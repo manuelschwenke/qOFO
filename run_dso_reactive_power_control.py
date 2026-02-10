@@ -286,4 +286,375 @@ class DSOIterationRecord:
 
     # Plant measurements after power flow
     plant_dn_voltages_pu: Optional[NDArray[np.float64]] = None
-    plant_q_interface_mvar: Optional[NDArray[np.float64]] = Non
+    plant_q_interface_mvar: Optional[NDArray[np.float64]] = None
+
+
+# ==============================================================================
+#  MAIN DSO-ONLY RUNNER
+# ==============================================================================
+
+def run_dso_reactive_power_control(
+    q_setpoints_mvar: NDArray[np.float64] = np.array([0.0, 0.0, 0.0]),
+    n_iterations: int = 60,
+    alpha: float = 0.01,
+    verbose: bool = True,
+) -> List[DSOIterationRecord]:
+    """
+    Run a DSO-only OFO reactive power controller loop on the DN network.
+
+    Parameters
+    ----------
+    q_setpoints_mvar : NDArray[np.float64]
+        Fixed reactive power setpoints for the three TSO-DSO interfaces [Mvar].
+    n_iterations : int
+        Number of OFO iterations to simulate.
+    alpha : float
+        OFO step size (gain).
+    verbose : bool
+        If True, print per-iteration summary.
+
+    Returns
+    -------
+    log : list[DSOIterationRecord]
+        One record per OFO iteration.
+    """
+    if verbose:
+        print("=" * 72)
+        print("  DSO-ONLY OFO SIMULATION -- Fixed Interface Setpoints")
+        print(f"  Q_setpoints = {q_setpoints_mvar} Mvar")
+        print("=" * 72)
+        print("[1/5] Building combined 380/110/20 kV network ...")
+
+    # 1) Build combined network
+    combined_net, meta = build_tuda_net(ext_grid_vm_pu=1.06, pv_nodes=True)
+
+    if verbose:
+        print("[2/5] Running converged power flow on combined network ...")
+
+    # Ensure base-case power flow is converged
+    pp.runpp(combined_net, run_control=True, calculate_voltage_angles=True)
+
+    if verbose:
+        print("[3/5] Splitting network into TN and DN ...")
+
+    # 2) Split into TN and DN networks
+    split_result = split_network(
+        combined_net,
+        meta,
+        dn_slack_coupler_index=0,
+    )
+
+    dn_net = split_result.dn_net
+
+    if verbose:
+        print("[4/5] Identifying DSO actuators and monitored quantities ...")
+
+    # Distribution-connected DER: DN sgens (exclude boundary sgens)
+    dso_der_buses: List[int] = []
+    for sidx in dn_net.sgen.index:
+        name = str(dn_net.sgen.at[sidx, "name"])
+        if name.startswith("BOUND_"):
+            continue  # Skip boundary sgens
+        subnet = str(dn_net.sgen.at[sidx, "subnet"])
+        if subnet == "DN":
+            dso_der_buses.append(int(dn_net.sgen.at[sidx, "bus"]))
+
+    # Monitored voltages: all 110 kV buses (HV, subnet "DN")
+    dso_v_buses: List[int] = sorted(
+        int(b)
+        for b in dn_net.bus.index
+        if 100.0 <= float(dn_net.bus.at[b, "vn_kv"]) < 200.0
+        and str(dn_net.bus.at[b, "subnet"]) == "DN"
+    )
+
+    if len(dso_v_buses) == 0:
+        raise RuntimeError("No 110 kV buses found for DSO voltage monitoring.")
+
+    # Monitored currents: all DN lines
+    dso_lines: List[int] = sorted(
+        int(li)
+        for li in dn_net.line.index
+        if str(dn_net.line.at[li, "subnet"]) == "DN"
+    )
+
+    # Interface transformers: 3-winding couplers
+    dso_interface_trafos = list(meta.coupler_trafo3w_indices)
+
+    # OLTC transformers: same as interface transformers
+    dso_oltc_trafos = dso_interface_trafos.copy()
+
+    # DN shunts: all shunts in DN subnet (if any)
+    dso_shunt_bus_candidates: List[int] = []
+    dso_shunt_q_candidates: List[float] = []
+    for sidx in dn_net.shunt.index:
+        subnet = str(dn_net.shunt.at[sidx, "subnet"])
+        if subnet == "DN":
+            dso_shunt_bus_candidates.append(int(dn_net.shunt.at[sidx, "bus"]))
+            dso_shunt_q_candidates.append(float(dn_net.shunt.at[sidx, "q_mvar"]))
+
+    # Probe Jacobian-based sensitivities to select valid actuators
+    probe_sens = JacobianSensitivities(dn_net)
+    H_probe, m_probe = probe_sens.build_sensitivity_matrix_H(
+        der_bus_indices=dso_der_buses,
+        observation_bus_indices=dso_v_buses,
+        line_indices=dso_lines,
+        trafo3w_indices=dso_interface_trafos,
+        oltc_trafo3w_indices=dso_oltc_trafos,
+        shunt_bus_indices=dso_shunt_bus_candidates,
+        shunt_q_steps_mvar=dso_shunt_q_candidates,
+    )
+
+    # Select only elements that produced valid sensitivities
+    dso_oltc = list(m_probe.get("oltc_trafo3ws", dso_oltc_trafos))
+    dso_v_buses = list(m_probe.get("obs_buses", dso_v_buses))
+    dso_shunt_buses = list(m_probe.get("shunt_buses", []))
+    dso_shunt_q_steps = [
+        dso_shunt_q_candidates[dso_shunt_bus_candidates.index(b)]
+        for b in dso_shunt_buses
+    ]
+    dso_interface_trafos = list(m_probe.get("trafo3ws", dso_interface_trafos))
+
+    dso_config = DSOControllerConfig(
+        der_bus_indices=dso_der_buses,
+        oltc_trafo_indices=dso_oltc,
+        shunt_bus_indices=dso_shunt_buses,
+        shunt_q_steps_mvar=dso_shunt_q_steps,
+        interface_trafo_indices=dso_interface_trafos,
+        voltage_bus_indices=dso_v_buses,
+        current_line_indices=dso_lines,
+        v_min_pu=0.95,
+        v_max_pu=1.05,
+        i_max_pu=1.0,
+        gamma_q_tracking=1.0,
+    )
+
+    if verbose:
+        print("[5/5] Creating DSO controller and sensitivity model ...")
+
+    # OFO tuning for DSO
+    ofo_params_dso = OFOParameters(
+        alpha=alpha,
+        g_w=0.00001,
+        g_z=1_000_000.0,
+        g_s=100.0,
+        g_u=0.0001,
+    )
+
+    # Network state and sensitivities
+    dso_trafo_idx = np.array(dso_oltc, dtype=np.int64)
+    dso_ns = network_state_from_net(dn_net, dso_trafo_idx, source_case="DN")
+
+    dso_sens = JacobianSensitivities(dn_net)
+
+    # Actuator bounds for DER, OLTC and shunts
+    der_indices_arr = np.array(dso_der_buses, dtype=np.int64)
+    der_s_rated = []
+    der_p_max = []
+    for sidx in dn_net.sgen.index:
+        name = str(dn_net.sgen.at[sidx, "name"])
+        if name.startswith("BOUND_"):
+            continue
+        subnet = str(dn_net.sgen.at[sidx, "subnet"])
+        if subnet != "DN":
+            continue
+        der_s_rated.append(float(dn_net.sgen.at[sidx, "sn_mva"]))
+        der_p_max.append(float(dn_net.sgen.at[sidx, "p_mw"]))
+
+    if len(der_s_rated) != len(dso_der_buses):
+        raise RuntimeError(
+            "Mismatch between DER buses and DER rating list length."
+        )
+
+    dso_bounds = ActuatorBounds(
+        der_indices=der_indices_arr,
+        der_s_rated_mva=np.array(der_s_rated, dtype=np.float64),
+        der_p_max_mw=np.array(der_p_max, dtype=np.float64),
+        oltc_indices=np.array(dso_oltc, dtype=np.int64),
+        oltc_tap_min=np.array(
+            [int(dn_net.trafo3w.at[t, "tap_min"]) for t in dso_oltc],
+            dtype=np.int64,
+        ),
+        oltc_tap_max=np.array(
+            [int(dn_net.trafo3w.at[t, "tap_max"]) for t in dso_oltc],
+            dtype=np.int64,
+        ),
+        shunt_indices=np.array(dso_shunt_buses, dtype=np.int64),
+        shunt_q_mvar=np.array(dso_shunt_q_steps, dtype=np.float64),
+    )
+
+    dso = DSOController(
+        controller_id="dso_main",
+        params=ofo_params_dso,
+        config=dso_config,
+        network_state=dso_ns,
+        actuator_bounds=dso_bounds,
+        sensitivities=dso_sens,
+    )
+
+    # Set fixed Q setpoints
+    dso.q_setpoint_mvar = q_setpoints_mvar.copy()
+
+    if verbose:
+        print("Initialising DSO controller from converged power flow ...")
+
+    # Initial DSO measurement and controller initialisation
+    dso_meas0 = measurement_from_dn(dn_net, dso_config, iteration=0)
+    dso.initialise(dso_meas0)
+
+    if verbose:
+        print()
+        print(
+            f"Running DSO-only OFO for {n_iterations} iterations "
+            f"(alpha = {alpha:.4f}) ..."
+        )
+        print()
+
+    log: List[DSOIterationRecord] = []
+
+    for it in range(1, n_iterations + 1):
+        rec = DSOIterationRecord(iteration=it)
+
+        # New measurement at current operating point
+        meas = measurement_from_dn(dn_net, dso_config, iteration=it)
+
+        # OFO step
+        try:
+            dso_output = dso.step(meas)
+        except RuntimeError as e:
+            raise RuntimeError(f"DSO OFO step failed at iteration {it}: {e}")
+
+        # Extract control variables
+        n_der_d = len(dso_config.der_bus_indices)
+        n_oltc_d = len(dso_config.oltc_trafo_indices)
+
+        rec.dso_q_der_mvar = dso_output.u_new[:n_der_d].copy()
+        rec.dso_oltc_taps = np.round(
+            dso_output.u_new[n_der_d:n_der_d + n_oltc_d]
+        ).astype(np.int64)
+        rec.dso_shunt_states = np.round(
+            dso_output.u_new[n_der_d + n_oltc_d:]
+        ).astype(np.int64)
+
+        rec.dso_objective = dso_output.objective_value
+        rec.dso_solver_status = dso_output.solver_status
+        rec.dso_solve_time_s = dso_output.solve_time_s
+        rec.dso_slack = dso_output.z_slack.copy()
+
+        # Predicted outputs
+        n_iface = len(dso_config.interface_trafo_indices)
+        n_v = len(dso_config.voltage_bus_indices)
+        rec.dso_q_interface_mvar = dso_output.y_predicted[:n_iface].copy()
+        rec.dso_voltages_pu = dso_output.y_predicted[n_iface:n_iface + n_v].copy()
+
+        # Apply controls to plant
+        apply_dso_controls(dn_net, dso_output, dso_config)
+
+        # Re-run power flow
+        try:
+            pp.runpp(dn_net, run_control=False, calculate_voltage_angles=True)
+        except Exception as e:
+            raise RuntimeError(
+                f"DN power flow failed at iteration {it}: {e}"
+            )
+
+        # Record plant measurements
+        rec.plant_dn_voltages_pu = dn_net.res_bus.loc[
+            dso_v_buses, "vm_pu"
+        ].values.astype(np.float64).copy()
+
+        rec.plant_q_interface_mvar = np.zeros(n_iface, dtype=np.float64)
+        for k, tidx in enumerate(dso_config.interface_trafo_indices):
+            rec.plant_q_interface_mvar[k] = float(
+                dn_net.res_trafo3w.at[tidx, "q_hv_mvar"]
+            )
+
+        log.append(rec)
+
+        # Verbose summary
+        if verbose:
+            v = rec.plant_dn_voltages_pu
+            v_min = float(np.min(v))
+            v_mean = float(np.mean(v))
+            v_max = float(np.max(v))
+
+            q_if = rec.plant_q_interface_mvar
+            q_err = np.abs(q_if - q_setpoints_mvar[:n_iface])
+            q_err_max = float(np.max(q_err))
+
+            print(
+                f"[it {it:3d}] DN V: min={v_min:.4f}  mean={v_mean:.4f}  "
+                f"max={v_max:.4f} p.u."
+            )
+            print(
+                f"          Q_interface = "
+                f"{np.array2string(q_if, precision=2, suppress_small=True)} Mvar  "
+                f"(setpoint={np.array2string(q_setpoints_mvar[:n_iface], precision=1)}, "
+                f"|err|_max={q_err_max:.2f})"
+            )
+            print(
+                f"          obj={rec.dso_objective:.4e}  "
+                f"status={rec.dso_solver_status}  "
+                f"t_solve={rec.dso_solve_time_s:.3f}s"
+            )
+            if rec.dso_q_der_mvar is not None:
+                print(
+                    "          Q_DER = "
+                    f"{np.array2string(rec.dso_q_der_mvar, precision=2, suppress_small=True)} "
+                    "Mvar"
+                )
+            if rec.dso_oltc_taps is not None:
+                print(f"          OLTC taps = {rec.dso_oltc_taps}")
+            if rec.dso_shunt_states is not None and len(rec.dso_shunt_states) > 0:
+                print(f"          Shunt states = {rec.dso_shunt_states}")
+            print()
+
+    return log
+
+
+# ==============================================================================
+#  ENTRY POINT
+# ==============================================================================
+
+def main() -> None:
+    """
+    Run a single DSO-only reactive power control scenario with Q_set = [0, 0, 0] Mvar.
+    """
+    q_set = np.array([0.0, 0.0, 0.0])
+    n_it = 120
+
+    print()
+    print("#" * 72)
+    print(f"#  DSO-ONLY SCENARIO: Q_setpoints = {q_set} Mvar")
+    print("#" * 72)
+    print()
+
+    log = run_dso_reactive_power_control(
+        q_setpoints_mvar=q_set,
+        n_iterations=n_it,
+        alpha=0.01,
+        verbose=True,
+    )
+
+    final = log[-1]
+    if final.plant_q_interface_mvar is not None:
+        q_if = final.plant_q_interface_mvar
+        q_err = np.abs(q_if - q_set[:len(q_if)])
+        q_err_max = float(np.max(q_err))
+
+        print()
+        print("=" * 72)
+        print("  FINAL DSO-ONLY INTERFACE REACTIVE POWER SUMMARY")
+        print("=" * 72)
+        print(
+            f"  Q_setpoints = {q_set} Mvar"
+        )
+        print(
+            f"  Q_interface = {q_if} Mvar"
+        )
+        print(f"  Max |Q - Q_set| = {q_err_max:.4f} Mvar")
+        print("=" * 72)
+        print()
+
+
+if __name__ == "__main__":
+    main()

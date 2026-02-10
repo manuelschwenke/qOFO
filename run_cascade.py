@@ -155,6 +155,15 @@ def measurement_from_tn(
             sidx = net.shunt.index[mask][0]
             shunt_states[i] = int(net.shunt.at[sidx, "step"])
 
+
+    # generator AVR setpoints
+    gen_idx = np.array(tso_config.gen_indices, dtype=np.int64)
+    gen_vm = np.zeros(len(gen_idx), dtype=np.float64)
+    for k, g in enumerate(gen_idx):
+        if g not in net.gen.index:
+            raise ValueError(f"Generator index {g} not found in TN net.gen.")
+        gen_vm[k] = float(net.gen.at[g, "vm_pu"])
+
     return Measurement(
         iteration=iteration,
         bus_indices=all_bus,
@@ -169,6 +178,8 @@ def measurement_from_tn(
         oltc_tap_positions=oltc_taps,
         shunt_indices=shunt_bus,
         shunt_states=shunt_states,
+        gen_indices=gen_idx,
+        gen_vm_pu=gen_vm,
     )
 
 
@@ -252,7 +263,9 @@ def apply_tso_controls(
     u = tso_output.u_new
     n_der = len(tso_config.der_bus_indices)
     n_pcc = len(tso_config.pcc_trafo_indices)
+    n_gen = len(tso_config.gen_indices)
     n_oltc = len(tso_config.oltc_trafo_indices)
+    n_shunt = len(tso_config.shunt_bus_indices)
 
     # DER Q setpoints
     for i, bus in enumerate(tso_config.der_bus_indices):
@@ -262,21 +275,35 @@ def apply_tso_controls(
             net.sgen.at[sidx, "q_mvar"] = u[i]
 
     # PCC setpoints -> boundary sgen Q (update the boundary injection)
+    # PCC Q setpoints (unchanged)
     for i, sidx in enumerate(split.tn_boundary_sgen_indices):
-        # The boundary sgen injects -Q_coupler, so to set Q_PCC = u[n_der+i]
-        # we set sgen.q_mvar = -u[n_der+i]
         net.sgen.at[sidx, "q_mvar"] = -u[n_der + i]
 
+    # AVR setpoints
+    avr_start = n_der + n_pcc
+    avr_end = avr_start + n_gen
+    avr_values = u[avr_start:avr_end]
+    for g_idx, vm in zip(tso_config.gen_indices, avr_values):
+        if g_idx not in net.gen.index:
+            raise ValueError(f"Generator index {g_idx} not found in TN net.gen.")
+        net.gen.at[g_idx, "vm_pu"] = float(vm)
+
     # OLTC taps
+    tap_start = avr_end
     for i, trafo_idx in enumerate(tso_config.oltc_trafo_indices):
-        net.trafo.at[trafo_idx, "tap_pos"] = int(np.round(u[n_der + n_pcc + i]))
+        net.trafo.at[trafo_idx, "tap_pos"] = int(
+            np.round(u[tap_start + i])
+        )
 
     # Shunt states
+    shunt_start = tap_start + n_oltc
     for i, shunt_bus in enumerate(tso_config.shunt_bus_indices):
         mask = net.shunt["bus"] == shunt_bus
         if mask.any():
             sidx = net.shunt.index[mask][0]
-            net.shunt.at[sidx, "step"] = int(np.round(u[n_der + n_pcc + n_oltc + i]))
+            net.shunt.at[sidx, "step"] = int(
+                np.round(u[shunt_start + i])
+            )
 
 
 def apply_dso_controls(
@@ -422,6 +449,25 @@ def run_cascade(
     # actually produce valid sensitivities.
     tso_oltc_candidates = list(meta.machine_trafo_indices)
 
+    # synchronous generators and their associated grid-side buses
+    tso_gen_indices: List[int] = []
+    tso_gen_bus_indices: List[int] = []
+    for g in tn_net.gen.index:
+        tso_gen_indices.append(int(g))
+        gen_lv_bus = int(tn_net.gen.at[g, "bus"])
+        mt_mask = (
+            (tn_net.trafo["lv_bus"] == gen_lv_bus)
+            & tn_net.trafo["name"].astype(str).str.startswith("MachineTrf|")
+        )
+        if not mt_mask.any():
+            raise RuntimeError(
+                f"No machine transformer found for generator {g} "
+                f"(bus {gen_lv_bus}) in TN network."
+            )
+        mt_idx = int(tn_net.trafo.index[mt_mask][0])
+        hv_bus = int(tn_net.trafo.at[mt_idx, "hv_bus"])
+        tso_gen_bus_indices.append(hv_bus)
+
     # TSO shunts
     tso_shunt_bus_candidates = []
     tso_shunt_q_candidates = []
@@ -468,8 +514,13 @@ def run_cascade(
         voltage_bus_indices=tso_v_buses,
         current_line_indices=tso_lines,
         v_setpoints_pu=v_setpoints,
-        gamma_v_tracking=100.0,
+        gamma_v_tracking=1.0,
+        gen_indices=tso_gen_indices,
+        gen_bus_indices=tso_gen_bus_indices,
+        gen_vm_min_pu=0.95,
+        gen_vm_max_pu=1.10,
     )
+
 
     # DSO configs -- one per PCC (for simplicity, all share the DN network)
     # DSO DERs: distribution-connected sgens (not boundary sgens)

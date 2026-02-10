@@ -178,9 +178,14 @@ def measurement_from_tn(
         sidx = net.shunt.index[mask][0]
         shunt_states[k] = int(net.shunt.at[sidx, "step"])
 
-    # For now, the Measurement class does not carry generator AVR
-    # setpoints explicitly; AVR integration is handled in the controller
-    # if present in the configuration.
+    # generator AVR setpoints
+    gen_idx = np.array(tso_config.gen_indices, dtype=np.int64)
+    gen_vm = np.zeros(len(gen_idx), dtype=np.float64)
+    for k, g in enumerate(gen_idx):
+        if g not in net.gen.index:
+            raise ValueError(f"Generator index {g} not found in net.gen.")
+        gen_vm[k] = float(net.gen.at[g, "vm_pu"])
+
     return Measurement(
         iteration=iteration,
         bus_indices=all_bus,
@@ -195,6 +200,8 @@ def measurement_from_tn(
         oltc_tap_positions=oltc_taps,
         shunt_indices=shunt_bus,
         shunt_states=shunt_states,
+        gen_indices=gen_idx,
+        gen_vm_pu=gen_vm,
     )
 
 
@@ -231,7 +238,16 @@ def apply_tso_controls(
 
     # 2) PCC Q setpoints are intentionally omitted (n_pcc = 0).
 
-    # 3) Machine transformer OLTC tap positions
+    # 3) Generator AVR setpoints
+    avr_start = n_der + n_pcc
+    avr_end = avr_start + n_gen
+    avr_values = tso_output.u_new[avr_start:avr_end]
+    for g_idx, vm in zip(tso_config.gen_indices, avr_values):
+        if g_idx not in net.gen.index:
+            raise ValueError(f"Generator index {g_idx} not found in net.gen.")
+        net.gen.at[g_idx, "vm_pu"] = float(vm)
+
+    # 4) Machine transformer OLTC tap positions
     for k, trafo_idx in enumerate(tso_config.oltc_trafo_indices):
         if trafo_idx not in net.trafo.index:
             raise ValueError(
@@ -240,7 +256,7 @@ def apply_tso_controls(
         tap_val = int(np.round(u[n_der + n_pcc + k]))
         net.trafo.at[trafo_idx, "tap_pos"] = tap_val
 
-    # 4) Shunt states
+    # 5) Shunt states
     n_shunt = len(tso_config.shunt_bus_indices)
     for k, shunt_bus in enumerate(tso_config.shunt_bus_indices):
         mask = net.shunt["bus"] == shunt_bus
@@ -361,6 +377,26 @@ def run_tso_voltage_control(
         tso_shunt_bus_candidates.append(int(net.shunt.at[sidx, "bus"]))
         tso_shunt_q_candidates.append(float(net.shunt.at[sidx, "q_mvar"]))
 
+    # synchronous generators and their associated grid-side buses
+    tso_gen_indices: List[int] = []
+    tso_gen_bus_indices: List[int] = []
+    for g in net.gen.index:
+        tso_gen_indices.append(int(g))
+        gen_lv_bus = int(net.gen.at[g, "bus"])
+        # Find the machine transformer that connects this LV bus to the grid
+        mt_mask = (
+            (net.trafo["lv_bus"] == gen_lv_bus)
+            & net.trafo["name"].astype(str).str.startswith("MachineTrf|")
+        )
+        if not mt_mask.any():
+            raise RuntimeError(
+                f"No machine transformer found for generator {g} "
+                f"(bus {gen_lv_bus})."
+            )
+        mt_idx = int(net.trafo.index[mt_mask][0])
+        hv_bus = int(net.trafo.at[mt_idx, "hv_bus"])
+        tso_gen_bus_indices.append(hv_bus)
+
     # Probe Jacobian-based sensitivities to select valid actuators and buses
     probe_sens = JacobianSensitivities(net)
     H_probe, m_probe = probe_sens.build_sensitivity_matrix_H(
@@ -398,8 +434,13 @@ def run_tso_voltage_control(
         voltage_bus_indices=tso_v_buses,
         current_line_indices=tso_lines,
         v_setpoints_pu=v_setpoints,
-        gamma_v_tracking=100.0,
+        gamma_v_tracking=1.0,
+        gen_indices=tso_gen_indices,
+        gen_bus_indices=tso_gen_bus_indices,
+        gen_vm_min_pu=0.95,
+        gen_vm_max_pu=1.10,
     )
+
 
     if verbose:
         print("[3/4] Creating TSO controller and sensitivity model ...")

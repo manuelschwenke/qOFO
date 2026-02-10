@@ -1,0 +1,26 @@
+# Dependencies for Cascaded OFO Controller
+# Python >= 3.10 required
+
+# Numerical computing
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Power system simulation
+pandapower>=2.13.0
+
+# Optimisation
+cvxpy>=1.4.0
+
+# SCIP solver (optional, for MIQP)
+# Note: SCIP requires separate installation
+# See: https://www.scipopt.org/
+pyscipopt>=4.3.0
+
+# Testing
+pytest>=7.0.0
+
+# Type checking (development)
+mypy>=1.0.0
+
+# Code formatting (development)
+black>=23.0.0

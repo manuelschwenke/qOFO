@@ -15,6 +15,10 @@ Key Architecture:
     - All control actions applied to combined_net
     - Power flow runs only on combined_net
 
+Sensitivity Methods:
+    - **Analytical (default)**: Fast Jacobian-based sensitivities
+    - **Numerical (toggle)**: Finite-difference validation/debugging
+
 Timing:
     - DSO controller executes every 1 minute
     - TSO controller executes every 3 minutes
@@ -34,7 +38,7 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import copy
 
 import numpy as np
@@ -51,7 +55,13 @@ from controller.base_controller import OFOParameters, ControllerOutput
 from controller.tso_controller import TSOController, TSOControllerConfig
 from controller.dso_controller import DSOController, DSOControllerConfig
 from core.message import SetpointMessage
+
+# -- Sensitivity modules (both analytical and numerical) ----------------------
 from sensitivity.jacobian import JacobianSensitivities
+from sensitivity.numerical import NumericalSensitivities
+
+# Type alias for sensitivity calculator
+SensitivityCalculator = Union[JacobianSensitivities, NumericalSensitivities]
 
 
 # ===============================================================================
@@ -415,6 +425,7 @@ def run_cascade(
     dso_period_min: int = 1,
     tso_period_min: int = 3,
     alpha: float = 0.05,
+    use_numerical_sensitivities: bool = False,
     verbose: bool = True,
 ) -> List[IterationRecord]:
     """
@@ -436,6 +447,10 @@ def run_cascade(
         TSO controller execution period in minutes.
     alpha : float
         OFO step size (gain).
+    use_numerical_sensitivities : bool, optional
+        If True, use numerical finite-difference sensitivities instead of
+        analytical Jacobian-based sensitivities (default: False).
+        Numerical method is slower but can help validate/debug analytical method.
     verbose : bool
         Print per-iteration details.
 
@@ -444,11 +459,14 @@ def run_cascade(
     log : list[IterationRecord]
         One record per simulated minute.
     """
+    sens_method = "NUMERICAL" if use_numerical_sensitivities else "ANALYTICAL"
+    
     if verbose:
         print("=" * 72)
         print(f"  CASCADED OFO SIMULATION -- V_setpoint = {v_setpoint_pu:.3f} p.u.")
         print("=" * 72)
         print("  Architecture: combined_net (plant) + tn_net/dn_net (models)")
+        print(f"  Sensitivity method: {sens_method}")
         print("=" * 72)
 
     # -- 1) Build combined network (plant) and model networks ---------------
@@ -524,7 +542,11 @@ def run_cascade(
             tso_shunt_q_candidates.append(float(combined_net.shunt.at[sidx, "q_mvar"]))
 
     # Probe TN model to find which elements survive sensitivity computation
-    _probe_sens = JacobianSensitivities(tn_net)
+    if use_numerical_sensitivities:
+        _probe_sens: SensitivityCalculator = NumericalSensitivities(tn_net)
+    else:
+        _probe_sens = JacobianSensitivities(tn_net)
+    
     _H_probe, _m_probe = _probe_sens.build_sensitivity_matrix_H(
         der_bus_indices=tso_der_buses,
         observation_bus_indices=tso_v_buses,
@@ -604,7 +626,11 @@ def run_cascade(
     dso_shunt_q_steps = []
 
     # Probe DSO model to find surviving elements
-    _dso_probe_sens = JacobianSensitivities(dn_net)
+    if use_numerical_sensitivities:
+        _dso_probe_sens: SensitivityCalculator = NumericalSensitivities(dn_net)
+    else:
+        _dso_probe_sens = JacobianSensitivities(dn_net)
+    
     _H_dso_probe, _m_dso_probe = _dso_probe_sens.build_sensitivity_matrix_H(
         der_bus_indices=dso_der_buses,
         observation_bus_indices=dso_v_buses,
@@ -648,7 +674,11 @@ def run_cascade(
     # TSO sensitivities & state (from TN model)
     tso_trafo_idx = np.array(tso_oltc, dtype=np.int64)
     tso_ns = network_state_from_net(tn_net, tso_trafo_idx, source_case="TN_model")
-    tso_sens = JacobianSensitivities(tn_net)
+    
+    if use_numerical_sensitivities:
+        tso_sens: SensitivityCalculator = NumericalSensitivities(tn_net)
+    else:
+        tso_sens = JacobianSensitivities(tn_net)
 
     # TSO bounds (from combined plant)
     tso_bounds = ActuatorBounds(
@@ -696,7 +726,11 @@ def run_cascade(
         np.array([], dtype=np.int64),
         source_case="DN_model",
     )
-    dso_sens = JacobianSensitivities(dn_net)
+    
+    if use_numerical_sensitivities:
+        dso_sens: SensitivityCalculator = NumericalSensitivities(dn_net)
+    else:
+        dso_sens = JacobianSensitivities(dn_net)
 
     # Aggregate DER ratings per unique bus from combined plant
     dso_der_s_rated = {b: 0.0 for b in dso_der_buses}
@@ -1021,6 +1055,7 @@ def print_summary(
 def main() -> None:
     """Run cascade scenarios for voltage setpoints."""
     scenarios = [1.06]
+    use_numerical = False  # Toggle: True for numerical, False for analytical
 
     all_results: Dict[float, List[IterationRecord]] = {}
 
@@ -1037,6 +1072,7 @@ def main() -> None:
             dso_period_min=15,
             tso_period_min=1,
             alpha=0.001,
+            use_numerical_sensitivities=use_numerical,
             verbose=True,
         )
         all_results[v_set] = log

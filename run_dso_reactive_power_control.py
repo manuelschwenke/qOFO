@@ -18,6 +18,18 @@ three TSO-DSO interface transformers (3-winding couplers) by actuating:
     - OLTC tap positions of 3-winding coupler transformers
     - States of distribution-level switchable shunts
 
+Network Architecture
+--------------------
+1. **Combined network** (TN + DN): The "real plant"
+   - Controls are applied here
+   - Measurements are taken from here
+   - Power flow is executed here
+   
+2. **DN network model**: Used for sensitivity calculations
+   - Network states are created from this
+   - Jacobian sensitivities are computed from this
+   - Not used for actual control or measurement
+
 The controller is executed in closed loop with pandapower as the
 plant model, using Jacobian-based sensitivities as in the PSCC 2026
 and CIGRÉ 2026 formulations.
@@ -109,42 +121,44 @@ def network_state_from_net(
 
 
 # ==============================================================================
-#  HELPER: Extract Measurement from a converged DN network
+#  HELPER: Extract Measurement from COMBINED network (real plant)
 # ==============================================================================
 
-def measurement_from_dn(
-    net: pp.pandapowerNet,
+def measurement_from_combined(
+    combined_net: pp.pandapowerNet,
     dso_config: DSOControllerConfig,
     iteration: int,
 ) -> Measurement:
     """
-    Build a DSO Measurement from the converged DN network.
+    Build a DSO Measurement from the converged COMBINED network (real plant).
 
     Interface reactive power is measured at the HV side of the 3-winding
-    coupler transformers.
+    coupler transformers in the combined network.
+    
+    This represents taking measurements from the real, physical system.
     """
-    # All bus indices and voltage magnitudes
-    all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
-    vm = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
+    # All bus indices and voltage magnitudes from combined network
+    all_bus = np.array(sorted(combined_net.res_bus.index), dtype=np.int64)
+    vm = combined_net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
 
-    # Branch currents: monitored DN lines
+    # Branch currents: monitored DN lines from combined network
     line_idx = np.array(dso_config.current_line_indices, dtype=np.int64)
     i_ka = np.zeros(len(line_idx), dtype=np.float64)
     for k, li in enumerate(line_idx):
-        if li not in net.res_line.index:
-            raise ValueError(f"Line {li} not found in net.res_line.")
-        i_ka[k] = float(net.res_line.at[li, "i_from_ka"])
+        if li not in combined_net.res_line.index:
+            raise ValueError(f"Line {li} not found in combined_net.res_line.")
+        i_ka[k] = float(combined_net.res_line.at[li, "i_from_ka"])
 
-    # Interface transformers (3-winding couplers)
+    # Interface transformers (3-winding couplers) from combined network
     iface_trafo = np.array(dso_config.interface_trafo_indices, dtype=np.int64)
     q_iface = np.zeros(len(iface_trafo), dtype=np.float64)
     for k, tidx in enumerate(iface_trafo):
-        if tidx not in net.res_trafo3w.index:
+        if tidx not in combined_net.res_trafo3w.index:
             raise ValueError(
-                f"Interface transformer {tidx} not found in net.res_trafo3w."
+                f"Interface transformer {tidx} not found in combined_net.res_trafo3w."
             )
         # Reactive power at HV side (transmission interface)
-        q_iface[k] = float(net.res_trafo3w.at[tidx, "q_hv_mvar"])
+        q_iface[k] = float(combined_net.res_trafo3w.at[tidx, "q_hv_mvar"])
 
     # DER Q (distribution-connected sgens, exclude boundary sgens)
     der_bus = np.array(dso_config.der_bus_indices, dtype=np.int64)
@@ -152,37 +166,37 @@ def measurement_from_dn(
     for k, bus in enumerate(der_bus):
         # Find sgen at this bus that is NOT a boundary sgen
         sgen_mask = (
-            (net.sgen["bus"] == bus) &
-            ~net.sgen["name"].astype(str).str.startswith("BOUND_")
+            (combined_net.sgen["bus"] == bus) &
+            ~combined_net.sgen["name"].astype(str).str.startswith("BOUND_")
         )
         if not sgen_mask.any():
             raise ValueError(
-                f"DER sgen at bus {bus} not found in DN net.sgen."
+                f"DER sgen at bus {bus} not found in combined_net.sgen."
             )
-        sidx = net.sgen.index[sgen_mask][0]
-        der_q[k] = float(net.res_sgen.at[sidx, "q_mvar"])
+        sidx = combined_net.sgen.index[sgen_mask][0]
+        der_q[k] = float(combined_net.res_sgen.at[sidx, "q_mvar"])
 
     # OLTC tap positions (3-winding coupler transformers)
     oltc_idx = np.array(dso_config.oltc_trafo_indices, dtype=np.int64)
     oltc_taps = np.zeros(len(oltc_idx), dtype=np.int64)
     for k, tidx in enumerate(oltc_idx):
-        if tidx not in net.trafo3w.index:
+        if tidx not in combined_net.trafo3w.index:
             raise ValueError(
-                f"OLTC transformer {tidx} not found in net.trafo3w."
+                f"OLTC transformer {tidx} not found in combined_net.trafo3w."
             )
-        oltc_taps[k] = int(net.trafo3w.at[tidx, "tap_pos"])
+        oltc_taps[k] = int(combined_net.trafo3w.at[tidx, "tap_pos"])
 
     # Shunt states at DN shunt buses
     shunt_bus = np.array(dso_config.shunt_bus_indices, dtype=np.int64)
     shunt_states = np.zeros(len(shunt_bus), dtype=np.int64)
     for k, sb in enumerate(shunt_bus):
-        mask = net.shunt["bus"] == sb
+        mask = combined_net.shunt["bus"] == sb
         if not mask.any():
             raise ValueError(
-                f"DN shunt at bus {sb} not found in net.shunt."
+                f"DN shunt at bus {sb} not found in combined_net.shunt."
             )
-        sidx = net.shunt.index[mask][0]
-        shunt_states[k] = int(net.shunt.at[sidx, "step"])
+        sidx = combined_net.shunt.index[mask][0]
+        shunt_states[k] = int(combined_net.shunt.at[sidx, "step"])
 
     # No generators in DN (all are at TN level)
     gen_idx = np.array([], dtype=np.int64)
@@ -208,16 +222,16 @@ def measurement_from_dn(
 
 
 # ==============================================================================
-#  HELPER: Apply DSO controls back to pandapower network
+#  HELPER: Apply DSO controls to COMBINED network (real plant)
 # ==============================================================================
 
 def apply_dso_controls(
-    net: pp.pandapowerNet,
+    combined_net: pp.pandapowerNet,
     dso_output: ControllerOutput,
     dso_config: DSOControllerConfig,
 ) -> None:
     """
-    Apply DSO control outputs to the DN pandapower network.
+    Apply DSO control outputs to the COMBINED pandapower network (real plant).
 
     Control variables are ordered as:
         [DER_Q (continuous), OLTC_taps (integer), Shunt_states (integer)]
@@ -231,35 +245,35 @@ def apply_dso_controls(
     # 1) Distribution-connected DER Q setpoints
     for k, bus in enumerate(dso_config.der_bus_indices):
         sgen_mask = (
-            (net.sgen["bus"] == bus) &
-            ~net.sgen["name"].astype(str).str.startswith("BOUND_")
+            (combined_net.sgen["bus"] == bus) &
+            ~combined_net.sgen["name"].astype(str).str.startswith("BOUND_")
         )
         if not sgen_mask.any():
             raise ValueError(
-                f"DER sgen at bus {bus} not found in DN net.sgen."
+                f"DER sgen at bus {bus} not found in combined_net.sgen."
             )
-        sidx = net.sgen.index[sgen_mask][0]
-        net.sgen.at[sidx, "q_mvar"] = float(u[k])
+        sidx = combined_net.sgen.index[sgen_mask][0]
+        combined_net.sgen.at[sidx, "q_mvar"] = float(u[k])
 
     # 2) OLTC tap positions (3-winding transformers)
     for k, trafo_idx in enumerate(dso_config.oltc_trafo_indices):
-        if trafo_idx not in net.trafo3w.index:
+        if trafo_idx not in combined_net.trafo3w.index:
             raise ValueError(
-                f"OLTC transformer {trafo_idx} not found in net.trafo3w."
+                f"OLTC transformer {trafo_idx} not found in combined_net.trafo3w."
             )
         tap_val = int(np.round(u[n_der + k]))
-        net.trafo3w.at[trafo_idx, "tap_pos"] = tap_val
+        combined_net.trafo3w.at[trafo_idx, "tap_pos"] = tap_val
 
     # 3) Shunt states
     for k, shunt_bus in enumerate(dso_config.shunt_bus_indices):
-        mask = net.shunt["bus"] == shunt_bus
+        mask = combined_net.shunt["bus"] == shunt_bus
         if not mask.any():
             raise ValueError(
-                f"DN shunt at bus {shunt_bus} not found in net.shunt."
+                f"DN shunt at bus {shunt_bus} not found in combined_net.shunt."
             )
-        sidx = net.shunt.index[mask][0]
+        sidx = combined_net.shunt.index[mask][0]
         step_val = int(np.round(u[n_der + n_oltc + k]))
-        net.shunt.at[sidx, "step"] = step_val
+        combined_net.shunt.at[sidx, "step"] = step_val
 
 
 # ==============================================================================
@@ -300,7 +314,11 @@ def run_dso_reactive_power_control(
     verbose: bool = True,
 ) -> List[DSOIterationRecord]:
     """
-    Run a DSO-only OFO reactive power controller loop on the DN network.
+    Run a DSO-only OFO reactive power controller loop.
+    
+    Architecture:
+    - Combined network (TN+DN): Real plant (apply controls, measure, run PF)
+    - DN network model: Used only for sensitivity calculations
 
     Parameters
     ----------
@@ -323,48 +341,49 @@ def run_dso_reactive_power_control(
         print("  DSO-ONLY OFO SIMULATION -- Fixed Interface Setpoints")
         print(f"  Q_setpoints = {q_setpoints_mvar} Mvar")
         print("=" * 72)
-        print("[1/5] Building combined 380/110/20 kV network ...")
+        print("[1/6] Building combined 380/110/20 kV network (real plant) ...")
 
-    # 1) Build combined network
+    # 1) Build combined network - this is the REAL PLANT
     combined_net, meta = build_tuda_net(ext_grid_vm_pu=1.06, pv_nodes=True)
 
     if verbose:
-        print("[2/5] Running converged power flow on combined network ...")
+        print("[2/6] Running converged power flow on combined network ...")
 
     # Ensure base-case power flow is converged
     pp.runpp(combined_net, run_control=True, calculate_voltage_angles=True)
 
     if verbose:
-        print("[3/5] Splitting network into TN and DN ...")
+        print("[3/6] Splitting network to create DN model (for sensitivities) ...")
 
-    # 2) Split into TN and DN networks
+    # 2) Split to create DN network MODEL (for sensitivities only)
     split_result = split_network(
         combined_net,
         meta,
         dn_slack_coupler_index=0,
     )
 
-    dn_net = split_result.dn_net
+    dn_net_model = split_result.dn_net  # This is the MODEL, not the plant!
 
     if verbose:
-        print("[4/5] Identifying DSO actuators and monitored quantities ...")
+        print("[4/6] Identifying DSO actuators and monitored quantities ...")
 
     # Distribution-connected DER: DN sgens (exclude boundary sgens)
+    # Identify from combined network (real plant)
     dso_der_buses: List[int] = []
-    for sidx in dn_net.sgen.index:
-        name = str(dn_net.sgen.at[sidx, "name"])
+    for sidx in combined_net.sgen.index:
+        name = str(combined_net.sgen.at[sidx, "name"])
         if name.startswith("BOUND_"):
             continue  # Skip boundary sgens
-        subnet = str(dn_net.sgen.at[sidx, "subnet"])
+        subnet = str(combined_net.sgen.at[sidx, "subnet"])
         if subnet == "DN":
-            dso_der_buses.append(int(dn_net.sgen.at[sidx, "bus"]))
+            dso_der_buses.append(int(combined_net.sgen.at[sidx, "bus"]))
 
     # Monitored voltages: all 110 kV buses (HV, subnet "DN")
     dso_v_buses: List[int] = sorted(
         int(b)
-        for b in dn_net.bus.index
-        if 100.0 <= float(dn_net.bus.at[b, "vn_kv"]) < 200.0
-        and str(dn_net.bus.at[b, "subnet"]) == "DN"
+        for b in combined_net.bus.index
+        if 100.0 <= float(combined_net.bus.at[b, "vn_kv"]) < 200.0
+        and str(combined_net.bus.at[b, "subnet"]) == "DN"
     )
 
     if len(dso_v_buses) == 0:
@@ -373,8 +392,8 @@ def run_dso_reactive_power_control(
     # Monitored currents: all DN lines
     dso_lines: List[int] = sorted(
         int(li)
-        for li in dn_net.line.index
-        if str(dn_net.line.at[li, "subnet"]) == "DN"
+        for li in combined_net.line.index
+        if str(combined_net.line.at[li, "subnet"]) == "DN"
     )
 
     # Interface transformers: 3-winding couplers
@@ -386,14 +405,17 @@ def run_dso_reactive_power_control(
     # DN shunts: all shunts in DN subnet (if any)
     dso_shunt_bus_candidates: List[int] = []
     dso_shunt_q_candidates: List[float] = []
-    for sidx in dn_net.shunt.index:
-        subnet = str(dn_net.shunt.at[sidx, "subnet"])
+    for sidx in combined_net.shunt.index:
+        subnet = str(combined_net.shunt.at[sidx, "subnet"])
         if subnet == "DN":
-            dso_shunt_bus_candidates.append(int(dn_net.shunt.at[sidx, "bus"]))
-            dso_shunt_q_candidates.append(float(dn_net.shunt.at[sidx, "q_mvar"]))
+            dso_shunt_bus_candidates.append(int(combined_net.shunt.at[sidx, "bus"]))
+            dso_shunt_q_candidates.append(float(combined_net.shunt.at[sidx, "q_mvar"]))
 
-    # Probe Jacobian-based sensitivities to select valid actuators
-    probe_sens = JacobianSensitivities(dn_net)
+    if verbose:
+        print("[5/6] Computing sensitivities from DN model ...")
+
+    # Probe Jacobian-based sensitivities from DN MODEL (not combined plant)
+    probe_sens = JacobianSensitivities(dn_net_model)
     H_probe, m_probe = probe_sens.build_sensitivity_matrix_H(
         der_bus_indices=dso_der_buses,
         observation_bus_indices=dso_v_buses,
@@ -405,7 +427,6 @@ def run_dso_reactive_power_control(
     )
 
     # Select only elements that produced valid sensitivities
-    # FIXED: Use correct keys returned by build_sensitivity_matrix_H
     dso_oltc = list(m_probe.get("oltc_trafo3w", dso_oltc_trafos))
     dso_v_buses = list(m_probe.get("obs_buses", dso_v_buses))
     dso_shunt_buses = list(m_probe.get("shunt_buses", []))
@@ -430,7 +451,7 @@ def run_dso_reactive_power_control(
     )
 
     if verbose:
-        print("[5/5] Creating DSO controller and sensitivity model ...")
+        print("[6/6] Creating DSO controller ...")
 
     # OFO tuning for DSO
     ofo_params_dso = OFOParameters(
@@ -441,25 +462,26 @@ def run_dso_reactive_power_control(
         g_u=0.0001,
     )
 
-    # Network state and sensitivities
+    # Network state from DN MODEL (for sensitivities)
     dso_trafo_idx = np.array(dso_oltc, dtype=np.int64)
-    dso_ns = network_state_from_net(dn_net, dso_trafo_idx, source_case="DN")
+    dso_ns = network_state_from_net(dn_net_model, dso_trafo_idx, source_case="DN")
 
-    dso_sens = JacobianSensitivities(dn_net)
+    # Sensitivities from DN MODEL
+    dso_sens = JacobianSensitivities(dn_net_model)
 
-    # Actuator bounds for DER, OLTC and shunts
+    # Actuator bounds for DER, OLTC and shunts (from combined network)
     der_indices_arr = np.array(dso_der_buses, dtype=np.int64)
     der_s_rated = []
     der_p_max = []
-    for sidx in dn_net.sgen.index:
-        name = str(dn_net.sgen.at[sidx, "name"])
+    for sidx in combined_net.sgen.index:
+        name = str(combined_net.sgen.at[sidx, "name"])
         if name.startswith("BOUND_"):
             continue
-        subnet = str(dn_net.sgen.at[sidx, "subnet"])
+        subnet = str(combined_net.sgen.at[sidx, "subnet"])
         if subnet != "DN":
             continue
-        der_s_rated.append(float(dn_net.sgen.at[sidx, "sn_mva"]))
-        der_p_max.append(float(dn_net.sgen.at[sidx, "p_mw"]))
+        der_s_rated.append(float(combined_net.sgen.at[sidx, "sn_mva"]))
+        der_p_max.append(float(combined_net.sgen.at[sidx, "p_mw"]))
 
     if len(der_s_rated) != len(dso_der_buses):
         raise RuntimeError(
@@ -472,11 +494,11 @@ def run_dso_reactive_power_control(
         der_p_max_mw=np.array(der_p_max, dtype=np.float64),
         oltc_indices=np.array(dso_oltc, dtype=np.int64),
         oltc_tap_min=np.array(
-            [int(dn_net.trafo3w.at[t, "tap_min"]) for t in dso_oltc],
+            [int(combined_net.trafo3w.at[t, "tap_min"]) for t in dso_oltc],
             dtype=np.int64,
         ),
         oltc_tap_max=np.array(
-            [int(dn_net.trafo3w.at[t, "tap_max"]) for t in dso_oltc],
+            [int(combined_net.trafo3w.at[t, "tap_max"]) for t in dso_oltc],
             dtype=np.int64,
         ),
         shunt_indices=np.array(dso_shunt_buses, dtype=np.int64),
@@ -498,8 +520,8 @@ def run_dso_reactive_power_control(
     if verbose:
         print("Initialising DSO controller from converged power flow ...")
 
-    # Initial DSO measurement and controller initialisation
-    dso_meas0 = measurement_from_dn(dn_net, dso_config, iteration=0)
+    # Initial DSO measurement from COMBINED network (real plant)
+    dso_meas0 = measurement_from_combined(combined_net, dso_config, iteration=0)
     dso.initialise(dso_meas0)
 
     if verbose:
@@ -508,6 +530,9 @@ def run_dso_reactive_power_control(
             f"Running DSO-only OFO for {n_iterations} iterations "
             f"(alpha = {alpha:.4f}) ..."
         )
+        print("  • Controls applied to: COMBINED network (real plant)")
+        print("  • Measurements from: COMBINED network (real plant)")
+        print("  • Sensitivities from: DN model")
         print()
 
     log: List[DSOIterationRecord] = []
@@ -515,8 +540,8 @@ def run_dso_reactive_power_control(
     for it in range(1, n_iterations + 1):
         rec = DSOIterationRecord(iteration=it)
 
-        # New measurement at current operating point
-        meas = measurement_from_dn(dn_net, dso_config, iteration=it)
+        # New measurement from COMBINED network (real plant)
+        meas = measurement_from_combined(combined_net, dso_config, iteration=it)
 
         # OFO step
         try:
@@ -547,26 +572,26 @@ def run_dso_reactive_power_control(
         rec.dso_q_interface_mvar = dso_output.y_predicted[:n_iface].copy()
         rec.dso_voltages_pu = dso_output.y_predicted[n_iface:n_iface + n_v].copy()
 
-        # Apply controls to plant
-        apply_dso_controls(dn_net, dso_output, dso_config)
+        # Apply controls to COMBINED network (real plant)
+        apply_dso_controls(combined_net, dso_output, dso_config)
 
-        # Re-run power flow
+        # Re-run power flow on COMBINED network (real plant)
         try:
-            pp.runpp(dn_net, run_control=False, calculate_voltage_angles=True)
+            pp.runpp(combined_net, run_control=False, calculate_voltage_angles=True)
         except Exception as e:
             raise RuntimeError(
-                f"DN power flow failed at iteration {it}: {e}"
+                f"Combined network power flow failed at iteration {it}: {e}"
             )
 
-        # Record plant measurements
-        rec.plant_dn_voltages_pu = dn_net.res_bus.loc[
+        # Record plant measurements from COMBINED network
+        rec.plant_dn_voltages_pu = combined_net.res_bus.loc[
             dso_v_buses, "vm_pu"
         ].values.astype(np.float64).copy()
 
         rec.plant_q_interface_mvar = np.zeros(n_iface, dtype=np.float64)
         for k, tidx in enumerate(dso_config.interface_trafo_indices):
             rec.plant_q_interface_mvar[k] = float(
-                dn_net.res_trafo3w.at[tidx, "q_hv_mvar"]
+                combined_net.res_trafo3w.at[tidx, "q_hv_mvar"]
             )
 
         log.append(rec)

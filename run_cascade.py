@@ -38,7 +38,7 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Set
 import copy
 
 import numpy as np
@@ -62,6 +62,23 @@ from sensitivity.numerical import NumericalSensitivities
 
 # Type alias for sensitivity calculator
 SensitivityCalculator = Union[JacobianSensitivities, NumericalSensitivities]
+
+
+# ===============================================================================
+#  HELPER: Identify DN-only buses from combined network
+# ===============================================================================
+
+def _get_dn_only_buses(combined_net: pp.pandapowerNet) -> Set[int]:
+    """
+    Identify DN-only buses from the combined network by checking the 'subnet' column.
+    
+    Returns a set of bus indices where subnet == 'DN'.
+    """
+    if "subnet" not in combined_net.bus.columns:
+        raise RuntimeError("Combined network buses have no 'subnet' column.")
+    
+    dn_mask = combined_net.bus["subnet"].astype(str) == "DN"
+    return set(int(b) for b in combined_net.bus.index[dn_mask])
 
 
 # ===============================================================================
@@ -123,7 +140,7 @@ def network_state_from_net(
 def measurement_from_combined_tn_side(
     combined_net: pp.pandapowerNet,
     meta: NetworkMetadata,
-    split: SplitResult,
+    dn_buses: Set[int],
     tso_config: TSOControllerConfig,
     iteration: int,
 ) -> Measurement:
@@ -161,7 +178,7 @@ def measurement_from_combined_tn_side(
         # Only count sgens that are not boundary injections
         for sidx in combined_net.sgen.index[sgen_mask]:
             # Check if this sgen has the boundary marker
-            if not combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+            if not str(combined_net.sgen.at[sidx, "name"]).startswith("BOUND_"):
                 der_q[i] += float(combined_net.res_sgen.at[sidx, "q_mvar"])
 
     # OLTC tap positions (2W machine transformers) from combined plant
@@ -211,7 +228,7 @@ def measurement_from_combined_tn_side(
 def measurement_from_combined_dn_side(
     combined_net: pp.pandapowerNet,
     meta: NetworkMetadata,
-    split: SplitResult,
+    dn_buses: Set[int],
     dso_config: DSOControllerConfig,
     iteration: int,
 ) -> Measurement:
@@ -248,7 +265,7 @@ def measurement_from_combined_dn_side(
         sgen_mask = combined_net.sgen["bus"] == bus
         for sidx in combined_net.sgen.index[sgen_mask]:
             # Only count DN sgens (not boundary)
-            if not combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+            if not str(combined_net.sgen.at[sidx, "name"]).startswith("BOUND_"):
                 der_q[i] += float(combined_net.res_sgen.at[sidx, "q_mvar"])
 
     # OLTC tap positions (3W transformers in DN) from combined plant
@@ -293,7 +310,6 @@ def apply_tso_controls_to_combined(
     combined_net: pp.pandapowerNet,
     tso_output: ControllerOutput,
     tso_config: TSOControllerConfig,
-    split: SplitResult,
 ) -> None:
     """
     Apply TSO control outputs to the COMBINED pandapower plant network.
@@ -309,7 +325,7 @@ def apply_tso_controls_to_combined(
     for i, bus in enumerate(tso_config.der_bus_indices):
         sgen_mask = combined_net.sgen["bus"] == bus
         for sidx in combined_net.sgen.index[sgen_mask]:
-            if not combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+            if not str(combined_net.sgen.at[sidx, "name"]).startswith("BOUND_"):
                 combined_net.sgen.at[sidx, "q_mvar"] = u[i]
                 break  # Only set first non-boundary sgen
 
@@ -361,7 +377,7 @@ def apply_dso_controls_to_combined(
         # Count non-boundary sgens
         valid_sgens = []
         for sidx in combined_net.sgen.index[sgen_mask]:
-            if not combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+            if not str(combined_net.sgen.at[sidx, "name"]).startswith("BOUND_"):
                 valid_sgens.append(sidx)
         
         n_sgens = len(valid_sgens)
@@ -484,6 +500,9 @@ def run_cascade(
     # Create split for identifying TN/DN elements and creating model networks
     split = split_network(combined_net, meta, dn_slack_coupler_index=0)
     
+    # Identify DN-only buses from combined network
+    dn_buses = _get_dn_only_buses(combined_net)
+    
     # Create model networks (deep copies for sensitivity computation)
     tn_net = copy.deepcopy(split.tn_net)
     dn_net = copy.deepcopy(split.dn_net)
@@ -492,6 +511,7 @@ def run_cascade(
         print(f"       combined_net (plant): {len(combined_net.bus)} buses")
         print(f"       tn_net (model): {len(tn_net.bus)} buses")
         print(f"       dn_net (model): {len(dn_net.bus)} buses")
+        print(f"       DN-only buses: {len(dn_buses)}")
 
     # -- 2) Identify element indices for controller configs FROM COMBINED NET ----
     
@@ -503,9 +523,9 @@ def run_cascade(
     for sidx in combined_net.sgen.index:
         bus = int(combined_net.sgen.at[sidx, "bus"])
         # TN sgens are those not in DN-only buses
-        if bus not in split.dn_only_bus_indices:
+        if bus not in dn_buses:
             # Not a boundary sgen
-            if not combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+            if not str(combined_net.sgen.at[sidx, "name"]).startswith("BOUND_"):
                 if bus not in tso_der_buses:
                     tso_der_buses.append(bus)
 
@@ -602,9 +622,9 @@ def run_cascade(
     for sidx in combined_net.sgen.index:
         bus = int(combined_net.sgen.at[sidx, "bus"])
         # DN sgens are those in DN-only buses
-        if bus in split.dn_only_bus_indices:
+        if bus in dn_buses:
             # Not a boundary sgen
-            if not combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+            if not str(combined_net.sgen.at[sidx, "name"]).startswith("BOUND_"):
                 dso_der_buses_raw.append(bus)
     
     # Deduplicate while preserving order
@@ -619,7 +639,7 @@ def run_cascade(
     dso_v_buses = sorted(
         int(b) for b in combined_net.bus.index
         if 100.0 <= float(combined_net.bus.at[b, "vn_kv"]) <= 120.0
-        and b in split.dn_only_bus_indices
+        and b in dn_buses
     )
 
     # DSO current monitoring: DN lines from COMBINED NET
@@ -695,14 +715,14 @@ def run_cascade(
             [float(combined_net.sgen.at[s, "sn_mva"])
              for s in combined_net.sgen.index
              if (int(combined_net.sgen.at[s, "bus"]) in tso_der_buses
-                 and not combined_net.sgen.at[s, "name"].startswith("BoundarySgen|"))],
+                 and not str(combined_net.sgen.at[s, "name"]).startswith("BOUND_"))],
             dtype=np.float64,
         )[:len(tso_der_buses)],  # Ensure correct length
         der_p_max_mw=np.array(
             [float(combined_net.sgen.at[s, "p_mw"])
              for s in combined_net.sgen.index
              if (int(combined_net.sgen.at[s, "bus"]) in tso_der_buses
-                 and not combined_net.sgen.at[s, "name"].startswith("BoundarySgen|"))],
+                 and not str(combined_net.sgen.at[s, "name"]).startswith("BOUND_"))],
             dtype=np.float64,
         )[:len(tso_der_buses)],
         oltc_indices=np.array(tso_oltc, dtype=np.int64),
@@ -746,7 +766,7 @@ def run_cascade(
     for sidx in combined_net.sgen.index:
         bus = int(combined_net.sgen.at[sidx, "bus"])
         if bus in dso_der_buses:
-            if not combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+            if not str(combined_net.sgen.at[sidx, "name"]).startswith("BOUND_"):
                 dso_der_s_rated[bus] += float(combined_net.sgen.at[sidx, "sn_mva"])
                 dso_der_p_max[bus] += float(combined_net.sgen.at[sidx, "p_mw"])
 
@@ -790,10 +810,10 @@ def run_cascade(
     pp.runpp(combined_net, run_control=False, calculate_voltage_angles=True)
 
     tso_meas = measurement_from_combined_tn_side(
-        combined_net, meta, split, tso_config, iteration=0
+        combined_net, meta, dn_buses, tso_config, iteration=0
     )
     dso_meas = measurement_from_combined_dn_side(
-        combined_net, meta, split, dso_config, iteration=0
+        combined_net, meta, dn_buses, dso_config, iteration=0
     )
 
     tso.initialise(tso_meas)
@@ -821,7 +841,7 @@ def run_cascade(
         if run_tso:
             # Measure from COMBINED PLANT
             tso_meas = measurement_from_combined_tn_side(
-                combined_net, meta, split, tso_config, iteration=minute
+                combined_net, meta, dn_buses, tso_config, iteration=minute
             )
             try:
                 tso_output = tso.step(tso_meas)
@@ -856,7 +876,7 @@ def run_cascade(
 
                 # Apply TSO controls to COMBINED PLANT
                 apply_tso_controls_to_combined(
-                    combined_net, tso_output, tso_config, split
+                    combined_net, tso_output, tso_config
                 )
 
                 # Generate setpoint messages for DSO
@@ -887,7 +907,7 @@ def run_cascade(
         if run_dso:
             # Measure from COMBINED PLANT
             dso_meas = measurement_from_combined_dn_side(
-                combined_net, meta, split, dso_config, iteration=minute
+                combined_net, meta, dn_buses, dso_config, iteration=minute
             )
             try:
                 dso_output = dso.step(dso_meas)
@@ -935,14 +955,12 @@ def run_cascade(
                 print(f"  [min {minute:3d}] Combined plant power flow failed: {e}")
 
         # Record plant measurements from COMBINED network
-        tn_bus_mask = [b for b in combined_net.bus.index 
-                       if b not in split.dn_only_bus_indices]
+        tn_bus_mask = [b for b in combined_net.bus.index if b not in dn_buses]
         rec.plant_tn_voltages_pu = combined_net.res_bus.loc[
             [b for b in tso_v_buses if b in tn_bus_mask], "vm_pu"
         ].values.copy()
         
-        dn_bus_mask = [b for b in combined_net.bus.index 
-                       if b in split.dn_only_bus_indices]
+        dn_bus_mask = [b for b in combined_net.bus.index if b in dn_buses]
         rec.plant_dn_voltages_pu = combined_net.res_bus.loc[
             [b for b in dso_v_buses if b in dn_bus_mask], "vm_pu"
         ].values.copy()

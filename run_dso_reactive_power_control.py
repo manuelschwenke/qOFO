@@ -405,14 +405,15 @@ def run_dso_reactive_power_control(
     )
 
     # Select only elements that produced valid sensitivities
-    dso_oltc = list(m_probe.get("oltc_trafo3ws", dso_oltc_trafos))
+    # FIXED: Use correct keys returned by build_sensitivity_matrix_H
+    dso_oltc = list(m_probe.get("oltc_trafo3w", dso_oltc_trafos))
     dso_v_buses = list(m_probe.get("obs_buses", dso_v_buses))
     dso_shunt_buses = list(m_probe.get("shunt_buses", []))
     dso_shunt_q_steps = [
         dso_shunt_q_candidates[dso_shunt_bus_candidates.index(b)]
         for b in dso_shunt_buses
     ]
-    dso_interface_trafos = list(m_probe.get("trafo3ws", dso_interface_trafos))
+    dso_interface_trafos = list(m_probe.get("trafo3w", dso_interface_trafos))
 
     dso_config = DSOControllerConfig(
         der_bus_indices=dso_der_buses,

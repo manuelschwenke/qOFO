@@ -111,6 +111,10 @@ class TSOControllerConfig:
     i_max_pu: float = 1.0
     v_setpoints_pu: Optional[NDArray[np.float64]] = None
     gamma_v_tracking: float = 1.0
+    gen_indices: List[int] = field(default_factory=list)
+    gen_bus_indices: List[int] = field(default_factory=list)
+    gen_vm_min_pu: float = 0.95
+    gen_vm_max_pu: float = 1.10
 
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
@@ -147,6 +151,16 @@ class TSOControllerConfig:
                     f"must match voltage_bus_indices length "
                     f"({len(self.voltage_bus_indices)})"
                 )
+        if len(self.gen_indices) != len(self.gen_bus_indices):
+            raise ValueError(
+                f"gen_indices length ({len(self.gen_indices)}) must match "
+                f"gen_bus_indices length ({len(self.gen_bus_indices)})"
+            )
+        if self.gen_vm_min_pu >= self.gen_vm_max_pu:
+            raise ValueError(
+                f"gen_vm_min_pu ({self.gen_vm_min_pu}) must be less than "
+                f"gen_vm_max_pu ({self.gen_vm_max_pu})"
+            )
 
 
 class TSOController(BaseOFOController):
@@ -341,19 +355,19 @@ class TSOController(BaseOFOController):
         """
         Define the control variable structure.
 
-        Ordering: [ Q_DER | Q_PCC_set | s_OLTC | s_shunt ]
+        Ordering: [ Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt ]
         """
         n_der = len(self.config.der_bus_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
+        n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
 
-        n_continuous = n_der + n_pcc
+        n_continuous = n_der + n_pcc + n_gen
         n_integer = n_oltc + n_shunt
 
-        # Integer indices start after continuous variables
+        # Integer indices start after all continuous variables
         integer_indices = list(range(n_continuous, n_continuous + n_integer))
-
         return n_continuous, n_integer, integer_indices
 
     def _extract_control_values(
@@ -363,11 +377,12 @@ class TSOController(BaseOFOController):
         """Extract current control values from measurements."""
         n_der = len(self.config.der_bus_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
+        n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
-        n_total = n_der + n_pcc + n_oltc + n_shunt
 
-        u = np.zeros(n_total)
+        n_total = n_der + n_pcc + n_gen + n_oltc + n_shunt
+        u = np.zeros(n_total, dtype=np.float64)
         idx = 0
 
         # --- Transmission-connected DER Q setpoints ---
@@ -377,7 +392,7 @@ class TSOController(BaseOFOController):
                 raise ValueError(
                     f"DER at bus {der_bus} not found in measurement"
                 )
-            u[idx] = measurement.der_q_mvar[meas_idx[0]]
+            u[idx] = float(measurement.der_q_mvar[meas_idx[0]])
             idx += 1
 
         # --- PCC reactive power as initial setpoints ---
@@ -389,7 +404,19 @@ class TSOController(BaseOFOController):
                 raise ValueError(
                     f"PCC transformer {trafo_idx} not found in measurement"
                 )
-            u[idx] = measurement.interface_q_hv_side_mvar[meas_idx[0]]
+            u[idx] = float(
+                measurement.interface_q_hv_side_mvar[meas_idx[0]]
+            )
+            idx += 1
+
+        # --- Generator AVR voltage setpoints ---
+        for g_idx in self.config.gen_indices:
+            meas_idx = np.where(measurement.gen_indices == g_idx)[0]
+            if len(meas_idx) == 0:
+                raise ValueError(
+                    f"Generator {g_idx} not found in measurement.gen_indices"
+                )
+            u[idx] = float(measurement.gen_vm_pu[meas_idx[0]])
             idx += 1
 
         # --- Machine-transformer OLTC tap positions ---
@@ -485,18 +512,18 @@ class TSOController(BaseOFOController):
         Compute operating-point-dependent input bounds.
 
         For PCC setpoints, the bounds are updated from capability messages.
-        If no capability message has been received for a PCC, the bounds
-        remain at ±∞, which means the solver is free to choose any value
-        and infeasibilities will surface in the DSO layer.
+        AVR setpoints are bounded by fixed min/max values in the config.
         """
         n_der = len(self.config.der_bus_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
+        n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
-        n_total = n_der + n_pcc + n_oltc + n_shunt
 
-        u_lower = np.zeros(n_total)
-        u_upper = np.zeros(n_total)
+        n_total = n_der + n_pcc + n_gen + n_oltc + n_shunt
+
+        u_lower = np.zeros(n_total, dtype=np.float64)
+        u_upper = np.zeros(n_total, dtype=np.float64)
 
         # --- DER Q bounds (P-dependent) ---
         q_min, q_max = self.actuator_bounds.compute_der_q_bounds(der_p_current)
@@ -507,21 +534,27 @@ class TSOController(BaseOFOController):
         u_lower[n_der:n_der + n_pcc] = self.pcc_capability_min_mvar
         u_upper[n_der:n_der + n_pcc] = self.pcc_capability_max_mvar
 
+        # --- AVR setpoint bounds (fixed) ---
+        avr_start = n_der + n_pcc
+        avr_end = avr_start + n_gen
+        u_lower[avr_start:avr_end] = self.config.gen_vm_min_pu
+        u_upper[avr_start:avr_end] = self.config.gen_vm_max_pu
+
         # --- OLTC tap bounds (fixed mechanical limits) ---
         tap_min, tap_max = self.actuator_bounds.get_oltc_tap_bounds()
-        u_lower[n_der + n_pcc:n_der + n_pcc + n_oltc] = tap_min.astype(
-            np.float64
-        )
-        u_upper[n_der + n_pcc:n_der + n_pcc + n_oltc] = tap_max.astype(
-            np.float64
-        )
+        tap_start = avr_end
+        tap_end = tap_start + n_oltc
+        u_lower[tap_start:tap_end] = tap_min.astype(np.float64)
+        u_upper[tap_start:tap_end] = tap_max.astype(np.float64)
 
         # --- Shunt state bounds (fixed: -1, 0, +1) ---
         state_min, state_max = self.actuator_bounds.get_shunt_state_bounds()
-        u_lower[n_der + n_pcc + n_oltc:] = state_min.astype(np.float64)
-        u_upper[n_der + n_pcc + n_oltc:] = state_max.astype(np.float64)
+        shunt_start = tap_end
+        u_lower[shunt_start:] = state_min.astype(np.float64)
+        u_upper[shunt_start:] = state_max.astype(np.float64)
 
         return u_lower, u_upper
+
 
     def _get_output_limits(
         self,
@@ -660,15 +693,16 @@ class TSOController(BaseOFOController):
 
         n_der = len(self.config.der_bus_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
+        n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
         n_v = len(self.config.voltage_bus_indices)
         n_i = len(self.config.current_line_indices)
 
-        n_controls = n_der + n_pcc + n_oltc + n_shunt
+        n_controls = n_der + n_pcc + n_gen + n_oltc + n_shunt
         n_outputs = n_v + n_pcc + n_i
 
-        H = np.zeros((n_outputs, n_controls))
+        H = np.zeros((n_outputs, n_controls), dtype=np.float64)
 
         # --- Physical sensitivities for DER / OLTC / shunt columns ---
         # Build sub-matrix from JacobianSensitivities for the physical
@@ -777,9 +811,21 @@ class TSOController(BaseOFOController):
             n_q_phys + n_v:, col_sh_phys
         ]
 
+        # --- AVR columns: approximate ∂V/∂V_AVR as identity on local bus ---
+        avr_start = n_der + n_pcc
+        for k, bus in enumerate(self.config.gen_bus_indices):
+            try:
+                v_row = self.config.voltage_bus_indices.index(bus)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Generator bus {bus} not in voltage_bus_indices; "
+                    f"cannot define AVR sensitivity."
+                ) from exc
+            col = avr_start + k
+            H[v_row, col] = 1.0
+
         self._H_cache = H
         self._H_mappings = mappings
-
         return H
 
     def invalidate_sensitivity_cache(self) -> None:

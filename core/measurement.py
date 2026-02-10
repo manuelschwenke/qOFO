@@ -55,7 +55,7 @@ class Measurement:
     shunt_states : NDArray[np.int64]
         Current shunt switching states (-1: capacitor, 0: off, 1: reactor).
     """
-    
+
     def __init__(
         self,
         iteration: int,
@@ -71,6 +71,8 @@ class Measurement:
         oltc_tap_positions: NDArray[np.int64],
         shunt_indices: NDArray[np.int64],
         shunt_states: NDArray[np.int64],
+        gen_indices: NDArray[np.int64],
+        gen_vm_pu: NDArray[np.float64]
     ) -> None:
         """
         Initialise a Measurement instance.
@@ -103,6 +105,10 @@ class Measurement:
             Shunt indices.
         shunt_states : NDArray[np.int64]
             Shunt states.
+        gen_indices : NDArray[np.int64]
+            Generator indices.
+        gen_vm_pu : NDArray[np.int64]
+            Generator AVR voltage.
         """
         self.iteration = iteration
         self.bus_indices = bus_indices
@@ -117,6 +123,8 @@ class Measurement:
         self.oltc_tap_positions = oltc_tap_positions
         self.shunt_indices = shunt_indices
         self.shunt_states = shunt_states
+        self.gen_indices = gen_indices
+        self.gen_vm_pu = gen_vm_pu
     
     @property
     def n_bus_measurements(self) -> int:

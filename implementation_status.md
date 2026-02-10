@@ -3,7 +3,7 @@
 This document tracks the implementation status of all modules and functionalities
 in the cascaded Online Feedback Optimisation (OFO) controller framework.
 
-**Last Updated:** 2026-02-06 (Phase 5 — Network Module Refactored)
+**Last Updated:** 2026-02-10 (Phase 5 + Architecture Corrections)
 
 ---
 
@@ -51,9 +51,11 @@ enforcing local network constraints.
 
 ### Sensitivity (`sensitivity/`)
 
+#### Analytical (Jacobian-Based)
+
 | Module | Class/Function | Status | Description |
 |--------|----------------|--------|-------------|
-| `jacobian.py` | `JacobianSensitivities` | ✅ Implemented | Main sensitivity calculator class |
+| `jacobian.py` | `JacobianSensitivities` | ✅ Implemented | Analytical sensitivity calculator class |
 | `jacobian.py` | `compute_dV_dQ_der` | ✅ Implemented | ∂V/∂Q sensitivity from Jacobian (Eq. 9, 10) |
 | `jacobian.py` | `compute_dV_ds` | ✅ Implemented | ∂V/∂s OLTC tap sensitivity (Eq. 11) |
 | `jacobian.py` | `compute_dQtrafo_dQ_der` | ✅ Implemented | ∂Q_tr/∂Q_DER sensitivity (Eq. 12-14) |
@@ -65,6 +67,23 @@ enforcing local network constraints.
 | `jacobian.py` | `get_jacobian_indices` | ✅ Implemented | Helper function for Jacobian indexing |
 | `jacobian.py` | `get_ppc_trafo_index` | ✅ Implemented | Helper function for pypower trafo mapping |
 
+#### Numerical (Finite Differences)
+
+| Module | Class/Function | Status | Description |
+|--------|----------------|--------|-------------|
+| `numerical.py` | `NumericalSensitivities` | ✅ Implemented | Numerical sensitivity calculator using perturbation method |
+| `numerical.py` | `compute_dV_dQ_der` | ✅ Implemented | ∂V/∂Q via repeated power flow |
+| `numerical.py` | `compute_dV_ds` | ✅ Implemented | ∂V/∂s (2W and 3W OLTC) via repeated power flow |
+| `numerical.py` | `compute_dQtrafo_dQ_der` | ✅ Implemented | ∂Q_tr/∂Q_DER via repeated power flow |
+| `numerical.py` | `compute_dQtrafo_ds` | ✅ Implemented | ∂Q_tr/∂s (2W and 3W OLTC) via repeated power flow |
+| `numerical.py` | `compute_dI_dQ_der` | ✅ Implemented | ∂I/∂Q via repeated power flow |
+| `numerical.py` | `compute_dV_dQ_shunt` | ✅ Implemented | ∂V/∂Q_shunt via repeated power flow |
+| `numerical.py` | `compute_dI_dQ_shunt` | ✅ Implemented | ∂I/∂Q_shunt via repeated power flow |
+| `numerical.py` | `build_sensitivity_matrix_H` | ✅ Implemented | Combined H matrix with all actuator types |
+
+**Note:** `numerical.py` provides the same interface as `jacobian.py` for drop-in replacement.
+Use for validation and debugging of analytical sensitivities.
+
 ### Network (`network/`)
 
 | Module | Class/Function | Status | Description |
@@ -75,6 +94,14 @@ enforcing local network constraints.
 | `split_tn_dn_net.py` | `SplitResult` | ✅ Implemented | Container for split TN/DN networks + boundary metadata |
 | `split_tn_dn_net.py` | `split_network()` | ✅ Implemented | Split combined network into separate TN and DN models |
 | `split_tn_dn_net.py` | `validate_split()` | ✅ Implemented | Verify split reproduces combined operating point |
+
+### Run Scripts
+
+| Script | Status | Description |
+|--------|--------|-------------|
+| `run_cascade.py` | ✅ Correct | Cascaded TSO-DSO OFO loop with numerical/analytical toggle |
+| `run_tso_voltage_control.py` | ✅ Fixed (2026-02-10) | TSO-only OFO with numerical/analytical toggle |
+| `run_dso_reactive_power_control.py` | ✅ Correct | DSO-only OFO with numerical/analytical toggle (reference) |
 
 ### Tests (`tests/`)
 
@@ -111,12 +138,14 @@ enforcing local network constraints.
 
 | Functionality | Status | Reference |
 |---------------|--------|-----------|
-| Bus voltage to DER Q sensitivity | ✅ Implemented | Eq. (9), (10) in PSCC paper |
-| Bus voltage to OLTC position sensitivity | ✅ Implemented | Eq. (11) in PSCC paper |
-| Transformer Q to DER Q sensitivity | ✅ Implemented | Eq. (14) in PSCC paper |
-| Transformer Q to OLTC position sensitivity | ✅ Implemented | Eq. (17) in PSCC paper |
-| Branch current to DER Q sensitivity | ✅ Implemented | Eq. (20) in PSCC paper |
-| Combined ∇H matrix construction | ✅ Implemented | Eq. (29) in PSCC paper |
+| Bus voltage to DER Q sensitivity (analytical) | ✅ Implemented | Eq. (9), (10) in PSCC paper |
+| Bus voltage to OLTC position sensitivity (analytical) | ✅ Implemented | Eq. (11) in PSCC paper |
+| Transformer Q to DER Q sensitivity (analytical) | ✅ Implemented | Eq. (14) in PSCC paper |
+| Transformer Q to OLTC position sensitivity (analytical) | ✅ Implemented | Eq. (17) in PSCC paper |
+| Branch current to DER Q sensitivity (analytical) | ✅ Implemented | Eq. (20) in PSCC paper |
+| Combined ∇H matrix construction (analytical) | ✅ Implemented | Eq. (29) in PSCC paper |
+| All sensitivities via numerical finite differences | ✅ Implemented | validation.py / debugging |
+| Toggle between analytical and numerical methods | ✅ Implemented | All run scripts |
 
 ### TSO-DSO Coordination
 
@@ -143,6 +172,26 @@ enforcing local network constraints.
 
 ---
 
+## Architecture
+
+### Critical Principle: Combined Network vs Model Networks
+
+See `ARCHITECTURE.md` for detailed documentation.
+
+**Summary:**
+- **Combined network** (`combined_net`): Real physical system
+  - ✅ Take measurements
+  - ✅ Apply control actions
+  - ✅ Run power flow
+- **Model networks** (`tn_net`, `dn_net`): Controller-internal models
+  - ✅ Compute sensitivities
+  - ✅ Create network states
+  - ❌ **NOT** for measurements or controls
+
+**All run scripts verified to follow this architecture** (2026-02-10).
+
+---
+
 ## Dependencies
 
 | Package | Version | Purpose |
@@ -164,6 +213,8 @@ enforcing local network constraints.
 - TSO and DSO controllers maintain separate network states (no model exchange).
 - The TSO controller models PCC setpoints as continuous control variables with an
   identity sensitivity approximation (perfect DSO tracking).
+- **Measurements are always taken from the combined network (real plant)**.
+- **Sensitivities are always computed from model networks (TN/DN split)**.
 
 ---
 
@@ -183,6 +234,10 @@ enforcing local network constraints.
    and shunt states as integer inputs. Use the `oltc_trafo_indices` and
    `shunt_bus_indices` parameters in `build_sensitivity_matrix_H()`. The
    `input_types` mapping indicates which inputs are 'continuous' vs 'integer'.
+
+4. **Numerical sensitivity performance**: The numerical sensitivity calculator requires
+   N power flows for N inputs, making it computationally expensive. Recommended for
+   validation and debugging only, not for production use.
 
 ### Optimisation Module
 
@@ -222,7 +277,8 @@ enforcing local network constraints.
 | Phase 3 | ✅ Complete | MIQP solver interface (MIQPSolver, MIQPProblem, MIQPResult) |
 | Phase 4 | ✅ Complete | Controller implementation (BaseOFOController, TSOController, DSOController) |
 | Phase 5a | ✅ Complete | Network module (build_tuda_net, split_network, validate_split) |
-| Phase 5b | ❌ Not started | Integration testing with pandapower simulation loop |
+| Phase 5b | ✅ Complete | Integration scripts with correct measurement architecture |
+| Phase 6 | ✅ Complete | Numerical sensitivity validation module |
 
 ---
 
@@ -243,6 +299,11 @@ enforcing local network constraints.
 | 2026-02-06 | Refactored network/split_tn_dn_net.py: CouplerPowerFlow, SplitResult, split_network, validate_split |
 | 2026-02-06 | Updated network/__init__.py to export clean public API |
 | 2026-02-06 | Added test_network.py for build, split, and validation tests |
+| 2026-02-10 | Implemented numerical.py with finite-difference sensitivities for validation |
+| 2026-02-10 | Added toggle for numerical/analytical sensitivities in all run scripts |
+| 2026-02-10 | **CRITICAL FIX**: Corrected run_tso_voltage_control.py to measure from combined network |
+| 2026-02-10 | Verified run_cascade.py and run_dso_reactive_power_control.py follow correct architecture |
+| 2026-02-10 | Added ARCHITECTURE.md documenting combined network vs model networks principle |
 
 ---
 

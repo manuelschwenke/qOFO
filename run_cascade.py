@@ -7,6 +7,14 @@ Cascaded OFO Controller Simulation
 This script runs the full TSO-DSO cascaded Online Feedback Optimisation
 controller loop with pandapower as the plant model.
 
+Key Architecture:
+    - **combined_net** = the 'real' plant (measurements, power flow)
+    - **tn_net, dn_net** = controller models only (for sensitivities/Jacobians)
+    - Controllers use tn_net/dn_net for computing sensitivities
+    - All measurements come from combined_net (realistic feedback)
+    - All control actions applied to combined_net
+    - Power flow runs only on combined_net
+
 Timing:
     - DSO controller executes every 1 minute
     - TSO controller executes every 3 minutes
@@ -17,8 +25,8 @@ buses.  Multiple scenarios are run with setpoints from 1.00 to 1.10 p.u.
 After each scenario, a summary of control variables and outputs at every
 iteration is printed (and optionally plotted).
 
-Author: Manuel Schwenke / Claude Code
-Date: 2026-02-08
+Author: Manuel Schwenke
+Date: 2026-02-10
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+import copy
 
 import numpy as np
 from numpy.typing import NDArray
@@ -98,48 +107,53 @@ def network_state_from_net(
 
 
 # ===============================================================================
-#  HELPER: Extract Measurement from a converged pandapower network
+#  HELPER: Extract Measurement from combined plant
 # ===============================================================================
 
-def measurement_from_tn(
+def measurement_from_combined_tn_side(
     net: pp.pandapowerNet,
     meta: NetworkMetadata,
     split: SplitResult,
     tso_config: TSOControllerConfig,
     iteration: int,
 ) -> Measurement:
-    """Build a TSO Measurement from the converged TN network."""
-    # All TN bus indices
-    all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
+    """
+    Build a TSO Measurement from the combined plant network.
+    
+    Extracts TN-side quantities from the combined network.
+    """
+    # TN bus indices -- use original TN bus indices
+    tn_bus_indices = [b for b in net.bus.index 
+                      if b not in split.dn_only_bus_indices]
+    all_bus = np.array(sorted(tn_bus_indices), dtype=np.int64)
     vm = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
 
-    # Branch currents -- use line results (i_from_ka as proxy)
+    # Branch currents -- TN lines only
     line_idx = np.array(tso_config.current_line_indices, dtype=np.int64)
     i_ka = np.array(
         [float(net.res_line.at[li, "i_from_ka"]) for li in line_idx],
         dtype=np.float64,
     )
 
-    # Interface Q at coupler HV buses -- read from boundary sgens
+    # Interface Q at coupler HV buses -- read from 3W trafo HV side
     iface_trafo = np.array(tso_config.pcc_trafo_indices, dtype=np.int64)
     q_iface = np.array(
-        [float(net.res_sgen.at[s, "q_mvar"])
-         for s in split.tn_boundary_sgen_indices],
+        [float(net.res_trafo3w.at[t, "q_hv_mvar"]) for t in iface_trafo],
         dtype=np.float64,
     )
-    # Negate: boundary sgen injects -Q_coupler, so measured Q = -sgen_q
-    q_iface = -q_iface
 
-    # DER Q (transmission-connected sgens)
+    # DER Q (transmission-connected sgens) -- exclude boundary sgens
     der_bus = np.array(tso_config.der_bus_indices, dtype=np.int64)
     der_q = np.zeros(len(der_bus), dtype=np.float64)
     for i, bus in enumerate(der_bus):
         sgen_mask = net.sgen["bus"] == bus
-        if sgen_mask.any():
-            sidx = net.sgen.index[sgen_mask][0]
-            der_q[i] = float(net.res_sgen.at[sidx, "q_mvar"])
+        # Only count sgens that are not boundary injections
+        for sidx in net.sgen.index[sgen_mask]:
+            # Check if this sgen has the boundary marker
+            if not net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+                der_q[i] += float(net.res_sgen.at[sidx, "q_mvar"])
 
-    # OLTC tap positions
+    # OLTC tap positions (2W machine transformers)
     oltc_idx = np.array(tso_config.oltc_trafo_indices, dtype=np.int64)
     oltc_taps = np.array(
         [int(net.trafo.at[t, "tap_pos"]) for t in oltc_idx],
@@ -155,13 +169,12 @@ def measurement_from_tn(
             sidx = net.shunt.index[mask][0]
             shunt_states[i] = int(net.shunt.at[sidx, "step"])
 
-
-    # generator AVR setpoints
+    # Generator AVR setpoints
     gen_idx = np.array(tso_config.gen_indices, dtype=np.int64)
     gen_vm = np.zeros(len(gen_idx), dtype=np.float64)
     for k, g in enumerate(gen_idx):
         if g not in net.gen.index:
-            raise ValueError(f"Generator index {g} not found in TN net.gen.")
+            raise ValueError(f"Generator index {g} not found in combined net.gen.")
         gen_vm[k] = float(net.gen.at[g, "vm_pu"])
 
     return Measurement(
@@ -183,18 +196,24 @@ def measurement_from_tn(
     )
 
 
-def measurement_from_dn(
+def measurement_from_combined_dn_side(
     net: pp.pandapowerNet,
     meta: NetworkMetadata,
     split: SplitResult,
     dso_config: DSOControllerConfig,
     iteration: int,
 ) -> Measurement:
-    """Build a DSO Measurement from the converged DN network."""
-    all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
+    """
+    Build a DSO Measurement from the combined plant network.
+    
+    Extracts DN-side quantities from the combined network.
+    """
+    # DN bus indices
+    dn_bus_indices = list(split.dn_only_bus_indices)
+    all_bus = np.array(sorted(dn_bus_indices), dtype=np.int64)
     vm = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
 
-    # Branch currents
+    # Branch currents -- DN lines only
     line_idx = np.array(dso_config.current_line_indices, dtype=np.int64)
     i_ka = np.array(
         [float(net.res_line.at[li, "i_from_ka"]) for li in line_idx],
@@ -208,13 +227,15 @@ def measurement_from_dn(
         dtype=np.float64,
     )
 
-    # DER Q -- sum Q from all sgens at each (unique) bus
+    # DER Q -- sum Q from all sgens at each (unique) bus in DN
     der_bus = np.array(dso_config.der_bus_indices, dtype=np.int64)
     der_q = np.zeros(len(der_bus), dtype=np.float64)
     for i, bus in enumerate(der_bus):
         sgen_mask = net.sgen["bus"] == bus
         for sidx in net.sgen.index[sgen_mask]:
-            der_q[i] += float(net.res_sgen.at[sidx, "q_mvar"])
+            # Only count DN sgens (not boundary)
+            if not net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+                der_q[i] += float(net.res_sgen.at[sidx, "q_mvar"])
 
     # OLTC tap positions (3W transformers in DN)
     oltc_idx = np.array(dso_config.oltc_trafo_indices, dtype=np.int64)
@@ -250,16 +271,18 @@ def measurement_from_dn(
 
 
 # ===============================================================================
-#  HELPER: Apply control outputs back to pandapower networks
+#  HELPER: Apply control outputs to combined plant
 # ===============================================================================
 
-def apply_tso_controls(
+def apply_tso_controls_to_combined(
     net: pp.pandapowerNet,
     tso_output: ControllerOutput,
     tso_config: TSOControllerConfig,
     split: SplitResult,
 ) -> None:
-    """Apply TSO control outputs to the TN pandapower network."""
+    """
+    Apply TSO control outputs to the combined pandapower plant network.
+    """
     u = tso_output.u_new
     n_der = len(tso_config.der_bus_indices)
     n_pcc = len(tso_config.pcc_trafo_indices)
@@ -270,14 +293,13 @@ def apply_tso_controls(
     # DER Q setpoints
     for i, bus in enumerate(tso_config.der_bus_indices):
         sgen_mask = net.sgen["bus"] == bus
-        if sgen_mask.any():
-            sidx = net.sgen.index[sgen_mask][0]
-            net.sgen.at[sidx, "q_mvar"] = u[i]
+        for sidx in net.sgen.index[sgen_mask]:
+            if not net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+                net.sgen.at[sidx, "q_mvar"] = u[i]
+                break  # Only set first non-boundary sgen
 
-    # PCC setpoints -> boundary sgen Q (update the boundary injection)
-    # PCC Q setpoints (unchanged)
-    for i, sidx in enumerate(split.tn_boundary_sgen_indices):
-        net.sgen.at[sidx, "q_mvar"] = -u[n_der + i]
+    # PCC setpoints are NOT applied here -- they are communicated to DSO
+    # The DSO will actuate DERs in the DN to track the PCC setpoints
 
     # AVR setpoints
     avr_start = n_der + n_pcc
@@ -285,10 +307,10 @@ def apply_tso_controls(
     avr_values = u[avr_start:avr_end]
     for g_idx, vm in zip(tso_config.gen_indices, avr_values):
         if g_idx not in net.gen.index:
-            raise ValueError(f"Generator index {g_idx} not found in TN net.gen.")
+            raise ValueError(f"Generator index {g_idx} not found in combined net.gen.")
         net.gen.at[g_idx, "vm_pu"] = float(vm)
 
-    # OLTC taps
+    # OLTC taps (2W machine transformers)
     tap_start = avr_end
     for i, trafo_idx in enumerate(tso_config.oltc_trafo_indices):
         net.trafo.at[trafo_idx, "tap_pos"] = int(
@@ -306,12 +328,14 @@ def apply_tso_controls(
             )
 
 
-def apply_dso_controls(
+def apply_dso_controls_to_combined(
     net: pp.pandapowerNet,
     dso_output: ControllerOutput,
     dso_config: DSOControllerConfig,
 ) -> None:
-    """Apply DSO control outputs to the DN pandapower network."""
+    """
+    Apply DSO control outputs to the combined pandapower plant network.
+    """
     u = dso_output.u_new
     n_der = len(dso_config.der_bus_indices)
     n_oltc = len(dso_config.oltc_trafo_indices)
@@ -319,10 +343,16 @@ def apply_dso_controls(
     # DER Q setpoints -- distribute evenly across all sgens at each bus
     for i, bus in enumerate(dso_config.der_bus_indices):
         sgen_mask = net.sgen["bus"] == bus
-        n_sgens = int(sgen_mask.sum())
+        # Count non-boundary sgens
+        valid_sgens = []
+        for sidx in net.sgen.index[sgen_mask]:
+            if not net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+                valid_sgens.append(sidx)
+        
+        n_sgens = len(valid_sgens)
         if n_sgens > 0:
             q_per_sgen = u[i] / n_sgens
-            for sidx in net.sgen.index[sgen_mask]:
+            for sidx in valid_sgens:
                 net.sgen.at[sidx, "q_mvar"] = q_per_sgen
 
     # OLTC taps (3W transformers)
@@ -390,6 +420,10 @@ def run_cascade(
     """
     Run the cascaded TSO-DSO OFO controller loop.
 
+    Architecture:
+        - combined_net: the 'real' plant (measurements, power flow)
+        - tn_net, dn_net: controller models only (sensitivities)
+
     Parameters
     ----------
     v_setpoint_pu : float
@@ -414,69 +448,82 @@ def run_cascade(
         print("=" * 72)
         print(f"  CASCADED OFO SIMULATION -- V_setpoint = {v_setpoint_pu:.3f} p.u.")
         print("=" * 72)
+        print("  Architecture: combined_net (plant) + tn_net/dn_net (models)")
+        print("=" * 72)
 
-    # -- 1) Build and split the network ------------------------------------
+    # -- 1) Build combined network (plant) and model networks ---------------
     if verbose:
-        print("[1/5] Building combined 380/110/20 kV network ...")
-    net_combined, meta = build_tuda_net(ext_grid_vm_pu=1.06, pv_nodes=True)
+        print("[1/5] Building combined 380/110/20 kV network (plant) ...")
+    combined_net, meta = build_tuda_net(ext_grid_vm_pu=1.06, pv_nodes=True)
 
     if verbose:
-        print("[2/5] Splitting into TN and DN ...")
-    split = split_network(net_combined, meta, dn_slack_coupler_index=0)
-    tn_net = split.tn_net
-    dn_net = split.dn_net
+        print("[2/5] Creating TN and DN model networks for controllers ...")
+    # Create split for identifying TN/DN elements
+    split = split_network(combined_net, meta, dn_slack_coupler_index=0)
+    
+    # Create model networks (deep copies for sensitivity computation)
+    tn_net = copy.deepcopy(split.tn_net)
+    dn_net = copy.deepcopy(split.dn_net)
+    
+    if verbose:
+        print(f"       combined_net: {len(combined_net.bus)} buses")
+        print(f"       tn_net (model): {len(tn_net.bus)} buses")
+        print(f"       dn_net (model): {len(dn_net.bus)} buses")
 
     # -- 2) Identify element indices for controller configs ----------------
 
     # TSO DER: transmission-connected sgens (not boundary sgens)
     tso_der_buses = []
-    for sidx in tn_net.sgen.index:
-        if sidx not in split.tn_boundary_sgen_indices:
-            tso_der_buses.append(int(tn_net.sgen.at[sidx, "bus"]))
+    for sidx in combined_net.sgen.index:
+        bus = int(combined_net.sgen.at[sidx, "bus"])
+        # TN sgens are those not in DN-only buses
+        if bus not in split.dn_only_bus_indices:
+            # Not a boundary sgen
+            if not combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+                if bus not in tso_der_buses:
+                    tso_der_buses.append(bus)
 
     # TSO voltage monitoring: all EHV (380 kV) buses
     tso_v_buses = sorted(
-        int(b) for b in tn_net.bus.index
-        if float(tn_net.bus.at[b, "vn_kv"]) >= 300.0
+        int(b) for b in combined_net.bus.index
+        if float(combined_net.bus.at[b, "vn_kv"]) >= 300.0
     )
 
     # TSO current monitoring: all TN lines
-    tso_lines = sorted(int(li) for li in tn_net.line.index)
+    tso_lines = [li for li in combined_net.line.index 
+                 if li in tn_net.line.index]
 
     # TSO machine transformers (OLTCs)
-    # Note: Machine transformers connecting to slack bus have known
-    # Jacobian issues. We build H once to discover which elements
-    # actually produce valid sensitivities.
     tso_oltc_candidates = list(meta.machine_trafo_indices)
 
-    # synchronous generators and their associated grid-side buses
+    # Synchronous generators and their associated grid-side buses
     tso_gen_indices: List[int] = []
     tso_gen_bus_indices: List[int] = []
-    for g in tn_net.gen.index:
+    for g in combined_net.gen.index:
         tso_gen_indices.append(int(g))
-        gen_lv_bus = int(tn_net.gen.at[g, "bus"])
+        gen_lv_bus = int(combined_net.gen.at[g, "bus"])
         mt_mask = (
-            (tn_net.trafo["lv_bus"] == gen_lv_bus)
-            & tn_net.trafo["name"].astype(str).str.startswith("MachineTrf|")
+            (combined_net.trafo["lv_bus"] == gen_lv_bus)
+            & combined_net.trafo["name"].astype(str).str.startswith("MachineTrf|")
         )
         if not mt_mask.any():
             raise RuntimeError(
                 f"No machine transformer found for generator {g} "
-                f"(bus {gen_lv_bus}) in TN network."
+                f"(bus {gen_lv_bus}) in combined network."
             )
-        mt_idx = int(tn_net.trafo.index[mt_mask][0])
-        hv_bus = int(tn_net.trafo.at[mt_idx, "hv_bus"])
+        mt_idx = int(combined_net.trafo.index[mt_mask][0])
+        hv_bus = int(combined_net.trafo.at[mt_idx, "hv_bus"])
         tso_gen_bus_indices.append(hv_bus)
 
     # TSO shunts
     tso_shunt_bus_candidates = []
     tso_shunt_q_candidates = []
     for sidx in meta.tn_shunt_indices:
-        if sidx in tn_net.shunt.index:
-            tso_shunt_bus_candidates.append(int(tn_net.shunt.at[sidx, "bus"]))
-            tso_shunt_q_candidates.append(float(tn_net.shunt.at[sidx, "q_mvar"]))
+        if sidx in combined_net.shunt.index:
+            tso_shunt_bus_candidates.append(int(combined_net.shunt.at[sidx, "bus"]))
+            tso_shunt_q_candidates.append(float(combined_net.shunt.at[sidx, "q_mvar"]))
 
-    # Probe build_sensitivity_matrix_H to find which elements survive
+    # Probe TN model to find which elements survive sensitivity computation
     _probe_sens = JacobianSensitivities(tn_net)
     _H_probe, _m_probe = _probe_sens.build_sensitivity_matrix_H(
         der_bus_indices=tso_der_buses,
@@ -496,10 +543,9 @@ def run_cascade(
     ]
 
     # PCC info (one per coupler)
-    # All PCCs map to a single DSO controller that manages the entire DN.
     pcc_trafo_indices = list(meta.coupler_trafo3w_indices)
     n_pcc = len(pcc_trafo_indices)
-    dso_ids = ["dso_0"] * n_pcc  # all PCCs -> same DSO controller
+    dso_ids = ["dso_0"] * n_pcc
 
     # Voltage setpoints
     v_setpoints = np.full(len(tso_v_buses), v_setpoint_pu)
@@ -521,14 +567,16 @@ def run_cascade(
         gen_vm_max_pu=1.10,
     )
 
-
-    # DSO configs -- one per PCC (for simplicity, all share the DN network)
-    # DSO DERs: distribution-connected sgens (not boundary sgens)
-    # Use unique bus indices -- multiple sgens at same bus are one DER.
+    # DSO configs
     dso_der_buses_raw = []
-    for sidx in dn_net.sgen.index:
-        if sidx not in split.dn_boundary_sgen_indices:
-            dso_der_buses_raw.append(int(dn_net.sgen.at[sidx, "bus"]))
+    for sidx in combined_net.sgen.index:
+        bus = int(combined_net.sgen.at[sidx, "bus"])
+        # DN sgens are those in DN-only buses
+        if bus in split.dn_only_bus_indices:
+            # Not a boundary sgen
+            if not combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+                dso_der_buses_raw.append(bus)
+    
     # Deduplicate while preserving order
     seen = set()
     dso_der_buses = []
@@ -539,32 +587,30 @@ def run_cascade(
 
     # DSO voltage monitoring: all DN (110 kV) buses
     dso_v_buses = sorted(
-        int(b) for b in dn_net.bus.index
-        if 100.0 <= float(dn_net.bus.at[b, "vn_kv"]) <= 120.0
+        int(b) for b in combined_net.bus.index
+        if 100.0 <= float(combined_net.bus.at[b, "vn_kv"]) <= 120.0
+        and b in split.dn_only_bus_indices
     )
 
-    # DSO current monitoring: all DN lines
-    dso_lines = sorted(int(li) for li in dn_net.line.index)
+    # DSO current monitoring: DN lines
+    dso_lines = [li for li in combined_net.line.index 
+                 if li in dn_net.line.index]
 
     # DSO OLTCs: the 3W coupler transformers
     dso_oltc_candidates = list(meta.coupler_trafo3w_indices)
 
-    # DSO shunts: exclude tertiary (20 kV) shunts -- they are not directly
-    # controllable from the 110 kV DSO level and cause Jacobian issues.
+    # DSO shunts (exclude tertiary 20 kV shunts)
     dso_shunt_buses = []
     dso_shunt_q_steps = []
 
-    # Probe DSO sensitivities to find surviving elements
+    # Probe DSO model to find surviving elements
     _dso_probe_sens = JacobianSensitivities(dn_net)
-    _dso_kw = dict(
+    _H_dso_probe, _m_dso_probe = _dso_probe_sens.build_sensitivity_matrix_H(
         der_bus_indices=dso_der_buses,
         observation_bus_indices=dso_v_buses,
         line_indices=dso_lines,
         trafo3w_indices=list(meta.coupler_trafo3w_indices),
         oltc_trafo3w_indices=dso_oltc_candidates,
-    )
-    _H_dso_probe, _m_dso_probe = _dso_probe_sens.build_sensitivity_matrix_H(
-        **_dso_kw,
     )
     dso_oltc = list(_m_dso_probe.get("oltc_trafo3w", dso_oltc_candidates))
     dso_v_buses = list(_m_dso_probe.get("obs_buses", dso_v_buses))
@@ -599,32 +645,35 @@ def run_cascade(
         g_u=0.00001,
     )
 
-    # TSO sensitivities & state
+    # TSO sensitivities & state (from TN model)
     tso_trafo_idx = np.array(tso_oltc, dtype=np.int64)
-    tso_ns = network_state_from_net(tn_net, tso_trafo_idx, source_case="TN")
+    tso_ns = network_state_from_net(tn_net, tso_trafo_idx, source_case="TN_model")
     tso_sens = JacobianSensitivities(tn_net)
 
+    # TSO bounds (from combined plant)
     tso_bounds = ActuatorBounds(
         der_indices=np.array(tso_der_buses, dtype=np.int64),
         der_s_rated_mva=np.array(
-            [float(tn_net.sgen.at[s, "sn_mva"])
-             for s in tn_net.sgen.index
-             if s not in split.tn_boundary_sgen_indices],
+            [float(combined_net.sgen.at[s, "sn_mva"])
+             for s in combined_net.sgen.index
+             if (int(combined_net.sgen.at[s, "bus"]) in tso_der_buses
+                 and not combined_net.sgen.at[s, "name"].startswith("BoundarySgen|"))],
             dtype=np.float64,
-        ),
+        )[:len(tso_der_buses)],  # Ensure correct length
         der_p_max_mw=np.array(
-            [float(tn_net.sgen.at[s, "p_mw"])
-             for s in tn_net.sgen.index
-             if s not in split.tn_boundary_sgen_indices],
+            [float(combined_net.sgen.at[s, "p_mw"])
+             for s in combined_net.sgen.index
+             if (int(combined_net.sgen.at[s, "bus"]) in tso_der_buses
+                 and not combined_net.sgen.at[s, "name"].startswith("BoundarySgen|"))],
             dtype=np.float64,
-        ),
+        )[:len(tso_der_buses)],
         oltc_indices=np.array(tso_oltc, dtype=np.int64),
         oltc_tap_min=np.array(
-            [int(tn_net.trafo.at[t, "tap_min"]) for t in tso_oltc],
+            [int(combined_net.trafo.at[t, "tap_min"]) for t in tso_oltc],
             dtype=np.int64,
         ),
         oltc_tap_max=np.array(
-            [int(tn_net.trafo.at[t, "tap_max"]) for t in tso_oltc],
+            [int(combined_net.trafo.at[t, "tap_max"]) for t in tso_oltc],
             dtype=np.int64,
         ),
         shunt_indices=np.array(tso_shunt_buses, dtype=np.int64),
@@ -640,26 +689,24 @@ def run_cascade(
         sensitivities=tso_sens,
     )
 
-    # DSO sensitivities & state
+    # DSO sensitivities & state (from DN model)
     dso_trafo3w_idx = np.array(dso_oltc, dtype=np.int64)
     dso_ns = network_state_from_net(
         dn_net,
-        # For 3W transformers we pass them; NetworkState accepts any trafo idx
         np.array([], dtype=np.int64),
-        source_case="DN",
+        source_case="DN_model",
     )
     dso_sens = JacobianSensitivities(dn_net)
 
-    # Aggregate DER ratings per unique bus (sum S_rated and P_max from
-    # all sgens at the same bus).
+    # Aggregate DER ratings per unique bus from combined plant
     dso_der_s_rated = {b: 0.0 for b in dso_der_buses}
     dso_der_p_max = {b: 0.0 for b in dso_der_buses}
-    for sidx in dn_net.sgen.index:
-        if sidx not in split.dn_boundary_sgen_indices:
-            bus = int(dn_net.sgen.at[sidx, "bus"])
-            if bus in dso_der_s_rated:
-                dso_der_s_rated[bus] += float(dn_net.sgen.at[sidx, "sn_mva"])
-                dso_der_p_max[bus] += float(dn_net.sgen.at[sidx, "p_mw"])
+    for sidx in combined_net.sgen.index:
+        bus = int(combined_net.sgen.at[sidx, "bus"])
+        if bus in dso_der_buses:
+            if not combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
+                dso_der_s_rated[bus] += float(combined_net.sgen.at[sidx, "sn_mva"])
+                dso_der_p_max[bus] += float(combined_net.sgen.at[sidx, "p_mw"])
 
     dso_bounds = ActuatorBounds(
         der_indices=np.array(dso_der_buses, dtype=np.int64),
@@ -673,11 +720,11 @@ def run_cascade(
         ),
         oltc_indices=dso_trafo3w_idx,
         oltc_tap_min=np.array(
-            [int(dn_net.trafo3w.at[t, "tap_min"]) for t in dso_oltc],
+            [int(combined_net.trafo3w.at[t, "tap_min"]) for t in dso_oltc],
             dtype=np.int64,
         ),
         oltc_tap_max=np.array(
-            [int(dn_net.trafo3w.at[t, "tap_max"]) for t in dso_oltc],
+            [int(combined_net.trafo3w.at[t, "tap_max"]) for t in dso_oltc],
             dtype=np.int64,
         ),
         shunt_indices=np.array(dso_shunt_buses, dtype=np.int64),
@@ -693,12 +740,19 @@ def run_cascade(
         sensitivities=dso_sens,
     )
 
-    # -- 4) Initialise controllers with first measurement ------------------
+    # -- 4) Initialise controllers from combined plant ---------------------
     if verbose:
-        print("[4/5] Initialising controllers from converged power flow ...")
+        print("[4/5] Initialising controllers from combined plant power flow ...")
 
-    tso_meas = measurement_from_tn(tn_net, meta, split, tso_config, iteration=0)
-    dso_meas = measurement_from_dn(dn_net, meta, split, dso_config, iteration=0)
+    # Run initial power flow on combined plant
+    pp.runpp(combined_net, run_control=False, calculate_voltage_angles=True)
+
+    tso_meas = measurement_from_combined_tn_side(
+        combined_net, meta, split, tso_config, iteration=0
+    )
+    dso_meas = measurement_from_combined_dn_side(
+        combined_net, meta, split, dso_config, iteration=0
+    )
 
     tso.initialise(tso_meas)
     dso.initialise(dso_meas)
@@ -710,8 +764,6 @@ def run_cascade(
         print()
 
     log: List[IterationRecord] = []
-    tso_output: Optional[ControllerOutput] = None
-    dso_output: Optional[ControllerOutput] = None
 
     for minute in range(1, n_minutes + 1):
         run_tso = (minute % tso_period_min == 0)
@@ -721,37 +773,47 @@ def run_cascade(
 
         # -- TSO step (every tso_period_min minutes) -----------------------
         if run_tso:
-            tso_meas = measurement_from_tn(tn_net, meta, split, tso_config, iteration=minute)
+            # Measure from combined plant
+            tso_meas = measurement_from_combined_tn_side(
+                combined_net, meta, split, tso_config, iteration=minute
+            )
             try:
                 tso_output = tso.step(tso_meas)
 
                 n_der_t = len(tso_config.der_bus_indices)
                 n_pcc_t = len(tso_config.pcc_trafo_indices)
+                n_gen_t = len(tso_config.gen_indices)
                 n_oltc_t = len(tso_config.oltc_trafo_indices)
+                n_shunt_t = len(tso_config.shunt_bus_indices)
 
                 rec.tso_q_der_mvar = tso_output.u_new[:n_der_t].copy()
                 rec.tso_q_pcc_set_mvar = tso_output.u_new[n_der_t:n_der_t + n_pcc_t].copy()
+                
+                oltc_start = n_der_t + n_pcc_t + n_gen_t
                 rec.tso_oltc_taps = np.round(
-                    tso_output.u_new[n_der_t + n_pcc_t:n_der_t + n_pcc_t + n_oltc_t]
+                    tso_output.u_new[oltc_start:oltc_start + n_oltc_t]
                 ).astype(np.int64)
+                
+                shunt_start = oltc_start + n_oltc_t
                 rec.tso_shunt_states = np.round(
-                    tso_output.u_new[n_der_t + n_pcc_t + n_oltc_t:]
+                    tso_output.u_new[shunt_start:shunt_start + n_shunt_t]
                 ).astype(np.int64)
+                
                 rec.tso_objective = tso_output.objective_value
                 rec.tso_solver_status = tso_output.solver_status
                 rec.tso_solve_time_s = tso_output.solve_time_s
                 rec.tso_slack = tso_output.z_slack.copy()
 
-                # Predicted voltages (first n_v outputs)
+                # Predicted voltages
                 n_v = len(tso_config.voltage_bus_indices)
                 rec.tso_voltages_pu = tso_output.y_predicted[:n_v].copy()
 
-                # Apply TSO controls to TN network
-                apply_tso_controls(tn_net, tso_output, tso_config, split)
+                # Apply TSO controls to combined plant
+                apply_tso_controls_to_combined(
+                    combined_net, tso_output, tso_config, split
+                )
 
-                # Generate setpoint messages for DSO.
-                # The TSO produces one message per PCC; merge them into a
-                # single message that covers all interface transformers.
+                # Generate setpoint messages for DSO
                 setpoint_msgs = tso.generate_setpoint_messages()
                 dso_msgs = [m for m in setpoint_msgs
                             if m.target_controller_id == dso.controller_id]
@@ -777,19 +839,23 @@ def run_cascade(
 
         # -- DSO step (every dso_period_min minutes) -----------------------
         if run_dso:
-            dso_meas = measurement_from_dn(dn_net, meta, split, dso_config, iteration=minute)
+            # Measure from combined plant
+            dso_meas = measurement_from_combined_dn_side(
+                combined_net, meta, split, dso_config, iteration=minute
+            )
             try:
                 dso_output = dso.step(dso_meas)
 
                 n_der_d = len(dso_config.der_bus_indices)
                 n_oltc_d = len(dso_config.oltc_trafo_indices)
+                n_shunt_d = len(dso_config.shunt_bus_indices)
 
                 rec.dso_q_der_mvar = dso_output.u_new[:n_der_d].copy()
                 rec.dso_oltc_taps = np.round(
                     dso_output.u_new[n_der_d:n_der_d + n_oltc_d]
                 ).astype(np.int64)
                 rec.dso_shunt_states = np.round(
-                    dso_output.u_new[n_der_d + n_oltc_d:]
+                    dso_output.u_new[n_der_d + n_oltc_d:n_der_d + n_oltc_d + n_shunt_d]
                 ).astype(np.int64)
                 rec.dso_objective = dso_output.objective_value
                 rec.dso_solver_status = dso_output.solver_status
@@ -802,8 +868,10 @@ def run_cascade(
                 rec.dso_q_interface_mvar = dso_output.y_predicted[:n_iface].copy()
                 rec.dso_voltages_pu = dso_output.y_predicted[n_iface:n_iface + n_v_d].copy()
 
-                # Apply DSO controls to DN network
-                apply_dso_controls(dn_net, dso_output, dso_config)
+                # Apply DSO controls to combined plant
+                apply_dso_controls_to_combined(
+                    combined_net, dso_output, dso_config
+                )
 
                 # Send capability back to TSO
                 cap_msg = dso.generate_capability_message("tso_main", dso_meas)
@@ -813,25 +881,24 @@ def run_cascade(
                 if verbose:
                     print(f"  [min {minute:3d}] DSO FAILED: {e}")
 
-        # -- Re-run power flow after control actions -----------------------
+        # -- Re-run power flow on combined plant after control actions -----
         try:
-            pp.runpp(tn_net, run_control=False, calculate_voltage_angles=True)
+            pp.runpp(combined_net, run_control=False, calculate_voltage_angles=True)
         except Exception as e:
             if verbose:
-                print(f"  [min {minute:3d}] TN power flow failed: {e}")
+                print(f"  [min {minute:3d}] Combined plant power flow failed: {e}")
 
-        try:
-            pp.runpp(dn_net, run_control=False, calculate_voltage_angles=True)
-        except Exception as e:
-            if verbose:
-                print(f"  [min {minute:3d}] DN power flow failed: {e}")
-
-        # Record plant measurements
-        rec.plant_tn_voltages_pu = tn_net.res_bus.loc[
-            tso_v_buses, "vm_pu"
+        # Record plant measurements from combined network
+        tn_bus_mask = [b for b in combined_net.bus.index 
+                       if b not in split.dn_only_bus_indices]
+        rec.plant_tn_voltages_pu = combined_net.res_bus.loc[
+            [b for b in tso_v_buses if b in tn_bus_mask], "vm_pu"
         ].values.copy()
-        rec.plant_dn_voltages_pu = dn_net.res_bus.loc[
-            dso_v_buses, "vm_pu"
+        
+        dn_bus_mask = [b for b in combined_net.bus.index 
+                       if b in split.dn_only_bus_indices]
+        rec.plant_dn_voltages_pu = combined_net.res_bus.loc[
+            [b for b in dso_v_buses if b in dn_bus_mask], "vm_pu"
         ].values.copy()
 
         log.append(rec)
@@ -849,7 +916,7 @@ def run_cascade(
                 v_mean = np.mean(rec.plant_tn_voltages_pu)
                 v_max = np.max(rec.plant_tn_voltages_pu)
                 v_min = np.min(rec.plant_tn_voltages_pu)
-                print(f"           TN V:  min={v_min:.4f}  mean={v_mean:.4f}  max={v_max:.4f} p.u."
+                print(f"           TN V (plant):  min={v_min:.4f}  mean={v_mean:.4f}  max={v_max:.4f} p.u."
                       f"   (target={v_setpoint_pu:.3f})")
                 print(f"           TSO obj={rec.tso_objective:.4e}  status={rec.tso_solver_status}"
                       f"  t_solve={rec.tso_solve_time_s:.3f}s")
@@ -857,23 +924,23 @@ def run_cascade(
                     print(f"           TSO Q_DER = {np.array2string(rec.tso_q_der_mvar, precision=2, suppress_small=True)} Mvar")
                 if rec.tso_q_pcc_set_mvar is not None:
                     print(f"           TSO Q_PCC_set = {np.array2string(rec.tso_q_pcc_set_mvar, precision=2, suppress_small=True)} Mvar")
-                if rec.tso_oltc_taps is not None:
+                if rec.tso_oltc_taps is not None and len(rec.tso_oltc_taps) > 0:
                     print(f"           TSO OLTC taps = {rec.tso_oltc_taps}")
-                if rec.tso_shunt_states is not None:
+                if rec.tso_shunt_states is not None and len(rec.tso_shunt_states) > 0:
                     print(f"           TSO shunt states = {rec.tso_shunt_states}")
 
             if run_dso and rec.dso_voltages_pu is not None:
                 v_d_mean = np.mean(rec.plant_dn_voltages_pu)
                 v_d_max = np.max(rec.plant_dn_voltages_pu)
                 v_d_min = np.min(rec.plant_dn_voltages_pu)
-                print(f"           DN V:  min={v_d_min:.4f}  mean={v_d_mean:.4f}  max={v_d_max:.4f} p.u.")
+                print(f"           DN V (plant):  min={v_d_min:.4f}  mean={v_d_mean:.4f}  max={v_d_max:.4f} p.u.")
                 print(f"           DSO obj={rec.dso_objective:.4e}  status={rec.dso_solver_status}"
                       f"  t_solve={rec.dso_solve_time_s:.3f}s")
                 if rec.dso_q_der_mvar is not None:
                     print(f"           DSO Q_DER = {np.array2string(rec.dso_q_der_mvar, precision=2, suppress_small=True)} Mvar")
                 if rec.dso_q_interface_mvar is not None:
-                    print(f"           DSO Q_iface = {np.array2string(rec.dso_q_interface_mvar, precision=2, suppress_small=True)} Mvar")
-                if rec.dso_oltc_taps is not None:
+                    print(f"           DSO Q_iface (plant) = {np.array2string(rec.dso_q_interface_mvar, precision=2, suppress_small=True)} Mvar")
+                if rec.dso_oltc_taps is not None and len(rec.dso_oltc_taps) > 0:
                     print(f"           DSO OLTC taps = {rec.dso_oltc_taps}")
 
             print()
@@ -900,7 +967,7 @@ def print_summary(
     final = log[-1]
     if final.plant_tn_voltages_pu is not None:
         v = final.plant_tn_voltages_pu
-        print(f"  Final TN voltages:  min={np.min(v):.4f}  mean={np.mean(v):.4f}"
+        print(f"  Final TN voltages (plant):  min={np.min(v):.4f}  mean={np.mean(v):.4f}"
               f"  max={np.max(v):.4f} p.u.")
         print(f"  Voltage error (max): {np.max(np.abs(v - v_setpoint)):.4f} p.u.")
 
@@ -917,9 +984,9 @@ def print_summary(
             print(f"  Final TSO Q_DER:       {np.array2string(last_tso.tso_q_der_mvar, precision=2)} Mvar")
         if last_tso.tso_q_pcc_set_mvar is not None:
             print(f"  Final TSO Q_PCC_set:   {np.array2string(last_tso.tso_q_pcc_set_mvar, precision=2)} Mvar")
-        if last_tso.tso_oltc_taps is not None:
+        if last_tso.tso_oltc_taps is not None and len(last_tso.tso_oltc_taps) > 0:
             print(f"  Final TSO OLTC taps:   {last_tso.tso_oltc_taps}")
-        if last_tso.tso_shunt_states is not None:
+        if last_tso.tso_shunt_states is not None and len(last_tso.tso_shunt_states) > 0:
             print(f"  Final TSO shunt:       {last_tso.tso_shunt_states}")
 
     dso_recs = [r for r in log if r.dso_active and r.dso_voltages_pu is not None]
@@ -927,7 +994,7 @@ def print_summary(
         last_dso = dso_recs[-1]
         if last_dso.dso_q_der_mvar is not None:
             print(f"  Final DSO Q_DER:       {np.array2string(last_dso.dso_q_der_mvar, precision=2)} Mvar")
-        if last_dso.dso_oltc_taps is not None:
+        if last_dso.dso_oltc_taps is not None and len(last_dso.dso_oltc_taps) > 0:
             print(f"  Final DSO OLTC taps:   {last_dso.dso_oltc_taps}")
 
     # Convergence trace: voltage error over TSO iterations
@@ -952,7 +1019,7 @@ def print_summary(
 # ===============================================================================
 
 def main() -> None:
-    """Run cascade scenarios for voltage setpoints from 1.00 to 1.10 p.u."""
+    """Run cascade scenarios for voltage setpoints."""
     scenarios = [1.06]
 
     all_results: Dict[float, List[IterationRecord]] = {}
@@ -974,13 +1041,12 @@ def main() -> None:
         )
         all_results[v_set] = log
 
-        # Build tso_v_buses for summary (re-derive from log)
         print_summary(v_set, log, tso_v_buses=[])
 
     # -- Cross-scenario comparison -----------------------------------------
     print()
     print("=" * 72)
-    print("  CROSS-SCENARIO COMPARISON  (final TN voltages)")
+    print("  CROSS-SCENARIO COMPARISON  (final TN voltages from plant)")
     print("=" * 72)
     print(f"  {'V_set':>6s}  {'V_min':>8s}  {'V_mean':>8s}  {'V_max':>8s}  {'|err|_max':>10s}")
     print(f"  {'-'*6}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*10}")

@@ -224,6 +224,7 @@ def apply_tso_controls(
 
     n_der = len(tso_config.der_bus_indices)
     n_pcc = len(tso_config.pcc_trafo_indices)  # will be zero here
+    n_gen = len(tso_config.gen_indices)
     n_oltc = len(tso_config.oltc_trafo_indices)
 
     # 1) Transmission-connected DER Q setpoints
@@ -248,15 +249,17 @@ def apply_tso_controls(
         net.gen.at[g_idx, "vm_pu"] = float(vm)
 
     # 4) Machine transformer OLTC tap positions
+    oltc_start = n_der + n_pcc + n_gen
     for k, trafo_idx in enumerate(tso_config.oltc_trafo_indices):
         if trafo_idx not in net.trafo.index:
             raise ValueError(
                 f"Machine transformer {trafo_idx} not found in net.trafo."
             )
-        tap_val = int(np.round(u[n_der + n_pcc + k]))
+        tap_val = int(np.round(u[oltc_start + k]))
         net.trafo.at[trafo_idx, "tap_pos"] = tap_val
 
     # 5) Shunt states
+    shunt_start = oltc_start + n_oltc
     n_shunt = len(tso_config.shunt_bus_indices)
     for k, shunt_bus in enumerate(tso_config.shunt_bus_indices):
         mask = net.shunt["bus"] == shunt_bus
@@ -265,7 +268,7 @@ def apply_tso_controls(
                 f"TN shunt at bus {shunt_bus} not found in net.shunt."
             )
         sidx = net.shunt.index[mask][0]
-        step_val = int(np.round(u[n_der + n_pcc + n_oltc + k]))
+        step_val = int(np.round(u[shunt_start + k]))
         net.shunt.at[sidx, "step"] = step_val
 
 
@@ -283,6 +286,7 @@ class TSOIterationRecord:
     # Controller outputs
     tso_voltages_pu: Optional[NDArray[np.float64]] = None
     tso_q_der_mvar: Optional[NDArray[np.float64]] = None
+    tso_gen_avr_setpoints_pu: Optional[NDArray[np.float64]] = None
     tso_oltc_taps: Optional[NDArray[np.int64]] = None
     tso_shunt_states: Optional[NDArray[np.int64]] = None
     tso_objective: Optional[float] = None
@@ -292,6 +296,7 @@ class TSOIterationRecord:
 
     # Plant measurements after power flow
     plant_tn_voltages_pu: Optional[NDArray[np.float64]] = None
+    plant_gen_q_mvar: Optional[NDArray[np.float64]] = None
 
 
 # ==============================================================================
@@ -538,15 +543,28 @@ def run_tso_voltage_control(
         # Extract control variables
         n_der_t = len(tso_config.der_bus_indices)
         n_pcc_t = len(tso_config.pcc_trafo_indices)  # zero here
+        n_gen_t = len(tso_config.gen_indices)
         n_oltc_t = len(tso_config.oltc_trafo_indices)
 
         rec.tso_q_der_mvar = tso_output.u_new[:n_der_t].copy()
+        
+        # Extract generator AVR setpoints
+        avr_start = n_der_t + n_pcc_t
+        avr_end = avr_start + n_gen_t
+        rec.tso_gen_avr_setpoints_pu = tso_output.u_new[avr_start:avr_end].copy()
+        
+        # Extract OLTC taps
+        oltc_start = avr_end
+        oltc_end = oltc_start + n_oltc_t
         rec.tso_oltc_taps = np.round(
-            tso_output.u_new[n_der_t + n_pcc_t : n_der_t + n_pcc_t + n_oltc_t]
+            tso_output.u_new[oltc_start:oltc_end]
         ).astype(np.int64)
+        
+        # Extract shunt states
         rec.tso_shunt_states = np.round(
-            tso_output.u_new[n_der_t + n_pcc_t + n_oltc_t :]
+            tso_output.u_new[oltc_end:]
         ).astype(np.int64)
+        
         rec.tso_objective = tso_output.objective_value
         rec.tso_solver_status = tso_output.solver_status
         rec.tso_solve_time_s = tso_output.solve_time_s
@@ -571,6 +589,13 @@ def run_tso_voltage_control(
         rec.plant_tn_voltages_pu = net.res_bus.loc[
             tso_v_buses, "vm_pu"
         ].values.astype(np.float64).copy()
+        
+        # Record generator reactive power outputs from power flow results
+        rec.plant_gen_q_mvar = np.zeros(len(tso_config.gen_indices), dtype=np.float64)
+        for k, g in enumerate(tso_config.gen_indices):
+            if g not in net.res_gen.index:
+                raise ValueError(f"Generator {g} not found in net.res_gen.")
+            rec.plant_gen_q_mvar[k] = float(net.res_gen.at[g, "q_mvar"])
 
         log.append(rec)
 
@@ -596,6 +621,18 @@ def run_tso_voltage_control(
                 print(
                     "          Q_DER = "
                     f"{np.array2string(rec.tso_q_der_mvar, precision=2, suppress_small=True)} "
+                    "Mvar"
+                )
+            if rec.tso_gen_avr_setpoints_pu is not None:
+                print(
+                    "          Gen AVR setpoints = "
+                    f"{np.array2string(rec.tso_gen_avr_setpoints_pu, precision=4, suppress_small=True)} "
+                    "p.u."
+                )
+            if rec.plant_gen_q_mvar is not None:
+                print(
+                    "          Gen Q output = "
+                    f"{np.array2string(rec.plant_gen_q_mvar, precision=2, suppress_small=True)} "
                     "Mvar"
                 )
             if rec.tso_oltc_taps is not None:

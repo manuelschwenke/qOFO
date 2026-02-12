@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-DSO-Only OFO Reactive Power Controller
-=======================================
+DSO-Only OFO Reactive Power Controller (Option A: Combined Network Sensitivities)
+==================================================================================
 
 This script runs a *single-layer* Online Feedback Optimisation (OFO)
-controller on the **distribution system only**.  It does *not* include
+controller on the **distribution system only**. It does *not* include
 the TSO controller and receives fixed reactive power setpoints at the
 TSO–DSO interfaces (coupler transformers).
 
@@ -13,44 +14,36 @@ Control objective
 -----------------
 Track fixed reactive power setpoints Q_set = [0, 0, 0] Mvar at the
 three TSO-DSO interface transformers (3-winding couplers) by actuating:
+- Reactive power of distribution-connected DER (DN sgens)
+- OLTC tap positions of 3-winding coupler transformers
+- States of distribution-level switchable shunts
 
-    - Reactive power of distribution-connected DER (DN sgens)
-    - OLTC tap positions of 3-winding coupler transformers
-    - States of distribution-level switchable shunts
-
-Network Architecture
---------------------
-1. **Combined network** (TN + DN): The "real plant"
+Network Architecture (Option A)
+--------------------------------
+1. **Combined network** (TN + DN): Used for EVERYTHING
    - Controls are applied here
    - Measurements are taken from here
    - Power flow is executed here
-   
-2. **DN network model**: Used for sensitivity calculations
-   - Network states are created from this
-   - Jacobian sensitivities are computed from this
-   - Not used for actual control or measurement
+   - **Sensitivities are computed from here** ← KEY CHANGE
+   - Network state is cached from here after initial PF
 
-The controller is executed in closed loop with pandapower as the
-plant model, using Jacobian-based sensitivities as in the PSCC 2026
-and CIGRÉ 2026 formulations.
+This ensures sensitivities match the actual plant dynamics, eliminating
+the model mismatch between DN-based sensitivities and combined plant reality.
 
 Author: Manuel Schwenke / Claude Code
-Date: 2026-02-10
+Date: 2026-02-11
 """
 
 from __future__ import annotations
-
 import time
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Tuple
-
 import numpy as np
 from numpy.typing import NDArray
 import pandapower as pp
 
 # -- qOFO imports --------------------------------------------------------------
 from network.build_tuda_net import build_tuda_net, NetworkMetadata
-from network.split_tn_dn_net import split_network, SplitResult
 from core.network_state import NetworkState
 from core.measurement import Measurement
 from core.actuator_bounds import ActuatorBounds
@@ -58,25 +51,25 @@ from controller.base_controller import OFOParameters, ControllerOutput
 from controller.dso_controller import DSOController, DSOControllerConfig
 from sensitivity.jacobian import JacobianSensitivities
 
-
 # ==============================================================================
-#  HELPER: Build NetworkState from a converged pandapower network
+# HELPER: Build NetworkState from a converged pandapower network
 # ==============================================================================
 
 def network_state_from_net(
     net: pp.pandapowerNet,
     trafo3w_indices: NDArray[np.int64],
-    source_case: str = "DN",
+    source_case: str = "COMBINED",
     iteration: int = 0,
 ) -> NetworkState:
     """
     Create a NetworkState snapshot from a converged pandapower network.
 
-    For the DSO, the transformers with OLTCs are 3-winding couplers,
+    For the DSO controller, the transformers with OLTCs are 3-winding couplers,
     so we use trafo3w tap positions.
+
+    NOTE: This now operates on the COMBINED network, not the split DN model.
     """
     bus_indices = np.array(net.bus.index, dtype=np.int64)
-
     vm = net.res_bus.loc[bus_indices, "vm_pu"].values.astype(np.float64)
     va = np.deg2rad(
         net.res_bus.loc[bus_indices, "va_degree"].values.astype(np.float64)
@@ -84,15 +77,20 @@ def network_state_from_net(
 
     # Slack bus (ext_grid) index
     if net.ext_grid.empty:
-        raise RuntimeError("No external grid defined in DN network.")
+        raise RuntimeError("No external grid defined in network.")
     slack_bus = int(net.ext_grid.at[net.ext_grid.index[0], "bus"])
 
-    # PV buses: none expected in DN (all generators are at TN level)
-    pv_buses = np.array([], dtype=np.int64)
+    # PV buses: generators in TN (if any)
+    pv_buses_list = []
+    for gen_idx in net.gen.index:
+        gen_bus = int(net.gen.at[gen_idx, "bus"])
+        if gen_bus != slack_bus and gen_bus not in pv_buses_list:
+            pv_buses_list.append(gen_bus)
+    pv_buses = np.array(pv_buses_list, dtype=np.int64)
 
-    # PQ buses = all non-slack buses
+    # PQ buses = all non-slack, non-PV buses
     pq_buses = np.array(
-        [int(b) for b in bus_indices if int(b) != slack_bus],
+        [int(b) for b in bus_indices if int(b) != slack_bus and int(b) not in pv_buses],
         dtype=np.int64,
     )
 
@@ -119,9 +117,8 @@ def network_state_from_net(
         cached_at_iteration=iteration,
     )
 
-
 # ==============================================================================
-#  HELPER: Extract Measurement from COMBINED network (real plant)
+# HELPER: Extract Measurement from COMBINED network (real plant)
 # ==============================================================================
 
 def measurement_from_combined(
@@ -134,7 +131,7 @@ def measurement_from_combined(
 
     Interface reactive power is measured at the HV side of the 3-winding
     coupler transformers in the combined network.
-    
+
     This represents taking measurements from the real, physical system.
     """
     # All bus indices and voltage magnitudes from combined network
@@ -198,7 +195,7 @@ def measurement_from_combined(
         sidx = combined_net.shunt.index[mask][0]
         shunt_states[k] = int(combined_net.shunt.at[sidx, "step"])
 
-    # No generators in DN (all are at TN level)
+    # Generators (TN level, if any)
     gen_idx = np.array([], dtype=np.int64)
     gen_vm = np.array([], dtype=np.float64)
 
@@ -220,9 +217,8 @@ def measurement_from_combined(
         gen_vm_pu=gen_vm,
     )
 
-
 # ==============================================================================
-#  HELPER: Apply DSO controls to COMBINED network (real plant)
+# HELPER: Apply DSO controls to COMBINED network (real plant)
 # ==============================================================================
 
 def apply_dso_controls(
@@ -234,10 +230,9 @@ def apply_dso_controls(
     Apply DSO control outputs to the COMBINED pandapower network (real plant).
 
     Control variables are ordered as:
-        [DER_Q (continuous), OLTC_taps (integer), Shunt_states (integer)]
+    [DER_Q (continuous), OLTC_taps (integer), Shunt_states (integer)]
     """
     u = dso_output.u_new
-
     n_der = len(dso_config.der_bus_indices)
     n_oltc = len(dso_config.oltc_trafo_indices)
     n_shunt = len(dso_config.shunt_bus_indices)
@@ -275,9 +270,8 @@ def apply_dso_controls(
         step_val = int(np.round(u[n_der + n_oltc + k]))
         combined_net.shunt.at[sidx, "step"] = step_val
 
-
 # ==============================================================================
-#  ITERATION LOG
+# ITERATION LOG
 # ==============================================================================
 
 @dataclass
@@ -302,9 +296,8 @@ class DSOIterationRecord:
     plant_dn_voltages_pu: Optional[NDArray[np.float64]] = None
     plant_q_interface_mvar: Optional[NDArray[np.float64]] = None
 
-
 # ==============================================================================
-#  MAIN DSO-ONLY RUNNER
+# MAIN DSO-ONLY RUNNER (Option A: Combined Network Sensitivities)
 # ==============================================================================
 
 def run_dso_reactive_power_control(
@@ -315,10 +308,15 @@ def run_dso_reactive_power_control(
 ) -> List[DSOIterationRecord]:
     """
     Run a DSO-only OFO reactive power controller loop.
-    
-    Architecture:
-    - Combined network (TN+DN): Real plant (apply controls, measure, run PF)
-    - DN network model: Used only for sensitivity calculations
+
+    Architecture (Option A - Combined Network Sensitivities):
+    - Combined network (TN+DN): Used for EVERYTHING
+      * Real plant (apply controls, measure, run PF)
+      * Sensitivity calculations (Jacobian from combined network)
+      * Cached network state (from combined network initial PF)
+
+    This eliminates the model mismatch between DN-based sensitivities
+    and combined plant reality.
 
     Parameters
     ----------
@@ -338,37 +336,30 @@ def run_dso_reactive_power_control(
     """
     if verbose:
         print("=" * 72)
-        print("  DSO-ONLY OFO SIMULATION -- Fixed Interface Setpoints")
+        print("  DSO-ONLY OFO SIMULATION (Option A: Combined Network Sensitivities)")
         print(f"  Q_setpoints = {q_setpoints_mvar} Mvar")
         print("=" * 72)
-        print("[1/6] Building combined 380/110/20 kV network (real plant) ...")
+        print("[1/4] Building combined 380/110/20 kV network (real plant) ...")
 
     # 1) Build combined network - this is the REAL PLANT
     combined_net, meta = build_tuda_net(ext_grid_vm_pu=1.06, pv_nodes=True)
 
     if verbose:
-        print("[2/6] Running converged power flow on combined network ...")
+        print("[2/4] Running converged power flow on combined network ...")
 
     # Ensure base-case power flow is converged
     pp.runpp(combined_net, run_control=True, calculate_voltage_angles=True)
 
-    if verbose:
-        print("[3/6] Splitting network to create DN model (for sensitivities) ...")
-
-    # 2) Split to create DN network MODEL (for sensitivities only)
-    split_result = split_network(
-        combined_net,
-        meta,
-        dn_slack_coupler_index=0,
-    )
-
-    dn_net_model = split_result.dn_net  # This is the MODEL, not the plant!
+    # Clear controller objects to enable manual OLTC control
+    if hasattr(combined_net, 'controller') and len(combined_net.controller) > 0:
+        if verbose:
+            print(f"    Clearing {len(combined_net.controller)} controller objects...")
+        combined_net.controller.drop(combined_net.controller.index, inplace=True)
 
     if verbose:
-        print("[4/6] Identifying DSO actuators and monitored quantities ...")
+        print("[3/4] Identifying DSO actuators and monitored quantities ...")
 
     # Distribution-connected DER: DN sgens (exclude boundary sgens)
-    # Identify from combined network (real plant)
     dso_der_buses: List[int] = []
     for sidx in combined_net.sgen.index:
         name = str(combined_net.sgen.at[sidx, "name"])
@@ -412,10 +403,13 @@ def run_dso_reactive_power_control(
             dso_shunt_q_candidates.append(float(combined_net.shunt.at[sidx, "q_mvar"]))
 
     if verbose:
-        print("[5/6] Computing sensitivities from DN model ...")
+        print("[4/4] Computing sensitivities from COMBINED network ...")
+        print("        ↳ KEY CHANGE: Sensitivities now match actual plant dynamics!")
 
-    # Probe Jacobian-based sensitivities from DN MODEL (not combined plant)
-    probe_sens = JacobianSensitivities(dn_net_model)
+    # ============================================================================
+    # KEY CHANGE: Use COMBINED network for sensitivities (Option A)
+    # ============================================================================
+    probe_sens = JacobianSensitivities(combined_net)
     H_probe, m_probe = probe_sens.build_sensitivity_matrix_H(
         der_bus_indices=dso_der_buses,
         observation_bus_indices=dso_v_buses,
@@ -444,30 +438,38 @@ def run_dso_reactive_power_control(
         interface_trafo_indices=dso_interface_trafos,
         voltage_bus_indices=dso_v_buses,
         current_line_indices=dso_lines,
-        v_min_pu=0.95,
-        v_max_pu=1.05,
-        i_max_pu=1.0,
+        v_min_pu=0.9,
+        v_max_pu=1.1,
+        i_max_pu=2.0,
         gamma_q_tracking=1.0,
     )
 
     if verbose:
-        print("[6/6] Creating DSO controller ...")
+        print("Creating DSO controller ...")
 
     # OFO tuning for DSO
     ofo_params_dso = OFOParameters(
         alpha=alpha,
-        g_w=0.00001,
-        g_z=1_000_000.0,
-        g_s=100.0,
-        g_u=0.0001,
+        g_w=0.1,
+        g_z=1E10,
+        g_s=3,
+        g_u=1E-8,
     )
 
-    # Network state from DN MODEL (for sensitivities)
+    # ============================================================================
+    # KEY CHANGE: Network state from COMBINED network (Option A)
+    # ============================================================================
     dso_trafo_idx = np.array(dso_oltc, dtype=np.int64)
-    dso_ns = network_state_from_net(dn_net_model, dso_trafo_idx, source_case="DN")
+    dso_ns = network_state_from_net(
+        combined_net,
+        dso_trafo_idx,
+        source_case="COMBINED"
+    )
 
-    # Sensitivities from DN MODEL
-    dso_sens = JacobianSensitivities(dn_net_model)
+    # ============================================================================
+    # KEY CHANGE: Sensitivities from COMBINED network (Option A)
+    # ============================================================================
+    dso_sens = JacobianSensitivities(combined_net)
 
     # Actuator bounds for DER, OLTC and shunts (from combined network)
     der_indices_arr = np.array(dso_der_buses, dtype=np.int64)
@@ -532,7 +534,8 @@ def run_dso_reactive_power_control(
         )
         print("  • Controls applied to: COMBINED network (real plant)")
         print("  • Measurements from: COMBINED network (real plant)")
-        print("  • Sensitivities from: DN model")
+        print("  • Sensitivities from: COMBINED network ← KEY CHANGE (Option A)")
+        print("  • Network state cached from: COMBINED network ← KEY CHANGE (Option A)")
         print()
 
     log: List[DSOIterationRecord] = []
@@ -636,21 +639,20 @@ def run_dso_reactive_power_control(
 
     return log
 
-
 # ==============================================================================
-#  ENTRY POINT
+# ENTRY POINT
 # ==============================================================================
 
 def main() -> None:
     """
-    Run a single DSO-only reactive power control scenario with Q_set = [0, 0, 0] Mvar.
+    Run a single DSO-only reactive power control scenario with Q_set = [100, 100, 100] Mvar.
     """
-    q_set = np.array([0.0, 0.0, 0.0])
+    q_set = np.array([70.0, 80.0, 110.0])
     n_it = 120
 
     print()
     print("#" * 72)
-    print(f"#  DSO-ONLY SCENARIO: Q_setpoints = {q_set} Mvar")
+    print(f"# DSO-ONLY SCENARIO (Option A): Q_setpoints = {q_set} Mvar")
     print("#" * 72)
     print()
 
@@ -672,15 +674,14 @@ def main() -> None:
         print("  FINAL DSO-ONLY INTERFACE REACTIVE POWER SUMMARY")
         print("=" * 72)
         print(
-            f"  Q_setpoints = {q_set} Mvar"
+            f"  Q_setpoints       = {q_set} Mvar"
         )
         print(
-            f"  Q_interface = {q_if} Mvar"
+            f"  Q_interface       = {q_if} Mvar"
         )
-        print(f"  Max |Q - Q_set| = {q_err_max:.4f} Mvar")
+        print(f"  Max |Q - Q_set|  = {q_err_max:.4f} Mvar")
         print("=" * 72)
         print()
-
 
 if __name__ == "__main__":
     main()

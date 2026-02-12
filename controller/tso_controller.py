@@ -229,8 +229,8 @@ class TSOController(BaseOFOController):
         # Initialise PCC capability bounds to large symmetric range
         # until DSO controllers report actual capabilities
         n_pcc = len(config.pcc_trafo_indices)
-        self.pcc_capability_min_mvar = np.full(n_pcc, -np.inf)
-        self.pcc_capability_max_mvar = np.full(n_pcc, +np.inf)
+        self.pcc_capability_min_mvar = np.full(n_pcc, -1E6)
+        self.pcc_capability_max_mvar = np.full(n_pcc, +1E6)
 
         # Cache for the sensitivity matrix
         self._H_cache: Optional[NDArray[np.float64]] = None
@@ -592,8 +592,8 @@ class TSOController(BaseOFOController):
 
         # --- PCC Q: no hard limits (tracking is objective-based) ---
         for _ in range(n_pcc):
-            y_lower[idx] = -np.inf
-            y_upper[idx] = np.inf
+            y_lower[idx] = -1E6
+            y_upper[idx] = 1E6
             idx += 1
 
         # --- Current limits (upper only) ---

@@ -567,8 +567,8 @@ class TestDSOController:
         n_i = 2
 
         # Interface Q: no hard limits
-        assert y_lo[0] == -np.inf
-        assert y_hi[0] == np.inf
+        assert y_lo[0] == -1E6
+        assert y_hi[0] == 1E6
         # Voltage limits
         assert_allclose(
             y_lo[n_interface:n_interface + n_v], config.v_min_pu
@@ -807,8 +807,8 @@ class TestTSOController:
         assert_allclose(y_lo[:n_v], config.v_min_pu)
         assert_allclose(y_hi[:n_v], config.v_max_pu)
         # PCC Q: no limits
-        assert y_lo[n_v] == -np.inf
-        assert y_hi[n_v] == np.inf
+        assert y_lo[n_v] == -1E6
+        assert y_hi[n_v] == 1E6
         # Current: [0, i_max]
         assert_allclose(y_lo[n_v + n_pcc:], 0.0)
         assert_allclose(y_hi[n_v + n_pcc:], config.i_max_pu)

@@ -232,7 +232,7 @@ class BaseOFOController(ABC):
         self.solver = MIQPSolver(
             verbose=params.solver_verbose,
             time_limit_s=60.0,
-            mip_gap=1e-4,
+            mip_gap=1e-6,
         )
         
         # Initialise iteration counter

@@ -425,8 +425,8 @@ class DSOController(BaseOFOController):
         
         # Interface Q: no hard limits (tracking via objective)
         for _ in range(n_interfaces):
-            y_lower[idx] = -np.inf
-            y_upper[idx] = np.inf
+            y_lower[idx] = -1E6
+            y_upper[idx] = 1E6
             idx += 1
         
         # Voltage limits

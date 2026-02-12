@@ -386,9 +386,9 @@ def _create_single_coupler(
     reactor_idx = pp.create_shunt(
         net, bus=lv_bus,
         q_mvar=50.0, p_mw=0.0, vn_kv=_TR3W["vn_lv_kv"],
-        step=1, max_step=1,
+        step=0, max_step=1,
         name=f"Reactor|Tertiary|{label}",
-        in_service=True, type="reactor",
+        in_service=True, type="reactor", subnet='DN'
     )
 
     return trafo3w_idx, lv_bus, [reactor_idx]
@@ -496,7 +496,7 @@ def _add_tn_shunt(
         step=0, max_step=1,
         name=f"TN_Shunt@EHV{ehv_bus_no}",
         in_service=True,
-        type="capacitor" if q_mvar < 0 else "reactor",
+        type="capacitor" if q_mvar < 0 else "reactor", subnet='TN'
     )
 
 

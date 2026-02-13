@@ -779,7 +779,43 @@ class TSOController(BaseOFOController):
         H[n_v + n_pcc:, :n_der] = H_physical[n_q_phys + n_v:, :n_der]
 
         # PCC setpoint columns → target column n_der..n_der+n_pcc-1
-        # Perfect-tracking approximation: ∂Q_PCC_j / ∂Q_PCC_set_j = 1
+        # A change in Q_PCC_set is realised by the DSO as a Q injection at
+        # the PCC HV bus.  Use the Jacobian ∂V/∂Q and ∂I/∂Q at those buses
+        # so the TSO optimizer sees the physical voltage/current impact.
+        pcc_hv_buses = []
+        for t in self.config.pcc_trafo_indices:
+            if pcc_in_trafo3w:
+                pcc_hv_buses.append(int(net.trafo3w.at[t, "hv_bus"]))
+            elif pcc_in_trafo:
+                pcc_hv_buses.append(int(net.trafo.at[t, "hv_bus"]))
+        if pcc_hv_buses:
+            # ∂V/∂Q at PCC HV buses → voltage rows of PCC columns
+            dV_dQ_pcc, obs_map, pcc_map = self.sensitivities.compute_dV_dQ_der(
+                der_bus_indices=pcc_hv_buses,
+                observation_bus_indices=self.config.voltage_bus_indices,
+            )
+            # Map columns: pcc_map may be a subset if some PCC buses are PV/slack
+            for j_pcc, bus in enumerate(pcc_hv_buses):
+                col = n_der + j_pcc
+                if bus in pcc_map:
+                    j_jac = pcc_map.index(bus)
+                    for i_obs, obs_bus in enumerate(obs_map):
+                        i_row = self.config.voltage_bus_indices.index(obs_bus)
+                        H[i_row, col] = dV_dQ_pcc[i_obs, j_jac]
+            # ∂I/∂Q at PCC HV buses → current rows of PCC columns
+            if self.config.current_line_indices:
+                dI_dQ_pcc, line_map, pcc_map_i = \
+                    self.sensitivities.compute_dI_dQ_der_matrix(
+                        line_indices=self.config.current_line_indices,
+                        der_bus_indices=pcc_hv_buses,
+                    )
+                for j_pcc, bus in enumerate(pcc_hv_buses):
+                    col = n_der + j_pcc
+                    if bus in pcc_map_i:
+                        j_jac = pcc_map_i.index(bus)
+                        for i_line in range(len(line_map)):
+                            H[n_v + n_pcc + i_line, col] = dI_dQ_pcc[i_line, j_jac]
+        # Q_PCC tracking: ∂Q_PCC_j / ∂Q_PCC_set_j = 1
         for j in range(n_pcc):
             H[n_v + j, n_der + j] = 1.0
 

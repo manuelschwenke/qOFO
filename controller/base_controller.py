@@ -25,7 +25,7 @@ Date: 2025-02-06
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Union
 import numpy as np
 from numpy.typing import NDArray
 
@@ -54,43 +54,40 @@ class OFOParameters:
     alpha : float
         Step size (gain) for the OFO update. Must be positive.
         Larger values lead to faster but potentially less stable convergence.
-    g_w : float
+    g_w : float or NDArray[np.float64]
         Weight for control variable changes (w^T G_w w term).
         Penalises large changes in setpoints per iteration.
+        Either a scalar (uniform for all variables) or an array of
+        length n_total with per-variable diagonal weights.
     g_u : float
         Weight for control variable usage (regularisation).
         Penalises deviation from zero/neutral setpoints.
     g_z : float
         Weight for slack variables (soft constraint violations).
         Higher values enforce output constraints more strictly.
-    g_s : float
-        Weight for discrete variable changes (OLTC taps, shunt switching).
-        Penalises frequent switching of discrete actuators.
     max_iter_per_step : int
         Maximum MIQP solver iterations per OFO step.
     solver_verbose : bool
         Whether to print solver output for debugging.
     """
     alpha: float
-    g_w: float
+    g_w: Union[float, NDArray[np.float64]]
     g_z: float
-    g_s: float
     g_u: float = 0.0
     max_iter_per_step: int = 100
     solver_verbose: bool = False
-    
+
     def __post_init__(self) -> None:
         """Validate parameters after initialisation."""
         if self.alpha <= 0:
             raise ValueError(f"alpha must be positive, got {self.alpha}")
-        if self.g_w < 0:
+        g_w_arr = np.asarray(self.g_w)
+        if np.any(g_w_arr < 0):
             raise ValueError(f"g_w must be non-negative, got {self.g_w}")
         if self.g_u < 0:
             raise ValueError(f"g_u must be non-negative, got {self.g_u}")
         if self.g_z < 0:
             raise ValueError(f"g_z must be non-negative, got {self.g_z}")
-        if self.g_s < 0:
-            raise ValueError(f"g_s must be non-negative, got {self.g_s}")
 
 
 @dataclass
@@ -362,7 +359,6 @@ class BaseOFOController(ABC):
             g_w=self.params.g_w,
             g_u=self.params.g_u,
             g_z=self.params.g_z,
-            g_s=self.params.g_s,
             integer_indices=self._integer_indices,
         )
         

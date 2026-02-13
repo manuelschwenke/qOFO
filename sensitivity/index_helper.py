@@ -298,8 +298,8 @@ def get_ppc_trafo3w_branch_indices(
     aux_bus_ppc: Optional[int] = None
 
     for br_idx in candidate_indices:
-        from_bus = int(net._ppc['branch'][br_idx, 0])
-        to_bus = int(net._ppc['branch'][br_idx, 1])
+        from_bus = int(np.real(net._ppc['branch'][br_idx, 0]))
+        to_bus = int(np.real(net._ppc['branch'][br_idx, 1]))
 
         # One end is a known winding bus, the other is the auxiliary star bus
         if from_bus in known_buses:
@@ -386,8 +386,8 @@ def _get_trafo3w_hv_branch_data(
     tau = (1.0 + s0 * delta_tau)
 
     # Branch impedance
-    r_pu = float(net._ppc['branch'][hv_br, 2])
-    x_pu = float(net._ppc['branch'][hv_br, 3])
+    r_pu = float(np.real(net._ppc['branch'][hv_br, 2]))
+    x_pu = float(np.real(net._ppc['branch'][hv_br, 3]))
     y_pu = 1.0 / complex(r_pu, x_pu)
     g = y_pu.real
     b = y_pu.imag

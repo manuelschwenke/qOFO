@@ -13,8 +13,10 @@ Author: Manuel Schwenke / Claude Code
 """
 
 from __future__ import annotations
+import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import numpy as np
 from numpy.typing import NDArray
@@ -28,6 +30,7 @@ from controller.base_controller import OFOParameters, ControllerOutput
 from controller.tso_controller import TSOController, TSOControllerConfig
 from controller.dso_controller import DSOController, DSOControllerConfig
 from core.message import SetpointMessage
+from core.profiles import load_profiles, snapshot_base_values, apply_profiles, DEFAULT_PROFILES_CSV
 from sensitivity.jacobian import JacobianSensitivities
 
 # =============================================================================
@@ -215,6 +218,7 @@ def _apply_dso(net: pp.pandapowerNet, out: ControllerOutput, cfg: DSOControllerC
             net.shunt.at[net.shunt.index[mask][0], "step"] = int(np.round(u[n_der + n_oltc + k]))
 
 
+
 # =============================================================================
 #  Iteration log
 # =============================================================================
@@ -256,9 +260,11 @@ class IterationRecord:
 
 def run_cascade(
     v_setpoint_pu: float,
-    n_minutes: int = 30,
+    n_minutes: int = 120,
     tso_period_min: int = 3,
     dso_period_min: int = 1,
+    start_time: datetime = datetime(2016, 7, 15, 10, 0),
+    profiles_csv: str = DEFAULT_PROFILES_CSV,
     verbose: bool = True,
 ) -> List[IterationRecord]:
     """Run cascaded TSO-DSO OFO. Combined network for everything."""
@@ -266,6 +272,8 @@ def run_cascade(
     if verbose:
         print("=" * 72)
         print(f"  CASCADED OFO  --  V_set = {v_setpoint_pu:.3f} p.u.")
+        print(f"  Profiles: {os.path.basename(profiles_csv)}  "
+              f"start={start_time:%d.%m.%Y %H:%M}  {n_minutes} min")
         print("=" * 72)
 
     # 1) Build combined network
@@ -273,6 +281,14 @@ def run_cascade(
     pp.runpp(net, run_control=True, calculate_voltage_angles=True)
     if hasattr(net, 'controller') and len(net.controller) > 0:
         net.controller.drop(net.controller.index, inplace=True)
+
+    # Load time-series profiles and snapshot base load/gen values
+    profiles = load_profiles(profiles_csv, timestep_min=dso_period_min)
+    snapshot_base_values(net)
+
+    # Apply profiles at t=0 and re-run PF so sensitivities + init use realistic operating point
+    apply_profiles(net, profiles, start_time)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
     # 2) Identify elements
     dn_buses = {int(b) for b in net.bus.index if str(net.bus.at[b, "subnet"]) == "DN"}
@@ -371,7 +387,7 @@ def run_cascade(
         oltc_trafo_indices=tso_oltc, shunt_bus_indices=tso_shunt_buses,
         shunt_q_steps_mvar=tso_shunt_q,
         voltage_bus_indices=tso_v_buses, current_line_indices=tso_lines,
-        v_setpoints_pu=v_setpoints, gamma_v_tracking=1.0,
+        v_setpoints_pu=v_setpoints, gamma_v_tracking=1,
         gen_indices=tso_gen_indices, gen_bus_indices=tso_gen_bus_indices,
     )
     dso_config = DSOControllerConfig(
@@ -416,8 +432,23 @@ def run_cascade(
     )
 
     # 6) Create controllers
-    ofo_tso = OFOParameters(alpha=0.01, g_w=0.01, g_z=1e8, g_s=0.1, g_u=1e-6)
-    ofo_dso = OFOParameters(alpha=0.01, g_w=0.01, g_z=1e8, g_s=5, g_u=1e-6)
+    # Per-actuator-type g_w weights on the diagonal of G_w.
+    # TSO u = [Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt]
+    gw_tso = np.concatenate([
+        np.full(len(tso_der_buses),   0.01),   # Q_DER
+        np.full(len(pcc_trafos),      0.01),   # Q_PCC_set
+        np.full(len(tso_gen_indices), 100),   # V_gen_set
+        np.full(len(tso_oltc),        0.1),   # s_OLTC
+        np.full(len(tso_shunt_buses), 0.1),   # s_shunt
+    ])
+    # DSO u = [Q_DER | s_OLTC | s_shunt]
+    gw_dso = np.concatenate([
+        np.full(len(dso_der_buses),   0.02),   # Q_DER
+        np.full(len(dso_oltc),        10),   # s_OLTC
+        np.full(len(dso_shunt_buses), 10),   # s_shunt
+    ])
+    ofo_tso = OFOParameters(alpha=0.002, g_w=gw_tso, g_z=1e10, g_u=1e-8)
+    ofo_dso = OFOParameters(alpha=0.003, g_w=gw_dso, g_z=1e10, g_u=1e-8)
 
     ns = _network_state(net)
 
@@ -445,6 +476,10 @@ def run_cascade(
         run_tso = (minute % tso_period_min == 0)
         run_dso = (minute % dso_period_min == 0)
         rec = IterationRecord(minute=minute, tso_active=run_tso, dso_active=run_dso)
+
+        # Apply time-series profiles for this minute
+        t_now = start_time + timedelta(minutes=minute)
+        apply_profiles(net, profiles, t_now)
 
         # TSO step
         if run_tso:
@@ -596,8 +631,8 @@ def print_summary(v_set: float, log: List[IterationRecord]):
 # =============================================================================
 
 def main():
-    for v_set in [1.05]:
-        log = run_cascade(v_setpoint_pu=v_set, n_minutes=180,
+    for v_set in [1.03]:
+        log = run_cascade(v_setpoint_pu=v_set, n_minutes=int(60*12),
                           tso_period_min=3, dso_period_min=1, verbose=True)
         print_summary(v_set, log)
 

@@ -397,8 +397,8 @@ class DSOController(BaseOFOController):
         
         # DER Q bounds (P-dependent)
         q_min, q_max = self.actuator_bounds.compute_der_q_bounds(der_p_current)
-        u_lower[:n_der] = q_min
-        u_upper[:n_der] = q_max
+        u_lower[:n_der] = -100 #q_min # ToDo: Also loosen here to test controller performance
+        u_upper[:n_der] = 100 #q_max # ToDo: Also loosen here to test controller performance
         
         # OLTC tap bounds (fixed)
         tap_min, tap_max = self.actuator_bounds.get_oltc_tap_bounds()
@@ -438,7 +438,7 @@ class DSOController(BaseOFOController):
         # Current limits (upper only, normalised to rating)
         for _ in range(n_current):
             y_lower[idx] = 0.0
-            y_upper[idx] = self.config.i_max_pu
+            y_upper[idx] = 1E6 # self.config.i_max_pu #ToDo: Tigheten Constraint later, for test purposed loosened
             idx += 1
         
         return y_lower, y_upper

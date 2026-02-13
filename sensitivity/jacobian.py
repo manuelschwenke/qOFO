@@ -317,8 +317,6 @@ class JacobianSensitivities:
             Pandapower transformer index.
         observation_bus_indices : List[int]
             Pandapower bus indices where voltages are observed.
-        delta_s : float, optional
-            Tap step size (default: 1.0 tap step).
         
         Returns
         -------
@@ -644,8 +642,6 @@ class JacobianSensitivities:
             Pandapower transformer index where Q is measured.
         chg_trafo_idx : int
             Pandapower transformer index where tap is changed.
-        delta_s : float, optional
-            Tap step size (default: 1.0 tap step).
         
         Returns
         -------
@@ -817,7 +813,7 @@ class JacobianSensitivities:
         for i, meas_idx in enumerate(trafo_indices):
             for j, chg_idx in enumerate(trafo_indices):
                 try:
-                    sensitivity_matrix[i, j] = self.compute_dQtrafo_2w_ds(meas_idx, chg_idx, delta_s=1.0)
+                    sensitivity_matrix[i, j] = self.compute_dQtrafo_2w_ds(meas_idx, chg_idx)
                 except ValueError:
                     print(ValueError)
                     sensitivity_matrix[i, j] = 0.0
@@ -1209,7 +1205,6 @@ class JacobianSensitivities:
         self,
         trafo3w_idx: int,
         observation_bus_indices: List[int],
-        delta_s: float = 1.0,
     ) -> Tuple[NDArray[np.float64], List[int]]:
         """
         Compute bus voltage sensitivity to a 3W transformer OLTC tap change.
@@ -1227,8 +1222,6 @@ class JacobianSensitivities:
             Pandapower ``net.trafo3w`` index.
         observation_bus_indices : List[int]
             Pandapower bus indices where voltages are observed.
-        delta_s : float, optional
-            Tap step size (default: 1.0 tap step).
 
         Returns
         -------
@@ -1441,7 +1434,6 @@ class JacobianSensitivities:
         self,
         meas_trafo3w_idx: int,
         chg_trafo3w_idx: int,
-        delta_s: float = 1.0,
     ) -> float:
         """
         Compute HV-side Q sensitivity of a 3W transformer to a 3W OLTC
@@ -1462,8 +1454,6 @@ class JacobianSensitivities:
             ``net.trafo3w`` index where Q is measured (HV side).
         chg_trafo3w_idx : int
             ``net.trafo3w`` index where the OLTC tap is changed.
-        delta_s : float
-            Tap step size (default: 1.0).
 
         Returns
         -------
@@ -1503,8 +1493,6 @@ class JacobianSensitivities:
             )
             direct = dQ_dtau_direct * d_meas['delta_tau']
 
-        # Scale from per-unit to Mvar
-        print(f'dQtrafo3w_hv_ds: {indirect+direct}')
         return (indirect + direct)
 
     def compute_dQtrafo3w_hv_ds_matrix(
@@ -1533,7 +1521,6 @@ class JacobianSensitivities:
         n_meas = len(meas_trafo3w_indices)
         n_chg = len(chg_trafo3w_indices)
         if n_meas == 0 or n_chg == 0:
-            print('Not good')
             return np.zeros((n_meas, n_chg)), [], []
 
         matrix = np.zeros((n_meas, n_chg))
@@ -1541,7 +1528,6 @@ class JacobianSensitivities:
             for j, c_idx in enumerate(chg_trafo3w_indices):
                 matrix[i, j] = self.compute_dQtrafo3w_hv_ds(m_idx, c_idx)
 
-        print(f'dQtrafo3w_hv_ds matrix: {matrix}')
         return matrix, list(meas_trafo3w_indices), list(chg_trafo3w_indices)
 
     def compute_dQtrafo3w_hv_dQ_shunt(
@@ -1788,7 +1774,6 @@ class JacobianSensitivities:
                         )
                     except ValueError:
                         dQtr3w_col[i] = 0.0
-                print(f'3w Sens: {dQtr3w_col}')
                 # Branch current (TODO: implement dI/ds)
                 dI_col = np.zeros(n_line_out)
 

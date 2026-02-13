@@ -452,7 +452,6 @@ def run_dso_reactive_power_control(
         alpha=alpha,
         g_w=0.1,
         g_z=1E10,
-        g_s=3,
         g_u=1E-8,
     )
 

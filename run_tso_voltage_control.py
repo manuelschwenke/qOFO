@@ -527,7 +527,6 @@ def run_tso_voltage_control(
         alpha=alpha,
         g_w=0.00001,
         g_z=1_000_000.0,
-        g_s=100.0,
         g_u=0.0001,
     )
 

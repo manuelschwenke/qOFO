@@ -37,7 +37,6 @@ class TestMIQPProblem:
             alpha=0.5,
             G_w=np.eye(n_total),
             G_z=np.eye(n_outputs),
-            G_s=np.eye(n_integer),
             grad_f=np.zeros(n_total),
             H_tilde=np.ones((n_outputs, n_total)),
             u_current=np.zeros(n_total),
@@ -63,7 +62,6 @@ class TestMIQPProblem:
                 alpha=0.5,
                 G_w=np.eye(3),  # Wrong shape
                 G_z=np.eye(2),
-                G_s=np.zeros((0, 0)),
                 grad_f=np.zeros(2),
                 H_tilde=np.ones((2, 2)),
                 u_current=np.zeros(2),
@@ -85,7 +83,6 @@ class TestMIQPProblem:
                 alpha=-0.5,  # Invalid
                 G_w=np.eye(2),
                 G_z=np.eye(2),
-                G_s=np.zeros((0, 0)),
                 grad_f=np.zeros(2),
                 H_tilde=np.ones((2, 2)),
                 u_current=np.zeros(2),
@@ -107,7 +104,6 @@ class TestMIQPProblem:
                 alpha=0.5,
                 G_w=np.eye(2),
                 G_z=np.eye(2),
-                G_s=np.zeros((0, 0)),
                 grad_f=np.zeros(2),
                 H_tilde=np.ones((2, 2)),
                 u_current=np.zeros(2),
@@ -169,7 +165,6 @@ class TestBuildMIQPProblem:
             g_w=1.0,
             g_u=0.1,
             g_z=100.0,
-            g_s=10.0,
             integer_indices=None,
         )
         
@@ -197,7 +192,6 @@ class TestBuildMIQPProblem:
             g_w=1.0,
             g_u=0.1,
             g_z=100.0,
-            g_s=10.0,
             integer_indices=[3, 4],  # Last two are integers
         )
         
@@ -221,7 +215,6 @@ class TestBuildMIQPProblem:
                 g_w=1.0,
                 g_u=0.1,
                 g_z=100.0,
-                g_s=10.0,
             )
 
 
@@ -265,12 +258,11 @@ class TestMIQPSolver:
             g_w=1.0,
             g_u=0.0,
             g_z=1000.0,
-            g_s=0.0,
         )
-        
+
         solver = MIQPSolver(verbose=False)
         result = solver.solve(problem)
-        
+
         # Check that we got a solution
         assert result.status in ('optimal', 'optimal_inaccurate')
         assert result.is_feasible
@@ -298,14 +290,13 @@ class TestMIQPSolver:
             g_w=1.0,
             g_u=0.0,
             g_z=1000.0,
-            g_s=0.0,
         )
-        
+
         solver = MIQPSolver(verbose=False)
         result = solver.solve(problem)
-        
+
         assert result.is_feasible
-        
+
         # Check that w respects bounds: u + α*w <= u_upper
         # => w <= (u_upper - u_current) / alpha = 1
         u_new = u_current + result.w_continuous
@@ -333,7 +324,6 @@ class TestMIQPSolver:
             g_w=0.1,
             g_u=0.0,
             g_z=100.0,  # High penalty for slack
-            g_s=0.0,
         )
         
         solver = MIQPSolver(verbose=False)
@@ -388,14 +378,13 @@ class TestMIQPSolverIntegration:
             g_w=1.0,
             g_u=0.01,
             g_z=1000.0,
-            g_s=0.0,
         )
-        
+
         solver = MIQPSolver(verbose=False)
         result = solver.solve(problem)
-        
+
         assert result.is_feasible
-        
+
         # With low voltage, solver should increase Q (capacitive)
         # Check that predicted voltage improves
         y_predicted = y_current + 0.5 * H @ result.w_continuous

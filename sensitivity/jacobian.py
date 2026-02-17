@@ -413,9 +413,9 @@ class JacobianSensitivities:
             raise ValueError("No valid observation buses found.")
         
         dV_ds = dV_ds_full[obs_jacobian_rows]
-        
+
         return dV_ds, obs_bus_mapping
-    
+
     def compute_dV_ds_2w_matrix(
         self,
         trafo_indices: List[int],
@@ -782,7 +782,7 @@ class JacobianSensitivities:
         sensitivity = (indirect_effect + direct_effect)
 
         return sensitivity
-    
+
     def compute_dQtrafo_ds_2w_matrix(
         self,
         trafo_indices: List[int],
@@ -1009,8 +1009,13 @@ class JacobianSensitivities:
         if len(der_map) == 0:
             raise ValueError(f"Shunt bus {shunt_bus_idx} is not valid for Q injection.")
 
-        # Negate to account for load-convention sign, then scale by step size
-        dV_dQ_shunt = -dV_dQ[:, 0] * q_step_mvar
+        # Negate to account for load-convention sign, then scale by step size.
+        # Shunts are constant-susceptance devices: Q_shunt = B * V².
+        # The q_step_mvar is the rated step at V=1 pu, so the actual
+        # reactive power per step at the current operating point is
+        # q_step_mvar * V_pu².
+        V_pu = self.net.res_bus.at[shunt_bus_idx, 'vm_pu']
+        dV_dQ_shunt = -dV_dQ[:, 0] * q_step_mvar * V_pu ** 2
 
         return dV_dQ_shunt, obs_map
 
@@ -1047,8 +1052,10 @@ class JacobianSensitivities:
         if len(der_map) == 0:
             raise ValueError(f"Shunt bus {shunt_bus_idx} is not valid for Q injection.")
 
-        # Negate to account for load-convention sign, then scale by step size
-        dI_dQ_shunt = -dI_dQ[:, 0] * q_step_mvar
+        # Negate to account for load-convention sign, then scale by step size.
+        # Shunts are constant-susceptance: Q_shunt = B * V².
+        V_pu = self.net.res_bus.at[shunt_bus_idx, 'vm_pu']
+        dI_dQ_shunt = -dI_dQ[:, 0] * q_step_mvar * V_pu ** 2
 
         return dI_dQ_shunt, line_map
 
@@ -1558,10 +1565,13 @@ class JacobianSensitivities:
         sensitivity : float
             ∂Q_HV / ∂(shunt state) [Mvar per state step].
         """
-        # Negate to account for load-convention sign of shunt.q_mvar
+        # Negate to account for load-convention sign of shunt.q_mvar.
+        # Shunts are constant-susceptance: Q_shunt = B * V².
+        V_pu = self.net.res_bus.at[shunt_bus_idx, 'vm_pu']
         return (
             -self.compute_dQtrafo3w_hv_dQ_der(trafo3w_idx, shunt_bus_idx)
             * q_step_mvar
+            * V_pu ** 2
         )
 
     # =========================================================================
@@ -1638,6 +1648,7 @@ class JacobianSensitivities:
             * ``'obs_buses'``: observation bus indices (V outputs)
             * ``'lines'``: line indices (I outputs)
             * ``'input_types'``: list of ``'continuous'`` / ``'integer'``
+            * ``'shunt_cached_v_pu'``: cached V_pu at shunt buses (for updater)
 
         Raises
         ------
@@ -1803,13 +1814,15 @@ class JacobianSensitivities:
                     q_step_mvar=q_step,
                 )
                 # 2W trafo Q w.r.t. shunt
+                # Shunts are constant-susceptance: Q_shunt = B * V².
+                V_pu_shunt = self.net.res_bus.at[shunt_bus, 'vm_pu']
                 dQtr2w_col = np.zeros(n_trafo2w_out)
                 for i, mt in enumerate(trafo_map):
                     try:
                         # Negate for shunt load-convention sign
                         dQtr2w_col[i] = -self.compute_dQtrafo_dQder_2w(
                             trafo_idx=mt, der_bus_idx=shunt_bus
-                        ) * q_step
+                        ) * q_step * V_pu_shunt ** 2
                     except ValueError:
                         dQtr2w_col[i] = 0.0
                 # 3W trafo Q_HV w.r.t. shunt
@@ -1914,6 +1927,11 @@ class JacobianSensitivities:
             + ['integer'] * n_shunt_actual
         )
 
+        # Cached voltages at shunt buses for SensitivityUpdater V² rescaling
+        shunt_cached_v_pu = np.array([
+            self.net.res_bus.at[bus, 'vm_pu'] for bus in shunt_map
+        ]) if shunt_map else np.array([])
+
         mappings = {
             'der_buses': der_bus_indices,
             'oltc_trafos': oltc2w_map,
@@ -1924,6 +1942,7 @@ class JacobianSensitivities:
             'obs_buses': obs_bus_map,
             'lines': line_map,
             'input_types': input_types,
+            'shunt_cached_v_pu': shunt_cached_v_pu,
         }
 
         return H, mappings

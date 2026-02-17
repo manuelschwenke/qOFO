@@ -228,8 +228,8 @@ class ActuatorBounds:
             Maximum state for each shunt (always +1).
         """
         n_shunts = len(self.shunt_indices)
-        state_min = np.full(n_shunts, -1, dtype=np.int64)
-        state_max = np.full(n_shunts, +1, dtype=np.int64)
+        state_min = np.full(n_shunts, 0, dtype=np.int64)
+        state_max = np.full(n_shunts, +2, dtype=np.int64)
         return state_min, state_max
     
     @property

@@ -695,14 +695,16 @@ def build_miqp_problem(
     # G_w combines the change weight and usage weight
     # G_w = diag(g_w) + α² * g_u * I
     g_w_vec = np.broadcast_to(np.asarray(g_w, dtype=np.float64), (n_total,)).copy()
-    G_w = np.diag(g_w_vec + alpha**2 * g_u)
-    
+    #G_w = np.diag(g_w_vec + alpha**2 * g_u)
+    G_w = np.diag(g_w_vec)
+
     # G_z is the slack variable weight
     G_z = g_z * np.eye(n_outputs)
 
     # Modified gradient includes regularisation term
     # grad_f_mod = grad_f + 2 * α * g_u * u_current
-    grad_f_mod = grad_f + 2 * alpha * g_u * u_current
+    #grad_f_mod = grad_f + 2 * alpha * g_u * u_current
+    grad_f_mod = grad_f
     
     # Reorder u and H to put continuous variables first, then integer
     continuous_indices = [i for i in range(n_total) if i not in integer_indices]

@@ -39,6 +39,7 @@ from core.measurement import Measurement
 from core.actuator_bounds import ActuatorBounds
 from core.message import SetpointMessage, CapabilityMessage
 from sensitivity.jacobian import JacobianSensitivities
+from sensitivity.sensitivity_updater import SensitivityUpdater
 
 
 @dataclass
@@ -78,8 +79,8 @@ class DSOControllerConfig:
     interface_trafo_indices: List[int]
     voltage_bus_indices: List[int]
     current_line_indices: List[int]
-    v_min_pu: float = 0.95
-    v_max_pu: float = 1.05
+    v_min_pu: float = 0.9
+    v_max_pu: float = 1.1
     i_max_pu: float = 1.0
     gamma_q_tracking: float = 1.0
     
@@ -173,6 +174,7 @@ class DSOController(BaseOFOController):
         # Cache the sensitivity matrix structure
         self._H_cache: Optional[NDArray[np.float64]] = None
         self._H_mappings: Optional[Dict] = None
+        self._sensitivity_updater: Optional[SensitivityUpdater] = None
     
     def receive_setpoint(self, message: SetpointMessage) -> None:
         """
@@ -397,8 +399,8 @@ class DSOController(BaseOFOController):
         
         # DER Q bounds (P-dependent)
         q_min, q_max = self.actuator_bounds.compute_der_q_bounds(der_p_current)
-        u_lower[:n_der] = -100 #q_min # ToDo: Also loosen here to test controller performance
-        u_upper[:n_der] = 100 #q_max # ToDo: Also loosen here to test controller performance
+        u_lower[:n_der] = q_min # ToDo: Also loosen here to test controller performance
+        u_upper[:n_der] = q_max # ToDo: Also loosen here to test controller performance
         
         # OLTC tap bounds (fixed)
         tap_min, tap_max = self.actuator_bounds.get_oltc_tap_bounds()
@@ -438,7 +440,7 @@ class DSOController(BaseOFOController):
         # Current limits (upper only, normalised to rating)
         for _ in range(n_current):
             y_lower[idx] = 0.0
-            y_upper[idx] = 1E6 # self.config.i_max_pu #ToDo: Tigheten Constraint later, for test purposed loosened
+            y_upper[idx] = self.config.i_max_pu #ToDo: Tigheten Constraint later, for test purposed loosened
             idx += 1
         
         return y_lower, y_upper
@@ -530,13 +532,42 @@ class DSOController(BaseOFOController):
             kw["oltc_trafo_indices"] = self.config.oltc_trafo_indices
 
         H, mappings = self.sensitivities.build_sensitivity_matrix_H(**kw)
-        
+
         self._H_cache = H
         self._H_mappings = mappings
-        
+
+        # Create the sensitivity updater for voltage-dependent corrections.
+        # DSO has no machine transformer OLTCs, so only shunt updates apply.
+        self._sensitivity_updater = SensitivityUpdater(
+            H=H,
+            mappings=mappings,
+            sensitivities=self.sensitivities,
+            update_interval_min=1,
+        )
+
         return H
-    
+
+    def step(self, measurement: Measurement) -> ControllerOutput:
+        """
+        Execute one OFO iteration with voltage-dependent sensitivity updates.
+
+        Before delegating to :meth:`BaseOFOController.step`, this method
+        rescales shunt columns of the cached H matrix using the measured
+        bus voltages.  The V² correction accounts for the constant-susceptance
+        nature of shunt devices (MSR / MSC).
+        """
+        # Ensure H is built
+        if self._H_cache is None:
+            self._build_sensitivity_matrix()
+        # Update state-dependent shunt columns
+        if self._sensitivity_updater is not None:
+            self._H_cache = self._sensitivity_updater.update(
+                measurement, measurement.iteration
+            )
+        return super().step(measurement)
+
     def invalidate_sensitivity_cache(self) -> None:
         """Invalidate the cached sensitivity matrix."""
         self._H_cache = None
         self._H_mappings = None
+        self._sensitivity_updater = None

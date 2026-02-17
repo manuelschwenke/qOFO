@@ -58,6 +58,7 @@ from core.measurement import Measurement
 from core.actuator_bounds import ActuatorBounds
 from core.message import SetpointMessage, CapabilityMessage
 from sensitivity.jacobian import JacobianSensitivities
+from sensitivity.sensitivity_updater import SensitivityUpdater
 
 
 @dataclass
@@ -235,6 +236,7 @@ class TSOController(BaseOFOController):
         # Cache for the sensitivity matrix
         self._H_cache: Optional[NDArray[np.float64]] = None
         self._H_mappings: Optional[Dict] = None
+        self._sensitivity_updater: Optional[SensitivityUpdater] = None
 
     # =========================================================================
     # Public interface for cascaded hierarchy communication
@@ -819,9 +821,9 @@ class TSOController(BaseOFOController):
         for j in range(n_pcc):
             H[n_v + j, n_der + j] = 1.0
 
-        # OLTC columns → target column n_der+n_pcc..n_der+n_pcc+n_oltc-1
+        # OLTC columns → target column n_der+n_pcc+n_gen..n_der+n_pcc+n_gen+n_oltc-1
         col_oltc_phys = slice(n_der, n_der + n_oltc)
-        col_oltc_target = slice(n_der + n_pcc, n_der + n_pcc + n_oltc)
+        col_oltc_target = slice(n_der + n_pcc + n_gen, n_der + n_pcc + n_gen + n_oltc)
         H[:n_v, col_oltc_target] = H_physical[
             n_q_phys:n_q_phys + n_v, col_oltc_phys
         ]
@@ -833,9 +835,9 @@ class TSOController(BaseOFOController):
             n_q_phys + n_v:, col_oltc_phys
         ]
 
-        # Shunt columns → target column n_der+n_pcc+n_oltc..end
+        # Shunt columns → target column n_der+n_pcc+n_gen+n_oltc..end
         col_sh_phys = slice(n_der + n_oltc, n_der + n_oltc + n_shunt)
-        col_sh_target = slice(n_der + n_pcc + n_oltc, n_controls)
+        col_sh_target = slice(n_der + n_pcc + n_gen + n_oltc, n_controls)
         H[:n_v, col_sh_target] = H_physical[
             n_q_phys:n_q_phys + n_v, col_sh_phys
         ]
@@ -862,9 +864,40 @@ class TSOController(BaseOFOController):
 
         self._H_cache = H
         self._H_mappings = mappings
+
+        # TSO H column layout: [DER | PCC_set | V_gen_set | OLTC | shunt]
+        col_shunt_start = n_der + n_pcc + n_gen + n_oltc
+
+        self._sensitivity_updater = SensitivityUpdater(
+            H=H,
+            mappings=mappings,
+            sensitivities=self.sensitivities,
+            update_interval_min=1,
+            col_shunt_start=col_shunt_start,
+        )
+
         return H
+
+    def step(self, measurement: Measurement) -> ControllerOutput:
+        """
+        Execute one OFO iteration with voltage-dependent sensitivity updates.
+
+        Before delegating to :meth:`BaseOFOController.step`, this method
+        rescales shunt columns by ``(V_measured / V_cached)²`` to account
+        for the constant-susceptance nature of shunt devices.
+        """
+        # Ensure H is built
+        if self._H_cache is None:
+            self._build_sensitivity_matrix()
+        # Update state-dependent columns (shunt V² rescaling)
+        if self._sensitivity_updater is not None:
+            self._H_cache = self._sensitivity_updater.update(
+                measurement, measurement.iteration,
+            )
+        return super().step(measurement)
 
     def invalidate_sensitivity_cache(self) -> None:
         """Invalidate the cached sensitivity matrix."""
         self._H_cache = None
         self._H_mappings = None
+        self._sensitivity_updater = None

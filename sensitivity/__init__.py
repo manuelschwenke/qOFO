@@ -28,7 +28,10 @@ compute_branch_current_sensitivity
 #     compute_branch_current_sensitivity,
 # )
 
+from sensitivity.sensitivity_updater import SensitivityUpdater
+
 __all__ = [
+    "SensitivityUpdater",
     # "compute_voltage_sensitivity",
     # "compute_transformer_q_sensitivity",
     # "compute_oltc_voltage_sensitivity",

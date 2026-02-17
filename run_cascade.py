@@ -224,7 +224,7 @@ def _apply_dso(net: pp.pandapowerNet, out: ControllerOutput, cfg: DSOControllerC
 # =============================================================================
 
 A2S = lambda a: np.array2string(a, precision=2, suppress_small=True)
-
+A3S = lambda a: np.array2string(a, precision=3, suppress_small=True)
 
 @dataclass
 class IterationRecord:
@@ -258,16 +258,39 @@ class IterationRecord:
 #  Main cascade runner
 # =============================================================================
 
+@dataclass
+class CascadeResult:
+    """Container for all cascade simulation results."""
+    log: List[IterationRecord]
+    tso_config: TSOControllerConfig
+    dso_config: DSOControllerConfig
+
+
 def run_cascade(
     v_setpoint_pu: float,
     n_minutes: int = 120,
     tso_period_min: int = 3,
     dso_period_min: int = 1,
-    start_time: datetime = datetime(2016, 7, 15, 10, 0),
+    start_time: datetime = datetime(2016, 1, 3, 1, 0),
     profiles_csv: str = DEFAULT_PROFILES_CSV,
     verbose: bool = True,
-) -> List[IterationRecord]:
-    """Run cascaded TSO-DSO OFO. Combined network for everything."""
+    live_plot: bool = True,
+    live_plotter=None,
+) -> CascadeResult:
+    """
+    Run cascaded TSO-DSO OFO on a combined network.
+
+    Parameters
+    ----------
+    live_plot : bool, optional
+        If ``True``, create a :class:`~visualization.plot_cascade.LivePlotter`
+        internally after configs are built and update it each iteration.
+        Ignored when *live_plotter* is provided.  Default: ``False``.
+    live_plotter : optional
+        Object with an ``update(rec)`` method called after each iteration,
+        e.g. :class:`visualization.plot_cascade.LivePlotter`.  Takes
+        precedence over *live_plot*.
+    """
 
     if verbose:
         print("=" * 72)
@@ -398,6 +421,11 @@ def run_cascade(
         gamma_q_tracking=1.0,
     )
 
+    # -- Live plotter (created here because configs are now available)
+    if live_plot and live_plotter is None:
+        from visualization.plot_cascade import LivePlotter
+        live_plotter = LivePlotter(tso_config, dso_config)
+
     # 5) Actuator bounds (from combined network)
     def _der_bounds(buses):
         s_rated, p_max = {b: 0.0 for b in buses}, {b: 0.0 for b in buses}
@@ -437,18 +465,18 @@ def run_cascade(
     gw_tso = np.concatenate([
         np.full(len(tso_der_buses),   0.01),   # Q_DER
         np.full(len(pcc_trafos),      0.01),   # Q_PCC_set
-        np.full(len(tso_gen_indices), 100),   # V_gen_set
-        np.full(len(tso_oltc),        0.1),   # s_OLTC
-        np.full(len(tso_shunt_buses), 0.1),   # s_shunt
+        np.full(len(tso_gen_indices), 1000000),   # V_gen_set
+        np.full(len(tso_oltc),        0.001),   # s_OLTC
+        np.full(len(tso_shunt_buses), 100),   # s_shunt
     ])
     # DSO u = [Q_DER | s_OLTC | s_shunt]
     gw_dso = np.concatenate([
-        np.full(len(dso_der_buses),   0.02),   # Q_DER
-        np.full(len(dso_oltc),        10),   # s_OLTC
-        np.full(len(dso_shunt_buses), 10),   # s_shunt
+        np.full(len(dso_der_buses),   0.2),   # Q_DER
+        np.full(len(dso_oltc),        2),   # s_OLTC
+        np.full(len(dso_shunt_buses), 1),   # s_shunt
     ])
-    ofo_tso = OFOParameters(alpha=0.002, g_w=gw_tso, g_z=1e10, g_u=1e-8)
-    ofo_dso = OFOParameters(alpha=0.003, g_w=gw_dso, g_z=1e10, g_u=1e-8)
+    ofo_tso = OFOParameters(alpha=0.001, g_w=gw_tso, g_z=1e10, g_u=1e-8)
+    ofo_dso = OFOParameters(alpha=0.03, g_w=gw_dso, g_z=1e10, g_u=1e-8)
 
     ns = _network_state(net)
 
@@ -555,6 +583,9 @@ def run_cascade(
                  for t in dso_config.interface_trafo_indices], dtype=np.float64)
         log.append(rec)
 
+        if live_plotter is not None:
+            live_plotter.update(rec)
+
         if verbose and (run_tso or run_dso):
             tags = "TSO+DSO" if (run_tso and run_dso) else ("TSO" if run_tso else "DSO")
             v_tn = rec.plant_tn_voltages_pu
@@ -568,7 +599,7 @@ def run_cascade(
                       f"t={rec.tso_solve_time_s:.3f}s")
                 print(f"      Q_DER   = {A2S(rec.tso_q_der_mvar)} Mvar")
                 print(f"      Q_PCC_s = {A2S(rec.tso_q_pcc_set_mvar)} Mvar")
-                print(f"      V_gen   = {A2S(rec.tso_v_gen_pu)} pu")
+                print(f"      V_gen   = {A3S(rec.tso_v_gen_pu)} pu")
                 if len(rec.tso_oltc_taps) > 0:
                     print(f"      OLTC    = {rec.tso_oltc_taps}")
                 if len(rec.tso_shunt_states) > 0:
@@ -586,7 +617,10 @@ def run_cascade(
                 print(f"      Q_act   = {A2S(rec.dso_q_actual_mvar)} Mvar  (plant)")
             print()
 
-    return log
+    if live_plotter is not None:
+        live_plotter.finish()
+
+    return CascadeResult(log=log, tso_config=tso_config, dso_config=dso_config)
 
 
 # =============================================================================
@@ -631,10 +665,13 @@ def print_summary(v_set: float, log: List[IterationRecord]):
 # =============================================================================
 
 def main():
-    for v_set in [1.03]:
-        log = run_cascade(v_setpoint_pu=v_set, n_minutes=int(60*12),
-                          tso_period_min=3, dso_period_min=1, verbose=True)
-        print_summary(v_set, log)
+    for v_set in [1.04]:
+        result = run_cascade(v_setpoint_pu=v_set, n_minutes=int(60*2),
+                             tso_period_min=3, dso_period_min=1, verbose=True)
+        print_summary(v_set, result.log)
+
+        from visualization.plot_cascade import plot_all
+        plot_all(result.log, result.tso_config, result.dso_config)
 
 
 if __name__ == "__main__":

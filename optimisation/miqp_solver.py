@@ -270,7 +270,7 @@ class MIQPSolver:
     """
     
     # Solver preference order for MIQP problems
-    MIQP_SOLVERS = ['MOSEK', 'GUROBI', 'SCIP', 'ECOS_BB']
+    MIQP_SOLVERS = ['SCIP', 'GUROBI', 'MOSEK', 'ECOS_BB']
     
     # Solver preference order for QP problems (continuous only)
     QP_SOLVERS = ['OSQP', 'ECOS', 'SCS', 'CVXOPT']
@@ -504,22 +504,26 @@ class MIQPSolver:
         constraints.append(w_c <= w_c_upper)
         
         # Input constraints for integer variables
-        # Integer variables are changes in tap position or shunt state
-        # Typically limited to small changes per iteration (e.g., ±1, ±2)
-        w_i_lower = (problem.u_lower[n_continuous:] - 
-                     problem.u_current[n_continuous:]) / alpha
-        w_i_upper = (problem.u_upper[n_continuous:] - 
-                     problem.u_current[n_continuous:]) / alpha
-        
-        # Round bounds to integers for integer variables
-        w_i_lower_int = np.floor(w_i_lower).astype(np.int64)
-        w_i_upper_int = np.ceil(w_i_upper).astype(np.int64)
-        
+        # w_i represents the DIRECT change in discrete state (e.g., +1 tap,
+        # -1 shunt step).  No alpha scaling — these are physical switching
+        # decisions, not gradient-descent micro-steps.
+        w_i_lower_int = np.floor(
+            problem.u_lower[n_continuous:] - problem.u_current[n_continuous:]
+        ).astype(np.int64)
+        w_i_upper_int = np.ceil(
+            problem.u_upper[n_continuous:] - problem.u_current[n_continuous:]
+        ).astype(np.int64)
+
         constraints.append(w_i >= w_i_lower_int)
         constraints.append(w_i <= w_i_upper_int)
-        
+
         # Output constraints with slack variables
-        Hw = alpha * (problem.H_tilde @ w)
+        # Continuous part is scaled by α (gradient step), integer part is
+        # unscaled (direct state change):
+        #   Δy ≈ α · H_c · w_c  +  H_i · w_i
+        H_c = problem.H_tilde[:, :n_continuous]
+        H_i = problem.H_tilde[:, n_continuous:]
+        Hw = alpha * (H_c @ w_c) + H_i @ w_i
         y_error_lower = problem.y_lower - problem.y_current
         y_error_upper = problem.y_upper - problem.y_current
         
@@ -695,21 +699,33 @@ def build_miqp_problem(
         )
 
     # Build weight matrices
-    # G_w combines the change weight and usage regularisation weight:
-    #   G_w = diag(g_w) + α² · diag(g_u)
-    # The g_u term adds a quadratic penalty on the absolute level of u,
-    # which penalises actuator *usage* (deviation from zero).  When g_u
-    # is a per-variable vector, only selected actuators are regularised.
+    # ─────────────────────
+    # Continuous variables:  w_c = Δu / α   (gradient-descent micro-step)
+    #   Quadratic: G_w_c = diag(g_w + α² · g_u)
+    #   Linear:    grad_c = grad_f + 2 · α · g_u · u
+    #
+    # Integer variables:     w_i = Δu        (direct state change, no α)
+    #   Quadratic: G_w_i = diag(g_w + g_u)   (no α² factor)
+    #   Linear:    grad_i = grad_f + 2 · g_u · u  (no α factor)
     g_w_vec = np.broadcast_to(np.asarray(g_w, dtype=np.float64), (n_total,)).copy()
     g_u_vec = np.broadcast_to(np.asarray(g_u, dtype=np.float64), (n_total,)).copy()
-    G_w = np.diag(g_w_vec + alpha**2 * g_u_vec)
+
+    # Diagonal of G_w: continuous get α²·g_u, integer get plain g_u
+    diag_Gw = g_w_vec.copy()
+    continuous_mask = np.ones(n_total, dtype=bool)
+    for idx in integer_indices:
+        continuous_mask[idx] = False
+    diag_Gw[continuous_mask] += alpha**2 * g_u_vec[continuous_mask]
+    diag_Gw[~continuous_mask] += g_u_vec[~continuous_mask]
+    G_w = np.diag(diag_Gw)
 
     # G_z is the slack variable weight
     G_z = g_z * np.eye(n_outputs)
 
-    # Modified gradient includes the linear part of the usage regularisation:
-    #   grad_f_mod = grad_f + 2 · α · g_u · u_current
-    grad_f_mod = grad_f + 2.0 * alpha * g_u_vec * u_current
+    # Modified gradient: continuous get α·g_u, integer get plain g_u
+    grad_f_mod = grad_f.copy()
+    grad_f_mod[continuous_mask] += 2.0 * alpha * g_u_vec[continuous_mask] * u_current[continuous_mask]
+    grad_f_mod[~continuous_mask] += 2.0 * g_u_vec[~continuous_mask] * u_current[~continuous_mask]
     
     # Reorder u and H to put continuous variables first, then integer
     continuous_indices = [i for i in range(n_total) if i not in integer_indices]

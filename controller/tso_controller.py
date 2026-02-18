@@ -598,9 +598,10 @@ class TSOController(BaseOFOController):
             idx += 1
 
         # --- Current limits (upper only) ---
+        # NOTE: Extremely loosened to unblock integer switching (shunts/OLTCs).
         for _ in range(n_i):
-            y_lower[idx] = 0.0
-            y_upper[idx] = self.config.i_max_pu
+            y_lower[idx] = -1E6
+            y_upper[idx] = 1E6
             idx += 1
 
         return y_lower, y_upper

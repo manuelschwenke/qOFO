@@ -598,7 +598,7 @@ def build_miqp_problem(
     y_lower: NDArray[np.float64],
     y_upper: NDArray[np.float64],
     g_w: Union[float, NDArray[np.float64]],
-    g_u: float,
+    g_u: Union[float, NDArray[np.float64]],
     g_z: float,
     integer_indices: Optional[List[int]] = None,
 ) -> MIQPProblem:
@@ -632,8 +632,11 @@ def build_miqp_problem(
         Weight for control variable changes. Either a scalar (applied
         uniformly to all variables) or an array of length n_total with
         per-variable weights for the diagonal of G_w.
-    g_u : float
-        Scalar weight for control variable usage (regularisation).
+    g_u : float or NDArray[np.float64]
+        Weight for control variable usage (regularisation).  Either a
+        scalar (uniform for all variables) or a per-variable array of
+        length n_total.  Set entries to 0 for actuators that should
+        not be regularised towards zero (e.g. OLTC taps, shunts).
     g_z : float
         Scalar weight for slack variables (constraint violations).
     integer_indices : List[int], optional
@@ -692,19 +695,21 @@ def build_miqp_problem(
         )
 
     # Build weight matrices
-    # G_w combines the change weight and usage weight
-    # G_w = diag(g_w) + α² * g_u * I
+    # G_w combines the change weight and usage regularisation weight:
+    #   G_w = diag(g_w) + α² · diag(g_u)
+    # The g_u term adds a quadratic penalty on the absolute level of u,
+    # which penalises actuator *usage* (deviation from zero).  When g_u
+    # is a per-variable vector, only selected actuators are regularised.
     g_w_vec = np.broadcast_to(np.asarray(g_w, dtype=np.float64), (n_total,)).copy()
-    #G_w = np.diag(g_w_vec + alpha**2 * g_u)
-    G_w = np.diag(g_w_vec)
+    g_u_vec = np.broadcast_to(np.asarray(g_u, dtype=np.float64), (n_total,)).copy()
+    G_w = np.diag(g_w_vec + alpha**2 * g_u_vec)
 
     # G_z is the slack variable weight
     G_z = g_z * np.eye(n_outputs)
 
-    # Modified gradient includes regularisation term
-    # grad_f_mod = grad_f + 2 * α * g_u * u_current
-    #grad_f_mod = grad_f + 2 * alpha * g_u * u_current
-    grad_f_mod = grad_f
+    # Modified gradient includes the linear part of the usage regularisation:
+    #   grad_f_mod = grad_f + 2 · α · g_u · u_current
+    grad_f_mod = grad_f + 2.0 * alpha * g_u_vec * u_current
     
     # Reorder u and H to put continuous variables first, then integer
     continuous_indices = [i for i in range(n_total) if i not in integer_indices]

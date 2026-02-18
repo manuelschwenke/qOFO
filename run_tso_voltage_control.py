@@ -512,7 +512,6 @@ def run_tso_voltage_control(
         voltage_bus_indices=tso_v_buses,
         current_line_indices=tso_lines,
         v_setpoints_pu=v_setpoints,
-        gamma_v_tracking=1.0,
         gen_indices=tso_gen_indices,
         gen_bus_indices=tso_gen_bus_indices,
         gen_vm_min_pu=0.95,

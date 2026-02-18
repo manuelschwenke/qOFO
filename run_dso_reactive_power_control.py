@@ -441,7 +441,6 @@ def run_dso_reactive_power_control(
         v_min_pu=0.9,
         v_max_pu=1.1,
         i_max_pu=2.0,
-        gamma_q_tracking=1.0,
     )
 
     if verbose:

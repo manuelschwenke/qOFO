@@ -22,6 +22,13 @@ import numpy as np
 from numpy.typing import NDArray
 import pandapower as pp
 
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"mosek"
+)
+
 from network.build_tuda_net import build_tuda_net, NetworkMetadata
 from core.network_state import NetworkState
 from core.measurement import Measurement
@@ -249,9 +256,10 @@ class IterationRecord:
     dso_objective: Optional[float] = None
     dso_solver_status: Optional[str] = None
     dso_solve_time_s: Optional[float] = None
-    # Plant voltages after PF
+    # Plant measurements after PF
     plant_tn_voltages_pu: Optional[NDArray[np.float64]] = None
     plant_dn_voltages_pu: Optional[NDArray[np.float64]] = None
+    tso_q_gen_mvar: Optional[NDArray[np.float64]] = None  # synchronous gen Q output
 
 
 # =============================================================================
@@ -271,11 +279,14 @@ def run_cascade(
     n_minutes: int = 120,
     tso_period_min: int = 3,
     dso_period_min: int = 1,
-    start_time: datetime = datetime(2016, 1, 3, 1, 0),
+    start_time: datetime = datetime(2016, 5, 1, 11, 0),
     profiles_csv: str = DEFAULT_PROFILES_CSV,
     verbose: bool = True,
     live_plot: bool = True,
     live_plotter=None,
+    g_v: float = 1000.0,
+    g_q: float = 1.0,
+    use_profiles: bool = True,
 ) -> CascadeResult:
     """
     Run cascaded TSO-DSO OFO on a combined network.
@@ -283,13 +294,28 @@ def run_cascade(
     Parameters
     ----------
     live_plot : bool, optional
-        If ``True``, create a :class:`~visualization.plot_cascade.LivePlotter`
+        If ``True``, create a :class:`~visualisation.plot_cascade.LivePlotter`
         internally after configs are built and update it each iteration.
         Ignored when *live_plotter* is provided.  Default: ``False``.
     live_plotter : optional
         Object with an ``update(rec)`` method called after each iteration,
-        e.g. :class:`visualization.plot_cascade.LivePlotter`.  Takes
+        e.g. :class:`visualisation.plot_cascade.LivePlotter`.  Takes
         precedence over *live_plot*.
+    g_v : float, optional
+        Voltage-schedule tracking weight for the TSO objective.
+        Scales the gradient ``2·g_v·(V - V_set)^T·∂V/∂u``.
+        Larger values → faster convergence toward setpoints but
+        larger per-step actuator movements.  Default: 1000.
+    g_q : float, optional
+        Q-interface tracking weight for the DSO objective.
+        Scales the gradient ``2·g_q·(Q - Q_set)^T·∂Q/∂u``.
+        Larger values → faster convergence toward TSO's reactive
+        power setpoints.  Default: 1.0.
+    use_profiles : bool, optional
+        If ``True`` (default), apply time-series load/generation
+        profiles each minute.  If ``False``, the operating point
+        stays fixed at the initial PF solution — useful for
+        debugging convergence without profile disturbances.
     """
 
     if verbose:
@@ -310,8 +336,9 @@ def run_cascade(
     snapshot_base_values(net)
 
     # Apply profiles at t=0 and re-run PF so sensitivities + init use realistic operating point
-    apply_profiles(net, profiles, start_time)
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    if use_profiles:
+        apply_profiles(net, profiles, start_time)
+        pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
     # 2) Identify elements
     dn_buses = {int(b) for b in net.bus.index if str(net.bus.at[b, "subnet"]) == "DN"}
@@ -410,7 +437,7 @@ def run_cascade(
         oltc_trafo_indices=tso_oltc, shunt_bus_indices=tso_shunt_buses,
         shunt_q_steps_mvar=tso_shunt_q,
         voltage_bus_indices=tso_v_buses, current_line_indices=tso_lines,
-        v_setpoints_pu=v_setpoints, gamma_v_tracking=1,
+        v_setpoints_pu=v_setpoints, g_v=g_v,
         gen_indices=tso_gen_indices, gen_bus_indices=tso_gen_bus_indices,
     )
     dso_config = DSOControllerConfig(
@@ -418,12 +445,12 @@ def run_cascade(
         shunt_bus_indices=dso_shunt_buses, shunt_q_steps_mvar=dso_shunt_q,
         interface_trafo_indices=dso_iface_trafos,
         voltage_bus_indices=dso_v_buses, current_line_indices=dso_lines,
-        gamma_q_tracking=1.0,
+        g_q=g_q,
     )
 
     # -- Live plotter (created here because configs are now available)
     if live_plot and live_plotter is None:
-        from visualization.plot_cascade import LivePlotter
+        from visualisation.plot_cascade import LivePlotter
         live_plotter = LivePlotter(tso_config, dso_config)
 
     # 5) Actuator bounds (from combined network)
@@ -460,23 +487,53 @@ def run_cascade(
     )
 
     # 6) Create controllers
+    # ─────────────────────────────────────────────────────────────────
     # Per-actuator-type g_w weights on the diagonal of G_w.
+    #
+    # The MIQP objective is:  min  w^T G_w w  +  grad_f^T w
+    # where  G_w = diag(g_w + α² g_u).
+    #
+    # For a single variable the unconstrained optimum is:
+    #     w* = −grad_f / (2 g_w)
+    #     Δu  = α · w*
+    #
+    # We choose g_w per actuator type so that the resulting per-step
+    # change Δu is physically reasonable:
+    #
+    #   • Q_DER  / Q_PCC_set  [Mvar]:  a few Mvar per TSO step
+    #   • V_gen  [p.u.]:               ≈ 0.001 p.u. per TSO step
+    #   • s_OLTC [taps]:               ≤ 1 tap per TSO step
+    #   • s_shunt [states]:            ≤ 1 state per TSO step
+    # ─────────────────────────────────────────────────────────────────
     # TSO u = [Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt]
+    #
+    # g_w is the diagonal weight on w^T G_w w in the MIQP.  Larger g_w
+    # means smaller per-step change for that actuator.  We calibrate
+    # g_w so that alpha * |grad| / (2*g_w) gives a physically sensible
+    # per-step change for each actuator type.
     gw_tso = np.concatenate([
-        np.full(len(tso_der_buses),   0.01),   # Q_DER
-        np.full(len(pcc_trafos),      0.01),   # Q_PCC_set
-        np.full(len(tso_gen_indices), 1000000),   # V_gen_set
-        np.full(len(tso_oltc),        0.001),   # s_OLTC
-        np.full(len(tso_shunt_buses), 100),   # s_shunt
+        np.full(len(tso_der_buses),   0.001),   # Q_DER  [Mvar]
+        np.full(len(pcc_trafos),      0.001),   # Q_PCC_set [Mvar]
+        np.full(len(tso_gen_indices), 3000),     # V_gen  [p.u.] — ~0.002 p.u./step
+        np.full(len(tso_oltc),        0.1),      # s_OLTC [taps] — ~0.5 tap/step
+        np.full(len(tso_shunt_buses), 0.02),     # s_shunt [states]
     ])
     # DSO u = [Q_DER | s_OLTC | s_shunt]
     gw_dso = np.concatenate([
-        np.full(len(dso_der_buses),   0.2),   # Q_DER
-        np.full(len(dso_oltc),        2),   # s_OLTC
-        np.full(len(dso_shunt_buses), 1),   # s_shunt
+        np.full(len(dso_der_buses),   0.1),    # Q_DER [Mvar]
+        np.full(len(dso_oltc),        5),      # s_OLTC — cautious with discrete jumps
+        np.full(len(dso_shunt_buses), 1),     # s_shunt — cautious with discrete jumps
     ])
-    ofo_tso = OFOParameters(alpha=0.001, g_w=gw_tso, g_z=1e10, g_u=1e-8)
-    ofo_dso = OFOParameters(alpha=0.03, g_w=gw_dso, g_z=1e10, g_u=1e-8)
+    # Per-actuator g_u: penalises DER Q *level* (deviation from zero) to
+    # incentivise freeing up DER headroom via shunt/OLTC switching.
+    gu_tso = np.zeros(len(gw_tso))       # TSO: no DER usage regularisation for now
+    gu_dso = np.concatenate([
+        np.full(len(dso_der_buses),   0.5),  # Q_DER: light regularise toward zero
+        np.full(len(dso_oltc),        0.0),   # s_OLTC: no usage penalty
+        np.full(len(dso_shunt_buses), 0.0),   # s_shunt: no usage penalty
+    ])
+    ofo_tso = OFOParameters(alpha=0.01, g_w=gw_tso, g_z=1e10, g_u=gu_tso)
+    ofo_dso = OFOParameters(alpha=0.03, g_w=gw_dso, g_z=1e10, g_u=gu_dso)
 
     ns = _network_state(net)
 
@@ -485,7 +542,48 @@ def run_cascade(
     dso = DSOController(dso_id, ofo_dso, dso_config, ns, dso_bounds,
                         JacobianSensitivities(net))
 
-    # 7) Initialise from converged PF
+    # 7) Initialise actuators to a neutral operating point
+    #    - DER Q = 0, TSO OLTC = 0, shunts = 0
+    #    - Generator AVR setpoints = 1.05 p.u.
+    #    - DSO 3W OLTCs: regulated via pandapower tap controllers to 1.05 p.u.
+    #      on the 110 kV (MV) side, then controllers are removed.
+    for s in net.sgen.index:
+        if not str(net.sgen.at[s, "name"]).startswith("BOUND_"):
+            net.sgen.at[s, "q_mvar"] = 0.0
+    for t in tso_oltc:
+        net.trafo.at[t, "tap_pos"] = 0
+    for g in tso_gen_indices:
+        net.gen.at[g, "vm_pu"] = 1.05 #v_setpoint_pu
+    for sb in tso_shunt_buses:
+        mask = net.shunt["bus"] == sb
+        if mask.any():
+            net.shunt.at[net.shunt.index[mask][0], "step"] = 0
+    for sb in dso_shunt_buses:
+        mask = net.shunt["bus"] == sb
+        if mask.any():
+            net.shunt.at[net.shunt.index[mask][0], "step"] = 0
+
+    # Use pandapower DiscreteTapControl to find the DSO OLTC positions that
+    # regulate the 110 kV side to ~v_setpoint_pu, then remove the controllers.
+    from pandapower.control import DiscreteTapControl
+    tol_pu = 0.005
+    for t3w in dso_oltc:
+        DiscreteTapControl(
+            net, element_index=t3w,
+            vm_lower_pu=v_setpoint_pu - tol_pu,
+            vm_upper_pu=v_setpoint_pu + tol_pu,
+            side="mv", element="trafo3w",
+        )
+    pp.runpp(net, run_control=True, calculate_voltage_angles=True)
+    if verbose:
+        for t3w in dso_oltc:
+            tap = int(net.trafo3w.at[t3w, "tap_pos"])
+            print(f"  DSO OLTC trafo3w {t3w}: initial tap_pos = {tap}")
+    # Remove pandapower controllers so they don't interfere with OFO
+    if hasattr(net, "controller") and len(net.controller) > 0:
+        net.controller.drop(net.controller.index, inplace=True)
+
+    # Initialise from converged PF
     tso.initialise(_measure_tso(net, tso_config, 0))
     dso.initialise(_measure_dso(net, dso_config, 0))
 
@@ -501,13 +599,14 @@ def run_cascade(
     log: List[IterationRecord] = []
 
     for minute in range(1, n_minutes + 1):
-        run_tso = (minute % tso_period_min == 0)
+        run_tso = (minute == 1) or (minute % tso_period_min == 0)
         run_dso = (minute % dso_period_min == 0)
         rec = IterationRecord(minute=minute, tso_active=run_tso, dso_active=run_dso)
 
         # Apply time-series profiles for this minute
-        t_now = start_time + timedelta(minutes=minute)
-        apply_profiles(net, profiles, t_now)
+        if use_profiles:
+            t_now = start_time + timedelta(minutes=minute)
+            apply_profiles(net, profiles, t_now)
 
         # TSO step
         if run_tso:
@@ -574,9 +673,12 @@ def run_cascade(
         # Power flow
         pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
-        # Record plant voltages + actual interface Q after PF
+        # Record plant voltages, generator Q, and actual interface Q after PF
         rec.plant_tn_voltages_pu = net.res_bus.loc[tso_v_buses, "vm_pu"].values.copy()
         rec.plant_dn_voltages_pu = net.res_bus.loc[dso_v_buses, "vm_pu"].values.copy()
+        rec.tso_q_gen_mvar = np.array(
+            [float(net.res_gen.at[g, "q_mvar"]) for g in tso_gen_indices],
+            dtype=np.float64)
         if run_dso:
             rec.dso_q_actual_mvar = np.array(
                 [float(net.res_trafo3w.at[t, "q_hv_mvar"])
@@ -665,13 +767,14 @@ def print_summary(v_set: float, log: List[IterationRecord]):
 # =============================================================================
 
 def main():
-    for v_set in [1.04]:
-        result = run_cascade(v_setpoint_pu=v_set, n_minutes=int(60*2),
-                             tso_period_min=3, dso_period_min=1, verbose=True)
+    for v_set in [1.05]:
+        result = run_cascade(v_setpoint_pu=v_set, n_minutes=int(60*12),
+                             tso_period_min=3, dso_period_min=1, verbose=True,
+                             g_v=100000, g_q=2, use_profiles=False)
         print_summary(v_set, result.log)
 
-        from visualization.plot_cascade import plot_all
-        plot_all(result.log, result.tso_config, result.dso_config)
+        from visualisation.plot_cascade import plot_all
+        #plot_all(result.log, result.tso_config, result.dso_config)
 
 
 if __name__ == "__main__":

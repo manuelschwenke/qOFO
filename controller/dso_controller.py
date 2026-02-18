@@ -13,7 +13,7 @@ The DSO controller:
 - Reports capability bounds to TSO
 
 The objective function includes a setpoint tracking term:
-    ∇f^HV = 2 · (Q_interface - Q_set) · ∂Q_interface/∂u
+    ∇f = 2 · (Q_interface - Q_set) · ∂Q_interface/∂u
 
 References
 ----------
@@ -69,8 +69,13 @@ class DSOControllerConfig:
         Maximum voltage limit in per-unit.
     i_max_pu : float
         Maximum current limit as fraction of line rating.
-    gamma_q_tracking : float
-        Weight for Q setpoint tracking in objective.
+    g_q : float
+        Weight for Q-interface tracking in the objective function.
+        Scales the gradient ``2 · g_q · (Q - Q_set)^T · ∂Q/∂u``.
+        Higher values make the controller track the TSO's reactive
+        power setpoints more aggressively.  Must be balanced against
+        the change penalty ``g_w``: the effective per-iteration step
+        scales as ``α · g_q / g_w``.  Default 1.0 (unweighted).
     """
     der_bus_indices: List[int]
     oltc_trafo_indices: List[int]
@@ -82,8 +87,8 @@ class DSOControllerConfig:
     v_min_pu: float = 0.9
     v_max_pu: float = 1.1
     i_max_pu: float = 1.0
-    gamma_q_tracking: float = 1.0
-    
+    g_q: float = 1.0
+
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
         if len(self.shunt_bus_indices) != len(self.shunt_q_steps_mvar):
@@ -98,10 +103,7 @@ class DSOControllerConfig:
             )
         if self.i_max_pu <= 0:
             raise ValueError(f"i_max_pu must be positive, got {self.i_max_pu}")
-        if self.gamma_q_tracking < 0:
-            raise ValueError(
-                f"gamma_q_tracking must be non-negative, got {self.gamma_q_tracking}"
-            )
+
 
 
 class DSOController(BaseOFOController):
@@ -399,8 +401,8 @@ class DSOController(BaseOFOController):
         
         # DER Q bounds (P-dependent)
         q_min, q_max = self.actuator_bounds.compute_der_q_bounds(der_p_current)
-        u_lower[:n_der] = q_min # ToDo: Also loosen here to test controller performance
-        u_upper[:n_der] = q_max # ToDo: Also loosen here to test controller performance
+        u_lower[:n_der] = -50 #q_min # ToDo: Also loosen here to test controller performance
+        u_upper[:n_der] = 50 #q_max # ToDo: Also loosen here to test controller performance
         
         # OLTC tap bounds (fixed)
         tap_min, tap_max = self.actuator_bounds.get_oltc_tap_bounds()
@@ -451,12 +453,12 @@ class DSOController(BaseOFOController):
     ) -> NDArray[np.float64]:
         """
         Compute the objective function gradient.
-        
+
         The DSO objective is to track the TSO setpoint:
-            f(u) = γ · ||Q_interface - Q_set||²
-        
+            f(u) = g_q · ||Q_interface - Q_set||²
+
         The gradient is:
-            ∇f = 2 · γ · (Q_interface - Q_set) · ∂Q_interface/∂u
+            ∇f = 2 · g_q · (Q_interface - Q_set) · ∂Q_interface/∂u
         """
         n_total = self.n_controls
         grad_f = np.zeros(n_total)
@@ -481,8 +483,8 @@ class DSOController(BaseOFOController):
         # Extract ∂Q_interface/∂u (first n_interfaces rows)
         dQ_du = H[:n_interfaces, :]
         
-        # Compute gradient: ∇f = 2 · γ · (Q - Q_set)^T · ∂Q/∂u
-        grad_f = 2.0 * self.config.gamma_q_tracking * (q_error @ dQ_du)
+        # Compute gradient: ∇f = 2 · g_q · (Q - Q_set)^T · ∂Q/∂u
+        grad_f = 2.0 * self.config.g_q * (q_error @ dQ_du)
         
         return grad_f
     

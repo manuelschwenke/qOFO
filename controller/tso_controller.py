@@ -96,8 +96,13 @@ class TSOControllerConfig:
         Voltage setpoints at monitored EHV buses [p.u.]. If provided, the
         objective includes a voltage-schedule tracking term. Must have the
         same length as voltage_bus_indices.
-    gamma_v_tracking : float
-        Weight for voltage setpoint tracking in the objective gradient.
+    g_v : float
+        Weight for voltage-schedule tracking in the objective function.
+        Scales the gradient ``2 · g_v · (V - V_set)^T · ∂V/∂u``.
+        Higher values make the controller track the voltage setpoints
+        more aggressively.  Must be balanced against the change penalty
+        ``g_w``: the effective per-iteration step scales as
+        ``α · g_v / g_w``.  Default 1.0 (unweighted tracking).
     """
     der_bus_indices: List[int]
     pcc_trafo_indices: List[int]
@@ -107,11 +112,11 @@ class TSOControllerConfig:
     shunt_q_steps_mvar: List[float]
     voltage_bus_indices: List[int]
     current_line_indices: List[int]
-    v_min_pu: float = 0.95
+    v_min_pu: float = 0.90
     v_max_pu: float = 1.10
     i_max_pu: float = 1.0
     v_setpoints_pu: Optional[NDArray[np.float64]] = None
-    gamma_v_tracking: float = 1.0
+    g_v: float = 1.0
     gen_indices: List[int] = field(default_factory=list)
     gen_bus_indices: List[int] = field(default_factory=list)
     gen_vm_min_pu: float = 0.95
@@ -139,11 +144,6 @@ class TSOControllerConfig:
         if self.i_max_pu <= 0:
             raise ValueError(
                 f"i_max_pu must be positive, got {self.i_max_pu}"
-            )
-        if self.gamma_v_tracking < 0:
-            raise ValueError(
-                f"gamma_v_tracking must be non-negative, "
-                f"got {self.gamma_v_tracking}"
             )
         if self.v_setpoints_pu is not None:
             if len(self.v_setpoints_pu) != len(self.voltage_bus_indices):
@@ -564,10 +564,10 @@ class TSOController(BaseOFOController):
         """
         Get output constraint limits.
 
-        If voltage setpoints are configured, the voltage outputs are
-        constrained to the setpoint value (y_lower = y_upper = v_set),
-        effectively implementing voltage-schedule tracking via soft
-        constraints.  Otherwise, the general voltage band is used.
+        Voltage outputs are constrained to the permissible band
+        [v_min_pu, v_max_pu].  Tracking toward voltage setpoints
+        (if configured) is handled by the quadratic objective in
+        ``_compute_objective_gradient()``, not by tight constraints.
 
         PCC Q outputs have no hard limits (±∞); tracking is handled
         by the DSO layer through the setpoint messages.
@@ -581,15 +581,14 @@ class TSOController(BaseOFOController):
         y_upper = np.zeros(n_outputs)
         idx = 0
 
-        # --- Voltage limits or setpoints ---
+        # --- Voltage limits (band constraints) ---
+        # Voltage tracking toward setpoints is handled by the quadratic
+        # objective term in _compute_objective_gradient(), not by tight
+        # output constraints.  The output constraints enforce the
+        # permissible voltage band [v_min_pu, v_max_pu].
         for j in range(n_v):
-            if self.config.v_setpoints_pu is not None:
-                # Tight band around setpoint → tracked via slack penalty
-                y_lower[idx] = self.config.v_setpoints_pu[j]
-                y_upper[idx] = self.config.v_setpoints_pu[j]
-            else:
-                y_lower[idx] = self.config.v_min_pu
-                y_upper[idx] = self.config.v_max_pu
+            y_lower[idx] = self.config.v_min_pu
+            y_upper[idx] = self.config.v_max_pu
             idx += 1
 
         # --- PCC Q: no hard limits (tracking is objective-based) ---
@@ -615,7 +614,7 @@ class TSOController(BaseOFOController):
 
         The TSO objective combines:
             1. DER usage regularisation:  2 · g_u · Q_DER^k
-            2. Voltage-schedule tracking: 2 · γ_v · (V^k - V_set)
+            2. Voltage-schedule tracking: 2 · g_v · (V^k - V_set)
                projected onto the control space via sensitivities
             3. PCC setpoint terms are zero (tracking handled by DSOs)
 
@@ -660,10 +659,8 @@ class TSOController(BaseOFOController):
             # Voltage outputs are the first n_v rows of H
             dV_du = H[:n_v, :]
 
-            # ∇f contribution: 2 · γ · (V - V_set)^T · ∂V/∂u
-            grad_f += (
-                2.0 * self.config.gamma_v_tracking * (v_error @ dV_du)
-            )
+            # ∇f contribution: 2 · g_v · (V - V_set)^T · ∂V/∂u
+            grad_f += 2.0 * self.config.g_v * (v_error @ dV_du)
 
         return grad_f
 
@@ -781,9 +778,14 @@ class TSOController(BaseOFOController):
         H[n_v + n_pcc:, :n_der] = H_physical[n_q_phys + n_v:, :n_der]
 
         # PCC setpoint columns → target column n_der..n_der+n_pcc-1
-        # A change in Q_PCC_set is realised by the DSO as a Q injection at
-        # the PCC HV bus.  Use the Jacobian ∂V/∂Q and ∂I/∂Q at those buses
-        # so the TSO optimizer sees the physical voltage/current impact.
+        #
+        # Q_PCC_set uses *load convention* on the HV port: positive means
+        # reactive power flowing INTO the coupler FROM the HV bus.  An
+        # increase in Q_PCC_set therefore *removes* Q from the HV bus,
+        # which is the opposite of a Q injection.  The Jacobian
+        # sensitivities (dV/dQ, dI/dQ) are computed in generator
+        # convention (positive = injection), so the PCC columns must be
+        # negated:  ∂V/∂Q_PCC_set(load) = −∂V/∂Q_inj(gen).
         pcc_hv_buses = []
         for t in self.config.pcc_trafo_indices:
             if pcc_in_trafo3w:
@@ -791,20 +793,19 @@ class TSOController(BaseOFOController):
             elif pcc_in_trafo:
                 pcc_hv_buses.append(int(net.trafo.at[t, "hv_bus"]))
         if pcc_hv_buses:
-            # ∂V/∂Q at PCC HV buses → voltage rows of PCC columns
+            # ∂V/∂Q_inj at PCC HV buses → negate for load convention
             dV_dQ_pcc, obs_map, pcc_map = self.sensitivities.compute_dV_dQ_der(
                 der_bus_indices=pcc_hv_buses,
                 observation_bus_indices=self.config.voltage_bus_indices,
             )
-            # Map columns: pcc_map may be a subset if some PCC buses are PV/slack
             for j_pcc, bus in enumerate(pcc_hv_buses):
                 col = n_der + j_pcc
                 if bus in pcc_map:
                     j_jac = pcc_map.index(bus)
                     for i_obs, obs_bus in enumerate(obs_map):
                         i_row = self.config.voltage_bus_indices.index(obs_bus)
-                        H[i_row, col] = dV_dQ_pcc[i_obs, j_jac]
-            # ∂I/∂Q at PCC HV buses → current rows of PCC columns
+                        H[i_row, col] = -dV_dQ_pcc[i_obs, j_jac]
+            # ∂I/∂Q_inj at PCC HV buses → negate for load convention
             if self.config.current_line_indices:
                 dI_dQ_pcc, line_map, pcc_map_i = \
                     self.sensitivities.compute_dI_dQ_der_matrix(
@@ -816,7 +817,7 @@ class TSOController(BaseOFOController):
                     if bus in pcc_map_i:
                         j_jac = pcc_map_i.index(bus)
                         for i_line in range(len(line_map)):
-                            H[n_v + n_pcc + i_line, col] = dI_dQ_pcc[i_line, j_jac]
+                            H[n_v + n_pcc + i_line, col] = -dI_dQ_pcc[i_line, j_jac]
         # Q_PCC tracking: ∂Q_PCC_j / ∂Q_PCC_set_j = 1
         for j in range(n_pcc):
             H[n_v + j, n_der + j] = 1.0
@@ -849,18 +850,24 @@ class TSOController(BaseOFOController):
             n_q_phys + n_v:, col_sh_phys
         ]
 
-        # --- AVR columns: approximate ∂V/∂V_AVR as identity on local bus ---
+        # --- AVR columns: ∂V_obs / ∂V_gen from Jacobian-based sensitivity ---
         avr_start = n_der + n_pcc
-        for k, bus in enumerate(self.config.gen_bus_indices):
-            try:
-                v_row = self.config.voltage_bus_indices.index(bus)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Generator bus {bus} not in voltage_bus_indices; "
-                    f"cannot define AVR sensitivity."
-                ) from exc
+        # The PV terminal buses of the generators (needed for sensitivity calc)
+        gen_terminal_buses = [
+            int(net.gen.at[g, "bus"]) for g in self.config.gen_indices
+        ]
+        dV_dVgen, obs_map, gen_map = \
+            self.sensitivities.compute_dV_dVgen_matrix(
+                gen_bus_indices_pp=gen_terminal_buses,
+                observation_bus_indices=self.config.voltage_bus_indices,
+            )
+        for k, gen_bus_pp in enumerate(gen_terminal_buses):
             col = avr_start + k
-            H[v_row, col] = 1.0
+            if gen_bus_pp in gen_map:
+                j_gen = gen_map.index(gen_bus_pp)
+                for i_obs, obs_bus in enumerate(obs_map):
+                    i_row = self.config.voltage_bus_indices.index(obs_bus)
+                    H[i_row, col] = dV_dVgen[i_obs, j_gen]
 
         self._H_cache = H
         self._H_mappings = mappings

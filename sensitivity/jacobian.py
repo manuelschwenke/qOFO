@@ -291,9 +291,166 @@ class JacobianSensitivities:
         #           dV_2/dQ_1   dV_2/dQ_2   dV_2/dQ_m
         #           dV_n/dQ_1   dV_n/dQ_2   dV_n/dQ_m
         sensitivity_matrix = self.dV_dQ_reduced[np.ix_(obs_jacobian_rows, der_jacobian_cols)]
-        
+
         return sensitivity_matrix, obs_bus_mapping, der_bus_mapping
-    
+
+    # =========================================================================
+    # A2. Bus Voltage to PV Generator Voltage Setpoint Sensitivity
+    # =========================================================================
+
+    def compute_dV_dVgen(
+        self,
+        gen_bus_ppc: int,
+        observation_bus_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int]]:
+        """
+        Compute observation-bus voltage sensitivity to a PV-bus voltage change.
+
+        For a PV generator bus *k*, this computes ∂V_obs / ∂V_gen by
+        constructing the column ∂g/∂V_k (the mismatch sensitivity to the
+        PV-bus voltage magnitude) and propagating it through J⁻¹:
+
+            Δx = -J⁻¹ · (∂g/∂V_k) · ΔV_k
+
+        Parameters
+        ----------
+        gen_bus_ppc : int
+            Pypower (ppc) bus index of the PV generator bus.
+        observation_bus_indices : List[int]
+            Pandapower bus indices where voltages are observed.
+
+        Returns
+        -------
+        dV_dVgen : NDArray[np.float64]
+            Sensitivity vector of shape ``(n_obs,)`` in [p.u. / p.u.].
+        observation_bus_mapping : List[int]
+            Ordered list of observation bus indices actually included.
+        """
+        bus_data = self.net._ppc['bus']
+        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
+
+        n_bus = bus_data.shape[0]
+        V_complex = bus_data[:, 7] * np.exp(1j * np.deg2rad(bus_data[:, 8]))
+
+        k = gen_bus_ppc
+        V_k = V_complex[k]
+        Vm_k = np.abs(V_k)
+
+        # Build ∂g/∂V_k  (state-sized vector: [Δθ_PV, Δθ_PQ, ΔV_PQ])
+        # The power injections at every bus i depend on V_k if Y_ik ≠ 0.
+        # S_i = V_i · (Σ_j Y_ij V_j)*
+        # ∂S_i/∂Vm_k = V_i · conj(Y_ik) · exp(jθ_k)     for i ≠ k
+        # ∂S_k/∂Vm_k = (2 Vm_k conj(Y_kk) + Σ_{j≠k} V_j conj(Y_kj)) · exp(jθ_k)
+        #            ... but separating P and Q is cleaner via real-form.
+
+        # ∂P_i/∂Vm_k and ∂Q_i/∂Vm_k for all buses
+        dP_dVk = np.zeros(n_bus)
+        dQ_dVk = np.zeros(n_bus)
+        theta = np.angle(V_complex)
+        Vm = np.abs(V_complex)
+        G = np.real(Ybus)
+        B = np.imag(Ybus)
+
+        for i in range(n_bus):
+            cos_ik = np.cos(theta[i] - theta[k])
+            sin_ik = np.sin(theta[i] - theta[k])
+            if i == k:
+                # ∂P_k/∂Vm_k = 2 Vm_k G_kk + Σ_{j≠k} Vm_j (G_kj cos + B_kj sin)
+                dP_dVk[i] = 2 * Vm[k] * G[k, k]
+                dQ_dVk[i] = -2 * Vm[k] * B[k, k]
+                for j in range(n_bus):
+                    if j != k:
+                        cos_kj = np.cos(theta[k] - theta[j])
+                        sin_kj = np.sin(theta[k] - theta[j])
+                        dP_dVk[i] += Vm[j] * (G[k, j] * cos_kj + B[k, j] * sin_kj)
+                        dQ_dVk[i] += Vm[j] * (G[k, j] * sin_kj - B[k, j] * cos_kj)
+            else:
+                dP_dVk[i] = Vm[i] * (G[i, k] * cos_ik + B[i, k] * sin_ik)
+                dQ_dVk[i] = Vm[i] * (G[i, k] * sin_ik - B[i, k] * cos_ik)
+
+        # Map to Jacobian ordering: [P_PV, P_PQ, Q_PQ]
+        pv_list = list(self.pv_buses)
+        pq_list = list(self.pq_buses)
+
+        dg_dVk = np.zeros(self.x_size)
+        for idx_pv, bus_pv in enumerate(pv_list):
+            dg_dVk[idx_pv] = dP_dVk[bus_pv]
+        n_pv = len(pv_list)
+        for idx_pq, bus_pq in enumerate(pq_list):
+            dg_dVk[n_pv + idx_pq] = dP_dVk[bus_pq]
+            dg_dVk[self.n_theta + idx_pq] = dQ_dVk[bus_pq]
+
+        # Δx = -J⁻¹ · ∂g/∂V_k
+        dx_dVk = -self.J_inv @ dg_dVk
+
+        # Extract ΔV_PQ at observation buses
+        dV_full = dx_dVk[self.n_theta:]  # V_PQ part
+
+        obs_rows: List[int] = []
+        obs_map: List[int] = []
+        for bus_idx in observation_bus_indices:
+            ppc_bus = pp_bus_to_ppc_bus(self.net, bus_idx)
+            if ppc_bus == k:
+                # The PV bus itself: ∂V_k/∂V_k = 1
+                obs_rows.append(-1)  # sentinel
+                obs_map.append(bus_idx)
+            else:
+                _, v_idx = get_jacobian_indices_ppc(self.net, ppc_bus)
+                if v_idx is not None and v_idx < len(dV_full):
+                    obs_rows.append(v_idx)
+                    obs_map.append(bus_idx)
+
+        dV_dVgen = np.zeros(len(obs_map))
+        for i, r in enumerate(obs_rows):
+            if r == -1:
+                dV_dVgen[i] = 1.0
+            else:
+                dV_dVgen[i] = dV_full[r]
+
+        return dV_dVgen, obs_map
+
+    def compute_dV_dVgen_matrix(
+        self,
+        gen_bus_indices_pp: List[int],
+        observation_bus_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """
+        Compute observation-bus voltage sensitivities for multiple PV generators.
+
+        Parameters
+        ----------
+        gen_bus_indices_pp : List[int]
+            Pandapower bus indices of PV generator buses.
+        observation_bus_indices : List[int]
+            Pandapower bus indices where voltages are observed.
+
+        Returns
+        -------
+        dV_dVgen : NDArray[np.float64]
+            Matrix of shape ``(n_obs, n_gen)`` [p.u. / p.u.].
+        observation_bus_mapping : List[int]
+            Ordered list of observation bus indices actually included.
+        gen_bus_mapping : List[int]
+            Ordered list of generator bus indices actually included.
+        """
+        # Use first generator to establish observation bus mapping
+        first_ppc = pp_bus_to_ppc_bus(self.net, gen_bus_indices_pp[0])
+        _, obs_map = self.compute_dV_dVgen(first_ppc, observation_bus_indices)
+
+        n_obs = len(obs_map)
+        n_gen = len(gen_bus_indices_pp)
+        result = np.zeros((n_obs, n_gen))
+        gen_map: List[int] = []
+
+        for j, gen_bus_pp in enumerate(gen_bus_indices_pp):
+            gen_bus_ppc = pp_bus_to_ppc_bus(self.net, gen_bus_pp)
+            dV, om = self.compute_dV_dVgen(gen_bus_ppc, observation_bus_indices)
+            # om should match obs_map (same observation buses)
+            result[:, j] = dV
+            gen_map.append(gen_bus_pp)
+
+        return result, obs_map, gen_map
+
     # =========================================================================
     # B. Bus Voltage to OLTC Position Sensitivity (Eq. 11 PSCC 2026)
     # =========================================================================

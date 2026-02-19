@@ -75,22 +75,7 @@ class DSOControllerConfig:
         Higher values make the controller track the TSO's reactive
         power setpoints more aggressively.  Must be balanced against
         the change penalty ``g_w``: the effective per-iteration step
-        scales as ``α · g_q / g_w``.  Default 1.0 (unweighted).
-    g_handoff : float
-        Gain for error-based DER-to-shunt handoff.  Adds a gradient
-        on each shunt that is proportional to the Q-tracking error at
-        its interface transformer, encouraging shunts to engage when
-        Q_error exceeds the dead-band.  Once engaged, a constant hold
-        gradient of magnitude ``g_handoff * q_dead_mvar`` resists
-        disengagement.  Must be large enough that the engagement
-        gradient bridges the gap between the Q-tracking gradient and
-        the switching threshold ``2 * g_w_shunt``.  Default 0.0
-        (disabled).
-    q_dead_mvar : float
-        Dead-band for shunt engagement [Mvar].  The handoff
-        engagement gradient is zero when Q_error at the interface is
-        below this threshold.  Also serves as the hold magnitude
-        multiplier once a shunt is engaged.  Default 20.0.
+        scales as ``g_q / g_w``.  Default 1.0 (unweighted).
     """
     der_bus_indices: List[int]
     oltc_trafo_indices: List[int]
@@ -103,8 +88,6 @@ class DSOControllerConfig:
     v_max_pu: float = 1.1
     i_max_pu: float = 1.0
     g_q: float = 1.0
-    g_handoff: float = 0.0
-    q_dead_mvar: float = 20.0
 
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
@@ -185,11 +168,17 @@ class DSOController(BaseOFOController):
         )
         
         self.config = config
-        
+
         # Initialise Q setpoints to zero (no tracking until TSO sends message)
         n_interfaces = len(config.interface_trafo_indices)
         self.q_setpoint_mvar = np.zeros(n_interfaces)
-        
+
+        # Shunt bound overrides from Reserve Observer.
+        # Keys: shunt index (0-based within shunt vector).
+        # Values: (lower, upper) bound override for that shunt.
+        # Cleared after each step.
+        self._shunt_bound_overrides: Dict[int, tuple] = {}
+
         # Cache the sensitivity matrix structure
         self._H_cache: Optional[NDArray[np.float64]] = None
         self._H_mappings: Optional[Dict] = None
@@ -296,10 +285,24 @@ class DSOController(BaseOFOController):
             q_max_mvar=q_interface_max,
         )
     
+    def set_shunt_overrides(self, overrides: Dict[int, tuple]) -> None:
+        """
+        Set shunt bound overrides from the Reserve Observer.
+
+        Parameters
+        ----------
+        overrides : Dict[int, tuple]
+            Mapping from shunt index (0-based within the DSO shunt
+            vector) to ``(lower, upper)`` bound.  These are applied
+            in :meth:`_compute_input_bounds` and cleared after each
+            call to :meth:`step`.
+        """
+        self._shunt_bound_overrides = overrides.copy()
+
     # =========================================================================
     # Implementation of abstract methods
     # =========================================================================
-    
+
     def _get_control_structure(self) -> Tuple[int, int, List[int]]:
         """Define the control variable structure."""
         n_der = len(self.config.der_bus_indices)
@@ -430,7 +433,13 @@ class DSOController(BaseOFOController):
         state_min, state_max = self.actuator_bounds.get_shunt_state_bounds()
         u_lower[n_der + n_oltc:] = state_min.astype(np.float64)
         u_upper[n_der + n_oltc:] = state_max.astype(np.float64)
-        
+
+        # Apply Reserve Observer overrides
+        shunt_offset = n_der + n_oltc
+        for j, (lo, hi) in self._shunt_bound_overrides.items():
+            u_lower[shunt_offset + j] = lo
+            u_upper[shunt_offset + j] = hi
+
         return u_lower, u_upper
     
     def _get_output_limits(self) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
@@ -506,98 +515,6 @@ class DSOController(BaseOFOController):
         # Compute gradient: ∇f = 2 · g_q · (Q - Q_set)^T · ∂Q/∂u
         grad_f = 2.0 * self.config.g_q * (q_error @ dQ_du)
 
-        # ── DER-to-shunt handoff ──
-        #
-        # Sensitivity-based mechanism to engage shunts and free DER
-        # resources.  Uses the H matrix to compute each DER's Q
-        # contribution at each interface transformer, then decides
-        # whether the corresponding shunt should engage.
-        #
-        # Part 1 — Shunt engagement (OFF → ON):
-        #   Compute the total DER Q contribution at interface j:
-        #     q_der_at_j = H[j, :n_der] @ Q_DER_current
-        #   When |q_der_at_j| > q_dead_mvar, the DERs are burdened
-        #   at this interface.  Add a gradient on the shunt to engage.
-        #
-        #   For a reactor (q_step > 0): DERs typically carry negative Q
-        #   (absorbing).  q_der_at_j < -q_dead → excess = |q_der_at_j| - q_dead.
-        #   Gradient on shunt: -= g_handoff * excess  (negative → engage).
-        #
-        # Part 2 — Shunt holding (ON → resist OFF):
-        #   When a shunt is ON, add a constant hold gradient that resists
-        #   disengagement.  Magnitude = g_handoff * q_dead_mvar.
-        #
-        # Key sizing: g_handoff should be large enough that Part 1 bridges
-        # the gap between the Q-tracking gradient (~200-500) and the
-        # switching threshold 2*g_w_shunt (e.g. 1000 for g_w=500).
-        # With g_handoff=100, q_dead=5, DER burden=10 → excess=5,
-        # engagement grad = -500.  Combined with tracking ~-300 → -800.
-        # Need g_handoff high enough or q_dead low enough.
-        if self.config.g_handoff > 0.0 and self._u_current is not None:
-            n_der = len(self.config.der_bus_indices)
-            n_oltc = len(self.config.oltc_trafo_indices)
-            n_shunt = len(self.config.shunt_bus_indices)
-
-            # H-matrix rows for interfaces, columns for DERs
-            H = self._build_sensitivity_matrix()
-            q_der_current = self._u_current[:n_der]
-
-            for j in range(min(n_shunt, n_interfaces)):
-                shunt_idx = n_der + n_oltc + j
-                s_shunt_j = self._u_current[shunt_idx]
-                q_step_j = self.config.shunt_q_steps_mvar[j]
-
-                # DER Q contribution at interface j (sensitivity-weighted)
-                dQ_dQder_j = H[j, :n_der]
-                q_der_at_j = float(dQ_dQder_j @ q_der_current)
-
-                if q_step_j > 0:  # Reactor shunt
-                    if s_shunt_j < 0.5:
-                        # Part 1: Engagement — DERs carry negative Q
-                        # (absorbing), so q_der_at_j < 0 when burdened.
-                        excess = max(-q_der_at_j - self.config.q_dead_mvar, 0.0)
-                        grad_f[shunt_idx] -= self.config.g_handoff * excess
-                    else:
-                        # Part 2: Hold — resist disengagement while ON.
-                        grad_f[shunt_idx] -= self.config.g_handoff * self.config.q_dead_mvar
-
-                elif q_step_j < 0:  # Capacitor shunt
-                    if s_shunt_j < 0.5:
-                        # Part 1: Engagement — DERs carry positive Q
-                        # (injecting), so q_der_at_j > 0 when burdened.
-                        excess = max(q_der_at_j - self.config.q_dead_mvar, 0.0)
-                        grad_f[shunt_idx] += self.config.g_handoff * excess
-                    else:
-                        # Part 2: Hold — resist disengagement while ON.
-                        grad_f[shunt_idx] += self.config.g_handoff * self.config.q_dead_mvar
-
-        # --- Diagnostic: print handoff gradient breakdown ---
-        if self.config.g_handoff > 0.0 and self._u_current is not None:
-            n_der_d = len(self.config.der_bus_indices)
-            n_oltc_d = len(self.config.oltc_trafo_indices)
-            n_shunt_d = len(self.config.shunt_bus_indices)
-            shunt_grad = grad_f[n_der_d + n_oltc_d : n_der_d + n_oltc_d + n_shunt_d]
-            q_track_grad = 2.0 * self.config.g_q * (q_error @ dQ_du)
-            shunt_track = q_track_grad[n_der_d + n_oltc_d : n_der_d + n_oltc_d + n_shunt_d]
-            shunt_states = np.round(self._u_current[n_der_d + n_oltc_d:
-                                                     n_der_d + n_oltc_d + n_shunt_d]).astype(int)
-            handoff_grad = shunt_grad - shunt_track
-            # DER contribution at each interface
-            H_diag = self._build_sensitivity_matrix()
-            q_der_vals = self._u_current[:n_der_d]
-            q_der_iface = np.array([float(H_diag[j, :n_der_d] @ q_der_vals)
-                                    for j in range(min(n_shunt_d, n_interfaces))])
-            print(f"  [HANDOFF] s_shunt={shunt_states}  Q_err={np.array2string(q_error[:n_interfaces], precision=1)}  "
-                  f"Q_DER@iface={np.array2string(q_der_iface, precision=1)}")
-            print(f"  [HANDOFF] total={np.array2string(shunt_grad, precision=0)}  "
-                  f"track={np.array2string(shunt_track, precision=0)}  "
-                  f"handoff={np.array2string(handoff_grad, precision=0)}  "
-                  f"threshold=±{2*np.max(np.asarray(self.params.g_w)[n_der_d+n_oltc_d:n_der_d+n_oltc_d+n_shunt_d]):.0f}")
-        # --- End diagnostic ---
-
-        # ToDo: Test: implement a "keep voltage at 1.05 p.u." gradient here for DSO!
-        #grad_f += 2.0 * self.config.g_v * (v_error @ dV_du)
-
         return grad_f
 
     def _build_sensitivity_matrix(self) -> NDArray[np.float64]:
@@ -669,6 +586,9 @@ class DSOController(BaseOFOController):
         rescales shunt columns of the cached H matrix using the measured
         bus voltages.  The V² correction accounts for the constant-susceptance
         nature of shunt devices (MSR / MSC).
+
+        After the step, shunt bound overrides from the Reserve Observer
+        are cleared so they must be re-set each iteration.
         """
         # Ensure H is built
         if self._H_cache is None:
@@ -678,7 +598,10 @@ class DSOController(BaseOFOController):
             self._H_cache = self._sensitivity_updater.update(
                 measurement, measurement.iteration
             )
-        return super().step(measurement)
+        result = super().step(measurement)
+        # Clear one-shot overrides
+        self._shunt_bound_overrides.clear()
+        return result
 
     def invalidate_sensitivity_cache(self) -> None:
         """Invalidate the cached sensitivity matrix."""

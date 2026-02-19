@@ -595,6 +595,9 @@ class DSOController(BaseOFOController):
                   f"threshold=±{2*np.max(np.asarray(self.params.g_w)[n_der_d+n_oltc_d:n_der_d+n_oltc_d+n_shunt_d]):.0f}")
         # --- End diagnostic ---
 
+        # ToDo: Test: implement a "keep voltage at 1.05 p.u." gradient here for DSO!
+        #grad_f += 2.0 * self.config.g_v * (v_error @ dV_du)
+
         return grad_f
 
     def _build_sensitivity_matrix(self) -> NDArray[np.float64]:

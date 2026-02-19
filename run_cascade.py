@@ -279,7 +279,7 @@ def run_cascade(
     n_minutes: int = 120,
     tso_period_min: int = 3,
     dso_period_min: int = 1,
-    start_time: datetime = datetime(2016, 5, 1, 11, 0),
+    start_time: datetime = datetime(2016, 5, 15, 10, 0),
     profiles_csv: str = DEFAULT_PROFILES_CSV,
     verbose: bool = True,
     live_plot: bool = True,
@@ -561,14 +561,14 @@ def run_cascade(
         np.full(len(tso_der_buses),   0.01),   # Q_DER  (continuous): 1 Mvar costs 0.01/0.01^2=100 -> moderate
         np.full(len(pcc_trafos),      0.01),   # Q_PCC_set (continuous): same scale as DER Q
         np.full(len(tso_gen_indices), 100000),   # V_gen  (continuous): 0.01 p.u. costs 10000/0.01^2=1e8 -> very cautious
-        np.full(len(tso_oltc),        1000),    # s_OLTC (integer, direct): 1-tap costs 2000
+        np.full(len(tso_oltc),        100),    # s_OLTC (integer, direct): 1-tap costs 2000
         np.full(len(tso_shunt_buses), 500),     # s_shunt (integer, direct): 1-step costs 500
     ])
     # DSO u = [Q_DER | s_OLTC | s_shunt]
     gw_dso = np.concatenate([
         np.full(len(dso_der_buses),   0.2),    # Q_DER (continuous): 1 Mvar costs 0.5/0.03^2~556 -> moderate damping
         np.full(len(dso_oltc),        100),   # s_OLTC (integer, direct): 1-tap costs 2000
-        np.full(len(dso_shunt_buses), 100),    # s_shunt (integer, direct): 1-step costs 200
+        np.full(len(dso_shunt_buses), 500),    # s_shunt (integer, direct): 1-step costs 200
     ])                                          #   Each 50 Mvar shunt step is a large discrete action.
                                                 #   A 1-step switch triggers when |grad| > 2*g_w = 400.
                                                 #   Observed Q-tracking gradient on shunts is O(200-950),
@@ -581,7 +581,7 @@ def run_cascade(
     # incentivise freeing up DER headroom via shunt/OLTC switching.
     gu_tso = np.zeros(len(gw_tso))       # TSO: no DER usage regularisation for now
     gu_dso = np.concatenate([
-        np.full(len(dso_der_buses),   0.1),  # Q_DER: light regularise toward zero
+        np.full(len(dso_der_buses),   10),  # Q_DER: light regularise toward zero
         np.full(len(dso_oltc),        0.0),   # s_OLTC: no usage penalty
         np.full(len(dso_shunt_buses), 0.0),   # s_shunt: no usage penalty
     ])
@@ -821,7 +821,7 @@ def print_summary(v_set: float, log: List[IterationRecord]):
 
 def main():
     for v_set in [1.04]:
-        result = run_cascade(v_setpoint_pu=v_set, n_minutes=180,
+        result = run_cascade(v_setpoint_pu=v_set, n_minutes=360,
                              tso_period_min=3, dso_period_min=1, verbose=True,
                              g_v=100000, g_q=1, use_profiles=False)
         print_summary(v_set, result.log)

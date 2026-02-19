@@ -36,6 +36,7 @@ from core.actuator_bounds import ActuatorBounds
 from controller.base_controller import OFOParameters, ControllerOutput
 from controller.tso_controller import TSOController, TSOControllerConfig
 from controller.dso_controller import DSOController, DSOControllerConfig
+from controller.reserve_observer import ReserveObserver, ReserveObserverConfig
 from core.message import SetpointMessage
 from core.profiles import load_profiles, snapshot_base_values, apply_profiles, DEFAULT_PROFILES_CSV
 from sensitivity.jacobian import JacobianSensitivities
@@ -446,16 +447,6 @@ def run_cascade(
         interface_trafo_indices=dso_iface_trafos,
         voltage_bus_indices=dso_v_buses, current_line_indices=dso_lines,
         g_q=g_q,
-        g_handoff=0,       # Sensitivity-based shunt engagement/hold gain
-                               #   Part 1 (engage): grad = -g_handoff * max(|Q_DER@iface| - q_dead, 0)
-                               #     DER Q contribution at interface is H[j,:n_der] @ Q_DER.
-                               #     With 6 DERs at ~-5 Mvar and H~0.1-0.3 → Q_DER@iface ~ -3 to -8.
-                               #     At Q_DER@iface=-5, q_dead=2: excess=3, grad=-600
-                               #     Combined with tracking ~-300 → total ~-900 (close to threshold=1000)
-                               #   Part 2 (hold): grad = -g_handoff * q_dead = -400
-        q_dead_mvar=0,      # Dead-band [Mvar]: shunt engages only when
-                               # DER Q contribution at interface exceeds this.
-                               # Also scales hold gradient (g_handoff * q_dead).
     )
 
     # -- Live plotter (created here because configs are now available)
@@ -497,96 +488,52 @@ def run_cascade(
     )
 
     # 6) Create controllers
-    # ─────────────────────────────────────────────────────────────────
-    # Per-actuator-type g_w weights on the diagonal of G_w.
-    #
-    # The MIQP objective is:  min  w^T G_w w  +  grad_f^T w
-    # where  G_w = diag(g_w + α² g_u).
-    #
-    # For a single variable the unconstrained optimum is:
-    #     w* = −grad_f / (2 g_w)
-    #     Δu  = α · w*
-    #
-    # We choose g_w per actuator type so that the resulting per-step
-    # change Δu is physically reasonable:
-    #
-    #   • Q_DER  / Q_PCC_set  [Mvar]:  a few Mvar per TSO step
-    #   • V_gen  [p.u.]:               ≈ 0.001 p.u. per TSO step
-    #   • s_OLTC [taps]:               ≤ 1 tap per TSO step
-    #   • s_shunt [states]:            ≤ 1 state per TSO step
-    # ─────────────────────────────────────────────────────────────────
-    # TSO u = [Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt]
-    #
-    # g_w is the diagonal weight on w^T G_w w in the MIQP.  Larger g_w
-    # means smaller per-step change for that actuator.  We calibrate
-    # g_w so that alpha * |grad| / (2*g_w) gives a physically sensible
-    # per-step change for each actuator type.
     # =====================================================================
     #  g_w calibration (MIQP quadratic weighting on control changes)
     # =====================================================================
     #
-    # The MIQP objective has a term  w^T G_w w  where G_w = diag(g_w).
+    # With alpha = 1, continuous and integer variables are treated
+    # identically: w = Δu (direct change).  The MIQP objective is
     #
-    #   Continuous variables (DER Q, V_gen, Q_PCC_set):
-    #     w_c = Du / alpha  (alpha-scaled micro-step).
-    #     A 1 Mvar DER Q change means w_c = 1/alpha.
-    #     MIQP cost for that change: g_w * (1/alpha)^2.
-    #     Guideline: set g_w so that 1-Mvar costs O(1).
-    #       -> g_w ~ alpha^2  (e.g. alpha=0.03 -> g_w ~ 0.001)
-    #     Larger g_w = slower, more cautious DER Q changes.
+    #   min  w^T G_w w  +  grad_f^T w
     #
-    #   Integer variables (OLTCs, shunts):
-    #     w_i = Du  (direct state change, NOT scaled by alpha).
-    #     A 1-tap OLTC change means w_i = 1.
-    #     MIQP cost for that change: g_w * 1^2 = g_w.
-    #     Guideline: set g_w proportional to how "expensive" switching is.
+    # where G_w = diag(g_w + g_u).
     #
-    #   OLTC g_w sizing:
-    #     Typical Q-tracking gradient on OLTCs is O(500-3000).
-    #     The MIQP switches when  |grad| > 2*g_w  (from optimality).
-    #     To allow switching when gradient exceeds ~1000:
-    #       g_w_oltc ~ 500-2000.
-    #     Higher -> fewer tap changes, more stable but slower tracking.
+    # The unconstrained optimum for a single variable is:
+    #   w* = −grad_f / (2 * (g_w + g_u))
     #
-    #   Shunt g_w sizing:
-    #     Each shunt step is 50 Mvar — a large discrete action.
-    #     The cooldown mechanism (base_controller._int_cooldown) prevents
-    #     chattering, so g_w can be moderate.
-    #     Typical Q-tracking gradient on shunts is O(500-2000).
-    #     g_w_shunt ~ 100-500 allows engagement when gradient is strong
-    #     but prevents switching on small fluctuations.
+    # So g_w directly controls the step size in physical units:
+    #   • Q_DER / Q_PCC_set [Mvar]: g_w=100 → 1 Mvar costs 100
+    #   • V_gen [p.u.]:             g_w=1e9 → very cautious AVR moves
+    #   • s_OLTC [taps]:            g_w=100 → 1-tap costs 100
+    #   • s_shunt [states]:         g_w=500 → 1-step costs 500
     #
     # =====================================================================
+    # TSO u = [Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt]
     gw_tso = np.concatenate([
-        np.full(len(tso_der_buses),   0.01),   # Q_DER  (continuous): 1 Mvar costs 0.01/0.01^2=100 -> moderate
-        np.full(len(pcc_trafos),      0.01),   # Q_PCC_set (continuous): same scale as DER Q
-        np.full(len(tso_gen_indices), 100000),   # V_gen  (continuous): 0.01 p.u. costs 10000/0.01^2=1e8 -> very cautious
-        np.full(len(tso_oltc),        100),    # s_OLTC (integer, direct): 1-tap costs 2000
-        np.full(len(tso_shunt_buses), 500),     # s_shunt (integer, direct): 1-step costs 500
+        np.full(len(tso_der_buses),   10),      # Q_DER: 1 Mvar costs 100
+        np.full(len(pcc_trafos),      10),      # Q_PCC_set: same scale as DER Q
+        np.full(len(tso_gen_indices), 1e6),      # V_gen: very cautious AVR moves
+        np.full(len(tso_oltc),        100),      # s_OLTC: 1-tap costs 100
+        np.full(len(tso_shunt_buses), 500),      # s_shunt: 1-step costs 500
     ])
     # DSO u = [Q_DER | s_OLTC | s_shunt]
     gw_dso = np.concatenate([
-        np.full(len(dso_der_buses),   0.2),    # Q_DER (continuous): 1 Mvar costs 0.5/0.03^2~556 -> moderate damping
-        np.full(len(dso_oltc),        100),   # s_OLTC (integer, direct): 1-tap costs 2000
-        np.full(len(dso_shunt_buses), 500),    # s_shunt (integer, direct): 1-step costs 200
-    ])                                          #   Each 50 Mvar shunt step is a large discrete action.
-                                                #   A 1-step switch triggers when |grad| > 2*g_w = 400.
-                                                #   Observed Q-tracking gradient on shunts is O(200-950),
-                                                #   so g_w=200 lets shunts engage at moderate tracking
-                                                #   errors (~3-5 Mvar per interface).
-                                                #   Combined with _int_cooldown = 5, this prevents rapid
-                                                #   on/off chattering while allowing engagement when the
-                                                #   DER Q burden exceeds what's comfortable.
+        np.full(len(dso_der_buses),   10),      # Q_DER: 1 Mvar costs 500
+        np.full(len(dso_oltc),        100),      # s_OLTC: 1-tap costs 100
+        np.full(len(dso_shunt_buses), 500),      # s_shunt: 1-step costs 500
+    ])
     # Per-actuator g_u: penalises DER Q *level* (deviation from zero) to
     # incentivise freeing up DER headroom via shunt/OLTC switching.
-    gu_tso = np.zeros(len(gw_tso))       # TSO: no DER usage regularisation for now
+    # With alpha=1 the g_u value adds directly to the G_w diagonal.
+    gu_tso = np.zeros(len(gw_tso))       # TSO: no DER usage regularisation
     gu_dso = np.concatenate([
-        np.full(len(dso_der_buses),   10),  # Q_DER: light regularise toward zero
-        np.full(len(dso_oltc),        0.0),   # s_OLTC: no usage penalty
-        np.full(len(dso_shunt_buses), 0.0),   # s_shunt: no usage penalty
+        np.full(len(dso_der_buses),   1.0),      # Q_DER: regularise toward zero
+        np.full(len(dso_oltc),        0.0),      # s_OLTC: no usage penalty
+        np.full(len(dso_shunt_buses), 0.0),      # s_shunt: no usage penalty
     ])
-    ofo_tso = OFOParameters(alpha=0.01, g_w=gw_tso, g_z=1e10, g_u=gu_tso)
-    ofo_dso = OFOParameters(alpha=0.02, g_w=gw_dso, g_z=1e10, g_u=gu_dso)
+    ofo_tso = OFOParameters(alpha=1.0, g_w=gw_tso, g_z=1e10, g_u=gu_tso)
+    ofo_dso = OFOParameters(alpha=1.0, g_w=gw_dso, g_z=1e10, g_u=gu_dso)
 
     ns = _network_state(net)
 
@@ -594,6 +541,14 @@ def run_cascade(
                         JacobianSensitivities(net))
     dso = DSOController(dso_id, ofo_dso, dso_config, ns, dso_bounds,
                         JacobianSensitivities(net))
+
+    # Reserve Observer: monitors aggregate DER Q and forces shunt
+    # engagement when DER burden exceeds the threshold.
+    reserve_obs = ReserveObserver(ReserveObserverConfig(
+        q_threshold_mvar=15.0,
+        q_release_mvar=5.0,
+        shunt_q_steps_mvar=dso_shunt_q,
+    ))
 
     # 7) Initialise actuators to a neutral operating point
     #    - DER Q = 0, TSO OLTC = 0, shunts = 0
@@ -704,6 +659,23 @@ def run_cascade(
         if run_dso:
             try:
                 dso_meas = _measure_dso(net, dso_config, minute)
+
+                # Reserve Observer: check DER Q burden and override shunt bounds
+                if dso._u_current is not None and len(dso_config.shunt_bus_indices) > 0:
+                    n_dd = len(dso_config.der_bus_indices)
+                    n_do = len(dso_config.oltc_trafo_indices)
+                    n_ds = len(dso_config.shunt_bus_indices)
+                    der_q = dso._u_current[:n_dd]
+                    shunt_st = np.round(dso._u_current[n_dd + n_do:n_dd + n_do + n_ds]).astype(np.int64)
+                    obs_result = reserve_obs.evaluate(der_q, shunt_st)
+                    overrides = {}
+                    for idx in obs_result.force_engage:
+                        overrides[idx] = (1, 1)   # force shunt ON
+                    for idx in obs_result.force_release:
+                        overrides[idx] = (0, 0)   # force shunt OFF
+                    if overrides:
+                        dso.set_shunt_overrides(overrides)
+
                 dso_out = dso.step(dso_meas)
                 u = dso_out.u_new
                 n_dd = len(dso_config.der_bus_indices)

@@ -57,8 +57,10 @@ class OFOParameters:
     g_w : float or NDArray[np.float64]
         Weight for control variable changes (w^T G_w w term).
         Penalises large changes in setpoints per iteration.
-        Either a scalar (uniform for all variables) or an array of
-        length n_total with per-variable diagonal weights.
+        Either a scalar (uniform for all variables), a 1-D array of
+        length n_total with per-variable diagonal weights, or a 2-D
+        symmetric (n_total x n_total) matrix for coupled weights
+        (e.g. OLTC cross-penalties).
     g_u : float or NDArray[np.float64]
         Weight for control variable usage (regularisation).
         Penalises deviation from zero/neutral setpoints.
@@ -85,8 +87,12 @@ class OFOParameters:
         if self.alpha <= 0:
             raise ValueError(f"alpha must be positive, got {self.alpha}")
         g_w_arr = np.asarray(self.g_w)
-        if np.any(g_w_arr < 0):
-            raise ValueError(f"g_w must be non-negative, got {self.g_w}")
+        if g_w_arr.ndim <= 1 and np.any(g_w_arr < 0):
+            raise ValueError(f"g_w diagonal must be non-negative, got {self.g_w}")
+        if g_w_arr.ndim == 2 and g_w_arr.shape[0] != g_w_arr.shape[1]:
+            raise ValueError(
+                f"g_w matrix must be square, got shape {g_w_arr.shape}"
+            )
         g_u_arr = np.asarray(self.g_u)
         if np.any(g_u_arr < 0):
             raise ValueError(f"g_u must be non-negative, got {self.g_u}")
@@ -303,7 +309,7 @@ class BaseOFOController(ABC):
         # Large discrete steps (e.g. 50 Mvar shunts) need enough time for
         # the continuous DERs to absorb the transient before the next
         # switching decision is made.
-        self._int_cooldown = 5   # number of iterations to lock after switching
+        self._int_cooldown = 3  # number of iterations to lock after switching
         self._int_lock_until: dict[int, int] = {}   # idx -> iteration when lock expires
     
     def step(self, measurement: Measurement) -> ControllerOutput:

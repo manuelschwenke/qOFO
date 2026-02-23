@@ -32,7 +32,7 @@ warnings.filterwarnings(
 from network.build_tuda_net import build_tuda_net, NetworkMetadata
 from core.network_state import NetworkState
 from core.measurement import Measurement
-from core.actuator_bounds import ActuatorBounds
+from core.actuator_bounds import ActuatorBounds, GeneratorParameters
 from controller.base_controller import OFOParameters, ControllerOutput
 from controller.tso_controller import TSOController, TSOControllerConfig
 from controller.dso_controller import DSOController, DSOControllerConfig
@@ -105,9 +105,13 @@ def _measure_tso(net: pp.pandapowerNet, cfg: TSOControllerConfig, it: int) -> Me
         if mask.any():
             shunt_states[k] = int(net.shunt.at[net.shunt.index[mask][0], "step"])
 
-    # Generator AVR
+    # Generator AVR setpoint, P and Q from power flow
     gen_vm = np.array([float(net.gen.at[g, "vm_pu"])
                         for g in cfg.gen_indices], dtype=np.float64)
+    gen_p = np.array([float(net.res_gen.at[g, "p_mw"])
+                       for g in cfg.gen_indices], dtype=np.float64)
+    gen_q = np.array([float(net.res_gen.at[g, "q_mvar"])
+                       for g in cfg.gen_indices], dtype=np.float64)
 
     return Measurement(
         iteration=it, bus_indices=all_bus, voltage_magnitudes_pu=vm,
@@ -121,6 +125,7 @@ def _measure_tso(net: pp.pandapowerNet, cfg: TSOControllerConfig, it: int) -> Me
         shunt_indices=np.array(cfg.shunt_bus_indices, dtype=np.int64),
         shunt_states=shunt_states,
         gen_indices=np.array(cfg.gen_indices, dtype=np.int64), gen_vm_pu=gen_vm,
+        gen_p_mw=gen_p, gen_q_mvar=gen_q,
     )
 
 
@@ -234,6 +239,30 @@ def _apply_dso(net: pp.pandapowerNet, out: ControllerOutput, cfg: DSOControllerC
 A2S = lambda a: np.array2string(a, precision=2, suppress_small=True)
 A3S = lambda a: np.array2string(a, precision=3, suppress_small=True)
 
+
+@dataclass
+class ContingencyEvent:
+    """
+    A scheduled network contingency (line trip or generator outage).
+
+    Parameters
+    ----------
+    minute : int
+        Simulation minute at which the event occurs.
+    element_type : str
+        Pandapower element table: ``"line"`` or ``"gen"``.
+    element_index : int
+        Row index in the corresponding ``net.<element_type>`` table.
+    action : str
+        ``"trip"`` sets ``in_service = False``;
+        ``"restore"`` sets ``in_service = True``.
+    """
+    minute: int
+    element_type: str       # "line" or "gen"
+    element_index: int
+    action: str = "trip"    # "trip" | "restore"
+
+
 @dataclass
 class IterationRecord:
     minute: int
@@ -261,6 +290,11 @@ class IterationRecord:
     plant_tn_voltages_pu: Optional[NDArray[np.float64]] = None
     plant_dn_voltages_pu: Optional[NDArray[np.float64]] = None
     tso_q_gen_mvar: Optional[NDArray[np.float64]] = None  # synchronous gen Q output
+    # Penalty terms (computed from plant measurements after PF)
+    tso_v_penalty: Optional[float] = None    # g_v * sum((V - V_set)^2)
+    dso_q_penalty: Optional[float] = None    # g_q * sum((Q - Q_set)^2)
+    # Contingency events that fired this minute (human-readable descriptions)
+    contingency_events: Optional[List[str]] = None
 
 
 # =============================================================================
@@ -288,6 +322,9 @@ def run_cascade(
     g_v: float = 1000.0,
     g_q: float = 1.0,
     use_profiles: bool = True,
+    enable_reserve_observer: bool = False,
+    gw_oltc_cross_tso: float = 0.0,
+    gw_oltc_cross_dso: float = 0.0,
 ) -> CascadeResult:
     """
     Run cascaded TSO-DSO OFO on a combined network.
@@ -317,6 +354,21 @@ def run_cascade(
         profiles each minute.  If ``False``, the operating point
         stays fixed at the initial PF solution — useful for
         debugging convergence without profile disturbances.
+    enable_reserve_observer : bool, optional
+        If ``True`` (default), the Reserve Observer monitors per-interface
+        DER Q contributions and forces shunt engagement/release at
+        tertiary windings.  Set to ``False`` to disable the observer
+        entirely (no shunt overrides will be applied).
+    gw_oltc_cross_tso : float, optional
+        Cross-coupling weight for the TSO OLTC sub-block in G_w.
+        Penalises *simultaneous* OLTC switching via
+        ``g_cross · (Σ_i w_i)^2``.  Adds ``+g_cross`` to every
+        element of the OLTC sub-block (diagonal and off-diagonal),
+        producing a PSD rank-1 update ``g_cross · 𝟏𝟏^T``.  Set to 0
+        for purely diagonal (uncoupled) penalties.  Default: 0.0.
+    gw_oltc_cross_dso : float, optional
+        Cross-coupling weight for the DSO OLTC sub-block.
+        Same semantics as *gw_oltc_cross_tso*.  Default: 0.0.
     """
 
     if verbose:
@@ -327,7 +379,7 @@ def run_cascade(
         print("=" * 72)
 
     # 1) Build combined network
-    net, meta = build_tuda_net(ext_grid_vm_pu=1.05, pv_nodes=True)
+    net, meta = build_tuda_net(ext_grid_vm_pu=v_setpoint_pu, pv_nodes=True)
     pp.runpp(net, run_control=True, calculate_voltage_angles=True)
     if hasattr(net, 'controller') and len(net.controller) > 0:
         net.controller.drop(net.controller.index, inplace=True)
@@ -441,12 +493,14 @@ def run_cascade(
         v_setpoints_pu=v_setpoints, g_v=g_v,
         gen_indices=tso_gen_indices, gen_bus_indices=tso_gen_bus_indices,
     )
+    dso_v_setpoints = np.full(len(dso_v_buses), v_setpoint_pu)
     dso_config = DSOControllerConfig(
         der_bus_indices=dso_der_buses, oltc_trafo_indices=dso_oltc,
         shunt_bus_indices=dso_shunt_buses, shunt_q_steps_mvar=dso_shunt_q,
         interface_trafo_indices=dso_iface_trafos,
         voltage_bus_indices=dso_v_buses, current_line_indices=dso_lines,
         g_q=g_q,
+        v_setpoints_pu=dso_v_setpoints, g_v=10000,
     )
 
     # -- Live plotter (created here because configs are now available)
@@ -466,6 +520,20 @@ def run_cascade(
                 np.array([p_max[b] for b in buses], dtype=np.float64))
 
     tso_s, tso_p = _der_bounds(tso_der_buses)
+
+    # Generator capability parameters (Milano §12.2.1, turbo-generator defaults)
+    tso_gen_params = [
+        GeneratorParameters(
+            s_rated_mva=float(net.gen.at[g, "sn_mva"]),
+            p_max_mw=float(net.gen.at[g, "p_mw"]),
+            xd_pu=1.2,           # typical direct-axis synchronous reactance
+            i_f_max_pu=2.65,     # typical max field current (turbo-gen, eq. 12.10)
+            beta=0.15,           # under-excitation slope (Milano p. 293)
+            q0_pu=0.4,           # under-excitation offset (Milano p. 293)
+        )
+        for g in tso_gen_indices
+    ]
+
     tso_bounds = ActuatorBounds(
         der_indices=np.array(tso_der_buses, dtype=np.int64),
         der_s_rated_mva=tso_s, der_p_max_mw=tso_p,
@@ -474,6 +542,7 @@ def run_cascade(
         oltc_tap_max=np.array([int(net.trafo.at[t, "tap_max"]) for t in tso_oltc], dtype=np.int64),
         shunt_indices=np.array(tso_shunt_buses, dtype=np.int64),
         shunt_q_mvar=np.array(tso_shunt_q, dtype=np.float64),
+        gen_params=tso_gen_params,
     )
 
     dso_s, dso_p = _der_bounds(dso_der_buses)
@@ -510,30 +579,71 @@ def run_cascade(
     #
     # =====================================================================
     # TSO u = [Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt]
-    gw_tso = np.concatenate([
-        np.full(len(tso_der_buses),   10),      # Q_DER: 1 Mvar costs 100
-        np.full(len(pcc_trafos),      10),      # Q_PCC_set: same scale as DER Q
-        np.full(len(tso_gen_indices), 1e6),      # V_gen: very cautious AVR moves
-        np.full(len(tso_oltc),        100),      # s_OLTC: 1-tap costs 100
-        np.full(len(tso_shunt_buses), 500),      # s_shunt: 1-step costs 500
+    gw_tso_diag = np.concatenate([
+        np.full(len(tso_der_buses),   0.5),        # Q_DER: moderate TS-DER damping
+        np.full(len(pcc_trafos),      0.5),        # Q_PCC_set: slow PCC setpoint moves
+        np.full(len(tso_gen_indices), 2e7),      # V_gen: very cautious AVR moves
+        np.full(len(tso_oltc),        50),      # s_OLTC: expensive tap switching
+        np.full(len(tso_shunt_buses), 500),      # s_shunt: expensive shunt switching
     ])
     # DSO u = [Q_DER | s_OLTC | s_shunt]
-    gw_dso = np.concatenate([
-        np.full(len(dso_der_buses),   10),      # Q_DER: 1 Mvar costs 500
-        np.full(len(dso_oltc),        100),      # s_OLTC: 1-tap costs 100
-        np.full(len(dso_shunt_buses), 500),      # s_shunt: 1-step costs 500
+    gw_dso_diag = np.concatenate([
+        np.full(len(dso_der_buses),   3),        # Q_DER: damped DER response
+        np.full(len(dso_oltc),        50),     # s_OLTC: very expensive 3W tap switching
+        np.full(len(dso_shunt_buses), 500),     # s_shunt: shunt switching cost
     ])
+
+    # Build G_w matrices — full 2-D if OLTC cross-coupling is requested,
+    # otherwise keep as 1-D diagonal vector (cheaper for solver).
+    #
+    # Cross-coupling penalises *simultaneous* OLTC switching:
+    #
+    #   g_cross · (Σ_i w_i)²  =  g_cross · Σ_i Σ_j w_i · w_j
+    #
+    # This adds +g_cross to EVERY element (diagonal AND off-diagonal)
+    # of the OLTC sub-block.  The resulting sub-block is
+    #
+    #   G_oltc = diag(d) + g_cross · 𝟏𝟏ᵀ
+    #
+    # which is PSD (rank-1 update of a positive diagonal).  Eigenvalues
+    # are  d  (multiplicity n−1)  and  d + n·g_cross  (multiplicity 1).
+    #
+    # Effect on switching decisions:
+    #   • Single OLTC taps by ±1:  cost = d + g_cross  (modest extra)
+    #   • Two OLTCs both tap ±1:   cost = 2d + 4·g_cross  (heavy extra)
+    # So the solver is steered toward tapping one OLTC at a time.
+    def _build_Gw(diag_vec, n_pre_oltc, n_oltc, cross_weight):
+        """Return 1-D diag vector or full 2-D G_w matrix."""
+        if cross_weight == 0.0 or n_oltc <= 1:
+            return diag_vec          # no coupling needed
+        n = len(diag_vec)
+        G = np.diag(diag_vec.copy())
+        i0 = n_pre_oltc
+        i1 = n_pre_oltc + n_oltc
+        # Add g_cross · 𝟏𝟏ᵀ to the OLTC sub-block (all elements)
+        G[i0:i1, i0:i1] += cross_weight
+        return G
+
+    n_pre_oltc_tso = len(tso_der_buses) + len(pcc_trafos) + len(tso_gen_indices)
+    gw_tso = _build_Gw(gw_tso_diag, n_pre_oltc_tso, len(tso_oltc),
+                        gw_oltc_cross_tso)
+
+    n_pre_oltc_dso = len(dso_der_buses)
+    gw_dso = _build_Gw(gw_dso_diag, n_pre_oltc_dso, len(dso_oltc),
+                        gw_oltc_cross_dso)
+
+
     # Per-actuator g_u: penalises DER Q *level* (deviation from zero) to
     # incentivise freeing up DER headroom via shunt/OLTC switching.
     # With alpha=1 the g_u value adds directly to the G_w diagonal.
-    gu_tso = np.zeros(len(gw_tso))       # TSO: no DER usage regularisation
+    gu_tso = np.zeros(len(gw_tso_diag))   # TSO: no DER usage regularisation
     gu_dso = np.concatenate([
-        np.full(len(dso_der_buses),   1.0),      # Q_DER: regularise toward zero
+        np.full(len(dso_der_buses),   0.01),      # Q_DER: regularise toward zero
         np.full(len(dso_oltc),        0.0),      # s_OLTC: no usage penalty
         np.full(len(dso_shunt_buses), 0.0),      # s_shunt: no usage penalty
     ])
-    ofo_tso = OFOParameters(alpha=1.0, g_w=gw_tso, g_z=1e10, g_u=gu_tso)
-    ofo_dso = OFOParameters(alpha=1.0, g_w=gw_dso, g_z=1e10, g_u=gu_dso)
+    ofo_tso = OFOParameters(alpha=1.0, g_w=gw_tso, g_z=1e12, g_u=gu_tso)
+    ofo_dso = OFOParameters(alpha=1.0, g_w=gw_dso, g_z=1e12, g_u=gu_dso)
 
     ns = _network_state(net)
 
@@ -542,11 +652,13 @@ def run_cascade(
     dso = DSOController(dso_id, ofo_dso, dso_config, ns, dso_bounds,
                         JacobianSensitivities(net))
 
-    # Reserve Observer: monitors aggregate DER Q and forces shunt
-    # engagement when DER burden exceeds the threshold.
+    # Reserve Observer: monitors per-interface DER Q contribution
+    # (Jacobian-weighted) and forces shunt engagement at the
+    # tertiary winding when the DER burden at that interface
+    # exceeds the threshold.  1:1 mapping between couplers and shunts.
     reserve_obs = ReserveObserver(ReserveObserverConfig(
-        q_threshold_mvar=15.0,
-        q_release_mvar=5.0,
+        q_threshold_mvar=40.0,
+        q_release_mvar=10.0,
         shunt_q_steps_mvar=dso_shunt_q,
     ))
 
@@ -561,7 +673,7 @@ def run_cascade(
     for t in tso_oltc:
         net.trafo.at[t, "tap_pos"] = 0
     for g in tso_gen_indices:
-        net.gen.at[g, "vm_pu"] = 1.05 #v_setpoint_pu
+        net.gen.at[g, "vm_pu"] = v_setpoint_pu #v_setpoint_pu
     for sb in tso_shunt_buses:
         mask = net.shunt["bus"] == sb
         if mask.any():
@@ -574,7 +686,7 @@ def run_cascade(
     # Use pandapower DiscreteTapControl to find the DSO OLTC positions that
     # regulate the 110 kV side to ~v_setpoint_pu, then remove the controllers.
     from pandapower.control import DiscreteTapControl
-    tol_pu = 0.005
+    tol_pu = 0.01
     for t3w in dso_oltc:
         DiscreteTapControl(
             net, element_index=t3w,
@@ -591,7 +703,14 @@ def run_cascade(
     if hasattr(net, "controller") and len(net.controller) > 0:
         net.controller.drop(net.controller.index, inplace=True)
 
-    # Initialise from converged PF
+    # Run a clean PF with the initial timestep (t=0) and neutral actuators
+    # so that the measurement used for initialise() is fully consistent
+    # with the actuator state set above (DER Q=0, OLTC=neutral, shunts=0).
+    if use_profiles:
+        apply_profiles(net, profiles, start_time)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+
+    # Initialise controller u_current from converged PF results
     tso.initialise(_measure_tso(net, tso_config, 0))
     dso.initialise(_measure_dso(net, dso_config, 0))
 
@@ -601,6 +720,42 @@ def run_cascade(
               f"{len(tso_gen_indices)} gen, {len(tso_shunt_buses)} shunt")
         print(f"  DSO: {len(dso_der_buses)} DER, {len(dso_oltc)} OLTC, "
               f"{len(dso_shunt_buses)} shunt")
+        if gw_oltc_cross_tso != 0.0:
+            n_o = len(tso_oltc)
+            eff_diag = 50 + gw_oltc_cross_tso
+            print(f"  TSO OLTC cross-coupling: g_cross={gw_oltc_cross_tso}, "
+                  f"eff. diag={eff_diag}, off-diag=+{gw_oltc_cross_tso}, "
+                  f"G_w shape={np.asarray(gw_tso).shape}")
+        if gw_oltc_cross_dso != 0.0:
+            n_o = len(dso_oltc)
+            eff_diag = 40 + gw_oltc_cross_dso
+            print(f"  DSO OLTC cross-coupling: g_cross={gw_oltc_cross_dso}, "
+                  f"eff. diag={eff_diag}, off-diag=+{gw_oltc_cross_dso}, "
+                  f"G_w shape={np.asarray(gw_dso).shape}")
+
+        # --- Print initialised u_current for both controllers ---
+        u_tso = tso.u_current
+        n_d = len(tso_config.der_bus_indices)
+        n_p = len(tso_config.pcc_trafo_indices)
+        n_g = len(tso_config.gen_indices)
+        n_o = len(tso_config.oltc_trafo_indices)
+        n_s = len(tso_config.shunt_bus_indices)
+        off = 0
+        print(f"  TSO u_init ({len(u_tso)} vars):")
+        print(f"    Q_DER       = {A2S(u_tso[off:off+n_d])} Mvar");  off += n_d
+        print(f"    Q_PCC_set   = {A2S(u_tso[off:off+n_p])} Mvar");  off += n_p
+        print(f"    V_gen_set   = {A3S(u_tso[off:off+n_g])} pu");    off += n_g
+        print(f"    s_OLTC      = {u_tso[off:off+n_o].astype(int).tolist()}");  off += n_o
+        print(f"    s_shunt     = {u_tso[off:off+n_s].astype(int).tolist()}")
+
+        u_dso = dso.u_current
+        n_dd = len(dso_config.der_bus_indices)
+        n_do = len(dso_config.oltc_trafo_indices)
+        n_ds = len(dso_config.shunt_bus_indices)
+        print(f"  DSO u_init ({len(u_dso)} vars):")
+        print(f"    Q_DER       = {A2S(u_dso[:n_dd])} Mvar")
+        print(f"    s_OLTC      = {u_dso[n_dd:n_dd+n_do].astype(int).tolist()}")
+        print(f"    s_shunt     = {u_dso[n_dd+n_do:n_dd+n_do+n_ds].astype(int).tolist()}")
         print()
 
     # 8) Cascade loop
@@ -660,21 +815,80 @@ def run_cascade(
             try:
                 dso_meas = _measure_dso(net, dso_config, minute)
 
-                # Reserve Observer: check DER Q burden and override shunt bounds
-                if dso._u_current is not None and len(dso_config.shunt_bus_indices) > 0:
+                # Reserve Observer: per-interface DER Q burden → shunt overrides
+                if enable_reserve_observer and dso._u_current is not None and len(dso_config.shunt_bus_indices) > 0:
                     n_dd = len(dso_config.der_bus_indices)
                     n_do = len(dso_config.oltc_trafo_indices)
                     n_ds = len(dso_config.shunt_bus_indices)
+                    n_iface = len(dso_config.interface_trafo_indices)
                     der_q = dso._u_current[:n_dd]
                     shunt_st = np.round(dso._u_current[n_dd + n_do:n_dd + n_do + n_ds]).astype(np.int64)
-                    obs_result = reserve_obs.evaluate(der_q, shunt_st)
+
+                    # Extract dQ_interface/dQ_DER sub-matrix from DSO H cache
+                    dQ_dQder = None
+                    if dso._H_cache is not None:
+                        dQ_dQder = dso._H_cache[:n_iface, :n_dd]
+
+                    # --- Debug: state BEFORE evaluate ---
+                    if verbose:
+                        print(f"    [ReserveObs min {minute}] --- BEFORE evaluate ---")
+                        print(f"      engaged_flags = {reserve_obs._engaged}")
+                        print(f"      shunt_states  = {shunt_st.tolist()}")
+                        print(f"      der_q (sum={np.sum(der_q):.2f} Mvar):")
+                        # Show top-5 DERs by |Q|
+                        top5 = np.argsort(np.abs(der_q))[-5:][::-1]
+                        for k in top5:
+                            print(f"        DER[{k}] bus={dso_config.der_bus_indices[k]}: "
+                                  f"Q={der_q[k]:.2f} Mvar")
+                        if dQ_dQder is not None:
+                            q_contribution = dQ_dQder @ der_q
+                            print(f"      dQ_dQder shape = {dQ_dQder.shape}")
+                            for j in range(n_iface):
+                                q_step_j = reserve_obs.config.shunt_q_steps_mvar[j]
+                                burden_j = -q_contribution[j] if q_step_j > 0 else q_contribution[j]
+                                row_nz = np.count_nonzero(dQ_dQder[j, :])
+                                row_sum = np.sum(dQ_dQder[j, :])
+                                print(f"      iface[{j}] trafo3w={dso_config.interface_trafo_indices[j]}:")
+                                print(f"        q_contribution = {q_contribution[j]:.2f} Mvar  "
+                                      f"(dQ_dQder row: {row_nz} nonzero, sum={row_sum:.4f})")
+                                print(f"        q_step = {q_step_j:.1f} Mvar  "
+                                      f"-> burden = {burden_j:.2f} Mvar")
+                                print(f"        thresholds: engage={reserve_obs.config.q_threshold_mvar:.1f}, "
+                                      f"release={reserve_obs.config.q_release_mvar:.1f}")
+                                engaged_before = reserve_obs._engaged[j]
+                                if not engaged_before:
+                                    would_engage = burden_j > reserve_obs.config.q_threshold_mvar
+                                    print(f"        state=DISENGAGED  "
+                                          f"-> {'WILL ENGAGE' if would_engage else 'stays disengaged'} "
+                                          f"(burden {'>' if would_engage else '<='} threshold)")
+                                else:
+                                    would_release = burden_j < reserve_obs.config.q_release_mvar
+                                    print(f"        state=ENGAGED  "
+                                          f"-> {'WILL RELEASE' if would_release else 'stays engaged'} "
+                                          f"(burden {'<' if would_release else '>='} release)")
+                        else:
+                            print(f"      dQ_dQder = None (fallback: aggregate sum)")
+
+                    obs_result = reserve_obs.evaluate(der_q, shunt_st, dQ_dQder)
+
+                    # --- Debug: result AFTER evaluate ---
+                    if verbose:
+                        print(f"      --- AFTER evaluate ---")
+                        print(f"      engaged_flags = {reserve_obs._engaged}")
+                        print(f"      force_engage  = {obs_result.force_engage}")
+                        print(f"      force_release = {obs_result.force_release}")
+
                     overrides = {}
                     for idx in obs_result.force_engage:
                         overrides[idx] = (1, 1)   # force shunt ON
                     for idx in obs_result.force_release:
                         overrides[idx] = (0, 0)   # force shunt OFF
                     if overrides:
+                        if verbose:
+                            print(f"      -> APPLYING overrides: {overrides}")
                         dso.set_shunt_overrides(overrides)
+                    elif verbose:
+                        print(f"      -> no overrides")
 
                 dso_out = dso.step(dso_meas)
                 u = dso_out.u_new
@@ -708,6 +922,15 @@ def run_cascade(
             rec.dso_q_actual_mvar = np.array(
                 [float(net.res_trafo3w.at[t, "q_hv_mvar"])
                  for t in dso_config.interface_trafo_indices], dtype=np.float64)
+
+        # Penalty terms from plant measurements
+        if tso_config.v_setpoints_pu is not None:
+            v_err = rec.plant_tn_voltages_pu - tso_config.v_setpoints_pu
+            rec.tso_v_penalty = float(tso_config.g_v * np.sum(v_err ** 2))
+        if rec.dso_q_actual_mvar is not None and dso.q_setpoint_mvar is not None:
+            q_err = rec.dso_q_actual_mvar - dso.q_setpoint_mvar
+            rec.dso_q_penalty = float(dso_config.g_q * np.sum(q_err ** 2))
+
         log.append(rec)
 
         if live_plotter is not None:
@@ -792,10 +1015,11 @@ def print_summary(v_set: float, log: List[IterationRecord]):
 # =============================================================================
 
 def main():
-    for v_set in [1.04]:
-        result = run_cascade(v_setpoint_pu=v_set, n_minutes=360,
+    for v_set in [1.05]:
+        result = run_cascade(v_setpoint_pu=v_set, n_minutes=24*60,
                              tso_period_min=3, dso_period_min=1, verbose=True,
-                             g_v=100000, g_q=1, use_profiles=False)
+                             g_v=100000, g_q=1, use_profiles=True, enable_reserve_observer=True,
+                             gw_oltc_cross_tso=0, gw_oltc_cross_dso=0)
         print_summary(v_set, result.log)
 
         from visualisation.plot_cascade import plot_all

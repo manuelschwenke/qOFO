@@ -81,6 +81,48 @@ from sensitivity.index_helper import (get_jacobian_indices, get_ppc_trafo_index,
                                       get_jacobian_indices_ppc, get_ppc_trafo3w_branch_indices,
                                       _get_trafo3w_hv_branch_data)
 
+def _apply_offdiagonal_scaling(
+    submatrix: NDArray[np.float64],
+    scale_factor: float,
+) -> NDArray[np.float64]:
+    """Scale all off-diagonal elements of a square submatrix by a given factor.
+
+    This is used to reduce the cross-coupling terms in the dQtr3w_ds block of
+    the H matrix, e.g. to account for modelling uncertainty in inter-transformer
+    reactive power sensitivities.
+
+    Parameters
+    ----------
+    submatrix : NDArray[np.float64]
+        Square matrix of shape (n, n).
+    scale_factor : float
+        Multiplicative factor applied to all off-diagonal elements.
+        Must be in (0, 1] for physical plausibility; values outside this
+        range are not blocked but should be used with caution.
+
+    Returns
+    -------
+    NDArray[np.float64]
+        Modified matrix with scaled off-diagonal elements.
+
+    Raises
+    ------
+    ValueError
+        If the submatrix is not square.
+    """
+    n_rows, n_cols = submatrix.shape
+    if n_rows != n_cols:
+        raise ValueError(
+            f"Off-diagonal scaling requires a square submatrix, "
+            f"got shape ({n_rows}, {n_cols})."
+        )
+
+    result = submatrix.copy()
+    # Identify off-diagonal positions and apply scaling
+    off_diag_mask = ~np.eye(n_rows, dtype=bool)
+    result[off_diag_mask] *= scale_factor
+    return result
+
 
 class JacobianSensitivities:
     """
@@ -1731,6 +1773,168 @@ class JacobianSensitivities:
             * V_pu ** 2
         )
 
+    def compute_dQtrafo3w_hv_dVgen(
+        self,
+        trafo3w_idx: int,
+        gen_bus_ppc: int,
+        observation_bus_indices_for_gen: Optional[List[int]] = None,
+    ) -> float:
+        """
+        Compute HV-side Q sensitivity of a 3W transformer to a PV
+        generator voltage setpoint change.
+
+        Uses the chain rule:
+
+            ∂Q_HV/∂V_gen = ∂Q_HV/∂V_hv · ∂V_hv/∂V_gen
+                          + ∂Q_HV/∂V_star · ∂V_star/∂V_gen
+
+        where ``∂Q_HV/∂V_hv`` and ``∂Q_HV/∂V_star`` are the branch-
+        level partial derivatives (same as in ``compute_dQtrafo3w_hv_dQ_der``)
+        and ``∂V_bus/∂V_gen`` comes from ``compute_dV_dVgen``.
+
+        Parameters
+        ----------
+        trafo3w_idx : int
+            ``net.trafo3w`` index.
+        gen_bus_ppc : int
+            Pypower (ppc) bus index of the PV generator bus.
+
+        Returns
+        -------
+        sensitivity : float
+            ∂Q_HV / ∂V_gen [Mvar / p.u.].
+        """
+        d = _get_trafo3w_hv_branch_data(self.net, trafo3w_idx)
+
+        U_i = d['U_hv']
+        U_j = d['U_aux']
+        theta_i = d['theta_hv']
+        theta_j = d['theta_aux']
+        tau = d['tau']
+        g_val = d['g']
+        b_val = d['b']
+
+        # ∂Q_HV/∂V_hv and ∂Q_HV/∂V_star (identical to compute_dQtrafo3w_hv_dQ_der)
+        dQ_dV_hv = (
+            b_val * (-2.0 * U_i / tau**2
+                     + U_j * np.cos(theta_i - theta_j) / tau)
+            - g_val * U_j * np.sin(theta_i - theta_j) / tau
+        )
+        dQ_dV_star = (
+            b_val * U_i * np.cos(theta_i - theta_j) / tau
+            - g_val * U_i * np.sin(theta_i - theta_j) / tau
+        )
+
+        # ∂V/∂V_gen at hv_bus and aux_bus
+        hv_bus_pp = int(self.net.trafo3w.at[trafo3w_idx, 'hv_bus'])
+        # The aux bus is internal to pandapower (not in net.bus), so we
+        # need to use the ppc bus index directly and extract from dx/dVk.
+        # Re-use the full dV_dVgen computation and request both buses.
+        #
+        # For the HV bus: use compute_dV_dVgen with [hv_bus_pp]
+        # For the aux bus: extract from the state vector directly
+        v_hv_jac = d['v_hv_jac']
+        v_aux_jac = d['v_aux_jac']
+
+        # Run full sensitivity computation for this generator
+        bus_data = self.net._ppc['bus']
+        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
+        n_bus = bus_data.shape[0]
+        V_complex = bus_data[:, 7] * np.exp(1j * np.deg2rad(bus_data[:, 8]))
+
+        k = gen_bus_ppc
+        V_k = V_complex[k]
+        Vm = np.abs(V_complex)
+        theta = np.angle(V_complex)
+        G = np.real(Ybus)
+        B = np.imag(Ybus)
+
+        dP_dVk = np.zeros(n_bus)
+        dQ_dVk = np.zeros(n_bus)
+        for i in range(n_bus):
+            cos_ik = np.cos(theta[i] - theta[k])
+            sin_ik = np.sin(theta[i] - theta[k])
+            if i == k:
+                dP_dVk[i] = 2 * Vm[k] * G[k, k]
+                dQ_dVk[i] = -2 * Vm[k] * B[k, k]
+                for j_bus in range(n_bus):
+                    if j_bus != k:
+                        cos_kj = np.cos(theta[k] - theta[j_bus])
+                        sin_kj = np.sin(theta[k] - theta[j_bus])
+                        dP_dVk[i] += Vm[j_bus] * (G[k, j_bus] * cos_kj + B[k, j_bus] * sin_kj)
+                        dQ_dVk[i] += Vm[j_bus] * (G[k, j_bus] * sin_kj - B[k, j_bus] * cos_kj)
+            else:
+                dP_dVk[i] = Vm[i] * (G[i, k] * cos_ik + B[i, k] * sin_ik)
+                dQ_dVk[i] = Vm[i] * (G[i, k] * sin_ik - B[i, k] * cos_ik)
+
+        pv_list = list(self.pv_buses)
+        pq_list = list(self.pq_buses)
+        dg_dVk = np.zeros(self.x_size)
+        for idx_pv, bus_pv in enumerate(pv_list):
+            dg_dVk[idx_pv] = dP_dVk[bus_pv]
+        n_pv = len(pv_list)
+        for idx_pq, bus_pq in enumerate(pq_list):
+            dg_dVk[n_pv + idx_pq] = dP_dVk[bus_pq]
+            dg_dVk[self.n_theta + idx_pq] = dQ_dVk[bus_pq]
+
+        dx_dVk = -self.J_inv @ dg_dVk
+        dV_full = dx_dVk[self.n_theta:]   # V_PQ part
+
+        sensitivity = 0.0
+
+        if v_hv_jac is not None and v_hv_jac < len(dV_full):
+            dV_hv_dVgen = dV_full[v_hv_jac]
+            sensitivity += dQ_dV_hv * dV_hv_dVgen
+        else:
+            # HV bus is a PV bus (generator bus itself) — dV/dVgen = 1
+            # if it IS the generator, else check if slack
+            if d['hv_bus_ppc'] == gen_bus_ppc:
+                sensitivity += dQ_dV_hv * 1.0
+
+        if v_aux_jac is not None and v_aux_jac < len(dV_full):
+            dV_star_dVgen = dV_full[v_aux_jac]
+            sensitivity += dQ_dV_star * dV_star_dVgen
+
+        return sensitivity
+
+    def compute_dQtrafo3w_hv_dVgen_matrix(
+        self,
+        trafo3w_indices: List[int],
+        gen_bus_indices_pp: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """
+        Compute HV-side Q sensitivity matrix for multiple 3W transformers
+        with respect to multiple PV generator voltage setpoints.
+
+        Parameters
+        ----------
+        trafo3w_indices : List[int]
+            ``net.trafo3w`` indices for measurement transformers.
+        gen_bus_indices_pp : List[int]
+            Pandapower bus indices of PV generator buses.
+
+        Returns
+        -------
+        sensitivity_matrix : NDArray[np.float64]
+            Shape ``(n_trafo3w, n_gen)`` [Mvar / p.u.].
+        trafo3w_mapping : List[int]
+        gen_bus_mapping : List[int]
+        """
+        n_t3w = len(trafo3w_indices)
+        n_gen = len(gen_bus_indices_pp)
+        if n_t3w == 0 or n_gen == 0:
+            return np.zeros((n_t3w, n_gen)), [], []
+
+        matrix = np.zeros((n_t3w, n_gen))
+        for j, gen_bus_pp in enumerate(gen_bus_indices_pp):
+            gen_bus_ppc = pp_bus_to_ppc_bus(self.net, gen_bus_pp)
+            for i, t3w_idx in enumerate(trafo3w_indices):
+                matrix[i, j] = self.compute_dQtrafo3w_hv_dVgen(
+                    t3w_idx, gen_bus_ppc,
+                )
+
+        return matrix, list(trafo3w_indices), list(gen_bus_indices_pp)
+
     # =========================================================================
     # Combined Sensitivity Matrix Construction
     # =========================================================================
@@ -1942,6 +2146,7 @@ class JacobianSensitivities:
                         )
                     except ValueError:
                         dQtr3w_col[i] = 0.0
+                print(f'dQtr32_ds: {dQtr3w_col}')
                 # Branch current (TODO: implement dI/ds)
                 dI_col = np.zeros(n_line_out)
 
@@ -2064,6 +2269,18 @@ class JacobianSensitivities:
             H[row_q3w:row_q3w + n_trafo3w_out, c] = dQtr3w
             H[row_v:row_v + n_bus_out, c] = dV
             H[row_i:row_i + n_line_out, c] = dI
+
+        # --- Off-diagonal scaling of dQtr3w_ds submatrix ---
+        # The cross-transformer coupling terms (off-diagonal) are attenuated by
+        # a tunable factor to account for modelling uncertainty.
+        # Only applied when the block is square (nmeas == nchg == ntrafo3w).
+        # _OFFDIAG_SCALE_DQTR3W_DS: float = 0.1  # Tuning parameter
+        #
+        # if n_oltc3w > 0 and n_trafo3w_out == n_oltc3w:
+        #     block = H[row_q3w: row_q3w + n_trafo3w_out, col_oltc3w: col_oltc3w + n_oltc3w]
+        #     H[row_q3w: row_q3w + n_trafo3w_out, col_oltc3w: col_oltc3w + n_oltc3w] = (
+        #         _apply_offdiagonal_scaling(block, _OFFDIAG_SCALE_DQTR3W_DS)
+        #     )
 
         # --- Shunt columns ---
         for j, (dQtr2w, dQtr3w, dV, dI) in enumerate(zip(

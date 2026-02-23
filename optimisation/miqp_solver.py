@@ -270,7 +270,7 @@ class MIQPSolver:
     """
     
     # Solver preference order for MIQP problems
-    MIQP_SOLVERS = ['MOSEK', 'GUROBI', 'SCIP', 'ECOS_BB']
+    MIQP_SOLVERS = ['GUROBI'] #['SCIP', 'MOSEK', 'GUROBI', 'ECOS_BB']
     
     # Solver preference order for QP problems (continuous only)
     QP_SOLVERS = ['OSQP', 'ECOS', 'SCS', 'CVXOPT']
@@ -280,7 +280,7 @@ class MIQPSolver:
         solver: Optional[str] = None,
         verbose: bool = False,
         time_limit_s: float = 60.0,
-        mip_gap: float = 1e-4,
+        mip_gap: float = 1e-6,
     ) -> None:
         """
         Initialise the MIQP solver.
@@ -381,7 +381,7 @@ class MIQPSolver:
         # Objective function (Equation 27 from PSCC paper)
         # g = w^T G_w w + ∇f^T H̃ w + z^T G_z z
         objective = (
-            cp.quad_form(w, problem.G_w) +
+            cp.quad_form(w, problem.G_w, assume_PSD=True) +
             problem.grad_f @ w +
             cp.quad_form(z, problem.G_z)
         )
@@ -487,7 +487,7 @@ class MIQPSolver:
         
         # Objective function: g = w^T G_w w + ∇f^T H̃ w + z^T G_z z
         objective = (
-            cp.quad_form(w, problem.G_w) +
+            cp.quad_form(w, problem.G_w, assume_PSD=True) +
             problem.grad_f @ w +
             cp.quad_form(z, problem.G_z)
         )
@@ -634,8 +634,11 @@ def build_miqp_problem(
         Upper bounds on outputs.
     g_w : float or NDArray[np.float64]
         Weight for control variable changes. Either a scalar (applied
-        uniformly to all variables) or an array of length n_total with
-        per-variable weights for the diagonal of G_w.
+        uniformly to all variables), a 1-D array of length n_total with
+        per-variable weights for the diagonal of G_w, or a 2-D
+        (n_total x n_total) symmetric matrix for coupled weights
+        (e.g. OLTC cross-penalties).  When 2-D, the g_u regularisation
+        is added to the diagonal only.
     g_u : float or NDArray[np.float64]
         Weight for control variable usage (regularisation).  Either a
         scalar (uniform for all variables) or a per-variable array of
@@ -707,17 +710,31 @@ def build_miqp_problem(
     # Integer variables:     w_i = Δu        (direct state change, no α)
     #   Quadratic: G_w_i = diag(g_w + g_u)   (no α² factor)
     #   Linear:    grad_i = grad_f + 2 · g_u · u  (no α factor)
-    g_w_vec = np.broadcast_to(np.asarray(g_w, dtype=np.float64), (n_total,)).copy()
+    g_w_arr = np.asarray(g_w, dtype=np.float64)
     g_u_vec = np.broadcast_to(np.asarray(g_u, dtype=np.float64), (n_total,)).copy()
 
-    # Diagonal of G_w: continuous get α²·g_u, integer get plain g_u
-    diag_Gw = g_w_vec.copy()
     continuous_mask = np.ones(n_total, dtype=bool)
     for idx in integer_indices:
         continuous_mask[idx] = False
-    diag_Gw[continuous_mask] += alpha**2 * g_u_vec[continuous_mask]
-    diag_Gw[~continuous_mask] += g_u_vec[~continuous_mask]
-    G_w = np.diag(diag_Gw)
+
+    if g_w_arr.ndim == 2:
+        # Full (n_total x n_total) weight matrix — use directly, add g_u
+        # to diagonal only.
+        G_w = g_w_arr.copy()
+        diag_idx = np.arange(n_total)
+        G_w[diag_idx[continuous_mask], diag_idx[continuous_mask]] += (
+            alpha**2 * g_u_vec[continuous_mask]
+        )
+        G_w[diag_idx[~continuous_mask], diag_idx[~continuous_mask]] += (
+            g_u_vec[~continuous_mask]
+        )
+    else:
+        # Scalar or 1-D vector → build diagonal G_w
+        g_w_vec = np.broadcast_to(g_w_arr, (n_total,)).copy()
+        diag_Gw = g_w_vec.copy()
+        diag_Gw[continuous_mask] += alpha**2 * g_u_vec[continuous_mask]
+        diag_Gw[~continuous_mask] += g_u_vec[~continuous_mask]
+        G_w = np.diag(diag_Gw)
 
     # G_z is the slack variable weight
     G_z = g_z * np.eye(n_outputs)

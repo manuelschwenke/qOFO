@@ -54,6 +54,14 @@ class Measurement:
         Pandapower shunt indices.
     shunt_states : NDArray[np.int64]
         Current shunt switching states (-1: capacitor, 0: off, 1: reactor).
+    gen_indices : NDArray[np.int64]
+        Pandapower generator indices.
+    gen_vm_pu : NDArray[np.float64]
+        Generator AVR voltage setpoints [p.u.].
+    gen_p_mw : NDArray[np.float64]
+        Generator active power output [MW].
+    gen_q_mvar : NDArray[np.float64]
+        Generator reactive power output [Mvar].
     """
 
     def __init__(
@@ -72,11 +80,13 @@ class Measurement:
         shunt_indices: NDArray[np.int64],
         shunt_states: NDArray[np.int64],
         gen_indices: NDArray[np.int64],
-        gen_vm_pu: NDArray[np.float64]
+        gen_vm_pu: NDArray[np.float64],
+        gen_p_mw: NDArray[np.float64] = None,
+        gen_q_mvar: NDArray[np.float64] = None,
     ) -> None:
         """
         Initialise a Measurement instance.
-        
+
         Parameters
         ----------
         iteration : int
@@ -107,8 +117,14 @@ class Measurement:
             Shunt states.
         gen_indices : NDArray[np.int64]
             Generator indices.
-        gen_vm_pu : NDArray[np.int64]
-            Generator AVR voltage.
+        gen_vm_pu : NDArray[np.float64]
+            Generator AVR voltage setpoints [p.u.].
+        gen_p_mw : NDArray[np.float64], optional
+            Generator active power output [MW].  Required for
+            capability-curve-based Q bounds.
+        gen_q_mvar : NDArray[np.float64], optional
+            Generator reactive power output [Mvar].  Required for
+            capability-curve-based Q bounds.
         """
         self.iteration = iteration
         self.bus_indices = bus_indices
@@ -125,6 +141,8 @@ class Measurement:
         self.shunt_states = shunt_states
         self.gen_indices = gen_indices
         self.gen_vm_pu = gen_vm_pu
+        self.gen_p_mw = gen_p_mw if gen_p_mw is not None else np.array([], dtype=np.float64)
+        self.gen_q_mvar = gen_q_mvar if gen_q_mvar is not None else np.array([], dtype=np.float64)
     
     @property
     def n_bus_measurements(self) -> int:

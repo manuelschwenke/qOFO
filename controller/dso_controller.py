@@ -76,6 +76,17 @@ class DSOControllerConfig:
         power setpoints more aggressively.  Must be balanced against
         the change penalty ``g_w``: the effective per-iteration step
         scales as ``g_q / g_w``.  Default 1.0 (unweighted).
+    v_setpoints_pu : Optional[NDArray[np.float64]]
+        Voltage setpoints at monitored DN buses [p.u.].  If provided,
+        the objective includes a soft voltage-schedule tracking term.
+        Must have the same length as *voltage_bus_indices*.
+        Default ``None`` (no voltage tracking).
+    g_v : float
+        Weight for voltage-schedule tracking in the objective function.
+        Scales the gradient ``2 · g_v · (V - V_set)^T · ∂V/∂u``.
+        Should be kept small relative to the TSO's g_v so that DSO
+        voltage tracking remains a secondary, soft objective behind
+        Q-interface tracking.  Default 1.0.
     """
     der_bus_indices: List[int]
     oltc_trafo_indices: List[int]
@@ -86,8 +97,10 @@ class DSOControllerConfig:
     current_line_indices: List[int]
     v_min_pu: float = 0.9
     v_max_pu: float = 1.1
-    i_max_pu: float = 1.0
+    i_max_pu: float = 5.0
     g_q: float = 1.0
+    v_setpoints_pu: Optional[NDArray[np.float64]] = None
+    g_v: float = 1.0
 
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
@@ -103,6 +116,13 @@ class DSOControllerConfig:
             )
         if self.i_max_pu <= 0:
             raise ValueError(f"i_max_pu must be positive, got {self.i_max_pu}")
+        if self.v_setpoints_pu is not None:
+            if len(self.v_setpoints_pu) != len(self.voltage_bus_indices):
+                raise ValueError(
+                    f"v_setpoints_pu length ({len(self.v_setpoints_pu)}) "
+                    f"must match voltage_bus_indices length "
+                    f"({len(self.voltage_bus_indices)})"
+                )
 
 
 
@@ -421,8 +441,8 @@ class DSOController(BaseOFOController):
         
         # DER Q bounds (P-dependent)
         q_min, q_max = self.actuator_bounds.compute_der_q_bounds(der_p_current)
-        u_lower[:n_der] = -50 #q_min # ToDo: Also loosen here to test controller performance
-        u_upper[:n_der] = 50 #q_max # ToDo: Also loosen here to test controller performance
+        u_lower[:n_der] = -100 #q_min # ToDo: Also loosen here to test controller performance
+        u_upper[:n_der] = 100 #q_max # ToDo: Also loosen here to test controller performance
         
         # OLTC tap bounds (fixed)
         tap_min, tap_max = self.actuator_bounds.get_oltc_tap_bounds()
@@ -483,37 +503,56 @@ class DSOController(BaseOFOController):
         """
         Compute the objective function gradient.
 
-        The DSO objective is to track the TSO setpoint:
-            f(u) = g_q · ||Q_interface - Q_set||²
+        The DSO objective combines two terms:
 
-        The gradient is:
-            ∇f = 2 · g_q · (Q_interface - Q_set) · ∂Q_interface/∂u
+        1. **Q-interface tracking** (primary):
+           f_q(u) = g_q · ||Q_interface - Q_set||²
+           ∇f_q  = 2 · g_q · (Q - Q_set)^T · ∂Q/∂u
+
+        2. **Voltage-schedule tracking** (secondary, optional):
+           f_v(u) = g_v · ||V - V_set||²
+           ∇f_v  = 2 · g_v · (V - V_set)^T · ∂V/∂u
+
+        The voltage term is only active when *v_setpoints_pu* is
+        configured.  It should be weighted softly (small g_v) so that
+        Q-interface tracking remains the dominant objective.
         """
         n_total = self.n_controls
         grad_f = np.zeros(n_total)
-        
-        # Get current interface Q values
+
+        # Get sensitivity matrix (use cache if available)
+        H = self._build_sensitivity_matrix()
+
         n_interfaces = len(self.config.interface_trafo_indices)
+        n_v = len(self.config.voltage_bus_indices)
+
+        # --- Component 1: Q-interface tracking ---
         q_interface = np.zeros(n_interfaces)
-        
         for i, trafo_idx in enumerate(self.config.interface_trafo_indices):
             meas_idx = np.where(
                 measurement.interface_transformer_indices == trafo_idx
             )[0]
             if len(meas_idx) > 0:
                 q_interface[i] = measurement.interface_q_hv_side_mvar[meas_idx[0]]
-        
-        # Compute Q tracking error
+
         q_error = q_interface - self.q_setpoint_mvar
-        
-        # Get sensitivity matrix (use cache if available)
-        H = self._build_sensitivity_matrix()
-        
-        # Extract ∂Q_interface/∂u (first n_interfaces rows)
         dQ_du = H[:n_interfaces, :]
-        
-        # Compute gradient: ∇f = 2 · g_q · (Q - Q_set)^T · ∂Q/∂u
-        grad_f = 2.0 * self.config.g_q * (q_error @ dQ_du)
+        grad_f += 2.0 * self.config.g_q * (q_error @ dQ_du)
+
+        # --- Component 2: Voltage-schedule tracking (optional) ---
+        if self.config.v_setpoints_pu is not None:
+            v_current = np.zeros(n_v)
+            for j, bus_idx in enumerate(self.config.voltage_bus_indices):
+                meas_idx = np.where(measurement.bus_indices == bus_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(f"Bus {bus_idx} not found in measurement")
+                v_current[j] = measurement.voltage_magnitudes_pu[meas_idx[0]]
+
+            v_error = v_current - self.config.v_setpoints_pu
+
+            # Voltage rows start after interface Q rows in H
+            dV_du = H[n_interfaces:n_interfaces + n_v, :]
+            grad_f += 2.0 * self.config.g_v * (v_error @ dV_du)
 
         return grad_f
 

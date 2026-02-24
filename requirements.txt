@@ -10,6 +10,7 @@ pandapower>=2.13.0
 
 # Optimisation
 cvxpy>=1.4.0
+pyomo>=6.6.0
 
 # SCIP solver (optional, for MIQP)
 # Note: SCIP requires separate installation

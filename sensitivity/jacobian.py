@@ -2146,7 +2146,6 @@ class JacobianSensitivities:
                         )
                     except ValueError:
                         dQtr3w_col[i] = 0.0
-                print(f'dQtr32_ds: {dQtr3w_col}')
                 # Branch current (TODO: implement dI/ds)
                 dI_col = np.zeros(n_line_out)
 

@@ -13,7 +13,7 @@ import pandas as pd
 import pandapower as pp
 
 DEFAULT_PROFILES_CSV = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "CLAUDE_IN", "profiles.csv"
+    os.path.dirname(os.path.dirname(__file__)), "data", "profiles.csv"
 )
 
 

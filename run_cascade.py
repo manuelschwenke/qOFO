@@ -712,8 +712,8 @@ def run_cascade(
     # tertiary winding when the DER burden at that interface
     # exceeds the threshold.  1:1 mapping between couplers and shunts.
     reserve_obs = ReserveObserver(ReserveObserverConfig(
-        q_threshold_mvar=30.0,
-        q_release_mvar=-30.0,
+        q_threshold_mvar=40.0,
+        q_release_mvar=-40.0,
         shunt_q_steps_mvar=dso_shunt_q,
         cooldown_min=reserve_cooldown_min,
     ))

@@ -304,7 +304,7 @@ class IterationRecord:
 def _apply_contingency(
     net,
     ev: ContingencyEvent,
-    verbose: bool,
+    verbose: int,
 ) -> str:
     """
     Apply a single contingency event to the pandapower network.
@@ -329,7 +329,7 @@ def _apply_contingency(
             f"(expected 'line' or 'gen')"
         )
 
-    if verbose:
+    if verbose > 0:
         print(f"\n  {'='*60}")
         print(f"  *** CONTINGENCY min {ev.minute}: {desc}")
         print(f"  {'='*60}\n")
@@ -353,9 +353,9 @@ def run_cascade(
     n_minutes: int = 120,
     tso_period_min: int = 3,
     dso_period_min: int = 1,
-    start_time: datetime = datetime(2016, 5, 15, 10, 0),
+    start_time: datetime = datetime(2016, 3, 15, 12, 0),
     profiles_csv: str = DEFAULT_PROFILES_CSV,
-    verbose: bool = True,
+    verbose: int = 1,
     live_plot: bool = True,
     live_plotter=None,
     g_v: float = 1000.0,
@@ -365,6 +365,7 @@ def run_cascade(
     gw_oltc_cross_tso: float = 0.0,
     gw_oltc_cross_dso: float = 0.0,
     contingencies: Optional[List[ContingencyEvent]] = None,
+    reserve_cooldown_min: int = 3,
 ) -> CascadeResult:
     """
     Run cascaded TSO-DSO OFO on a combined network.
@@ -417,7 +418,7 @@ def run_cascade(
         Default: ``None`` (no contingencies).
     """
 
-    if verbose:
+    if verbose > 0:
         print("=" * 72)
         print(f"  CASCADED OFO  --  V_set = {v_setpoint_pu:.3f} p.u.")
         print(f"  Profiles: {os.path.basename(profiles_csv)}  "
@@ -505,7 +506,7 @@ def run_cascade(
     pcc_trafos = list(meta.coupler_trafo3w_indices)
 
     # 3) Sensitivities from combined network
-    if verbose:
+    if verbose > 1:
         print("Computing sensitivities from combined network ...")
 
     # TSO probe
@@ -554,7 +555,7 @@ def run_cascade(
         interface_trafo_indices=dso_iface_trafos,
         voltage_bus_indices=dso_v_buses, current_line_indices=dso_lines,
         g_q=g_q,
-        v_setpoints_pu=dso_v_setpoints, g_v=1000,
+        v_setpoints_pu=dso_v_setpoints, g_v=10000,
     )
 
     # -- Live plotter (created here because configs are now available)
@@ -637,8 +638,8 @@ def run_cascade(
         np.full(len(tso_der_buses),   0.4),        # Q_DER: moderate TS-DER damping
         np.full(len(pcc_trafos),      0.4),        # Q_PCC_set: slow PCC setpoint moves
         np.full(len(tso_gen_indices), 2e7),      # V_gen: very cautious AVR moves
-        np.full(len(tso_oltc),        50),      # s_OLTC: expensive tap switching
-        np.full(len(tso_shunt_buses), 1000),      # s_shunt: expensive shunt switching
+        np.full(len(tso_oltc),        40),      # s_OLTC: expensive tap switching
+        np.full(len(tso_shunt_buses), 500),      # s_shunt: expensive shunt switching
     ])
     # DSO u = [Q_DER | s_OLTC | s_shunt]
     gw_dso_diag = np.concatenate([
@@ -714,6 +715,7 @@ def run_cascade(
         q_threshold_mvar=30.0,
         q_release_mvar=-30.0,
         shunt_q_steps_mvar=dso_shunt_q,
+        cooldown_min=reserve_cooldown_min,
     ))
 
     # 7) Initialise actuators to a neutral operating point
@@ -749,7 +751,7 @@ def run_cascade(
             side="mv", element="trafo3w",
         )
     pp.runpp(net, run_control=True, calculate_voltage_angles=True)
-    if verbose:
+    if verbose > 1:
         for t3w in dso_oltc:
             tap = int(net.trafo3w.at[t3w, "tap_pos"])
             print(f"  DSO OLTC trafo3w {t3w}: initial tap_pos = {tap}")
@@ -768,7 +770,7 @@ def run_cascade(
     tso.initialise(_measure_tso(net, tso_config, 0))
     dso.initialise(_measure_dso(net, dso_config, 0))
 
-    if verbose:
+    if verbose > 0:
         print(f"Running cascade: {n_minutes} min  (TSO/{tso_period_min}m, DSO/{dso_period_min}m)")
         print(f"  TSO: {len(tso_der_buses)} DER, {len(tso_oltc)} OLTC, "
               f"{len(tso_gen_indices)} gen, {len(tso_shunt_buses)} shunt")
@@ -880,7 +882,7 @@ def run_cascade(
                     )
                     dso.receive_setpoint(merged)
             except RuntimeError as e:
-                if verbose:
+                if verbose > 0:
                     print(f"  [min {minute:3d}] TSO FAILED: {e}")
 
         # DSO step
@@ -899,10 +901,9 @@ def run_cascade(
 
                     # Extract dQ_interface/dQ_DER sub-matrix from DSO H cache
                     dQ_dQder = dso.get_interface_der_sensitivity()
-                    print(f'dQ_dQder: {dQ_dQder}')
 
                     # --- Debug: state BEFORE evaluate ---
-                    if verbose:
+                    if verbose > 2:
                         print(f"    [ReserveObs min {minute}] --- BEFORE evaluate ---")
                         print(f"      engaged_flags = {reserve_obs._engaged}")
                         print(f"      shunt_states  = {shunt_st.tolist()}")
@@ -928,23 +929,34 @@ def run_cascade(
                                 print(f"        thresholds: engage={reserve_obs.config.q_threshold_mvar:.1f}, "
                                       f"release={reserve_obs.config.q_release_mvar:.1f}")
                                 engaged_before = reserve_obs._engaged[j]
+                                last_act = reserve_obs._last_action_min[j]
+                                cd_remaining = max(0, reserve_obs.config.cooldown_min - (minute - last_act))
+                                in_cd = cd_remaining > 0
+                                cd_str = (f"COOLDOWN {cd_remaining}min remaining"
+                                          if in_cd else "no cooldown")
+                                print(f"        cooldown: {cd_str}  "
+                                      f"(last_action=min {last_act})")
                                 if not engaged_before:
-                                    would_engage = burden_j > reserve_obs.config.q_threshold_mvar
+                                    would_engage = burden_j > reserve_obs.config.q_threshold_mvar and not in_cd
+                                    reason = ("BLOCKED by cooldown" if in_cd and burden_j > reserve_obs.config.q_threshold_mvar
+                                              else ('WILL ENGAGE' if would_engage else 'stays disengaged'))
                                     print(f"        state=DISENGAGED  "
-                                          f"-> {'WILL ENGAGE' if would_engage else 'stays disengaged'} "
-                                          f"(burden {'>' if would_engage else '<='} threshold)")
+                                          f"-> {reason} "
+                                          f"(burden {'>' if burden_j > reserve_obs.config.q_threshold_mvar else '<='} threshold)")
                                 else:
-                                    would_release = burden_j < reserve_obs.config.q_release_mvar
+                                    would_release = burden_j < reserve_obs.config.q_release_mvar and not in_cd
+                                    reason = ("BLOCKED by cooldown" if in_cd and burden_j < reserve_obs.config.q_release_mvar
+                                              else ('WILL RELEASE' if would_release else 'stays engaged'))
                                     print(f"        state=ENGAGED  "
-                                          f"-> {'WILL RELEASE' if would_release else 'stays engaged'} "
-                                          f"(burden {'<' if would_release else '>='} release)")
+                                          f"-> {reason} "
+                                          f"(burden {'<' if burden_j < reserve_obs.config.q_release_mvar else '>='} release)")
                         else:
                             print(f"      dQ_dQder = None (fallback: aggregate sum)")
 
-                    obs_result = reserve_obs.evaluate(der_q, shunt_st, dQ_dQder)
+                    obs_result = reserve_obs.evaluate(der_q, shunt_st, dQ_dQder, minute=minute)
 
                     # --- Debug: result AFTER evaluate ---
-                    if verbose:
+                    if verbose > 2:
                         print(f"      --- AFTER evaluate ---")
                         print(f"      engaged_flags = {reserve_obs._engaged}")
                         print(f"      force_engage  = {obs_result.force_engage}")
@@ -956,10 +968,10 @@ def run_cascade(
                     for idx in obs_result.force_release:
                         overrides[idx] = (0, 0)   # force shunt OFF
                     if overrides:
-                        if verbose:
+                        if verbose > 2:
                             print(f"      -> APPLYING overrides: {overrides}")
                         dso.set_shunt_overrides(overrides)
-                    elif verbose:
+                    elif verbose > 2:
                         print(f"      -> no overrides")
 
                 dso_out = dso.step(dso_meas)
@@ -978,7 +990,7 @@ def run_cascade(
                 _apply_dso(net, dso_out, dso_config)
                 tso.receive_capability(dso.generate_capability_message("tso_main", dso_meas))
             except RuntimeError as e:
-                if verbose:
+                if verbose > 0:
                     print(f"  [min {minute:3d}] DSO FAILED: {e}")
 
         # Power flow
@@ -1008,7 +1020,7 @@ def run_cascade(
         if live_plotter is not None:
             live_plotter.update(rec)
 
-        if verbose and (run_tso or run_dso):
+        if verbose > 0 and (run_tso or run_dso):
             tags = "TSO+DSO" if (run_tso and run_dso) else ("TSO" if run_tso else "DSO")
             v_tn = rec.plant_tn_voltages_pu
             v_dn = rec.plant_dn_voltages_pu
@@ -1095,15 +1107,16 @@ def main():
          ContingencyEvent(minute=100, element_type="line", element_index=3),
          ContingencyEvent(minute=150, element_type="gen",  element_index=0),
          ContingencyEvent(minute=200, element_type="line", element_index=3, action="restore"),
-         ContingencyEvent(minute=300, element_type="gen", element_index=0, action="restore"),
+         ContingencyEvent(minute=400, element_type="gen", element_index=0, action="restore"),
     ]
 
-    for v_set in [1.07]:
+    for v_set in [1.05]:
         result = run_cascade(v_setpoint_pu=v_set, n_minutes=12*60,
-                             tso_period_min=3, dso_period_min=1, verbose=True,
+                             tso_period_min=3, dso_period_min=1, verbose=1,
                              g_v=100000, g_q=1, use_profiles=True, enable_reserve_observer=True,
                              gw_oltc_cross_tso=0, gw_oltc_cross_dso=0,
-                             contingencies=events if events else None)
+                             contingencies=events if events else None,
+                             reserve_cooldown_min=3)
         print_summary(v_set, result.log)
 
         from visualisation.plot_cascade import plot_all

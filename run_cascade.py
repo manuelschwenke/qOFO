@@ -298,6 +298,45 @@ class IterationRecord:
 
 
 # =============================================================================
+#  Contingency helper
+# =============================================================================
+
+def _apply_contingency(
+    net,
+    ev: ContingencyEvent,
+    verbose: bool,
+) -> str:
+    """
+    Apply a single contingency event to the pandapower network.
+
+    Returns a human-readable description string for logging.
+    """
+    trip = (ev.action == "trip")
+    in_service = not trip
+    tag = "TRIP" if trip else "RESTORE"
+
+    if ev.element_type == "line":
+        net.line.at[ev.element_index, "in_service"] = in_service
+        name = net.line.at[ev.element_index, "name"]
+        desc = f"{tag} line {ev.element_index} ({name})"
+    elif ev.element_type == "gen":
+        net.gen.at[ev.element_index, "in_service"] = in_service
+        name = net.gen.at[ev.element_index, "name"]
+        desc = f"{tag} gen {ev.element_index} ({name})"
+    else:
+        raise ValueError(
+            f"Unknown element_type '{ev.element_type}' "
+            f"(expected 'line' or 'gen')"
+        )
+
+    if verbose:
+        print(f"\n  {'='*60}")
+        print(f"  *** CONTINGENCY min {ev.minute}: {desc}")
+        print(f"  {'='*60}\n")
+    return desc
+
+
+# =============================================================================
 #  Main cascade runner
 # =============================================================================
 
@@ -325,6 +364,7 @@ def run_cascade(
     enable_reserve_observer: bool = False,
     gw_oltc_cross_tso: float = 0.0,
     gw_oltc_cross_dso: float = 0.0,
+    contingencies: Optional[List[ContingencyEvent]] = None,
 ) -> CascadeResult:
     """
     Run cascaded TSO-DSO OFO on a combined network.
@@ -369,6 +409,12 @@ def run_cascade(
     gw_oltc_cross_dso : float, optional
         Cross-coupling weight for the DSO OLTC sub-block.
         Same semantics as *gw_oltc_cross_tso*.  Default: 0.0.
+    contingencies : list of ContingencyEvent, optional
+        Scheduled network contingencies (line trips, generator outages).
+        Each event fires at its specified *minute*, setting the element
+        ``in_service`` flag accordingly.  After any topology change the
+        Jacobian sensitivities are re-computed for both controllers.
+        Default: ``None`` (no contingencies).
     """
 
     if verbose:
@@ -377,6 +423,14 @@ def run_cascade(
         print(f"  Profiles: {os.path.basename(profiles_csv)}  "
               f"start={start_time:%d.%m.%Y %H:%M}  {n_minutes} min")
         print("=" * 72)
+        if contingencies:
+            print(f"  Scheduled contingencies ({len(contingencies)}):")
+            for ev in contingencies:
+                print(f"    min {ev.minute:4d}: {ev.action.upper()} "
+                      f"{ev.element_type} {ev.element_index}")
+
+    if contingencies is None:
+        contingencies = []
 
     # 1) Build combined network
     net, meta = build_tuda_net(ext_grid_vm_pu=v_setpoint_pu, pv_nodes=True)
@@ -500,7 +554,7 @@ def run_cascade(
         interface_trafo_indices=dso_iface_trafos,
         voltage_bus_indices=dso_v_buses, current_line_indices=dso_lines,
         g_q=g_q,
-        v_setpoints_pu=dso_v_setpoints, g_v=10000,
+        v_setpoints_pu=dso_v_setpoints, g_v=1000,
     )
 
     # -- Live plotter (created here because configs are now available)
@@ -580,17 +634,17 @@ def run_cascade(
     # =====================================================================
     # TSO u = [Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt]
     gw_tso_diag = np.concatenate([
-        np.full(len(tso_der_buses),   0.5),        # Q_DER: moderate TS-DER damping
-        np.full(len(pcc_trafos),      0.5),        # Q_PCC_set: slow PCC setpoint moves
+        np.full(len(tso_der_buses),   0.4),        # Q_DER: moderate TS-DER damping
+        np.full(len(pcc_trafos),      0.4),        # Q_PCC_set: slow PCC setpoint moves
         np.full(len(tso_gen_indices), 2e7),      # V_gen: very cautious AVR moves
         np.full(len(tso_oltc),        50),      # s_OLTC: expensive tap switching
-        np.full(len(tso_shunt_buses), 500),      # s_shunt: expensive shunt switching
+        np.full(len(tso_shunt_buses), 1000),      # s_shunt: expensive shunt switching
     ])
     # DSO u = [Q_DER | s_OLTC | s_shunt]
     gw_dso_diag = np.concatenate([
-        np.full(len(dso_der_buses),   3),        # Q_DER: damped DER response
-        np.full(len(dso_oltc),        50),     # s_OLTC: very expensive 3W tap switching
-        np.full(len(dso_shunt_buses), 500),     # s_shunt: shunt switching cost
+        np.full(len(dso_der_buses),   4),        # Q_DER: damped DER response
+        np.full(len(dso_oltc),        100),     # s_OLTC: very expensive 3W tap switching
+        np.full(len(dso_shunt_buses), 3000),     # s_shunt: shunt switching cost
     ])
 
     # Build G_w matrices — full 2-D if OLTC cross-coupling is requested,
@@ -638,7 +692,7 @@ def run_cascade(
     # With alpha=1 the g_u value adds directly to the G_w diagonal.
     gu_tso = np.zeros(len(gw_tso_diag))   # TSO: no DER usage regularisation
     gu_dso = np.concatenate([
-        np.full(len(dso_der_buses),   0.01),      # Q_DER: regularise toward zero
+        np.full(len(dso_der_buses),   0.1),      # Q_DER: regularise toward zero
         np.full(len(dso_oltc),        0.0),      # s_OLTC: no usage penalty
         np.full(len(dso_shunt_buses), 0.0),      # s_shunt: no usage penalty
     ])
@@ -657,8 +711,8 @@ def run_cascade(
     # tertiary winding when the DER burden at that interface
     # exceeds the threshold.  1:1 mapping between couplers and shunts.
     reserve_obs = ReserveObserver(ReserveObserverConfig(
-        q_threshold_mvar=40.0,
-        q_release_mvar=10.0,
+        q_threshold_mvar=30.0,
+        q_release_mvar=-30.0,
         shunt_q_steps_mvar=dso_shunt_q,
     ))
 
@@ -771,6 +825,25 @@ def run_cascade(
             t_now = start_time + timedelta(minutes=minute)
             apply_profiles(net, profiles, t_now)
 
+        # ── Apply contingency events ──────────────────────────────────
+        if contingencies:
+            fired = [ev for ev in contingencies if ev.minute == minute]
+            if fired:
+                descs = []
+                for ev in fired:
+                    descs.append(_apply_contingency(net, ev, verbose))
+                rec.contingency_events = descs
+
+                # Re-converge PF with new topology so Jacobian is valid
+                pp.runpp(net, run_control=False,
+                         calculate_voltage_angles=True)
+
+                # Refresh sensitivity matrices for both controllers
+                tso.sensitivities = JacobianSensitivities(net)
+                dso.sensitivities = JacobianSensitivities(net)
+                tso.invalidate_sensitivity_cache()
+                dso.invalidate_sensitivity_cache()
+
         # TSO step
         if run_tso:
             try:
@@ -825,9 +898,8 @@ def run_cascade(
                     shunt_st = np.round(dso._u_current[n_dd + n_do:n_dd + n_do + n_ds]).astype(np.int64)
 
                     # Extract dQ_interface/dQ_DER sub-matrix from DSO H cache
-                    dQ_dQder = None
-                    if dso._H_cache is not None:
-                        dQ_dQder = dso._H_cache[:n_iface, :n_dd]
+                    dQ_dQder = dso.get_interface_der_sensitivity()
+                    print(f'dQ_dQder: {dQ_dQder}')
 
                     # --- Debug: state BEFORE evaluate ---
                     if verbose:
@@ -845,7 +917,7 @@ def run_cascade(
                             print(f"      dQ_dQder shape = {dQ_dQder.shape}")
                             for j in range(n_iface):
                                 q_step_j = reserve_obs.config.shunt_q_steps_mvar[j]
-                                burden_j = -q_contribution[j] if q_step_j > 0 else q_contribution[j]
+                                burden_j = q_contribution[j] if q_step_j > 0 else -q_contribution[j]
                                 row_nz = np.count_nonzero(dQ_dQder[j, :])
                                 row_sum = np.sum(dQ_dQder[j, :])
                                 print(f"      iface[{j}] trafo3w={dso_config.interface_trafo_indices[j]}:")
@@ -1015,11 +1087,23 @@ def print_summary(v_set: float, log: List[IterationRecord]):
 # =============================================================================
 
 def main():
-    for v_set in [1.05]:
-        result = run_cascade(v_setpoint_pu=v_set, n_minutes=24*60,
+    # Example contingency events (uncomment to activate):
+    #   - Trip EHV line 3 at minute 90  (1,5 hours into simulation)
+    #   - Trip synchronous generator 0 at minute 120  (2 hours)
+    #   - Restore line 3 at minute 150  (2,5 hours)
+    events = [
+         ContingencyEvent(minute=100, element_type="line", element_index=3),
+         ContingencyEvent(minute=150, element_type="gen",  element_index=0),
+         ContingencyEvent(minute=200, element_type="line", element_index=3, action="restore"),
+         ContingencyEvent(minute=300, element_type="gen", element_index=0, action="restore"),
+    ]
+
+    for v_set in [1.07]:
+        result = run_cascade(v_setpoint_pu=v_set, n_minutes=12*60,
                              tso_period_min=3, dso_period_min=1, verbose=True,
                              g_v=100000, g_q=1, use_profiles=True, enable_reserve_observer=True,
-                             gw_oltc_cross_tso=0, gw_oltc_cross_dso=0)
+                             gw_oltc_cross_tso=0, gw_oltc_cross_dso=0,
+                             contingencies=events if events else None)
         print_summary(v_set, result.log)
 
         from visualisation.plot_cascade import plot_all

@@ -323,6 +323,19 @@ class DSOController(BaseOFOController):
     # Implementation of abstract methods
     # =========================================================================
 
+    def get_interface_der_sensitivity(self) -> NDArray[np.float64]:
+        """
+        Return the ∂Q_interface / ∂Q_DER sub-matrix, shape (n_interfaces, n_der).
+
+        Builds the full H matrix on first call if not yet cached. Subsequent
+        calls return the cached result without recomputation.
+        """
+        if self._H_cache is None:
+            self._build_sensitivity_matrix()
+        n_interfaces = len(self.config.interface_trafo_indices)
+        n_der = len(self.config.der_bus_indices)
+        return self._H_cache[:n_interfaces, :n_der]
+
     def _get_control_structure(self) -> Tuple[int, int, List[int]]:
         """Define the control variable structure."""
         n_der = len(self.config.der_bus_indices)

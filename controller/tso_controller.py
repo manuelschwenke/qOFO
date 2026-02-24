@@ -585,7 +585,7 @@ class TSOController(BaseOFOController):
             )
 
             # Margin: clamp V_gen when Q is within this fraction of the limit
-            margin_frac = 0.05  # 5% of the capability range
+            margin_frac = 0.1  # 10% of the capability range
 
             for k in range(n_gen):
                 q_range = gen_q_max[k] - gen_q_min[k]

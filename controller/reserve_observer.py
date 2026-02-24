@@ -56,12 +56,19 @@ class ReserveObserverConfig:
     q_threshold_mvar: float = 15.0
     q_release_mvar: float = 5.0
     shunt_q_steps_mvar: List[float] = field(default_factory=list)
+    cooldown_min: int = 3
+    """Minimum minutes between consecutive engage/release actions on the
+    same interface.  Prevents overreaction to transient conditions."""
 
     def __post_init__(self) -> None:
         if self.q_release_mvar >= self.q_threshold_mvar:
             raise ValueError(
                 f"q_release_mvar ({self.q_release_mvar}) must be less than "
                 f"q_threshold_mvar ({self.q_threshold_mvar})"
+            )
+        if self.cooldown_min < 0:
+            raise ValueError(
+                f"cooldown_min must be non-negative, got {self.cooldown_min}"
             )
 
 
@@ -108,12 +115,16 @@ class ReserveObserver:
         self.config = config
         n_interfaces = len(config.shunt_q_steps_mvar)
         self._engaged: List[bool] = [False] * n_interfaces
+        # Per-interface minute of last engage/release action (for cooldown).
+        # Initialised to -∞ so the first action is never blocked.
+        self._last_action_min: List[int] = [-999] * n_interfaces
 
     def evaluate(
             self,
             der_q_mvar: NDArray[np.float64],
             shunt_states: NDArray[np.int64],
             dQ_dQder: Optional[NDArray[np.float64]] = None,
+            minute: int = 0,
     ) -> ShuntOverride:
         """
         Evaluate per-interface DER Q burden and return shunt overrides.
@@ -132,6 +143,8 @@ class ReserveObserver:
             to the reactive power flow at interface *j*. Must be provided;
             the aggregate fallback is not supported in this implementation
             as it does not respect per-interface sign conventions.
+        minute : int, optional
+            Current simulation minute (used for cooldown tracking).
 
         Returns
         -------
@@ -196,17 +209,23 @@ class ReserveObserver:
             else:
                 burden = -q_contribution[j]
 
+            # Cooldown: skip switching decisions if the last action on this
+            # interface was less than cooldown_min minutes ago.
+            in_cooldown = (minute - self._last_action_min[j]) < self.config.cooldown_min
+
             if not self._engaged[j]:
                 # Engage when burden exceeds the threshold
-                if burden > self.config.q_threshold_mvar:
+                if burden > self.config.q_threshold_mvar and not in_cooldown:
                     self._engaged[j] = True
+                    self._last_action_min[j] = minute
                     if not currently_on:
                         override.force_engage.append(j)
             else:
                 # Release when burden drops below the release threshold
                 # (hysteresis band prevents chattering)
-                if burden < self.config.q_release_mvar:
+                if burden < self.config.q_release_mvar and not in_cooldown:
                     self._engaged[j] = False
+                    self._last_action_min[j] = minute
                     if currently_on:
                         override.force_release.append(j)
                 else:

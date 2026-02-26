@@ -1079,16 +1079,13 @@ class JacobianSensitivities:
         V_from = U_from * np.exp(1j * theta_from)
         V_to = U_to * np.exp(1j * theta_to)
 
-        # Get line impedance in per-unit
-        base_voltage_kv = self.net.bus.at[from_bus, 'vn_kv']
-        base_impedance = base_voltage_kv ** 2 / self.net.sn_mva
+        # Get line's ppc branch index
+        line_start = self.net._pd2ppc_lookups['branch']['line'][0]
+        pos = list(self.net.line.index).index(line_idx)
+        ppc_line_idx = line_start + pos
 
-        r_ohm = self.net.line.at[line_idx, 'r_ohm_per_km'] * self.net.line.at[line_idx, 'length_km']
-        x_ohm = self.net.line.at[line_idx, 'x_ohm_per_km'] * self.net.line.at[line_idx, 'length_km']
-
-        r_pu = r_ohm / base_impedance
-        x_pu = x_ohm / base_impedance
-
+        r_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 2]))
+        x_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 3]))
         Y_line = 1.0 / complex(r_pu, x_pu)
 
         # Compute current phasor (Equation 18)
@@ -1138,6 +1135,7 @@ class JacobianSensitivities:
         dI_mag_dQmvar = (1.0 / I_mag) * np.real(np.conj(I_ij) * dI_ij_dQmvar)
 
         # Convert p.u. current → kA via current base
+        base_voltage_kv = self.net.bus.at[from_bus, 'vn_kv']
         I_base_kA = self.net.sn_mva / (np.sqrt(3) * base_voltage_kv)
         sensitivity = dI_mag_dQmvar * I_base_kA  # [kA/Mvar]
 

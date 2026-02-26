@@ -570,9 +570,9 @@ class TestDSOController:
         assert_allclose(
             y_hi[n_interface:n_interface + n_v], config.v_max_pu
         )
-        # Current: lower=0, upper=i_max
+        # Current: lower=0, upper=1E6 (no per-line ratings provided)
         assert_allclose(y_lo[n_interface + n_v:], 0.0)
-        assert_allclose(y_hi[n_interface + n_v:], config.i_max_pu)
+        assert_allclose(y_hi[n_interface + n_v:], 1E6)
 
     def test_reset(self, dso_setup) -> None:
         """Test that reset clears internal state."""
@@ -803,9 +803,9 @@ class TestTSOController:
         # PCC Q: no limits
         assert y_lo[n_v] == -1E6
         assert y_hi[n_v] == 1E6
-        # Current: [0, i_max]
+        # Current: [0, 1E6] (no per-line ratings provided)
         assert_allclose(y_lo[n_v + n_pcc:], 0.0)
-        assert_allclose(y_hi[n_v + n_pcc:], config.i_max_pu)
+        assert_allclose(y_hi[n_v + n_pcc:], 1E6)
 
     def test_output_limits_with_setpoints(self, tso_setup) -> None:
         """Test output limits when voltage setpoints are configured."""

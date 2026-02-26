@@ -114,7 +114,10 @@ class TSOControllerConfig:
     current_line_indices: List[int]
     v_min_pu: float = 0.90
     v_max_pu: float = 1.10
-    i_max_pu: float = 5.0
+    i_max_pu: float = 1.0
+    current_line_max_i_ka: Optional[List[float]] = None
+    """Per-line thermal rating [kA]. Must have the same length as
+    ``current_line_indices``. If ``None``, limits are not enforced."""
     v_setpoints_pu: Optional[NDArray[np.float64]] = None
     g_v: float = 1.0
     gen_indices: List[int] = field(default_factory=list)
@@ -145,6 +148,13 @@ class TSOControllerConfig:
             raise ValueError(
                 f"i_max_pu must be positive, got {self.i_max_pu}"
             )
+        if self.current_line_max_i_ka is not None:
+            if len(self.current_line_max_i_ka) != len(self.current_line_indices):
+                raise ValueError(
+                    f"current_line_max_i_ka length ({len(self.current_line_max_i_ka)}) "
+                    f"must match current_line_indices length "
+                    f"({len(self.current_line_indices)})"
+                )
         if self.v_setpoints_pu is not None:
             if len(self.v_setpoints_pu) != len(self.voltage_bus_indices):
                 raise ValueError(
@@ -661,11 +671,14 @@ class TSOController(BaseOFOController):
         #     y_upper[idx] = 1E6
         #     idx += 1
 
-        # --- Current limits (upper only) ---
-        # NOTE: Extremely loosened to unblock integer switching (shunts/OLTCs).
-        for _ in range(n_i):
-            y_lower[idx] = -1E6
-            y_upper[idx] = 1E6
+        # --- Current limits (upper only, kA) ---
+        for j in range(n_i):
+            if self.config.current_line_max_i_ka is not None:
+                i_lim_ka = self.config.i_max_pu * self.config.current_line_max_i_ka[j]
+            else:
+                i_lim_ka = 1E6  # no limit if ratings not provided
+            y_lower[idx] = 0.0
+            y_upper[idx] = i_lim_ka
             idx += 1
 
         return y_lower, y_upper

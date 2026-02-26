@@ -56,10 +56,10 @@ def _collect_series(log: List[IterationRecord]):
     tso_v_gen = np.array([r.tso_v_gen_pu for r in tso_recs])
     tso_oltc = np.array([r.tso_oltc_taps for r in tso_recs]) if tso_recs and tso_recs[0].tso_oltc_taps is not None and len(tso_recs[0].tso_oltc_taps) > 0 else None
     tso_shunt = np.array([r.tso_shunt_states for r in tso_recs]) if tso_recs and tso_recs[0].tso_shunt_states is not None and len(tso_recs[0].tso_shunt_states) > 0 else None
-    #tso_obj = np.array([r.tso_objective for r in tso_recs # ToDo: Manually disabled
-    #                    if r.tso_objective is not None])
-    #tso_obj_min = np.array([r.minute for r in tso_recs
-    #                        if r.tso_objective is not None])
+    tso_obj = np.array([r.tso_objective for r in tso_recs # ToDo: Manually disabled
+                        if r.tso_objective is not None])
+    tso_obj_min = np.array([r.minute for r in tso_recs
+                            if r.tso_objective is not None])
 
     # DSO series
     dso_mask = np.array([r.dso_active and r.dso_q_der_mvar is not None
@@ -75,10 +75,10 @@ def _collect_series(log: List[IterationRecord]):
                           if r.dso_q_actual_mvar is not None])
     dso_q_act_min = np.array([r.minute for r in dso_recs
                               if r.dso_q_actual_mvar is not None])
-    #dso_obj = np.array([r.dso_objective for r in dso_recs  # ToDo: Manually disabled
-    #                    if r.dso_objective is not None])
-    #dso_obj_min = np.array([r.minute for r in dso_recs
-    #                        if r.dso_objective is not None])
+    dso_obj = np.array([r.dso_objective for r in dso_recs  # ToDo: Manually disabled
+                        if r.dso_objective is not None])
+    dso_obj_min = np.array([r.minute for r in dso_recs
+                            if r.dso_objective is not None])
 
     # Penalty term series (recorded every minute after PF)
     tso_v_pen = np.array([r.tso_v_penalty for r in log
@@ -404,16 +404,24 @@ class LivePlotter:
         tso_config: TSOControllerConfig,
         dso_config: DSOControllerConfig,
         update_every: int = 1,
+        tso_line_max_i_ka: Optional[np.ndarray] = None,
+        dso_line_max_i_ka: Optional[np.ndarray] = None,
     ) -> None:
         self._tso_cfg = tso_config
         self._dso_cfg = dso_config
         self._update_every = update_every
         self._call_count = 0
 
+        # Thermal limits for current plots (kA, one per monitored line)
+        self._tso_line_max_i_ka = tso_line_max_i_ka
+        self._dso_line_max_i_ka = dso_line_max_i_ka
+
         # Accumulated data
         self._minutes: List[int] = []
         self._tn_v: List[np.ndarray] = []
         self._dn_v: List[np.ndarray] = []
+        self._tn_i: List[np.ndarray] = []   # TN line currents [kA]
+        self._dn_i: List[np.ndarray] = []   # DN line currents [kA]
         self._tso_min: List[int] = []
         self._tso_q_pcc: List[np.ndarray] = []
         self._tso_q_der: List[np.ndarray] = []
@@ -446,8 +454,11 @@ class LivePlotter:
 
         plt.ion()
 
-        # ── TSO figure: V + Q_DER + Q_gen + V_gen + OLTC + objective ──
+        # ── TSO figure: V + Q_DER + I_line + Q_gen + V_gen + OLTC + objective ──
+        self._has_tso_current = len(tso_config.current_line_indices) > 0
         n_tso_rows = 2  # voltages + Q_DER always present
+        if self._has_tso_current:
+            n_tso_rows += 1  # line currents
         if self._has_tso_gen:
             n_tso_rows += 2  # Q_gen + V_gen
         if self._has_tso_oltc:
@@ -473,6 +484,14 @@ class LivePlotter:
         self._ax_tso_qder.grid(True, alpha=0.3)
 
         tso_row = 2
+        self._ax_tso_current = None
+        if self._has_tso_current:
+            self._ax_tso_current = self._axes_tso[tso_row]
+            self._ax_tso_current.set_ylabel("I [kA]")
+            self._ax_tso_current.set_title("TN Line Currents vs. Thermal Limits")
+            self._ax_tso_current.grid(True, alpha=0.3)
+            tso_row += 1
+
         self._ax_tso_qgen = None
         self._ax_tso_vgen = None
         if self._has_tso_gen:
@@ -504,8 +523,11 @@ class LivePlotter:
 
         self._axes_tso[-1].set_xlabel("Time [min]")
 
-        # ── DSO figure: V + interface Q + Q_DER + OLTC + shunt + objective ──
+        # ── DSO figure: V + interface Q + Q_DER + I_line + OLTC + shunt + objective ──
+        self._has_dso_current = len(dso_config.current_line_indices) > 0
         n_dso_rows = 3  # voltages + interface Q + Q_DER always present
+        if self._has_dso_current:
+            n_dso_rows += 1  # line currents
         if self._has_dso_oltc:
             n_dso_rows += 1
         if self._has_dso_shunt:
@@ -536,6 +558,14 @@ class LivePlotter:
         self._ax_dso_qder.grid(True, alpha=0.3)
 
         dso_row = 3
+        self._ax_dso_current = None
+        if self._has_dso_current:
+            self._ax_dso_current = self._axes_dso[dso_row]
+            self._ax_dso_current.set_ylabel("I [kA]")
+            self._ax_dso_current.set_title("DN Line Currents vs. Thermal Limits")
+            self._ax_dso_current.grid(True, alpha=0.3)
+            dso_row += 1
+
         self._ax_dso_oltc = None
         if self._has_dso_oltc:
             self._ax_dso_oltc = self._axes_dso[dso_row]
@@ -594,6 +624,10 @@ class LivePlotter:
             self._tn_v.append(rec.plant_tn_voltages_pu)
         if rec.plant_dn_voltages_pu is not None:
             self._dn_v.append(rec.plant_dn_voltages_pu)
+        if hasattr(rec, "plant_tn_currents_ka") and rec.plant_tn_currents_ka is not None:
+            self._tn_i.append(rec.plant_tn_currents_ka)
+        if hasattr(rec, "plant_dn_currents_ka") and rec.plant_dn_currents_ka is not None:
+            self._dn_i.append(rec.plant_dn_currents_ka)
         if hasattr(rec, "tso_q_gen_mvar") and rec.tso_q_gen_mvar is not None:
             self._tso_q_gen_min.append(rec.minute)
             self._tso_q_gen.append(rec.tso_q_gen_mvar)
@@ -606,9 +640,9 @@ class LivePlotter:
                 self._tso_v_gen.append(rec.tso_v_gen_pu)
             if rec.tso_oltc_taps is not None:
                 self._tso_oltc.append(rec.tso_oltc_taps)
-            #if rec.tso_objective is not None: # ToDo: Manually disabled
-            #    self._tso_obj_min.append(rec.minute)
-            #    self._tso_obj.append(rec.tso_objective)
+            if rec.tso_objective is not None: # ToDo: Manually disabled
+                self._tso_obj_min.append(rec.minute)
+                self._tso_obj.append(rec.tso_objective)
         if rec.dso_active and rec.dso_q_setpoint_mvar is not None:
             self._dso_q_set_min.append(rec.minute)
             self._dso_q_set.append(rec.dso_q_setpoint_mvar)
@@ -622,9 +656,9 @@ class LivePlotter:
                 self._dso_oltc.append(rec.dso_oltc_taps)
             if rec.dso_shunt_states is not None:
                 self._dso_shunt.append(rec.dso_shunt_states)
-            #if rec.dso_objective is not None: # ToDo: Manually disabled
-            #    self._dso_obj_min.append(rec.minute)
-            #    self._dso_obj.append(rec.dso_objective)
+            if rec.dso_objective is not None: # ToDo: Manually disabled
+                self._dso_obj_min.append(rec.minute)
+                self._dso_obj.append(rec.dso_objective)
 
         # Penalty terms (available every minute after PF)
         if hasattr(rec, "tso_v_penalty") and rec.tso_v_penalty is not None:
@@ -670,6 +704,28 @@ class LivePlotter:
                     td_arr, qd_arr[:, j], lw=1.0,
                     label=f"DER bus {self._tso_cfg.der_bus_indices[j]}")
             self._ax_tso_qder.legend(fontsize=7, ncol=4, loc="upper left")
+
+        # TSO Line Currents vs. Thermal Limits
+        if self._ax_tso_current is not None and len(self._tn_i) > 0:
+            tn_i = np.array(self._tn_i)
+            mins_i = np.array(self._minutes[:len(self._tn_i)])
+            self._ax_tso_current.clear()
+            self._ax_tso_current.set_ylabel("I [kA]")
+            self._ax_tso_current.set_title("TN Line Currents vs. Thermal Limits")
+            self._ax_tso_current.grid(True, alpha=0.3)
+            for j in range(tn_i.shape[1]):
+                self._ax_tso_current.plot(mins_i, tn_i[:, j], lw=0.7, alpha=0.7)
+            # Draw thermal limits as horizontal dashed lines
+            if self._tso_line_max_i_ka is not None:
+                for j in range(len(self._tso_line_max_i_ka)):
+                    lim = self._tso_line_max_i_ka[j]
+                    if lim < 1e5:  # skip absurdly large limits
+                        self._ax_tso_current.axhline(
+                            lim, color="r", ls="--", lw=0.8, alpha=0.5)
+                # Draw one visible legend entry for the limit band
+                self._ax_tso_current.axhline(
+                    np.nan, color="r", ls="--", lw=0.8, label="thermal limit")
+                self._ax_tso_current.legend(fontsize=7, loc="upper left")
 
         # TSO Q_gen (synchronous generator reactive power output)
         if self._ax_tso_qgen is not None and len(self._tso_q_gen) > 0:
@@ -726,8 +782,8 @@ class LivePlotter:
                 all_vals.extend(self._tso_obj)
             if len(self._tso_v_pen) > 0:
                 all_vals.extend(self._tso_v_pen)
-            #if all_vals and all(v > 0 for v in all_vals): # ToDo: Manually disabled
-            #    self._ax_tso_obj.set_yscale("log")
+            if all_vals and all(v > 0 for v in all_vals): # ToDo: Manually disabled
+                self._ax_tso_obj.set_yscale("log")
             if len(self._tso_obj) > 0:
                 obj_arr = np.array(self._tso_obj)
                 obj_min_arr = np.array(self._tso_obj_min)
@@ -805,6 +861,28 @@ class LivePlotter:
             if len(self._dso_cfg.der_bus_indices) <= 10:
                 self._ax_dso_qder.legend(fontsize=7, ncol=4, loc="upper left")
 
+        # DSO Line Currents vs. Thermal Limits
+        if self._ax_dso_current is not None and len(self._dn_i) > 0:
+            dn_i = np.array(self._dn_i)
+            mins_i_dn = np.array(self._minutes[:len(self._dn_i)])
+            self._ax_dso_current.clear()
+            self._ax_dso_current.set_ylabel("I [kA]")
+            self._ax_dso_current.set_title("DN Line Currents vs. Thermal Limits")
+            self._ax_dso_current.grid(True, alpha=0.3)
+            for j in range(dn_i.shape[1]):
+                self._ax_dso_current.plot(mins_i_dn, dn_i[:, j], lw=0.7, alpha=0.7)
+            # Draw thermal limits as horizontal dashed lines
+            if self._dso_line_max_i_ka is not None:
+                for j in range(len(self._dso_line_max_i_ka)):
+                    lim = self._dso_line_max_i_ka[j]
+                    if lim < 1e5:  # skip absurdly large limits
+                        self._ax_dso_current.axhline(
+                            lim, color="r", ls="--", lw=0.8, alpha=0.5)
+                # Draw one visible legend entry for the limit band
+                self._ax_dso_current.axhline(
+                    np.nan, color="r", ls="--", lw=0.8, label="thermal limit")
+                self._ax_dso_current.legend(fontsize=7, loc="upper left")
+
         # DSO OLTC taps
         if self._ax_dso_oltc is not None and len(self._dso_oltc) > 0:
             ot_arr = np.array(self._dso_oltc)
@@ -847,8 +925,8 @@ class LivePlotter:
                 all_vals.extend(self._dso_obj)
             if len(self._dso_q_pen) > 0:
                 all_vals.extend(self._dso_q_pen)
-            #if all_vals and all(v > 0 for v in all_vals): # ToDo: Manually disabled
-            #    self._ax_dso_obj.set_yscale("log")
+            if all_vals and all(v > 0 for v in all_vals): # ToDo: Manually disabled
+                self._ax_dso_obj.set_yscale("log")
             if len(self._dso_obj) > 0:
                 obj_arr = np.array(self._dso_obj)
                 obj_min_arr = np.array(self._dso_obj_min)

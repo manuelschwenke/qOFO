@@ -1022,31 +1022,41 @@ class JacobianSensitivities:
     # =========================================================================
     # E. Branch Current to DER Reactive Power Infeed Sensitivity (Eq. 18-20)
     # =========================================================================
-    
+
     def compute_dI_dQ_der(
-        self,
-        line_idx: int,
-        der_bus_idx: int,
+            self,
+            line_idx: int,
+            der_bus_idx: int,
     ) -> float:
         """
         Compute branch current magnitude sensitivity to DER reactive power.
-        
+
         This implements Equations (19) and (20) from the PSCC 2026 paper:
             ∂I_ij/∂Q_n = Y_ij (∂V_i/∂Q_n - ∂V_j/∂Q_n)
             ∂|I_ij|/∂Q_n = (1/|I_ij|) Re{I_ij* · ∂I_ij/∂Q_n}
-        
+
+        The complex voltage sensitivity is (chain rule):
+            ∂V_i/∂Q_n = (∂|V_i|/∂Q_pu + j·|V_i|·∂θ_i/∂Q_pu) · e^{jθ_i} / S_base
+
+        where ∂|V|/∂Q_pu comes from dV_dQ_reduced (reduced Jacobian inverse)
+        and ∂θ/∂Q_pu comes from the upper-right block of the full J_inv.
+        Division by S_base converts from p.u./p.u. → p.u./Mvar.
+
+        The final result is scaled from ∂|I_pu|/∂Q_Mvar to ∂|I_kA|/∂Q_Mvar
+        via the current base I_base = S_base / (sqrt(3) · V_n).
+
         Parameters
         ----------
         line_idx : int
             Pandapower line index.
         der_bus_idx : int
             Pandapower bus index where the DER is connected.
-        
+
         Returns
         -------
         sensitivity : float
-            Sensitivity ∂|I|/∂Q in [kA/Mvar] (or per-unit equivalent).
-        
+            Sensitivity ∂|I|/∂Q in [kA/Mvar].
+
         Raises
         ------
         ValueError
@@ -1054,68 +1064,85 @@ class JacobianSensitivities:
         """
         if line_idx not in self.net.line.index:
             raise ValueError(f"Line {line_idx} not found in network.")
-        
+
         # Get line buses
         from_bus = self.net.line.at[line_idx, 'from_bus']
         to_bus = self.net.line.at[line_idx, 'to_bus']
-        
+
         # Get voltage states
         U_from = self.net.res_bus.at[from_bus, 'vm_pu']
         U_to = self.net.res_bus.at[to_bus, 'vm_pu']
         theta_from = np.deg2rad(self.net.res_bus.at[from_bus, 'va_degree'])
         theta_to = np.deg2rad(self.net.res_bus.at[to_bus, 'va_degree'])
-        
+
         # Compute complex voltages
         V_from = U_from * np.exp(1j * theta_from)
         V_to = U_to * np.exp(1j * theta_to)
-        
+
         # Get line impedance in per-unit
         base_voltage_kv = self.net.bus.at[from_bus, 'vn_kv']
-        base_impedance = base_voltage_kv**2 / self.net.sn_mva
-        
+        base_impedance = base_voltage_kv ** 2 / self.net.sn_mva
+
         r_ohm = self.net.line.at[line_idx, 'r_ohm_per_km'] * self.net.line.at[line_idx, 'length_km']
         x_ohm = self.net.line.at[line_idx, 'x_ohm_per_km'] * self.net.line.at[line_idx, 'length_km']
-        
+
         r_pu = r_ohm / base_impedance
         x_pu = x_ohm / base_impedance
-        
+
         Y_line = 1.0 / complex(r_pu, x_pu)
-        
+
         # Compute current phasor (Equation 18)
         I_ij = Y_line * (V_from - V_to)
         I_mag = np.abs(I_ij)
-        
+
         if I_mag < 1e-10:
-            # Avoid division by zero for very small currents
             return 0.0
-        
-        # Get Jacobian indices
-        _, v_from_idx = get_jacobian_indices(self.net, from_bus)
-        _, v_to_idx = get_jacobian_indices(self.net, to_bus)
+
+        # Get Jacobian indices (theta_idx, v_idx) for each bus
+        theta_from_idx, v_from_idx = get_jacobian_indices(self.net, from_bus)
+        theta_to_idx, v_to_idx = get_jacobian_indices(self.net, to_bus)
         _, v_der_idx = get_jacobian_indices(self.net, der_bus_idx)
-        
+
         if v_from_idx is None or v_to_idx is None or v_der_idx is None:
             raise ValueError("Could not find Jacobian indices for buses.")
-        
-        # Get voltage sensitivities
-        if (v_from_idx >= self.dV_dQ_reduced.shape[0] or 
-            v_to_idx >= self.dV_dQ_reduced.shape[0] or 
-            v_der_idx >= self.dV_dQ_reduced.shape[1]):
+
+        if (v_from_idx >= self.dV_dQ_reduced.shape[0] or
+                v_to_idx >= self.dV_dQ_reduced.shape[0] or
+                v_der_idx >= self.dV_dQ_reduced.shape[1]):
             raise ValueError("Jacobian index out of bounds.")
-        
-        dV_from_dQ = self.dV_dQ_reduced[v_from_idx, v_der_idx]
-        dV_to_dQ = self.dV_dQ_reduced[v_to_idx, v_der_idx]
-        
-        # Compute current phasor derivative (Equation 19)
-        # Simplified: assuming small angle changes, dV/dQ primarily affects magnitude
-        dI_ij_dQ = Y_line * (dV_from_dQ * np.exp(1j * theta_from) - 
-                             dV_to_dQ * np.exp(1j * theta_to))
-        
-        # Compute magnitude derivative (Equation 20)
-        sensitivity = (1.0 / I_mag) * np.real(np.conj(I_ij) * dI_ij_dQ)
-        
+
+        # Column in J_inv for a Q perturbation at der_bus
+        # Q states occupy columns n_theta … n_theta+n_v-1  (same as dV_dQ_reduced columns)
+        col = self.n_theta + v_der_idx
+
+        # ∂|V|/∂Q_pu  — from reduced Jacobian (magnitude sensitivity only)
+        dVmag_from_dQpu = self.dV_dQ_reduced[v_from_idx, v_der_idx]
+        dVmag_to_dQpu = self.dV_dQ_reduced[v_to_idx, v_der_idx]
+
+        # ∂θ/∂Q_pu  — from upper-right block of full J_inv
+        # J_inv rows 0…n_theta-1 are angle states; col indexes the Q perturbation
+        dTheta_from_dQpu = self.J_inv[theta_from_idx, col] if theta_from_idx is not None else 0.0
+        dTheta_to_dQpu = self.J_inv[theta_to_idx, col] if theta_to_idx is not None else 0.0
+
+        # Full complex voltage sensitivity ∂V_i/∂Q_pu (chain rule, both magnitude and angle terms)
+        # Divide by S_base to convert from ∂(.)/∂Q_pu  →  ∂(.)/∂Q_Mvar
+        dV_from_dQmvar = (dVmag_from_dQpu + 1j * U_from * dTheta_from_dQpu) \
+                         * np.exp(1j * theta_from) / self.net.sn_mva
+        dV_to_dQmvar = (dVmag_to_dQpu + 1j * U_to * dTheta_to_dQpu) \
+                       * np.exp(1j * theta_to) / self.net.sn_mva
+
+        # ∂I_ij/∂Q_Mvar  (Equation 19)  — result in p.u. current / Mvar
+        dI_ij_dQmvar = Y_line * (dV_from_dQmvar - dV_to_dQmvar)
+
+        # ∂|I_ij|/∂Q_Mvar  (Equation 20)  — still in p.u. current / Mvar
+        dI_mag_dQmvar = (1.0 / I_mag) * np.real(np.conj(I_ij) * dI_ij_dQmvar)
+
+        # Convert p.u. current → kA via current base
+        I_base_kA = self.net.sn_mva / (np.sqrt(3) * base_voltage_kv)
+        sensitivity = dI_mag_dQmvar * I_base_kA  # [kA/Mvar]
+
         return sensitivity
-    
+
     def compute_dI_dQ_der_matrix(
         self,
         line_indices: List[int],

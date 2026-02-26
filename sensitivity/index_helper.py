@@ -42,24 +42,11 @@ def get_jacobian_indices(net: pp.pandapowerNet, bus_idx: int) -> Tuple[Optional[
     ValueError
         If the network does not have the required internal power flow data.
     """
-    if not hasattr(net, '_ppc') or 'internal' not in net._ppc:
-        raise ValueError("Network must have converged power flow with internal data.")
 
-    pq_buses = net._ppc['internal']['pq']
-    pv_buses = net._ppc['internal']['pv']
-
-    if bus_idx in pq_buses:     # Check if bus is PQ (both angle and magnitude in state vector)
-        pq_idx = list(pq_buses).index(bus_idx)
-        n_pv = len(pv_buses)
-        theta_idx = n_pv + pq_idx
-        v_idx = pq_idx
-        return theta_idx, v_idx
-    elif bus_idx in pv_buses:   # Check if bus is PV (only angle in state vector)
-        pv_idx = list(pv_buses).index(bus_idx)
-        theta_idx = pv_idx
-        return theta_idx, None
-    else:                       # Bus is slack (not in state vector)
-        return None, None
+    # Convert pandapower bus index → internal ppc bus index first
+    ppc_bus_idx = pp_bus_to_ppc_bus(net, bus_idx)
+    # Delegate to the ppc-aware version
+    return get_jacobian_indices_ppc(net, ppc_bus_idx)
 
 
 def get_ppc_trafo_index(net: pp.pandapowerNet, trafo_idx: int) -> Optional[int]:

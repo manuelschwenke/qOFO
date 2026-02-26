@@ -289,6 +289,8 @@ class IterationRecord:
     # Plant measurements after PF
     plant_tn_voltages_pu: Optional[NDArray[np.float64]] = None
     plant_dn_voltages_pu: Optional[NDArray[np.float64]] = None
+    plant_tn_currents_ka: Optional[NDArray[np.float64]] = None   # TN line i_from_ka
+    plant_dn_currents_ka: Optional[NDArray[np.float64]] = None   # DN line i_from_ka
     tso_q_gen_mvar: Optional[NDArray[np.float64]] = None  # synchronous gen Q output
     # Penalty terms (computed from plant measurements after PF)
     tso_v_penalty: Optional[float] = None    # g_v * sum((V - V_set)^2)
@@ -349,78 +351,50 @@ class CascadeResult:
 
 
 def run_cascade(
-    v_setpoint_pu: float,
-    n_minutes: int = 120,
-    tso_period_min: int = 3,
-    dso_period_min: int = 1,
-    start_time: datetime = datetime(2016, 3, 15, 12, 0),
-    profiles_csv: str = DEFAULT_PROFILES_CSV,
-    verbose: int = 1,
-    live_plot: bool = True,
+    config: "CascadeConfig",
+    *,
     live_plotter=None,
-    g_v: float = 1000.0,
-    g_q: float = 1.0,
-    use_profiles: bool = True,
-    enable_reserve_observer: bool = False,
-    gw_oltc_cross_tso: float = 0.0,
-    gw_oltc_cross_dso: float = 0.0,
-    contingencies: Optional[List[ContingencyEvent]] = None,
-    reserve_cooldown_min: int = 3,
 ) -> CascadeResult:
     """
     Run cascaded TSO-DSO OFO on a combined network.
 
     Parameters
     ----------
-    live_plot : bool, optional
-        If ``True``, create a :class:`~visualisation.plot_cascade.LivePlotter`
-        internally after configs are built and update it each iteration.
-        Ignored when *live_plotter* is provided.  Default: ``False``.
+    config : CascadeConfig
+        Central configuration object holding every tunable parameter.
+        See :class:`core.cascade_config.CascadeConfig` for all fields.
     live_plotter : optional
         Object with an ``update(rec)`` method called after each iteration,
         e.g. :class:`visualisation.plot_cascade.LivePlotter`.  Takes
-        precedence over *live_plot*.
-    g_v : float, optional
-        Voltage-schedule tracking weight for the TSO objective.
-        Scales the gradient ``2·g_v·(V - V_set)^T·∂V/∂u``.
-        Larger values → faster convergence toward setpoints but
-        larger per-step actuator movements.  Default: 1000.
-    g_q : float, optional
-        Q-interface tracking weight for the DSO objective.
-        Scales the gradient ``2·g_q·(Q - Q_set)^T·∂Q/∂u``.
-        Larger values → faster convergence toward TSO's reactive
-        power setpoints.  Default: 1.0.
-    use_profiles : bool, optional
-        If ``True`` (default), apply time-series load/generation
-        profiles each minute.  If ``False``, the operating point
-        stays fixed at the initial PF solution — useful for
-        debugging convergence without profile disturbances.
-    enable_reserve_observer : bool, optional
-        If ``True`` (default), the Reserve Observer monitors per-interface
-        DER Q contributions and forces shunt engagement/release at
-        tertiary windings.  Set to ``False`` to disable the observer
-        entirely (no shunt overrides will be applied).
-    gw_oltc_cross_tso : float, optional
-        Cross-coupling weight for the TSO OLTC sub-block in G_w.
-        Penalises *simultaneous* OLTC switching via
-        ``g_cross · (Σ_i w_i)^2``.  Adds ``+g_cross`` to every
-        element of the OLTC sub-block (diagonal and off-diagonal),
-        producing a PSD rank-1 update ``g_cross · 𝟏𝟏^T``.  Set to 0
-        for purely diagonal (uncoupled) penalties.  Default: 0.0.
-    gw_oltc_cross_dso : float, optional
-        Cross-coupling weight for the DSO OLTC sub-block.
-        Same semantics as *gw_oltc_cross_tso*.  Default: 0.0.
-    contingencies : list of ContingencyEvent, optional
-        Scheduled network contingencies (line trips, generator outages).
-        Each event fires at its specified *minute*, setting the element
-        ``in_service`` flag accordingly.  After any topology change the
-        Jacobian sensitivities are re-computed for both controllers.
-        Default: ``None`` (no contingencies).
+        precedence over ``config.live_plot``.
     """
+    from core.cascade_config import CascadeConfig
+
+    # ── Unpack frequently-used config fields for readability ──────────────
+    v_setpoint_pu = config.v_setpoint_pu
+    dso_v_setpoint_pu = config.effective_dso_v_setpoint_pu
+    n_minutes = config.n_minutes
+    tso_period_min = config.tso_period_min
+    dso_period_min = config.dso_period_min
+    start_time = config.start_time
+    profiles_csv = config.profiles_csv
+    verbose = config.verbose
+    live_plot = config.live_plot
+    g_v = config.g_v
+    g_q = config.g_q
+    use_profiles = config.use_profiles
+    enable_reserve_observer = config.enable_reserve_observer
+    gw_oltc_cross_tso = config.gw_oltc_cross_tso
+    gw_oltc_cross_dso = config.gw_oltc_cross_dso
+    contingencies = list(config.contingencies) if config.contingencies else []
+    reserve_cooldown_min = config.reserve_cooldown_min
 
     if verbose > 0:
         print("=" * 72)
-        print(f"  CASCADED OFO  --  V_set = {v_setpoint_pu:.3f} p.u.")
+        if dso_v_setpoint_pu != v_setpoint_pu:
+            print(f"  CASCADED OFO  --  V_set TSO={v_setpoint_pu:.3f}  DSO={dso_v_setpoint_pu:.3f} p.u.")
+        else:
+            print(f"  CASCADED OFO  --  V_set = {v_setpoint_pu:.3f} p.u.")
         print(f"  Profiles: {os.path.basename(profiles_csv)}  "
               f"start={start_time:%d.%m.%Y %H:%M}  {n_minutes} min")
         print("=" * 72)
@@ -430,8 +404,7 @@ def run_cascade(
                 print(f"    min {ev.minute:4d}: {ev.action.upper()} "
                       f"{ev.element_type} {ev.element_index}")
 
-    if contingencies is None:
-        contingencies = []
+    # contingencies already unpacked as list above
 
     # 1) Build combined network
     net, meta = build_tuda_net(ext_grid_vm_pu=v_setpoint_pu, pv_nodes=True)
@@ -539,29 +512,39 @@ def run_cascade(
     v_setpoints = np.full(len(tso_v_buses), v_setpoint_pu)
     dso_id = "dso_0"
 
+    # Per-line thermal ratings [kA] for current constraints
+    tso_line_max_i_ka = [float(net.line.at[li, "max_i_ka"]) for li in tso_lines]
+    dso_line_max_i_ka = [float(net.line.at[li, "max_i_ka"]) for li in dso_lines]
+
     tso_config = TSOControllerConfig(
         der_bus_indices=tso_der_buses, pcc_trafo_indices=pcc_trafos,
         pcc_dso_controller_ids=[dso_id] * len(pcc_trafos),
         oltc_trafo_indices=tso_oltc, shunt_bus_indices=tso_shunt_buses,
         shunt_q_steps_mvar=tso_shunt_q,
         voltage_bus_indices=tso_v_buses, current_line_indices=tso_lines,
+        current_line_max_i_ka=tso_line_max_i_ka,
         v_setpoints_pu=v_setpoints, g_v=g_v,
         gen_indices=tso_gen_indices, gen_bus_indices=tso_gen_bus_indices,
     )
-    dso_v_setpoints = np.full(len(dso_v_buses), v_setpoint_pu)
+    dso_v_setpoints = np.full(len(dso_v_buses), dso_v_setpoint_pu)
     dso_config = DSOControllerConfig(
         der_bus_indices=dso_der_buses, oltc_trafo_indices=dso_oltc,
         shunt_bus_indices=dso_shunt_buses, shunt_q_steps_mvar=dso_shunt_q,
         interface_trafo_indices=dso_iface_trafos,
         voltage_bus_indices=dso_v_buses, current_line_indices=dso_lines,
+        current_line_max_i_ka=dso_line_max_i_ka,
         g_q=g_q,
-        v_setpoints_pu=dso_v_setpoints, g_v=10000,
+        v_setpoints_pu=dso_v_setpoints, g_v=config.dso_g_v,
     )
 
     # -- Live plotter (created here because configs are now available)
     if live_plot and live_plotter is None:
         from visualisation.plot_cascade import LivePlotter
-        live_plotter = LivePlotter(tso_config, dso_config)
+        live_plotter = LivePlotter(
+            tso_config, dso_config,
+            tso_line_max_i_ka=np.array(tso_line_max_i_ka, dtype=np.float64),
+            dso_line_max_i_ka=np.array(dso_line_max_i_ka, dtype=np.float64),
+        )
 
     # 5) Actuator bounds (from combined network)
     def _der_bounds(buses):
@@ -576,15 +559,15 @@ def run_cascade(
 
     tso_s, tso_p = _der_bounds(tso_der_buses)
 
-    # Generator capability parameters (Milano §12.2.1, turbo-generator defaults)
+    # Generator capability parameters (Milano §12.2.1, from config)
     tso_gen_params = [
         GeneratorParameters(
             s_rated_mva=float(net.gen.at[g, "sn_mva"]),
             p_max_mw=float(net.gen.at[g, "p_mw"]),
-            xd_pu=1.2,           # typical direct-axis synchronous reactance
-            i_f_max_pu=2.65,     # typical max field current (turbo-gen, eq. 12.10)
-            beta=0.15,           # under-excitation slope (Milano p. 293)
-            q0_pu=0.4,           # under-excitation offset (Milano p. 293)
+            xd_pu=config.gen_xd_pu,
+            i_f_max_pu=config.gen_i_f_max_pu,
+            beta=config.gen_beta,
+            q0_pu=config.gen_q0_pu,
         )
         for g in tso_gen_indices
     ]
@@ -634,19 +617,16 @@ def run_cascade(
     #
     # =====================================================================
     # TSO u = [Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt]
-    gw_tso_diag = np.concatenate([
-        np.full(len(tso_der_buses),   0.4),        # Q_DER: moderate TS-DER damping
-        np.full(len(pcc_trafos),      0.4),        # Q_PCC_set: slow PCC setpoint moves
-        np.full(len(tso_gen_indices), 2e7),      # V_gen: very cautious AVR moves
-        np.full(len(tso_oltc),        40),      # s_OLTC: expensive tap switching
-        np.full(len(tso_shunt_buses), 500),      # s_shunt: expensive shunt switching
-    ])
+    gw_tso_diag = config.build_gw_tso_diag(
+        n_der=len(tso_der_buses), n_pcc=len(pcc_trafos),
+        n_gen=len(tso_gen_indices), n_oltc=len(tso_oltc),
+        n_shunt=len(tso_shunt_buses),
+    )
     # DSO u = [Q_DER | s_OLTC | s_shunt]
-    gw_dso_diag = np.concatenate([
-        np.full(len(dso_der_buses),   4),        # Q_DER: damped DER response
-        np.full(len(dso_oltc),        100),     # s_OLTC: very expensive 3W tap switching
-        np.full(len(dso_shunt_buses), 3000),     # s_shunt: shunt switching cost
-    ])
+    gw_dso_diag = config.build_gw_dso_diag(
+        n_der=len(dso_der_buses), n_oltc=len(dso_oltc),
+        n_shunt=len(dso_shunt_buses),
+    )
 
     # Build G_w matrices — full 2-D if OLTC cross-coupling is requested,
     # otherwise keep as 1-D diagonal vector (cheaper for solver).
@@ -691,14 +671,17 @@ def run_cascade(
     # Per-actuator g_u: penalises DER Q *level* (deviation from zero) to
     # incentivise freeing up DER headroom via shunt/OLTC switching.
     # With alpha=1 the g_u value adds directly to the G_w diagonal.
-    gu_tso = np.zeros(len(gw_tso_diag))   # TSO: no DER usage regularisation
-    gu_dso = np.concatenate([
-        np.full(len(dso_der_buses),   0.1),      # Q_DER: regularise toward zero
-        np.full(len(dso_oltc),        0.0),      # s_OLTC: no usage penalty
-        np.full(len(dso_shunt_buses), 0.0),      # s_shunt: no usage penalty
-    ])
-    ofo_tso = OFOParameters(alpha=1.0, g_w=gw_tso, g_z=1e12, g_u=gu_tso)
-    ofo_dso = OFOParameters(alpha=1.0, g_w=gw_dso, g_z=1e12, g_u=gu_dso)
+    gu_tso = config.build_gu_tso(
+        n_der=len(tso_der_buses), n_pcc=len(pcc_trafos),
+        n_gen=len(tso_gen_indices), n_oltc=len(tso_oltc),
+        n_shunt=len(tso_shunt_buses),
+    )
+    gu_dso = config.build_gu_dso(
+        n_der=len(dso_der_buses), n_oltc=len(dso_oltc),
+        n_shunt=len(dso_shunt_buses),
+    )
+    ofo_tso = OFOParameters(alpha=config.alpha, g_w=gw_tso, g_z=config.g_z, g_u=gu_tso)
+    ofo_dso = OFOParameters(alpha=config.alpha, g_w=gw_dso, g_z=config.g_z, g_u=gu_dso)
 
     ns = _network_state(net)
 
@@ -711,12 +694,9 @@ def run_cascade(
     # (Jacobian-weighted) and forces shunt engagement at the
     # tertiary winding when the DER burden at that interface
     # exceeds the threshold.  1:1 mapping between couplers and shunts.
-    reserve_obs = ReserveObserver(ReserveObserverConfig(
-        q_threshold_mvar=40.0,
-        q_release_mvar=-40.0,
-        shunt_q_steps_mvar=dso_shunt_q,
-        cooldown_min=reserve_cooldown_min,
-    ))
+    reserve_obs = ReserveObserver(
+        config.build_reserve_observer_config(shunt_q_steps_mvar=dso_shunt_q)
+    )
 
     # 7) Initialise actuators to a neutral operating point
     #    - DER Q = 0, TSO OLTC = 0, shunts = 0
@@ -740,14 +720,14 @@ def run_cascade(
             net.shunt.at[net.shunt.index[mask][0], "step"] = 0
 
     # Use pandapower DiscreteTapControl to find the DSO OLTC positions that
-    # regulate the 110 kV side to ~v_setpoint_pu, then remove the controllers.
+    # regulate the 110 kV side to ~dso_v_setpoint_pu, then remove the controllers.
     from pandapower.control import DiscreteTapControl
-    tol_pu = 0.01
+    tol_pu = config.dso_oltc_init_tol_pu
     for t3w in dso_oltc:
         DiscreteTapControl(
             net, element_index=t3w,
-            vm_lower_pu=v_setpoint_pu - tol_pu,
-            vm_upper_pu=v_setpoint_pu + tol_pu,
+            vm_lower_pu=dso_v_setpoint_pu - tol_pu,
+            vm_upper_pu=dso_v_setpoint_pu + tol_pu,
             side="mv", element="trafo3w",
         )
     pp.runpp(net, run_control=True, calculate_voltage_angles=True)
@@ -996,9 +976,15 @@ def run_cascade(
         # Power flow
         pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
-        # Record plant voltages, generator Q, and actual interface Q after PF
+        # Record plant voltages, line currents, generator Q, and actual interface Q after PF
         rec.plant_tn_voltages_pu = net.res_bus.loc[tso_v_buses, "vm_pu"].values.copy()
         rec.plant_dn_voltages_pu = net.res_bus.loc[dso_v_buses, "vm_pu"].values.copy()
+        rec.plant_tn_currents_ka = np.array(
+            [float(net.res_line.at[li, "i_from_ka"]) for li in tso_lines],
+            dtype=np.float64)
+        rec.plant_dn_currents_ka = np.array(
+            [float(net.res_line.at[li, "i_from_ka"]) for li in dso_lines],
+            dtype=np.float64)
         rec.tso_q_gen_mvar = np.array(
             [float(net.res_gen.at[g, "q_mvar"]) for g in tso_gen_indices],
             dtype=np.float64)
@@ -1099,28 +1085,78 @@ def print_summary(v_set: float, log: List[IterationRecord]):
 # =============================================================================
 
 def main():
-    # Example contingency events (uncomment to activate):
-    #   - Trip EHV line 3 at minute 90  (1,5 hours into simulation)
-    #   - Trip synchronous generator 0 at minute 120  (2 hours)
-    #   - Restore line 3 at minute 150  (2,5 hours)
-    events = [
-         ContingencyEvent(minute=100, element_type="line", element_index=3),
-         ContingencyEvent(minute=150, element_type="gen",  element_index=0),
-         ContingencyEvent(minute=200, element_type="line", element_index=3, action="restore"),
-         ContingencyEvent(minute=400, element_type="gen", element_index=0, action="restore"),
-    ]
+    import time as _time
+    from core.cascade_config import CascadeConfig
+    from core.results_storage import save_results
 
-    for v_set in [1.05]:
-        result = run_cascade(v_setpoint_pu=v_set, n_minutes=12*60,
-                             tso_period_min=3, dso_period_min=1, verbose=1,
-                             g_v=100000, g_q=1, use_profiles=True, enable_reserve_observer=True,
-                             gw_oltc_cross_tso=0, gw_oltc_cross_dso=0,
-                             contingencies=events if events else None,
-                             reserve_cooldown_min=3)
-        print_summary(v_set, result.log)
+    # ── Configuration (single place for ALL parameters) ───────────────────
+    config = CascadeConfig(
+        # Simulation
+        v_setpoint_pu=1.05,
+        n_minutes=24 * 60,
+        tso_period_min=3,
+        dso_period_min=1,
+        start_time=datetime(2016, 1, 3, 0, 0),
+        use_profiles=True,
+        verbose=1,
+        live_plot=True,
 
-        from visualisation.plot_cascade import plot_all
-        #plot_all(result.log, result.tso_config, result.dso_config)
+        # Objective weights
+        g_v=250000,
+        g_q=1,
+        dso_g_v=10000.0,
+
+        # OFO
+        alpha=1.0,
+        g_z=1e12,
+
+        # TSO g_w
+        gw_tso_q_der=0.4,
+        gw_tso_q_pcc=0.2,
+        gw_tso_v_gen=5e6,
+        gw_tso_oltc=40.0,
+        gw_tso_shunt=2000.0,
+        gw_oltc_cross_tso=0.0,
+
+        # DSO g_w
+        gw_dso_q_der=4.0,
+        gw_dso_oltc=100.0,
+        gw_dso_shunt=3000.0,
+        gw_oltc_cross_dso=0.0,
+
+        # Generator capability
+        gen_xd_pu=1.2,
+        gen_i_f_max_pu=2.65,
+        gen_beta=0.15,
+        gen_q0_pu=0.4,
+
+        # Reserve Observer
+        enable_reserve_observer=True,
+        reserve_q_threshold_mvar=40.0,
+        reserve_q_release_mvar=-40.0,
+        reserve_cooldown_min=3,
+
+        # Contingencies
+        contingencies=[
+            ContingencyEvent(minute=100, element_type="line", element_index=3),
+            ContingencyEvent(minute=600, element_type="gen",  element_index=0),
+            ContingencyEvent(minute=200, element_type="line", element_index=11),
+            ContingencyEvent(minute=300, element_type="line", element_index=3, action="restore"),
+            ContingencyEvent(minute=330, element_type="line", element_index=11, action="restore"),
+            ContingencyEvent(minute=1200, element_type="gen",  element_index=0, action="restore"),
+        ],
+    )
+
+    # ── Run ────────────────────────────────────────────────────────────────
+    t0 = _time.perf_counter()
+    result = run_cascade(config)
+    wall_time = _time.perf_counter() - t0
+
+    print_summary(config.v_setpoint_pu, result.log)
+
+    # ── Save results ──────────────────────────────────────────────────────
+    run_dir = save_results(result, config, wall_time_s=wall_time)
+    print(f"\nResults saved to: {run_dir}")
 
 
 if __name__ == "__main__":

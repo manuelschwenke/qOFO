@@ -588,3 +588,6 @@ def build_tuda_net(
     pp.runpp(net, run_control=True, calculate_voltage_angles=True)
 
     return net, meta
+
+if __name__ == "__main__":
+    net, meta = build_tuda_net()

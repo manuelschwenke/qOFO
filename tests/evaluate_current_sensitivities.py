@@ -40,6 +40,7 @@ import pandapower as pp
 # Project imports
 from network.build_tuda_net import build_tuda_net
 from sensitivity.jacobian import JacobianSensitivities
+from sensitivity.index_helper import pp_bus_to_ppc_bus
 
 
 # ==============================================================================
@@ -169,6 +170,102 @@ def compute_numerical_dI_dQshunt(
     i_minus = float(net_minus.res_line.at[line_idx, "i_from_ka"])
 
     return (i_plus - i_minus) / (2.0 * perturbation_steps)
+
+
+def compute_numerical_dI_ds_2w(
+    net: pp.pandapowerNet,
+    line_idx: int,
+    trafo_idx: int,
+    perturbation_steps: int = 1,
+) -> float:
+    """
+    Compute numerical sensitivity d|I|/d(tap_pos) for a 2W OLTC using finite differences.
+
+    Uses: d|I|/ds ≈ (|I|(s+Δ) − |I|(s−Δ)) / (2Δ)
+
+    Parameters
+    ----------
+    net : pp.pandapowerNet
+        Converged pandapower network.
+    line_idx : int
+        Pandapower line index for the current measurement.
+    trafo_idx : int
+        Pandapower transformer index (2W with OLTC).
+    perturbation_steps : int
+        Number of tap step increments for finite difference (default: 1).
+
+    Returns
+    -------
+    sensitivity : float
+        Numerical sensitivity d|I|/d(tap_step) [kA/step].
+    """
+    tap_original = int(net.trafo.at[trafo_idx, "tap_pos"])
+
+    # +Δstep
+    net_plus = copy.deepcopy(net)
+    net_plus.trafo.at[trafo_idx, "tap_pos"] = tap_original + perturbation_steps
+    pp.runpp(net_plus, run_control=False, calculate_voltage_angles=True)
+    if not net_plus.converged:
+        raise RuntimeError("PF did not converge for tap_pos + Δ.")
+    i_plus = float(net_plus.res_line.at[line_idx, "i_from_ka"])
+
+    # −Δstep
+    net_minus = copy.deepcopy(net)
+    net_minus.trafo.at[trafo_idx, "tap_pos"] = tap_original - perturbation_steps
+    pp.runpp(net_minus, run_control=False, calculate_voltage_angles=True)
+    if not net_minus.converged:
+        raise RuntimeError("PF did not converge for tap_pos − Δ.")
+    i_minus = float(net_minus.res_line.at[line_idx, "i_from_ka"])
+
+    return (i_plus - i_minus) / (2.0 * perturbation_steps)
+
+
+def compute_numerical_dI_dVgen(
+    net: pp.pandapowerNet,
+    line_idx: int,
+    gen_idx: int,
+    perturbation_pu: float = 0.01,
+) -> float:
+    """
+    Compute numerical sensitivity d|I|/dV_gen using central finite differences.
+
+    Uses: d|I|/dV ≈ (|I|(V+ΔV) − |I|(V−ΔV)) / (2ΔV)
+
+    Parameters
+    ----------
+    net : pp.pandapowerNet
+        Converged pandapower network.
+    line_idx : int
+        Pandapower line index for the current measurement.
+    gen_idx : int
+        Pandapower generator index (index into net.gen).
+    perturbation_pu : float
+        Voltage magnitude perturbation [p.u.] (default: 0.01).
+
+    Returns
+    -------
+    sensitivity : float
+        Numerical sensitivity d|I|/dV_gen [kA/p.u.].
+    """
+    vm_original = float(net.gen.at[gen_idx, "vm_pu"])
+
+    # +ΔV
+    net_plus = copy.deepcopy(net)
+    net_plus.gen.at[gen_idx, "vm_pu"] = vm_original + perturbation_pu
+    pp.runpp(net_plus, run_control=False, calculate_voltage_angles=True)
+    if not net_plus.converged:
+        raise RuntimeError("PF did not converge for V + ΔV.")
+    i_plus = float(net_plus.res_line.at[line_idx, "i_from_ka"])
+
+    # −ΔV
+    net_minus = copy.deepcopy(net)
+    net_minus.gen.at[gen_idx, "vm_pu"] = vm_original - perturbation_pu
+    pp.runpp(net_minus, run_control=False, calculate_voltage_angles=True)
+    if not net_minus.converged:
+        raise RuntimeError("PF did not converge for V − ΔV.")
+    i_minus = float(net_minus.res_line.at[line_idx, "i_from_ka"])
+
+    return (i_plus - i_minus) / (2.0 * perturbation_pu)
 
 
 # ==============================================================================

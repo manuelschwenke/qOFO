@@ -67,9 +67,13 @@ class OFOParameters:
         Either a scalar (uniform for all variables) or an array of
         length n_total with per-variable weights.  Set to 0 for
         actuators that should not be regularised (e.g. OLTC, shunt).
-    g_z : float
+    g_z : float or NDArray[np.float64]
         Weight for slack variables (soft constraint violations).
         Higher values enforce output constraints more strictly.
+        Either a scalar (uniform for all outputs) or a 1-D array
+        of length n_outputs with per-output weights.  Use lower
+        values for outputs that cannot be tightly controlled
+        (e.g. branch currents in a reactive-power controller).
     max_iter_per_step : int
         Maximum MIQP solver iterations per OFO step.
     solver_verbose : bool
@@ -77,7 +81,7 @@ class OFOParameters:
     """
     alpha: float
     g_w: Union[float, NDArray[np.float64]]
-    g_z: float
+    g_z: Union[float, NDArray[np.float64]]
     g_u: Union[float, NDArray[np.float64]] = 0.0
     max_iter_per_step: int = 100
     solver_verbose: bool = False
@@ -96,7 +100,8 @@ class OFOParameters:
         g_u_arr = np.asarray(self.g_u)
         if np.any(g_u_arr < 0):
             raise ValueError(f"g_u must be non-negative, got {self.g_u}")
-        if self.g_z < 0:
+        g_z_arr = np.asarray(self.g_z)
+        if np.any(g_z_arr < 0):
             raise ValueError(f"g_z must be non-negative, got {self.g_z}")
 
 

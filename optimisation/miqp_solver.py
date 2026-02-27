@@ -603,7 +603,7 @@ def build_miqp_problem(
     y_upper: NDArray[np.float64],
     g_w: Union[float, NDArray[np.float64]],
     g_u: Union[float, NDArray[np.float64]],
-    g_z: float,
+    g_z: Union[float, NDArray[np.float64]],
     integer_indices: Optional[List[int]] = None,
 ) -> MIQPProblem:
     """
@@ -644,8 +644,12 @@ def build_miqp_problem(
         scalar (uniform for all variables) or a per-variable array of
         length n_total.  Set entries to 0 for actuators that should
         not be regularised towards zero (e.g. OLTC taps, shunts).
-    g_z : float
-        Scalar weight for slack variables (constraint violations).
+    g_z : float or NDArray[np.float64]
+        Weight for slack variables (constraint violations).  Either a
+        scalar (uniform for all outputs) or a 1-D array of length
+        ``n_outputs`` with per-output weights.  Use lower values for
+        outputs that cannot be tightly controlled (e.g. branch currents
+        in a reactive-power controller).
     integer_indices : List[int], optional
         Indices of integer variables within u_current. If None, all
         variables are treated as continuous.
@@ -736,8 +740,9 @@ def build_miqp_problem(
         diag_Gw[~continuous_mask] += g_u_vec[~continuous_mask]
         G_w = np.diag(diag_Gw)
 
-    # G_z is the slack variable weight
-    G_z = g_z * np.eye(n_outputs)
+    # G_z is the slack variable weight (scalar or per-output vector)
+    g_z_vec = np.broadcast_to(np.asarray(g_z, dtype=np.float64), (n_outputs,)).copy()
+    G_z = np.diag(g_z_vec)
 
     # Modified gradient: continuous get α·g_u, integer get plain g_u
     grad_f_mod = grad_f.copy()

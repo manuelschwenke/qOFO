@@ -236,6 +236,8 @@ def _write_summary(
     a(f"  dso_g_v (DSO V track):  {config.dso_g_v}")
     a(f"  alpha:                  {config.alpha}")
     a(f"  g_z:                    {config.g_z}")
+    a(f"  gz_tso_current:         {config.gz_tso_current}")
+    a(f"  gz_dso_current:         {config.gz_dso_current}")
     a("")
 
     a("  ── TSO g_w (change damping) ──")

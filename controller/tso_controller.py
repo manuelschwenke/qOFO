@@ -114,7 +114,7 @@ class TSOControllerConfig:
     current_line_indices: List[int]
     v_min_pu: float = 0.90
     v_max_pu: float = 1.10
-    i_max_pu: float = 1.0
+    i_max_pu: float = 1.0 #1.0
     current_line_max_i_ka: Optional[List[float]] = None
     """Per-line thermal rating [kA]. Must have the same length as
     ``current_line_indices``. If ``None``, limits are not enforced."""
@@ -922,6 +922,20 @@ class TSOController(BaseOFOController):
                 for i_obs, obs_bus in enumerate(obs_map):
                     i_row = self.config.voltage_bus_indices.index(obs_bus)
                     H[i_row, col] = dV_dVgen[i_obs, j_gen]
+
+        if self.config.current_line_indices:
+            dI_dVgen, line_map, gen_map_i = \
+                self.sensitivities.compute_dI_dVgen_matrix(
+                    line_indices=self.config.current_line_indices,
+                    gen_bus_indices_pp=gen_terminal_buses,
+                )
+            for k, gen_bus_pp in enumerate(gen_terminal_buses):
+                col = avr_start + k
+                if gen_bus_pp in gen_map_i:
+                    j_gen = gen_map_i.index(gen_bus_pp)
+                    for i_line, l_idx in enumerate(line_map):
+                        # The lines are mapped to the lower part of H (after voltages)
+                        H[n_v + i_line, col] = dI_dVgen[i_line, j_gen]
 
         # NOTE: ∂Q_PCC / ∂V_gen entries are NOT filled here.
         # Q_PCC rows have been removed entirely. The sensitivity method

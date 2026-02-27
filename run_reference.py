@@ -900,8 +900,8 @@ def main():
     ]
 
     ref_result = run_reference(
-        v_setpoint_pu=1.05,
-        n_minutes=60*4,
+        v_setpoint_pu=1.03,
+        n_minutes=60*12,
         timestep_min=1,
         g_v_tn=100000,
         g_v_dn=1,
@@ -916,12 +916,12 @@ def main():
 
     from core.cascade_config import CascadeConfig
     cas_config = CascadeConfig(
-        v_setpoint_pu=1.05,
-        n_minutes=60 * 4,
+        v_setpoint_pu=1.03,
+        n_minutes=60 * 12,
         tso_period_min=3,
         dso_period_min=1,
         verbose=1,
-        g_v=250000,
+        g_v=200000,
         g_q=1,
         use_profiles=True,
         enable_reserve_observer=False,

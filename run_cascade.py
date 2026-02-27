@@ -542,8 +542,8 @@ def run_cascade(
         from visualisation.plot_cascade import LivePlotter
         live_plotter = LivePlotter(
             tso_config, dso_config,
-            tso_line_max_i_ka=np.array(tso_line_max_i_ka, dtype=np.float64),
-            dso_line_max_i_ka=np.array(dso_line_max_i_ka, dtype=np.float64),
+            tso_line_max_i_ka=np.array(tso_line_max_i_ka, dtype=np.float64)*tso_config.i_max_pu,
+            dso_line_max_i_ka=np.array(dso_line_max_i_ka, dtype=np.float64)*dso_config.i_max_pu,
         )
 
     # 5) Actuator bounds (from combined network)
@@ -680,8 +680,11 @@ def run_cascade(
         n_der=len(dso_der_buses), n_oltc=len(dso_oltc),
         n_shunt=len(dso_shunt_buses),
     )
-    ofo_tso = OFOParameters(alpha=config.alpha, g_w=gw_tso, g_z=config.g_z, g_u=gu_tso)
-    ofo_dso = OFOParameters(alpha=config.alpha, g_w=gw_dso, g_z=config.g_z, g_u=gu_dso)
+    gz_tso = config.build_gz_tso(n_v=len(tso_v_buses), n_i=len(tso_lines))
+    gz_dso = config.build_gz_dso(
+        n_iface=len(dso_iface_trafos), n_v=len(dso_v_buses), n_i=len(dso_lines))
+    ofo_tso = OFOParameters(alpha=config.alpha, g_w=gw_tso, g_z=gz_tso, g_u=gu_tso)
+    ofo_dso = OFOParameters(alpha=config.alpha, g_w=gw_dso, g_z=gz_dso, g_u=gu_dso)
 
     ns = _network_state(net)
 
@@ -1037,6 +1040,81 @@ def run_cascade(
                 print(f"      Q_act   = {A2S(rec.dso_q_actual_mvar)} Mvar  (plant)")
             print()
 
+            # DEBUG ########################################################################
+            # # --- DER active power injections ---
+            # tso_der_p = np.array(
+            #     [float(net.res_sgen.at[s, 'p_mw'])
+            #      for s in net.sgen.index
+            #      if int(net.sgen.at[s, 'bus']) not in dn_buses
+            #      and not str(net.sgen.at[s, 'name']).startswith('BOUND')],
+            #     dtype=np.float64,
+            # )
+            # dso_der_p = np.array(
+            #     [float(net.res_sgen.at[s, 'p_mw'])
+            #      for s in net.sgen.index
+            #      if int(net.sgen.at[s, 'bus']) in dn_buses
+            #      and not str(net.sgen.at[s, 'name']).startswith('BOUND')],
+            #     dtype=np.float64,
+            # )
+            # gen_p = np.array(
+            #     [float(net.res_gen.at[g, 'p_mw']) for g in tso_gen_indices],
+            #     dtype=np.float64,
+            # )
+            #
+            # # --- Load active power consumption ---
+            # tso_load_p = np.array(
+            #     [float(net.res_load.at[l, 'p_mw'])
+            #      for l in net.load.index
+            #      if int(net.load.at[l, 'bus']) not in dn_buses],
+            #     dtype=np.float64,
+            # )
+            # dso_load_p = np.array(
+            #     [float(net.res_load.at[l, 'p_mw'])
+            #      for l in net.load.index
+            #      if int(net.load.at[l, 'bus']) in dn_buses],
+            #     dtype=np.float64,
+            # )
+            #
+            # print(f"  TSO DER P  sum={tso_der_p.sum():.1f} MW  {A2S(tso_der_p)} MW")
+            # print(f"  DSO DER P  sum={dso_der_p.sum():.1f} MW  {A2S(dso_der_p)} MW")
+            # if len(gen_p):
+            #     print(f"  TSO Gen P  sum={gen_p.sum():.1f} MW  {A2S(gen_p)} MW")
+            # print(f"  TSO Load P sum={tso_load_p.sum():.1f} MW  {A2S(tso_load_p)} MW")
+            # print(f"  DSO Load P sum={dso_load_p.sum():.1f} MW  {A2S(dso_load_p)} MW")
+            # --- DEBUG: Print Actual Currents and Limits ---
+            # tso_i_actual = np.array(
+            #     [float(net.res_line.at[li, 'i_from_ka']) for li in tso_lines],
+            #     dtype=np.float64,
+            # )
+            # dso_i_actual = np.array(
+            #     [float(net.res_line.at[li, 'i_from_ka']) for li in dso_lines],
+            #     dtype=np.float64,
+            # )
+            #
+            # tso_i_lim = np.array(tso_config.current_line_max_i_ka, dtype=np.float64)
+            # dso_i_lim = np.array(dso_config.current_line_max_i_ka, dtype=np.float64)
+            #
+            # tso_violated = np.any(tso_i_actual > tso_i_lim * tso_config.i_max_pu)
+            # dso_violated = np.any(dso_i_actual > dso_i_lim * dso_config.i_max_pu)
+            #
+            # tso_flag = "  *** VIOLATION ***" if tso_violated else ""
+            # dso_flag = "  *** VIOLATION ***" if dso_violated else ""
+            #
+            # # Calculate maximum currents
+            # tso_max_i = np.max(tso_i_actual) if len(tso_i_actual) > 0 else 0.0
+            # dso_max_i = np.max(dso_i_actual) if len(dso_i_actual) > 0 else 0.0
+            #
+            # print(
+            #     f"  TN I actual [kA]  {A2S(tso_i_actual)}")
+            # print(
+            #     f"  (lim×{tso_config.i_max_pu:.2f}: {A2S(tso_i_lim * tso_config.i_max_pu)}){tso_flag}")
+            # print(f"  TN I max    [kA]  {tso_max_i:.3f}")
+            # print(
+            #     f"  DN I actual [kA]  {A2S(dso_i_actual)}")
+            # print(
+            #     f"  (lim×{dso_config.i_max_pu:.2f}: {A2S(dso_i_lim * dso_config.i_max_pu)}){dso_flag}")
+            # print(f"  DN I max    [kA]  {dso_max_i:.3f}")
+
     if live_plotter is not None:
         live_plotter.finish()
 
@@ -1093,16 +1171,16 @@ def main():
     config = CascadeConfig(
         # Simulation
         v_setpoint_pu=1.05,
-        n_minutes=24 * 60,
+        n_minutes=2 * 60,
         tso_period_min=3,
         dso_period_min=1,
-        start_time=datetime(2016, 1, 3, 0, 0),
+        start_time=datetime(2016, 5, 1, 0, 0),
         use_profiles=True,
         verbose=1,
         live_plot=True,
 
         # Objective weights
-        g_v=250000,
+        g_v=200000,
         g_q=1,
         dso_g_v=10000.0,
 
@@ -1138,12 +1216,14 @@ def main():
 
         # Contingencies
         contingencies=[
-            ContingencyEvent(minute=100, element_type="line", element_index=3),
-            ContingencyEvent(minute=600, element_type="gen",  element_index=0),
-            ContingencyEvent(minute=200, element_type="line", element_index=11),
-            ContingencyEvent(minute=300, element_type="line", element_index=3, action="restore"),
-            ContingencyEvent(minute=330, element_type="line", element_index=11, action="restore"),
-            ContingencyEvent(minute=1200, element_type="gen",  element_index=0, action="restore"),
+            ContingencyEvent(minute=90, element_type="line", element_index=3),
+            ContingencyEvent(minute=120, element_type="line", element_index=11),
+            #ContingencyEvent(minute=120, element_type="line", element_index=16),
+            ContingencyEvent(minute=180, element_type="gen", element_index=0),
+            ContingencyEvent(minute=210, element_type="line", element_index=3, action="restore"),
+            #ContingencyEvent(minute=210, element_type="line", element_index=16, action="restore"),
+            ContingencyEvent(minute=240, element_type="line", element_index=11, action="restore"),
+            ContingencyEvent(minute=400, element_type="gen",  element_index=0, action="restore"),
         ],
     )
 

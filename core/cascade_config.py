@@ -114,8 +114,17 @@ class CascadeConfig:
     directly without scaling."""
 
     g_z: float = 1e12
-    """Slack variable penalty in the MIQP (z^T G_z z).  Very large to
-    discourage constraint violation."""
+    """Slack variable penalty in the MIQP (z^T G_z z) for voltage and
+    interface-Q outputs.  Very large to discourage constraint violation."""
+
+    gz_tso_current: float = 1e4
+    """Slack variable penalty for TSO current-limit outputs.  Much smaller
+    than ``g_z`` because branch currents are only weakly controllable via
+    reactive-power actuators.  A too-large value causes oscillations when
+    current limits are hit."""
+
+    gz_dso_current: float = 1e4
+    """Slack variable penalty for DSO current-limit outputs."""
 
     # ── TSO g_w diagonal (per-actuator change damping) ────────────────────
     gw_tso_q_der: float = 0.4
@@ -257,6 +266,27 @@ class CascadeConfig:
             np.full(n_shunt, self.gu_dso_shunt),
         ])
 
+    def build_gz_tso(self, n_v: int, n_i: int) -> NDArray[np.float64]:
+        """Build per-output g_z vector for the TSO controller.
+
+        Output ordering: [ V_bus | I_line ]
+        """
+        return np.concatenate([
+            np.full(n_v, self.g_z),
+            np.full(n_i, self.gz_tso_current),
+        ])
+
+    def build_gz_dso(self, n_iface: int, n_v: int, n_i: int) -> NDArray[np.float64]:
+        """Build per-output g_z vector for the DSO controller.
+
+        Output ordering: [ Q_interface | V_bus | I_line ]
+        """
+        return np.concatenate([
+            np.full(n_iface, self.g_z),
+            np.full(n_v,     self.g_z),
+            np.full(n_i,     self.gz_dso_current),
+        ])
+
     def build_reserve_observer_config(
         self, shunt_q_steps_mvar: List[float],
     ) -> ReserveObserverConfig:
@@ -301,6 +331,8 @@ class CascadeConfig:
         # OFO
         d["alpha"] = self.alpha
         d["g_z"] = self.g_z
+        d["gz_tso_current"] = self.gz_tso_current
+        d["gz_dso_current"] = self.gz_dso_current
 
         # TSO g_w
         d["gw_tso_q_der"] = self.gw_tso_q_der

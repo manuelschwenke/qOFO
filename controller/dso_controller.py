@@ -97,7 +97,7 @@ class DSOControllerConfig:
     current_line_indices: List[int]
     v_min_pu: float = 0.9
     v_max_pu: float = 1.1
-    i_max_pu: float = 1.0
+    i_max_pu: float = 0.4 # 1.0
     current_line_max_i_ka: Optional[List[float]] = None
     """Per-line thermal rating [kA]. Must have the same length as
     ``current_line_indices``. If ``None``, limits are not enforced."""

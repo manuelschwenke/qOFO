@@ -105,6 +105,18 @@ class CascadeConfig:
     g_q: float = 1.0
     """DSO interface Q tracking penalty:  g_q · Σ(Q − Q_set)²."""
 
+    g_qi: float = 0.0
+    """DSO integral Q-tracking weight (leaky integrator).  When > 0,
+    accumulates Q-interface errors over iterations, building pressure
+    for discrete switching actions (OLTC, shunts).  Default 0.0 (disabled)."""
+
+    lambda_qi: float = 0.9
+    """Decay factor for the DSO leaky integrator (0 ≤ λ ≤ 1).
+    1.0 = pure integration (no decay), 0.9 = gradual decay."""
+
+    q_integral_max_mvar: float = 50.0
+    """Anti-windup clamp for the DSO integral accumulator [Mvar]."""
+
     dso_g_v: float = 100.0
     """DSO voltage tracking weight (soft secondary objective)."""
 
@@ -326,6 +338,9 @@ class CascadeConfig:
         # Objective weights
         d["g_v"] = self.g_v
         d["g_q"] = self.g_q
+        d["g_qi"] = self.g_qi
+        d["lambda_qi"] = self.lambda_qi
+        d["q_integral_max_mvar"] = self.q_integral_max_mvar
         d["dso_g_v"] = self.dso_g_v
 
         # OFO

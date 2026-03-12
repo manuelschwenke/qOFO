@@ -102,6 +102,20 @@ class DSOControllerConfig:
     """Per-line thermal rating [kA]. Must have the same length as
     ``current_line_indices``. If ``None``, limits are not enforced."""
     g_q: float = 1.0
+    g_qi: float = 0.0
+    """Weight for integral Q-tracking term.  When > 0, a leaky integrator
+    accumulates Q-interface errors over iterations, building pressure for
+    discrete switching actions (OLTC, shunts) when continuous DERs cannot
+    satisfy the setpoint.  The integral gradient contribution is
+    ``2 · g_qi · integral^T · ∂Q/∂u``.  Default 0.0 (disabled)."""
+    lambda_qi: float = 0.9
+    """Decay factor for the leaky integrator (0 ≤ λ ≤ 1).  Controls how
+    fast past errors are forgotten.  1.0 = pure integration (no decay),
+    0.9 = gradual decay.  Only used when *g_qi* > 0."""
+    q_integral_max_mvar: float = 50.0
+    """Anti-windup clamp for the integral accumulator [Mvar].  Limits each
+    element of the integral to ``[-max, +max]`` to prevent excessive
+    buildup when Q-capability limits are hit."""
     v_setpoints_pu: Optional[NDArray[np.float64]] = None
     g_v: float = 1.0
 
@@ -126,6 +140,17 @@ class DSOControllerConfig:
                     f"must match current_line_indices length "
                     f"({len(self.current_line_indices)})"
                 )
+        if self.g_qi < 0:
+            raise ValueError(f"g_qi must be non-negative, got {self.g_qi}")
+        if not (0.0 <= self.lambda_qi <= 1.0):
+            raise ValueError(
+                f"lambda_qi must be in [0, 1], got {self.lambda_qi}"
+            )
+        if self.q_integral_max_mvar <= 0:
+            raise ValueError(
+                f"q_integral_max_mvar must be positive, got "
+                f"{self.q_integral_max_mvar}"
+            )
         if self.v_setpoints_pu is not None:
             if len(self.v_setpoints_pu) != len(self.voltage_bus_indices):
                 raise ValueError(
@@ -203,6 +228,9 @@ class DSOController(BaseOFOController):
         n_interfaces = len(config.interface_trafo_indices)
         self.q_setpoint_mvar = np.zeros(n_interfaces)
 
+        # Integral Q-error accumulator (leaky integrator for PI-like behaviour)
+        self._q_error_integral = np.zeros(n_interfaces)
+
         # Shunt bound overrides from Reserve Observer.
         # Keys: shunt index (0-based within shunt vector).
         # Values: (lower, upper) bound override for that shunt.
@@ -250,6 +278,10 @@ class DSOController(BaseOFOController):
             msg_idx = list(message.interface_transformer_indices).index(trafo_idx)
             self.q_setpoint_mvar[i] = message.q_setpoints_mvar[msg_idx]
     
+    def reset_integral(self) -> None:
+        """Reset the Q-error integral accumulator to zero."""
+        self._q_error_integral[:] = 0.0
+
     def generate_capability_message(
         self,
         target_controller_id: str,
@@ -562,6 +594,21 @@ class DSOController(BaseOFOController):
         q_error = q_interface - self.q_setpoint_mvar
         dQ_du = H[:n_interfaces, :]
         grad_f += 2.0 * self.config.g_q * (q_error @ dQ_du)
+
+        # --- Integral Q-tracking component (leaky integrator) ---
+        if self.config.g_qi > 0.0:
+            # Leaky integrator: s_{k+1} = lambda * s_k + e_k
+            self._q_error_integral = (
+                self.config.lambda_qi * self._q_error_integral + q_error
+            )
+            # Anti-windup: clamp accumulator
+            np.clip(
+                self._q_error_integral,
+                -self.config.q_integral_max_mvar,
+                self.config.q_integral_max_mvar,
+                out=self._q_error_integral,
+            )
+            grad_f += 2.0 * self.config.g_qi * (self._q_error_integral @ dQ_du)
 
         # --- Component 2: Voltage-schedule tracking (optional) ---
         if self.config.v_setpoints_pu is not None:

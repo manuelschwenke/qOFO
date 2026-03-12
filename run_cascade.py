@@ -534,6 +534,9 @@ def run_cascade(
         voltage_bus_indices=dso_v_buses, current_line_indices=dso_lines,
         current_line_max_i_ka=dso_line_max_i_ka,
         g_q=g_q,
+        g_qi=config.g_qi,
+        lambda_qi=config.lambda_qi,
+        q_integral_max_mvar=config.q_integral_max_mvar,
         v_setpoints_pu=dso_v_setpoints, g_v=config.dso_g_v,
     )
 
@@ -1171,10 +1174,10 @@ def main():
     config = CascadeConfig(
         # Simulation
         v_setpoint_pu=1.05,
-        n_minutes=48 * 60,
-        tso_period_min=3,
+        n_minutes=12 * 60,
+        tso_period_min=5,
         dso_period_min=1,
-        start_time=datetime(2016, 5, 1, 0, 0),
+        start_time=datetime(2016, 7, 15, 8, 0),
         use_profiles=True,
         verbose=1,
         live_plot=True,
@@ -1198,9 +1201,14 @@ def main():
 
         # DSO g_w
         gw_dso_q_der=10.0,
-        gw_dso_oltc=100.0,
+        gw_dso_oltc=150.0,
         gw_dso_shunt=4000.0,
         gw_oltc_cross_dso=0.0,
+
+        # DSO integral Q-tracking (PI-like)
+        g_qi=0.05,
+        lambda_qi=0.9,
+        q_integral_max_mvar=50.0,
 
         # Generator capability
         gen_xd_pu=1.2,
@@ -1210,9 +1218,9 @@ def main():
 
         # Reserve Observer
         enable_reserve_observer=True,
-        reserve_q_threshold_mvar=40.0,
-        reserve_q_release_mvar=-40.0,
-        reserve_cooldown_min=3,
+        reserve_q_threshold_mvar=50.0,
+        reserve_q_release_mvar=-50.0,
+        reserve_cooldown_min=15,
 
         # Contingencies
         contingencies=[
@@ -1224,6 +1232,8 @@ def main():
             #ContingencyEvent(minute=210, element_type="line", element_index=16, action="restore"),
             ContingencyEvent(minute=120, element_type="line", element_index=11, action="restore"),
             ContingencyEvent(minute=180, element_type="gen",  element_index=0, action="restore"),
+            ContingencyEvent(minute=300, element_type="line", element_index=2),
+            ContingencyEvent(minute=360, element_type="line", element_index=2, action="restore"),
         ],
     )
 

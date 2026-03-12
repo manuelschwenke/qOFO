@@ -539,7 +539,6 @@ class MIQPSolver:
         
         if solver_name is not None:
             solver_kwargs['solver'] = solver_name
-            
             # Add solver-specific options
             if solver_name == 'SCIP':
                 solver_kwargs['scip_params'] = {

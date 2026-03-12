@@ -1171,7 +1171,7 @@ def main():
     config = CascadeConfig(
         # Simulation
         v_setpoint_pu=1.05,
-        n_minutes=2 * 60,
+        n_minutes=48 * 60,
         tso_period_min=3,
         dso_period_min=1,
         start_time=datetime(2016, 5, 1, 0, 0),
@@ -1180,9 +1180,9 @@ def main():
         live_plot=True,
 
         # Objective weights
-        g_v=200000,
+        g_v=250000,
         g_q=1,
-        dso_g_v=10000.0,
+        dso_g_v=50000.0,
 
         # OFO
         alpha=1.0,
@@ -1197,9 +1197,9 @@ def main():
         gw_oltc_cross_tso=0.0,
 
         # DSO g_w
-        gw_dso_q_der=4.0,
+        gw_dso_q_der=10.0,
         gw_dso_oltc=100.0,
-        gw_dso_shunt=3000.0,
+        gw_dso_shunt=4000.0,
         gw_oltc_cross_dso=0.0,
 
         # Generator capability
@@ -1216,14 +1216,14 @@ def main():
 
         # Contingencies
         contingencies=[
-            ContingencyEvent(minute=90, element_type="line", element_index=3),
-            ContingencyEvent(minute=120, element_type="line", element_index=11),
+            ContingencyEvent(minute=45, element_type="line", element_index=3),
+            ContingencyEvent(minute=60, element_type="line", element_index=11),
             #ContingencyEvent(minute=120, element_type="line", element_index=16),
-            ContingencyEvent(minute=180, element_type="gen", element_index=0),
-            ContingencyEvent(minute=210, element_type="line", element_index=3, action="restore"),
+            ContingencyEvent(minute=90, element_type="gen", element_index=0),
+            ContingencyEvent(minute=105, element_type="line", element_index=3, action="restore"),
             #ContingencyEvent(minute=210, element_type="line", element_index=16, action="restore"),
-            ContingencyEvent(minute=240, element_type="line", element_index=11, action="restore"),
-            ContingencyEvent(minute=400, element_type="gen",  element_index=0, action="restore"),
+            ContingencyEvent(minute=120, element_type="line", element_index=11, action="restore"),
+            ContingencyEvent(minute=180, element_type="gen",  element_index=0, action="restore"),
         ],
     )
 

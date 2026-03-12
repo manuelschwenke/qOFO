@@ -56,7 +56,10 @@ The following Sensitivities are implemented:
 -------------
 9)  ∂I_ij/∂Q_n = Y_ij·(∂V_i/∂Q_n - ∂V_j/∂Q_n)                  -> compute_dI_dQ_der()
     and ∂|I_ij|/∂Q_n = (1/|I_ij|) Re{I_ij*·∂I_ij/∂Q_n}         -> compute_dI_dQ_der_matrix()
-10) ∂I_ij/∂s_i:                                                 -> ToDo: Not implemented yet!
+10) ∂I_ij/∂s_i (2W):                                               -> compute_dI_ds_2w()
+                                                                   -> compute_dI_ds_2w_matrix()
+10b)∂I_ij/∂s_i (3W):                                               -> compute_dI_ds_3w()
+                                                                   -> compute_dI_ds_3w_matrix()
 11) ∂I_ij/∂Q_shunt: uses equations from 9)                      -> compute_dI_dQ_shunt()
 
 Author: Manuel Schwenke
@@ -1281,6 +1284,133 @@ class JacobianSensitivities:
 
         return sensitivity_matrix, line_mapping, trafo_mapping
 
+    def compute_dI_ds_3w(
+            self,
+            line_idx: int,
+            trafo3w_idx: int,
+    ) -> float:
+        """
+        Compute branch current magnitude sensitivity to 3W transformer HV OLTC tap.
+
+        Uses the implicit function theorem applied to the HV-star branch of a
+        3-winding transformer, then chains through the pi-model current formula.
+
+        Parameters
+        ----------
+        line_idx : int
+            Pandapower line index for the current measurement.
+        trafo3w_idx : int
+            Pandapower ``net.trafo3w`` index.
+
+        Returns
+        -------
+        sensitivity : float
+            d|I_line|/ds  [kA per tap step].
+
+        Raises
+        ------
+        ValueError
+            If the line or transformer is not found.
+        """
+        if line_idx not in self.net.line.index:
+            raise ValueError(f"Line {line_idx} not found in network.")
+        if trafo3w_idx not in self.net.trafo3w.index:
+            raise ValueError(f"Transformer 3W {trafo3w_idx} not found in network.")
+
+        # --- 1. Compute dx/ds for the 3W transformer ---
+        d = _get_trafo3w_hv_branch_data(self.net, trafo3w_idx)
+        dg_dtau = self._compute_dg_dtau_3w(d)
+
+        # Full state sensitivity:  dx/ds = -J^{-1} (dg/dtau) * delta_tau
+        dx_ds = -self.J_inv @ dg_dtau * d['delta_tau']
+
+        # --- 2. Compute branch current sensitivity ---
+        from_bus = self.net.line.at[line_idx, 'from_bus']
+        to_bus = self.net.line.at[line_idx, 'to_bus']
+
+        U_from = self.net.res_bus.at[from_bus, 'vm_pu']
+        U_to = self.net.res_bus.at[to_bus, 'vm_pu']
+        theta_from = np.deg2rad(self.net.res_bus.at[from_bus, 'va_degree'])
+        theta_to = np.deg2rad(self.net.res_bus.at[to_bus, 'va_degree'])
+
+        V_from = U_from * np.exp(1j * theta_from)
+        V_to = U_to * np.exp(1j * theta_to)
+
+        line_start = self.net._pd2ppc_lookups['branch']['line'][0]
+        pos = list(self.net.line.index).index(line_idx)
+        ppc_line_idx = line_start + pos
+
+        r_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 2]))
+        x_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 3]))
+        b_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 4]))
+
+        Y_line = 1.0 / complex(r_pu, x_pu)
+        Y_shunt = 1j * b_pu / 2.0
+
+        I_ij = Y_line * (V_from - V_to) + Y_shunt * V_from
+        I_mag = np.abs(I_ij)
+        if I_mag < 1e-10:
+            return 0.0
+
+        theta_from_idx, v_from_idx = get_jacobian_indices(self.net, from_bus)
+        theta_to_idx, v_to_idx = get_jacobian_indices(self.net, to_bus)
+
+        dTheta_from_ds = dx_ds[theta_from_idx] if theta_from_idx is not None else 0.0
+        dTheta_to_ds = dx_ds[theta_to_idx] if theta_to_idx is not None else 0.0
+        dVmag_from_ds = dx_ds[self.n_theta + v_from_idx] if v_from_idx is not None else 0.0
+        dVmag_to_ds = dx_ds[self.n_theta + v_to_idx] if v_to_idx is not None else 0.0
+
+        dV_from_ds = (dVmag_from_ds + 1j * U_from * dTheta_from_ds) * np.exp(1j * theta_from)
+        dV_to_ds = (dVmag_to_ds + 1j * U_to * dTheta_to_ds) * np.exp(1j * theta_to)
+
+        dI_ij_ds = Y_line * (dV_from_ds - dV_to_ds) + Y_shunt * dV_from_ds
+        dI_mag_ds = (1.0 / I_mag) * np.real(np.conj(I_ij) * dI_ij_ds)
+
+        base_voltage_kv = self.net.bus.at[from_bus, 'vn_kv']
+        I_base_kA = self.net.sn_mva / (np.sqrt(3) * base_voltage_kv)
+
+        return dI_mag_ds * I_base_kA
+
+    def compute_dI_ds_3w_matrix(
+            self,
+            line_indices: List[int],
+            trafo3w_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """
+        Compute branch current sensitivity matrix for multiple 3W OLTC taps.
+
+        Parameters
+        ----------
+        line_indices : List[int]
+            Pandapower line indices.
+        trafo3w_indices : List[int]
+            Pandapower ``net.trafo3w`` indices with OLTC.
+
+        Returns
+        -------
+        sensitivity_matrix : NDArray[np.float64]
+            Matrix of shape ``(n_lines, n_trafo3w)``.
+        line_mapping : List[int]
+        trafo3w_mapping : List[int]
+        """
+        n_lines = len(line_indices)
+        n_trafos = len(trafo3w_indices)
+        if n_lines == 0 or n_trafos == 0:
+            return np.zeros((n_lines, n_trafos)), [], []
+
+        sensitivity_matrix = np.zeros((n_lines, n_trafos))
+        line_mapping = list(line_indices)
+        trafo_mapping = list(trafo3w_indices)
+
+        for i, line_idx in enumerate(line_indices):
+            for j, trafo3w_idx in enumerate(trafo3w_indices):
+                try:
+                    sensitivity_matrix[i, j] = self.compute_dI_ds_3w(line_idx, trafo3w_idx)
+                except ValueError:
+                    sensitivity_matrix[i, j] = 0.0
+
+        return sensitivity_matrix, line_mapping, trafo_mapping
+
     def compute_dI_dVgen(
             self,
             line_idx: int,
@@ -1561,7 +1691,7 @@ class JacobianSensitivities:
         dP_dtau_j = (
             U_i * U_j * (
                 g * np.cos(theta_i - theta_j)
-                + b * np.sin(theta_i - theta_j)
+                - b * np.sin(theta_i - theta_j)
             ) / tau**2
         )
 
@@ -1575,7 +1705,7 @@ class JacobianSensitivities:
         )
         dQ_dtau_j = (
             U_i * U_j * (
-                g * np.sin(theta_i - theta_j)
+                - g * np.sin(theta_i - theta_j)
                 - b * np.cos(theta_i - theta_j)
             ) / tau**2
         )
@@ -2407,8 +2537,13 @@ class JacobianSensitivities:
                         )
                     except ValueError:
                         dQtr3w_col[i] = 0.0
-                # Branch current (TODO: implement dI/ds)
+                # Branch current w.r.t. 3W OLTC tap
                 dI_col = np.zeros(n_line_out)
+                for i_line, line_idx in enumerate(line_indices):
+                    try:
+                        dI_col[i_line] = self.compute_dI_ds_3w(line_idx, oltc3w_idx)
+                    except ValueError:
+                        dI_col[i_line] = 0.0
 
                 dV_ds3w_list.append(dV_col)
                 dQtr2w_ds3w_list.append(dQtr2w_col)

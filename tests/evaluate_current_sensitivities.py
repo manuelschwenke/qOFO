@@ -12,6 +12,8 @@ The following sensitivities are tested:
 
 1. ``dI/dQ_DER``   – Branch current magnitude w.r.t. DER reactive power
 2. ``dI/dQ_shunt`` – Branch current magnitude w.r.t. shunt reactive power
+3. ``dI/ds_2w``    – Branch current magnitude w.r.t. 2W OLTC tap position
+4. ``dI/dVgen``    – Branch current magnitude w.r.t. PV generator voltage setpoint
 
 Test Method
 -----------
@@ -94,7 +96,7 @@ def compute_numerical_dI_dQder(
     net_plus.sgen.at[idx_plus, "q_mvar"] = q_original + perturbation_mvar
     pp.runpp(net_plus, run_control=False, calculate_voltage_angles=True)
     if not net_plus.converged:
-        raise RuntimeError("PF did not converge for Q + ΔQ.")
+        raise RuntimeError("PF did not converge for Q + dQ.")
     i_plus = float(net_plus.res_line.at[line_idx, "i_from_ka"])
 
     # −ΔQ
@@ -106,7 +108,7 @@ def compute_numerical_dI_dQder(
     net_minus.sgen.at[idx_minus, "q_mvar"] = q_original - perturbation_mvar
     pp.runpp(net_minus, run_control=False, calculate_voltage_angles=True)
     if not net_minus.converged:
-        raise RuntimeError("PF did not converge for Q − ΔQ.")
+        raise RuntimeError("PF did not converge for Q - dQ.")
     i_minus = float(net_minus.res_line.at[line_idx, "i_from_ka"])
 
     return (i_plus - i_minus) / (2.0 * perturbation_mvar)
@@ -158,7 +160,7 @@ def compute_numerical_dI_dQshunt(
     net_plus.shunt.at[shunt_idx, "step"] = step_original + perturbation_steps
     pp.runpp(net_plus, run_control=False, calculate_voltage_angles=True)
     if not net_plus.converged:
-        raise RuntimeError("PF did not converge for step + Δ.")
+        raise RuntimeError("PF did not converge for step + d.")
     i_plus = float(net_plus.res_line.at[line_idx, "i_from_ka"])
 
     # −Δstep
@@ -166,7 +168,7 @@ def compute_numerical_dI_dQshunt(
     net_minus.shunt.at[shunt_idx, "step"] = step_original - perturbation_steps
     pp.runpp(net_minus, run_control=False, calculate_voltage_angles=True)
     if not net_minus.converged:
-        raise RuntimeError("PF did not converge for step − Δ.")
+        raise RuntimeError("PF did not converge for step - d.")
     i_minus = float(net_minus.res_line.at[line_idx, "i_from_ka"])
 
     return (i_plus - i_minus) / (2.0 * perturbation_steps)
@@ -206,7 +208,7 @@ def compute_numerical_dI_ds_2w(
     net_plus.trafo.at[trafo_idx, "tap_pos"] = tap_original + perturbation_steps
     pp.runpp(net_plus, run_control=False, calculate_voltage_angles=True)
     if not net_plus.converged:
-        raise RuntimeError("PF did not converge for tap_pos + Δ.")
+        raise RuntimeError("PF did not converge for tap_pos + d.")
     i_plus = float(net_plus.res_line.at[line_idx, "i_from_ka"])
 
     # −Δstep
@@ -214,7 +216,7 @@ def compute_numerical_dI_ds_2w(
     net_minus.trafo.at[trafo_idx, "tap_pos"] = tap_original - perturbation_steps
     pp.runpp(net_minus, run_control=False, calculate_voltage_angles=True)
     if not net_minus.converged:
-        raise RuntimeError("PF did not converge for tap_pos − Δ.")
+        raise RuntimeError("PF did not converge for tap_pos - d.")
     i_minus = float(net_minus.res_line.at[line_idx, "i_from_ka"])
 
     return (i_plus - i_minus) / (2.0 * perturbation_steps)
@@ -254,7 +256,7 @@ def compute_numerical_dI_dVgen(
     net_plus.gen.at[gen_idx, "vm_pu"] = vm_original + perturbation_pu
     pp.runpp(net_plus, run_control=False, calculate_voltage_angles=True)
     if not net_plus.converged:
-        raise RuntimeError("PF did not converge for V + ΔV.")
+        raise RuntimeError("PF did not converge for V + dV.")
     i_plus = float(net_plus.res_line.at[line_idx, "i_from_ka"])
 
     # −ΔV
@@ -262,10 +264,56 @@ def compute_numerical_dI_dVgen(
     net_minus.gen.at[gen_idx, "vm_pu"] = vm_original - perturbation_pu
     pp.runpp(net_minus, run_control=False, calculate_voltage_angles=True)
     if not net_minus.converged:
-        raise RuntimeError("PF did not converge for V − ΔV.")
+        raise RuntimeError("PF did not converge for V - dV.")
     i_minus = float(net_minus.res_line.at[line_idx, "i_from_ka"])
 
     return (i_plus - i_minus) / (2.0 * perturbation_pu)
+
+
+def compute_numerical_dI_ds_3w(
+    net: pp.pandapowerNet,
+    line_idx: int,
+    trafo3w_idx: int,
+    perturbation_steps: int = 1,
+) -> float:
+    """
+    Compute numerical sensitivity d|I|/d(tap_pos) for a 3W OLTC using finite differences.
+
+    Parameters
+    ----------
+    net : pp.pandapowerNet
+        Converged pandapower network.
+    line_idx : int
+        Pandapower line index for the current measurement.
+    trafo3w_idx : int
+        Pandapower ``net.trafo3w`` index.
+    perturbation_steps : int
+        Number of tap step increments for finite difference (default: 1).
+
+    Returns
+    -------
+    sensitivity : float
+        Numerical sensitivity d|I|/d(tap_step) [kA/step].
+    """
+    tap_original = int(net.trafo3w.at[trafo3w_idx, "tap_pos"])
+
+    # +d step
+    net_plus = copy.deepcopy(net)
+    net_plus.trafo3w.at[trafo3w_idx, "tap_pos"] = tap_original + perturbation_steps
+    pp.runpp(net_plus, run_control=False, calculate_voltage_angles=True)
+    if not net_plus.converged:
+        raise RuntimeError("PF did not converge for 3W tap_pos + d.")
+    i_plus = float(net_plus.res_line.at[line_idx, "i_from_ka"])
+
+    # -d step
+    net_minus = copy.deepcopy(net)
+    net_minus.trafo3w.at[trafo3w_idx, "tap_pos"] = tap_original - perturbation_steps
+    pp.runpp(net_minus, run_control=False, calculate_voltage_angles=True)
+    if not net_minus.converged:
+        raise RuntimeError("PF did not converge for 3W tap_pos - d.")
+    i_minus = float(net_minus.res_line.at[line_idx, "i_from_ka"])
+
+    return (i_plus - i_minus) / (2.0 * perturbation_steps)
 
 
 # ==============================================================================
@@ -296,27 +344,28 @@ def run_current_sensitivity_tests(
     -------
     results : dict
         Dictionary containing test results.
-        Keys: ``'dI_dQder'``, ``'dI_dQshunt'``
+        Keys: ``'dI_dQder_TN'``, ``'dI_dQder_DN'``, ``'dI_dQshunt_TN'``,
+        ``'dI_dQshunt_DN'``, ``'dI_ds2w'``, ``'dI_ds3w'``, ``'dI_dVgen'``
     """
     if verbose:
         print("=" * 80)
         print("BRANCH CURRENT SENSITIVITY VALIDATION TEST")
         print("=" * 80)
         print()
-        print("[1/5] Building combined 380/110/20 kV network ...")
+        print("[1/8] Building combined 380/110/20 kV network ...")
 
     # Build network
     net, meta = build_tuda_net(ext_grid_vm_pu=1.06, pv_nodes=True)
 
     if verbose:
-        print("[2/5] Running converged power flow ...")
+        print("[2/8] Running converged power flow ...")
 
     pp.runpp(net, run_control=True, calculate_voltage_angles=True)
     if not net.converged:
         raise RuntimeError("Initial power flow did not converge.")
 
     if verbose:
-        print("[3/5] Identifying monitored lines, DERs, and shunts ...")
+        print("[3/8] Identifying monitored lines, DERs, shunts, OLTCs, and gens ...")
 
     # TN lines (TSO-monitored)
     tn_lines = sorted(
@@ -364,12 +413,23 @@ def run_current_sensitivity_tests(
         if s in net.shunt.index
     ]
 
+    # 2W OLTC transformers (machine transformers with tap changers)
+    oltc_2w_indices = list(meta.machine_trafo_indices)
+
+    # 3W OLTC transformers (coupler transformers)
+    oltc_3w_indices = list(meta.coupler_trafo3w_indices)
+
+    # PV generators
+    gen_indices = list(net.gen.index)
+    gen_buses_pp = [int(net.gen.at[g, "bus"]) for g in gen_indices]
+
     if verbose:
         print(f"    TN lines: {len(tn_lines)},  DN lines: {len(dn_lines)}")
         print(f"    TSO DERs: {len(tso_der_buses)},  DSO DERs: {len(dso_der_buses)}")
         print(f"    TN shunts: {len(tn_shunt_buses)},  DN shunts: {len(dn_shunt_buses)}")
+        print(f"    2W OLTCs: {len(oltc_2w_indices)},  3W OLTCs: {len(oltc_3w_indices)},  PV gens: {len(gen_indices)}")
         print()
-        print("[4/5] Computing analytical sensitivities from Jacobian ...")
+        print("[4/8] Computing analytical sensitivities from Jacobian ...")
 
     jac_sens = JacobianSensitivities(net)
 
@@ -378,6 +438,9 @@ def run_current_sensitivity_tests(
         "dI_dQder_DN": [],
         "dI_dQshunt_TN": [],
         "dI_dQshunt_DN": [],
+        "dI_ds2w": [],
+        "dI_ds3w": [],
+        "dI_dVgen": [],
     }
 
     # ==========================================================================
@@ -386,7 +449,7 @@ def run_current_sensitivity_tests(
     if verbose:
         print()
         print("=" * 80)
-        print("TEST 1: d|I|/dQ_DER on TN lines (TSO DER → TN branch currents)")
+        print("TEST 1: d|I|/dQ_DER on TN lines (TSO DER -> TN branch currents)")
         print("=" * 80)
 
     test_tn_lines = tn_lines[:max_lines_per_test]
@@ -418,14 +481,14 @@ def run_current_sensitivity_tests(
 
                 if verbose:
                     status = _status_str(rel_err)
-                    print(f"  Line {line_idx:3d} ← DER bus {der_bus:3d}:  "
+                    print(f"  Line {line_idx:3d} <- DER bus {der_bus:3d}:  "
                           f"anal={analytical:+12.6e}  "
                           f"num={numerical:+12.6e}  "
                           f"rel_err={rel_err:8.3f}%  {status}")
 
             except Exception as e:
                 if verbose:
-                    print(f"  Line {line_idx:3d} ← DER bus {der_bus:3d}:  EXCEPTION: {e}")
+                    print(f"  Line {line_idx:3d} <- DER bus {der_bus:3d}:  EXCEPTION: {e}")
                 results["dI_dQder_TN"].append({
                     "line_idx": line_idx, "der_bus": der_bus, "error": str(e),
                 })
@@ -436,7 +499,7 @@ def run_current_sensitivity_tests(
     if verbose:
         print()
         print("=" * 80)
-        print("TEST 2: d|I|/dQ_DER on DN lines (DSO DER → DN branch currents)")
+        print("TEST 2: d|I|/dQ_DER on DN lines (DSO DER -> DN branch currents)")
         print("=" * 80)
 
     test_dn_lines = dn_lines[:max_lines_per_test]
@@ -465,25 +528,25 @@ def run_current_sensitivity_tests(
 
                 if verbose:
                     status = _status_str(rel_err)
-                    print(f"  Line {line_idx:3d} ← DER bus {der_bus:3d}:  "
+                    print(f"  Line {line_idx:3d} <- DER bus {der_bus:3d}:  "
                           f"anal={analytical:+12.6e}  "
                           f"num={numerical:+12.6e}  "
                           f"rel_err={rel_err:8.3f}%  {status}")
 
             except Exception as e:
                 if verbose:
-                    print(f"  Line {line_idx:3d} ← DER bus {der_bus:3d}:  EXCEPTION: {e}")
+                    print(f"  Line {line_idx:3d} <- DER bus {der_bus:3d}:  EXCEPTION: {e}")
                 results["dI_dQder_DN"].append({
                     "line_idx": line_idx, "der_bus": der_bus, "error": str(e),
                 })
 
     # ==========================================================================
-    # TEST 3: dI/dQ_shunt on TN lines (TSO shunt → TN branch currents)
+    # TEST 3: dI/dQ_shunt on TN lines (TSO shunt -> TN branch currents)
     # ==========================================================================
     if verbose:
         print()
         print("=" * 80)
-        print("TEST 3: d|I|/dQ_shunt on TN lines (TN shunt → TN branch currents)")
+        print("TEST 3: d|I|/dQ_shunt on TN lines (TN shunt -> TN branch currents)")
         print("=" * 80)
 
     for line_idx in test_tn_lines:
@@ -521,7 +584,7 @@ def run_current_sensitivity_tests(
 
                 if verbose:
                     status = _status_str(rel_err)
-                    print(f"  Line {line_idx:3d} ← Shunt bus {shunt_bus:3d} "
+                    print(f"  Line {line_idx:3d} <- Shunt bus {shunt_bus:3d} "
                           f"(q_step={q_step:.1f} Mvar):  "
                           f"anal={analytical:+12.6e}  "
                           f"num={numerical:+12.6e}  "
@@ -529,18 +592,18 @@ def run_current_sensitivity_tests(
 
             except Exception as e:
                 if verbose:
-                    print(f"  Line {line_idx:3d} ← Shunt bus {shunt_bus:3d}:  EXCEPTION: {e}")
+                    print(f"  Line {line_idx:3d} <- Shunt bus {shunt_bus:3d}:  EXCEPTION: {e}")
                 results["dI_dQshunt_TN"].append({
                     "line_idx": line_idx, "shunt_bus": shunt_bus, "error": str(e),
                 })
 
     # ==========================================================================
-    # TEST 4: dI/dQ_shunt on DN lines (DN shunt → DN branch currents)
+    # TEST 4: dI/dQ_shunt on DN lines (DN shunt -> DN branch currents)
     # ==========================================================================
     if verbose:
         print()
         print("=" * 80)
-        print("TEST 4: d|I|/dQ_shunt on DN lines (DN shunt → DN branch currents)")
+        print("TEST 4: d|I|/dQ_shunt on DN lines (DN shunt -> DN branch currents)")
         print("=" * 80)
 
     for line_idx in test_dn_lines:
@@ -576,7 +639,7 @@ def run_current_sensitivity_tests(
 
                 if verbose:
                     status = _status_str(rel_err)
-                    print(f"  Line {line_idx:3d} ← Shunt bus {shunt_bus:3d} "
+                    print(f"  Line {line_idx:3d} <- Shunt bus {shunt_bus:3d} "
                           f"(q_step={q_step:.1f} Mvar):  "
                           f"anal={analytical:+12.6e}  "
                           f"num={numerical:+12.6e}  "
@@ -584,9 +647,140 @@ def run_current_sensitivity_tests(
 
             except Exception as e:
                 if verbose:
-                    print(f"  Line {line_idx:3d} ← Shunt bus {shunt_bus:3d}:  EXCEPTION: {e}")
+                    print(f"  Line {line_idx:3d} <- Shunt bus {shunt_bus:3d}:  EXCEPTION: {e}")
                 results["dI_dQshunt_DN"].append({
                     "line_idx": line_idx, "shunt_bus": shunt_bus, "error": str(e),
+                })
+
+    # ==========================================================================
+    # TEST 5: dI/ds_2w on TN lines (2W OLTC tap -> TN branch currents)
+    # ==========================================================================
+    if verbose:
+        print()
+        print("=" * 80)
+        print("TEST 5: d|I|/ds_2w on TN lines (2W OLTC tap -> TN branch currents)")
+        print("=" * 80)
+
+    for line_idx in test_tn_lines:
+        for trafo_idx in oltc_2w_indices:
+            try:
+                analytical = jac_sens.compute_dI_ds_2w(line_idx, trafo_idx)
+                numerical = compute_numerical_dI_ds_2w(net, line_idx, trafo_idx)
+
+                abs_err = abs(analytical - numerical)
+                denom = max(abs(numerical), 1e-9)
+                rel_err = abs_err / denom * 100.0
+
+                results["dI_ds2w"].append({
+                    "line_idx": line_idx,
+                    "trafo_idx": trafo_idx,
+                    "analytical": analytical,
+                    "numerical": numerical,
+                    "abs_error": abs_err,
+                    "rel_error_pct": rel_err,
+                })
+
+                if verbose:
+                    status = _status_str(rel_err)
+                    print(f"  Line {line_idx:3d} <- Trafo {trafo_idx:3d}:  "
+                          f"anal={analytical:+12.6e}  "
+                          f"num={numerical:+12.6e}  "
+                          f"rel_err={rel_err:8.3f}%  {status}")
+
+            except Exception as e:
+                if verbose:
+                    print(f"  Line {line_idx:3d} <- Trafo {trafo_idx:3d}:  EXCEPTION: {e}")
+                results["dI_ds2w"].append({
+                    "line_idx": line_idx, "trafo_idx": trafo_idx, "error": str(e),
+                })
+
+    # ==========================================================================
+    # TEST 6: dI/dVgen on TN lines (PV generator voltage -> TN branch currents)
+    # ==========================================================================
+    if verbose:
+        print()
+        print("=" * 80)
+        print("TEST 6: d|I|/dV_gen on TN lines (PV gen voltage -> TN branch currents)")
+        print("=" * 80)
+
+    for line_idx in test_tn_lines:
+        for g_idx, gen_bus_pp in zip(gen_indices, gen_buses_pp):
+            try:
+                gen_bus_ppc = pp_bus_to_ppc_bus(net, gen_bus_pp)
+                analytical = jac_sens.compute_dI_dVgen(line_idx, gen_bus_ppc)
+                numerical = compute_numerical_dI_dVgen(net, line_idx, g_idx)
+
+                abs_err = abs(analytical - numerical)
+                denom = max(abs(numerical), 1e-9)
+                rel_err = abs_err / denom * 100.0
+
+                results["dI_dVgen"].append({
+                    "line_idx": line_idx,
+                    "gen_idx": g_idx,
+                    "gen_bus": gen_bus_pp,
+                    "analytical": analytical,
+                    "numerical": numerical,
+                    "abs_error": abs_err,
+                    "rel_error_pct": rel_err,
+                })
+
+                if verbose:
+                    status = _status_str(rel_err)
+                    print(f"  Line {line_idx:3d} <- Gen bus {gen_bus_pp:3d}:  "
+                          f"anal={analytical:+12.6e}  "
+                          f"num={numerical:+12.6e}  "
+                          f"rel_err={rel_err:8.3f}%  {status}")
+
+            except Exception as e:
+                if verbose:
+                    print(f"  Line {line_idx:3d} <- Gen bus {gen_bus_pp:3d}:  EXCEPTION: {e}")
+                results["dI_dVgen"].append({
+                    "line_idx": line_idx, "gen_bus": gen_bus_pp, "error": str(e),
+                })
+
+    # ==========================================================================
+    # TEST 7: dI/ds_3w on TN+DN lines (3W OLTC tap -> branch currents)
+    # ==========================================================================
+    if verbose:
+        print()
+        print("=" * 80)
+        print("TEST 7: d|I|/ds_3w on TN+DN lines (3W OLTC tap -> branch currents)")
+        print("=" * 80)
+
+    # Test on both TN and DN lines (3W couplers affect both)
+    test_lines_3w = (test_tn_lines[:3] + test_dn_lines[:3])
+
+    for line_idx in test_lines_3w:
+        for trafo3w_idx in oltc_3w_indices:
+            try:
+                analytical = jac_sens.compute_dI_ds_3w(line_idx, trafo3w_idx)
+                numerical = compute_numerical_dI_ds_3w(net, line_idx, trafo3w_idx)
+
+                abs_err = abs(analytical - numerical)
+                denom = max(abs(numerical), 1e-9)
+                rel_err = abs_err / denom * 100.0
+
+                results["dI_ds3w"].append({
+                    "line_idx": line_idx,
+                    "trafo3w_idx": trafo3w_idx,
+                    "analytical": analytical,
+                    "numerical": numerical,
+                    "abs_error": abs_err,
+                    "rel_error_pct": rel_err,
+                })
+
+                if verbose:
+                    status = _status_str(rel_err)
+                    print(f"  Line {line_idx:3d} <- Trafo3w {trafo3w_idx:3d}:  "
+                          f"anal={analytical:+12.6e}  "
+                          f"num={numerical:+12.6e}  "
+                          f"rel_err={rel_err:8.3f}%  {status}")
+
+            except Exception as e:
+                if verbose:
+                    print(f"  Line {line_idx:3d} <- Trafo3w {trafo3w_idx:3d}:  EXCEPTION: {e}")
+                results["dI_ds3w"].append({
+                    "line_idx": line_idx, "trafo3w_idx": trafo3w_idx, "error": str(e),
                 })
 
     # ==========================================================================
@@ -640,11 +834,11 @@ def run_current_sensitivity_tests(
 def _status_str(rel_err: float) -> str:
     """Return a pass/warning/fail status string."""
     if rel_err < 5.0:
-        return "✓ PASS"
+        return "PASS"
     elif rel_err < 10.0:
         return "~ WARNING"
     else:
-        return "✗ FAIL"
+        return "FAIL"
 
 
 # ==============================================================================

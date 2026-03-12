@@ -117,13 +117,13 @@ class CascadeConfig:
     """Slack variable penalty in the MIQP (z^T G_z z) for voltage and
     interface-Q outputs.  Very large to discourage constraint violation."""
 
-    gz_tso_current: float = 1e4
+    gz_tso_current: float = 1e3
     """Slack variable penalty for TSO current-limit outputs.  Much smaller
     than ``g_z`` because branch currents are only weakly controllable via
     reactive-power actuators.  A too-large value causes oscillations when
     current limits are hit."""
 
-    gz_dso_current: float = 1e4
+    gz_dso_current: float = 1e3
     """Slack variable penalty for DSO current-limit outputs."""
 
     # ── TSO g_w diagonal (per-actuator change damping) ────────────────────

@@ -111,7 +111,7 @@ def _make_mock_sensitivities(
 
 def _make_dso_measurement(
     iteration: int = 0,
-    der_bus_indices: list = None,
+    der_indices: list = None,
     oltc_trafo_indices: list = None,
     shunt_bus_indices: list = None,
     interface_trafo_indices: list = None,
@@ -119,8 +119,8 @@ def _make_dso_measurement(
     current_line_indices: list = None,
 ) -> Measurement:
     """Create a Measurement suitable for DSO controller tests."""
-    if der_bus_indices is None:
-        der_bus_indices = [2, 3]
+    if der_indices is None:
+        der_indices = [2, 3]
     if oltc_trafo_indices is None:
         oltc_trafo_indices = [0]
     if shunt_bus_indices is None:
@@ -133,7 +133,7 @@ def _make_dso_measurement(
         current_line_indices = [0, 1]
 
     all_bus_indices = sorted(
-        set(der_bus_indices + voltage_bus_indices + shunt_bus_indices
+        set(der_indices + voltage_bus_indices + shunt_bus_indices
             + [0, 1, 2, 3, 4])
     )
 
@@ -149,8 +149,8 @@ def _make_dso_measurement(
         interface_q_hv_side_mvar=np.full(
             len(interface_trafo_indices), 10.0
         ),
-        der_indices=np.array(der_bus_indices, dtype=np.int64),
-        der_q_mvar=np.full(len(der_bus_indices), 5.0),
+        der_indices=np.array(der_indices, dtype=np.int64),
+        der_q_mvar=np.full(len(der_indices), 5.0),
         oltc_indices=np.array(oltc_trafo_indices, dtype=np.int64),
         oltc_tap_positions=np.zeros(
             len(oltc_trafo_indices), dtype=np.int64
@@ -269,7 +269,7 @@ class TestDSOControllerConfig:
     def test_valid_config(self) -> None:
         """Test valid configuration construction."""
         cfg = DSOControllerConfig(
-            der_bus_indices=[2, 3],
+            der_indices=[2, 3],
             oltc_trafo_indices=[0],
             shunt_bus_indices=[4],
             shunt_q_steps_mvar=[50.0],
@@ -277,14 +277,14 @@ class TestDSOControllerConfig:
             voltage_bus_indices=[1, 2, 3],
             current_line_indices=[0, 1],
         )
-        assert len(cfg.der_bus_indices) == 2
+        assert len(cfg.der_indices) == 2
         assert cfg.v_min_pu == 0.95
 
     def test_shunt_length_mismatch_raises(self) -> None:
         """Test that mismatched shunt lists raise ValueError."""
         with pytest.raises(ValueError, match="shunt_bus_indices length"):
             DSOControllerConfig(
-                der_bus_indices=[2],
+                der_indices=[2],
                 oltc_trafo_indices=[],
                 shunt_bus_indices=[4, 5],
                 shunt_q_steps_mvar=[50.0],  # Only one element
@@ -297,7 +297,7 @@ class TestDSOControllerConfig:
         """Test that v_min >= v_max raises ValueError."""
         with pytest.raises(ValueError, match="v_min_pu"):
             DSOControllerConfig(
-                der_bus_indices=[2],
+                der_indices=[2],
                 oltc_trafo_indices=[],
                 shunt_bus_indices=[],
                 shunt_q_steps_mvar=[],
@@ -320,7 +320,7 @@ class TestTSOControllerConfig:
     def test_valid_config(self) -> None:
         """Test valid configuration construction."""
         cfg = TSOControllerConfig(
-            der_bus_indices=[2, 3],
+            der_indices=[2, 3],
             pcc_trafo_indices=[0, 1],
             pcc_dso_controller_ids=["dso_1", "dso_2"],
             oltc_trafo_indices=[0],
@@ -335,7 +335,7 @@ class TestTSOControllerConfig:
         """Test that mismatched PCC/DSO-ID lists raise ValueError."""
         with pytest.raises(ValueError, match="pcc_trafo_indices length"):
             TSOControllerConfig(
-                der_bus_indices=[2],
+                der_indices=[2],
                 pcc_trafo_indices=[0, 1],
                 pcc_dso_controller_ids=["dso_1"],  # Only one
                 oltc_trafo_indices=[],
@@ -349,7 +349,7 @@ class TestTSOControllerConfig:
         """Test that mismatched shunt lists raise ValueError."""
         with pytest.raises(ValueError, match="shunt_bus_indices length"):
             TSOControllerConfig(
-                der_bus_indices=[],
+                der_indices=[],
                 pcc_trafo_indices=[],
                 pcc_dso_controller_ids=[],
                 oltc_trafo_indices=[],
@@ -363,7 +363,7 @@ class TestTSOControllerConfig:
         """Test that mismatched v_setpoints length raises ValueError."""
         with pytest.raises(ValueError, match="v_setpoints_pu length"):
             TSOControllerConfig(
-                der_bus_indices=[],
+                der_indices=[],
                 pcc_trafo_indices=[],
                 pcc_dso_controller_ids=[],
                 oltc_trafo_indices=[],
@@ -402,7 +402,7 @@ class TestDSOController:
         n_outputs = n_interface + n_v + n_i
 
         config = DSOControllerConfig(
-            der_bus_indices=der_buses,
+            der_indices=der_buses,
             oltc_trafo_indices=oltc_trafos,
             shunt_bus_indices=shunt_buses,
             shunt_q_steps_mvar=[50.0],
@@ -434,7 +434,7 @@ class TestDSOController:
         )
 
         measurement = _make_dso_measurement(
-            der_bus_indices=der_buses,
+            der_indices=der_buses,
             oltc_trafo_indices=oltc_trafos,
             shunt_bus_indices=shunt_buses,
             interface_trafo_indices=interface_trafos,
@@ -625,7 +625,7 @@ class TestTSOController:
         n_outputs_phys = n_pcc + n_v + n_i
 
         config = TSOControllerConfig(
-            der_bus_indices=der_buses,
+            der_indices=der_buses,
             pcc_trafo_indices=pcc_trafos,
             pcc_dso_controller_ids=dso_ids,
             oltc_trafo_indices=oltc_trafos,
@@ -658,7 +658,7 @@ class TestTSOController:
         )
 
         measurement = _make_dso_measurement(
-            der_bus_indices=der_buses,
+            der_indices=der_buses,
             oltc_trafo_indices=oltc_trafos,
             shunt_bus_indices=shunt_buses,
             interface_trafo_indices=pcc_trafos,
@@ -920,7 +920,7 @@ class TestCascadedCommunication:
 
         # TSO setup
         tso_config = TSOControllerConfig(
-            der_bus_indices=der_buses,
+            der_indices=der_buses,
             pcc_trafo_indices=pcc_trafos,
             pcc_dso_controller_ids=["dso_1"],
             oltc_trafo_indices=oltc_trafos,
@@ -945,7 +945,7 @@ class TestCascadedCommunication:
 
         # DSO setup
         dso_config = DSOControllerConfig(
-            der_bus_indices=der_buses,
+            der_indices=der_buses,
             oltc_trafo_indices=oltc_trafos,
             shunt_bus_indices=shunt_buses,
             shunt_q_steps_mvar=[50.0],
@@ -966,7 +966,7 @@ class TestCascadedCommunication:
 
         # Measurement
         meas = _make_dso_measurement(
-            der_bus_indices=der_buses,
+            der_indices=der_buses,
             oltc_trafo_indices=oltc_trafos,
             shunt_bus_indices=shunt_buses,
             interface_trafo_indices=pcc_trafos,
@@ -1007,7 +1007,7 @@ class TestCascadedCommunication:
             controller_id="tso_main",
             params=OFOParameters(alpha=0.03, g_w=0.2, g_z=1000.0),
             config=TSOControllerConfig(
-                der_bus_indices=der_buses,
+                der_indices=der_buses,
                 pcc_trafo_indices=pcc_trafos,
                 pcc_dso_controller_ids=["dso_1"],
                 oltc_trafo_indices=oltc_trafos,
@@ -1027,7 +1027,7 @@ class TestCascadedCommunication:
             controller_id="dso_1",
             params=OFOParameters(alpha=0.03, g_w=0.2, g_z=1000.0),
             config=DSOControllerConfig(
-                der_bus_indices=der_buses,
+                der_indices=der_buses,
                 oltc_trafo_indices=oltc_trafos,
                 shunt_bus_indices=shunt_buses,
                 shunt_q_steps_mvar=[50.0],
@@ -1043,7 +1043,7 @@ class TestCascadedCommunication:
         )
 
         meas = _make_dso_measurement(
-            der_bus_indices=der_buses,
+            der_indices=der_buses,
             oltc_trafo_indices=oltc_trafos,
             shunt_bus_indices=shunt_buses,
             interface_trafo_indices=pcc_trafos,
@@ -1085,7 +1085,7 @@ class TestBaseOFOControllerViaSubclass:
             controller_id="copy_test",
             params=OFOParameters(alpha=0.1, g_w=1.0, g_z=100.0),
             config=DSOControllerConfig(
-                der_bus_indices=[2, 3],
+                der_indices=[2, 3],
                 oltc_trafo_indices=[0],
                 shunt_bus_indices=[4],
                 shunt_q_steps_mvar=[50.0],
@@ -1113,7 +1113,7 @@ class TestBaseOFOControllerViaSubclass:
                 controller_id="test",
                 params=None,
                 config=DSOControllerConfig(
-                    der_bus_indices=[],
+                    der_indices=[],
                     oltc_trafo_indices=[],
                     shunt_bus_indices=[],
                     shunt_q_steps_mvar=[],
@@ -1135,7 +1135,7 @@ class TestBaseOFOControllerViaSubclass:
                     alpha=0.1, g_w=1.0, g_z=100.0
                 ),
                 config=DSOControllerConfig(
-                    der_bus_indices=[],
+                    der_indices=[],
                     oltc_trafo_indices=[],
                     shunt_bus_indices=[],
                     shunt_q_steps_mvar=[],

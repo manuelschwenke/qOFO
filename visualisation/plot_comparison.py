@@ -834,8 +834,8 @@ def plot_der_q_states(
     colors = plt.cm.tab10.colors
 
     # -- Reference TN / DN split via ders_pp_buses ----------------------------
-    tso_bus_set = set(int(b) for b in cas.tso_config.der_bus_indices)
-    dso_bus_set = set(int(b) for b in cas.dso_config.der_bus_indices)
+    tso_bus_set = set(int(b) for b in cas.tso_config.der_indices)
+    dso_bus_set = set(int(b) for b in cas.dso_config.der_indices)
 
     tn_der_idx = [
         d for d, bus in enumerate(ref.ders_pp_buses) if bus in tso_bus_set
@@ -867,7 +867,7 @@ def plot_der_q_states(
         ref_dn_q[i] = q[dn_der_idx]
 
     # -- Cascade TSO DER Q (forward-filled, fires every 3 min) ----------------
-    n_tso_der = len(cas.tso_config.der_bus_indices)
+    n_tso_der = len(cas.tso_config.der_indices)
     cas_tn_q = _forward_fill(
         common_mins, cas_bm,
         lambda r: r.tso_q_der_mvar if (r.tso_active and r.tso_q_der_mvar is not None) else None,
@@ -875,7 +875,7 @@ def plot_der_q_states(
     )
 
     # -- Cascade DSO DER Q (forward-filled, fires every 1 min) ----------------
-    n_dso_der = len(cas.dso_config.der_bus_indices)
+    n_dso_der = len(cas.dso_config.der_indices)
     cas_dn_q = _forward_fill(
         common_mins, cas_bm,
         lambda r: r.dso_q_der_mvar if (r.dso_active and r.dso_q_der_mvar is not None) else None,
@@ -893,7 +893,7 @@ def plot_der_q_states(
                  color=c, linewidth=1.5, alpha=0.75,
                  label=f'Ref DER (bus {bus})')
 
-    tso_buses = cas.tso_config.der_bus_indices
+    tso_buses = cas.tso_config.der_indices
     for j, bus in enumerate(tso_buses):
         c = colors[j % 10]
         v = ~np.isnan(cas_tn_q[:, j])
@@ -924,7 +924,7 @@ def plot_der_q_states(
                  color=c, linewidth=1.5, alpha=0.75,
                  label=f'Ref DER (bus {bus})')
 
-    dso_buses = cas.dso_config.der_bus_indices
+    dso_buses = cas.dso_config.der_indices
     for j, bus in enumerate(dso_buses):
         c = colors[j % 10]
         v = ~np.isnan(cas_dn_q[:, j])

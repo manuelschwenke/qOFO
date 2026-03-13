@@ -49,8 +49,8 @@ class DSOControllerConfig:
     
     Attributes
     ----------
-    der_bus_indices : List[int]
-        Pandapower bus indices where DERs are connected.
+    der_indices : List[int]
+        Pandapower sgen indices for controllable DERs.
     oltc_trafo_indices : List[int]
         Pandapower transformer indices with OLTCs.
     shunt_bus_indices : List[int]
@@ -88,7 +88,7 @@ class DSOControllerConfig:
         voltage tracking remains a secondary, soft objective behind
         Q-interface tracking.  Default 1.0.
     """
-    der_bus_indices: List[int]
+    der_indices: List[int]
     oltc_trafo_indices: List[int]
     shunt_bus_indices: List[int]
     shunt_q_steps_mvar: List[float]
@@ -317,7 +317,7 @@ class DSOController(BaseOFOController):
         # Extract ∂Q_interface/∂Q_DER from H matrix
         # The first n_interfaces rows of H correspond to Q_interface outputs
         n_interfaces = len(self.config.interface_trafo_indices)
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         
         dQ_interface_dQ_der = self._H_cache[:n_interfaces, :n_der]
         
@@ -375,12 +375,12 @@ class DSOController(BaseOFOController):
         if self._H_cache is None:
             self._build_sensitivity_matrix()
         n_interfaces = len(self.config.interface_trafo_indices)
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         return self._H_cache[:n_interfaces, :n_der]
 
     def _get_control_structure(self) -> Tuple[int, int, List[int]]:
         """Define the control variable structure."""
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
         
@@ -397,7 +397,7 @@ class DSOController(BaseOFOController):
         measurement: Measurement,
     ) -> NDArray[np.float64]:
         """Extract current control values from measurements."""
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
         n_total = n_der + n_oltc + n_shunt
@@ -405,7 +405,7 @@ class DSOController(BaseOFOController):
         u = np.zeros(n_total)
         
         # DER Q setpoints
-        for i, der_idx in enumerate(self.config.der_bus_indices):
+        for i, der_idx in enumerate(self.config.der_indices):
             # Find DER in measurement by matching indices
             meas_idx = np.where(measurement.der_indices == der_idx)[0]
             if len(meas_idx) == 0:
@@ -486,7 +486,7 @@ class DSOController(BaseOFOController):
         der_p_current: NDArray[np.float64],
     ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Compute operating-point-dependent input bounds."""
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
         n_total = n_der + n_oltc + n_shunt
@@ -496,8 +496,9 @@ class DSOController(BaseOFOController):
         
         # DER Q bounds (P-dependent)
         q_min, q_max = self.actuator_bounds.compute_der_q_bounds(der_p_current)
-        u_lower[:n_der] = -100 #q_min # ToDo: Also loosen here to test controller performance
-        u_upper[:n_der] = 100 #q_max # ToDo: Also loosen here to test controller performance
+        print(f'q_min: {q_min}, q_max: {q_max}')
+        u_lower[:n_der] = q_min # ToDo: Also loosen here to test controller performance
+        u_upper[:n_der] = q_max # ToDo: Also loosen here to test controller performance
         
         # OLTC tap bounds (fixed)
         tap_min, tap_max = self.actuator_bounds.get_oltc_tap_bounds()
@@ -654,9 +655,14 @@ class DSOController(BaseOFOController):
             )
         )
 
+        # Map DER indices (sgen) to their corresponding buses for sensitivity
+        der_bus_indices = [
+            int(net.sgen.at[s, "bus"]) for s in self.config.der_indices
+        ]
+
         # Build keyword arguments depending on transformer type
         kw = dict(
-            der_bus_indices=self.config.der_bus_indices,
+            der_bus_indices=der_bus_indices,
             observation_bus_indices=self.config.voltage_bus_indices,
             line_indices=self.config.current_line_indices,
             shunt_bus_indices=self.config.shunt_bus_indices,

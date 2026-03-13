@@ -95,7 +95,7 @@ class ReserveObserver:
 
         # After DSO H matrix is built, extract sub-matrix
         n_iface = len(dso_config.interface_trafo_indices)
-        n_der = len(dso_config.der_bus_indices)
+        n_der = len(dso_config.der_indices)
         dQ_dQder = dso._H_cache[:n_iface, :n_der]
 
         # Evaluate

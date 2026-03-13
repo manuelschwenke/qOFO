@@ -68,8 +68,8 @@ class TSOControllerConfig:
 
     Attributes
     ----------
-    der_bus_indices : List[int]
-        Pandapower bus indices where transmission-connected DERs are located.
+    der_indices : List[int]
+        Pandapower sgen indices for transmission-connected DERs.
     pcc_trafo_indices : List[int]
         Pandapower transformer indices for TSO-DSO interface (PCC) transformers.
         These are the transformers through which DSO areas are connected.
@@ -104,7 +104,7 @@ class TSOControllerConfig:
         ``g_w``: the effective per-iteration step scales as
         ``α · g_v / g_w``.  Default 1.0 (unweighted tracking).
     """
-    der_bus_indices: List[int]
+    der_indices: List[int]
     pcc_trafo_indices: List[int]
     pcc_dso_controller_ids: List[str]
     oltc_trafo_indices: List[int]
@@ -321,7 +321,7 @@ class TSOController(BaseOFOController):
                 "Controller not initialised. Call initialise() first."
             )
 
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
 
         # PCC setpoint values sit after the DER entries in u
@@ -378,7 +378,7 @@ class TSOController(BaseOFOController):
 
         Ordering: [ Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt ]
         """
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -396,7 +396,7 @@ class TSOController(BaseOFOController):
         measurement: Measurement,
     ) -> NDArray[np.float64]:
         """Extract current control values from measurements."""
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -407,11 +407,11 @@ class TSOController(BaseOFOController):
         idx = 0
 
         # --- Transmission-connected DER Q setpoints ---
-        for der_bus in self.config.der_bus_indices:
-            meas_idx = np.where(measurement.der_indices == der_bus)[0]
+        for der_idx in self.config.der_indices:
+            meas_idx = np.where(measurement.der_indices == der_idx)[0]
             if len(meas_idx) == 0:
                 raise ValueError(
-                    f"DER at bus {der_bus} not found in measurement"
+                    f"DER {der_idx} not found in measurement.der_indices"
                 )
             u[idx] = float(measurement.der_q_mvar[meas_idx[0]])
             idx += 1
@@ -552,7 +552,7 @@ class TSOController(BaseOFOController):
         Similarly, if Q_gen is near Q_min (underexcitation / stator limit),
         the lower V_gen bound is clamped to prevent further voltage decrease.
         """
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -710,7 +710,7 @@ class TSOController(BaseOFOController):
         n_total = self.n_controls
         grad_f = np.zeros(n_total)
 
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_v = len(self.config.voltage_bus_indices)
 
@@ -766,7 +766,7 @@ class TSOController(BaseOFOController):
         if self._H_cache is not None:
             return self._H_cache
 
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -781,6 +781,10 @@ class TSOController(BaseOFOController):
 
         # --- Physical sensitivities for DER / OLTC / shunt columns ---
         net = self.sensitivities.net
+
+        der_bus_indices = [
+            int(net.sgen.at[s, 'bus']) for s in self.config.der_indices
+        ]
 
         pcc_in_trafo = all(
             t in net.trafo.index for t in self.config.pcc_trafo_indices
@@ -799,7 +803,7 @@ class TSOController(BaseOFOController):
         # However, we still pass trafo indices so the builder can
         # include them in the internal row mapping (may affect V/I rows).
         kw = dict(
-            der_bus_indices=self.config.der_bus_indices,
+            der_bus_indices=der_bus_indices,
             observation_bus_indices=self.config.voltage_bus_indices,
             line_indices=self.config.current_line_indices,
             oltc_trafo_indices=self.config.oltc_trafo_indices,

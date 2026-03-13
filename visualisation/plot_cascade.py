@@ -164,7 +164,7 @@ def plot_tso(
     ax = axes[row]
     for j in range(s["tso_q_der"].shape[1]):
         ax.plot(s["tso_min"], s["tso_q_der"][:, j], lw=1.0,
-                label=f"DER bus {tso_config.der_bus_indices[j]}")
+                label=f"DER bus {tso_config.der_indices[j]}")
     ax.set_ylabel("Q_DER [Mvar]")
     ax.set_title("TSO DER Reactive Power")
     ax.legend(fontsize=7, ncol=4, loc="upper left")
@@ -304,10 +304,10 @@ def plot_dso(
     for j in range(s["dso_q_der"].shape[1]):
         ax.plot(s["dso_min"], s["dso_q_der"][:, j], lw=0.8,
                 alpha=0.7,
-                label=f"DER bus {dso_config.der_bus_indices[j]}" if j < 10 else None)
+                label=f"DER bus {dso_config.der_indices[j]}" if j < 10 else None)
     ax.set_ylabel("Q_DER [Mvar]")
     ax.set_title("DSO DER Reactive Power")
-    if len(dso_config.der_bus_indices) <= 10:
+    if len(dso_config.der_indices) <= 10:
         ax.legend(fontsize=7, ncol=4, loc="upper left")
     ax.grid(True, alpha=0.3)
     row += 1
@@ -702,7 +702,7 @@ class LivePlotter:
             for j in range(qd_arr.shape[1]):
                 self._ax_tso_qder.plot(
                     td_arr, qd_arr[:, j], lw=1.0,
-                    label=f"DER bus {self._tso_cfg.der_bus_indices[j]}")
+                    label=f"DER bus {self._tso_cfg.der_indices[j]}")
             self._ax_tso_qder.legend(fontsize=7, ncol=4, loc="upper left")
 
         # TSO Line Currents vs. Thermal Limits
@@ -854,11 +854,11 @@ class LivePlotter:
             self._ax_dso_qder.set_title("DSO DER Reactive Power")
             self._ax_dso_qder.grid(True, alpha=0.3)
             for j in range(qd_arr.shape[1]):
-                lbl = (f"DER bus {self._dso_cfg.der_bus_indices[j]}"
+                lbl = (f"DER bus {self._dso_cfg.der_indices[j]}"
                        if j < 10 else None)
                 self._ax_dso_qder.plot(td_arr, qd_arr[:, j], lw=0.8,
                                        alpha=0.7, label=lbl)
-            if len(self._dso_cfg.der_bus_indices) <= 10:
+            if len(self._dso_cfg.der_indices) <= 10:
                 self._ax_dso_qder.legend(fontsize=7, ncol=4, loc="upper left")
 
         # DSO Line Currents vs. Thermal Limits

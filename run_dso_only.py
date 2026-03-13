@@ -158,7 +158,7 @@ def measurement_from_combined(
         q_iface[k] = float(combined_net.res_trafo3w.at[tidx, "q_hv_mvar"])
 
     # DER Q (distribution-connected sgens, exclude boundary sgens)
-    der_bus = np.array(dso_config.der_bus_indices, dtype=np.int64)
+    der_bus = np.array(dso_config.der_indices, dtype=np.int64)
     der_q = np.zeros(len(der_bus), dtype=np.float64)
     for k, bus in enumerate(der_bus):
         # Find sgen at this bus that is NOT a boundary sgen
@@ -233,21 +233,12 @@ def apply_dso_controls(
     [DER_Q (continuous), OLTC_taps (integer), Shunt_states (integer)]
     """
     u = dso_output.u_new
-    n_der = len(dso_config.der_bus_indices)
+    n_der = len(dso_config.der_indices)
     n_oltc = len(dso_config.oltc_trafo_indices)
     n_shunt = len(dso_config.shunt_bus_indices)
 
     # 1) Distribution-connected DER Q setpoints
-    for k, bus in enumerate(dso_config.der_bus_indices):
-        sgen_mask = (
-            (combined_net.sgen["bus"] == bus) &
-            ~combined_net.sgen["name"].astype(str).str.startswith("BOUND_")
-        )
-        if not sgen_mask.any():
-            raise ValueError(
-                f"DER sgen at bus {bus} not found in combined_net.sgen."
-            )
-        sidx = combined_net.sgen.index[sgen_mask][0]
+    for k, sidx in enumerate(dso_config.der_indices):
         combined_net.sgen.at[sidx, "q_mvar"] = float(u[k])
 
     # 2) OLTC tap positions (3-winding transformers)
@@ -359,15 +350,13 @@ def run_dso_reactive_power_control(
     if verbose:
         print("[3/4] Identifying DSO actuators and monitored quantities ...")
 
-    # Distribution-connected DER: DN sgens (exclude boundary sgens)
-    dso_der_buses: List[int] = []
-    for sidx in combined_net.sgen.index:
-        name = str(combined_net.sgen.at[sidx, "name"])
-        if name.startswith("BOUND_"):
-            continue  # Skip boundary sgens
-        subnet = str(combined_net.sgen.at[sidx, "subnet"])
-        if subnet == "DN":
-            dso_der_buses.append(int(combined_net.sgen.at[sidx, "bus"]))
+    # Distribution-connected DER: individual sgen indices (not boundary)
+    dso_der_indices = [
+        int(s) for s in combined_net.sgen.index
+        if str(combined_net.sgen.at[s, "subnet"]) == "DN"
+        and not str(combined_net.sgen.at[s, "name"]).startswith("BOUND_")
+    ]
+    dso_der_buses = [int(combined_net.sgen.at[s, "bus"]) for s in dso_der_indices]
 
     # Monitored voltages: all 110 kV buses (HV, subnet "DN")
     dso_v_buses: List[int] = sorted(
@@ -411,7 +400,7 @@ def run_dso_reactive_power_control(
     # ============================================================================
     probe_sens = JacobianSensitivities(combined_net)
     H_probe, m_probe = probe_sens.build_sensitivity_matrix_H(
-        der_bus_indices=dso_der_buses,
+        der_indices=dso_der_buses,
         observation_bus_indices=dso_v_buses,
         line_indices=dso_lines,
         trafo3w_indices=dso_interface_trafos,
@@ -431,7 +420,7 @@ def run_dso_reactive_power_control(
     dso_interface_trafos = list(m_probe.get("trafo3w", dso_interface_trafos))
 
     dso_config = DSOControllerConfig(
-        der_bus_indices=dso_der_buses,
+        der_indices=dso_der_buses,
         oltc_trafo_indices=dso_oltc,
         shunt_bus_indices=dso_shunt_buses,
         shunt_q_steps_mvar=dso_shunt_q_steps,
@@ -551,7 +540,7 @@ def run_dso_reactive_power_control(
             raise RuntimeError(f"DSO OFO step failed at iteration {it}: {e}")
 
         # Extract control variables
-        n_der_d = len(dso_config.der_bus_indices)
+        n_der_d = len(dso_config.der_indices)
         n_oltc_d = len(dso_config.oltc_trafo_indices)
 
         rec.dso_q_der_mvar = dso_output.u_new[:n_der_d].copy()

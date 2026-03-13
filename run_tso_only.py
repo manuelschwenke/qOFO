@@ -170,7 +170,7 @@ def measurement_from_combined(
     q_iface = np.zeros(0, dtype=np.float64)
 
     # DER Q (transmission-connected sgens, exclude boundary sgens)
-    der_bus = np.array(tso_config.der_bus_indices, dtype=np.int64)
+    der_bus = np.array(tso_config.der_indices, dtype=np.int64)
     der_q = np.zeros(len(der_bus), dtype=np.float64)
     for k, bus in enumerate(der_bus):
         # Find sgen at this bus that is NOT a boundary sgen
@@ -252,23 +252,13 @@ def apply_tso_controls(
     """
     u = tso_output.u_new
 
-    n_der = len(tso_config.der_bus_indices)
+    n_der = len(tso_config.der_indices)
     n_pcc = len(tso_config.pcc_trafo_indices)  # will be zero here
     n_gen = len(tso_config.gen_indices)
     n_oltc = len(tso_config.oltc_trafo_indices)
 
     # 1) Transmission-connected DER Q setpoints
-    for k, bus in enumerate(tso_config.der_bus_indices):
-        sgen_mask = (
-            (combined_net.sgen["bus"] == bus) &
-            ~combined_net.sgen["name"].astype(str).str.startswith("BoundarySgen|")
-        )
-        if not sgen_mask.any():
-            raise ValueError(
-                f"DER sgen at bus {bus} not found in combined_net.sgen."
-            )
-        # Set first valid sgen at this bus
-        sidx = combined_net.sgen.index[sgen_mask][0]
+    for k, sidx in enumerate(tso_config.der_indices):
         combined_net.sgen.at[sidx, "q_mvar"] = float(u[k])
 
     # 2) PCC Q setpoints are intentionally omitted (n_pcc = 0).
@@ -404,17 +394,13 @@ def run_tso_voltage_control(
     if verbose:
         print("[4/6] Identifying TSO actuators and monitored quantities ...")
 
-    # Transmission-connected DER: TN sgens (exclude boundary sgens)
-    # Identify from combined network (real plant)
-    tso_der_buses: List[int] = []
-    for sidx in combined_net.sgen.index:
-        bus = int(combined_net.sgen.at[sidx, "bus"])
-        # TN sgens are those not in DN-only buses
-        if bus not in split_result.dn_only_bus_indices:
-            # Not a boundary sgen
-            if not combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
-                if bus not in tso_der_buses:
-                    tso_der_buses.append(bus)
+    # -- Transmission-connected DER: individual sgen indices (not DN, not boundary)
+    tso_der_indices = [
+        int(s) for s in combined_net.sgen.index
+        if int(combined_net.sgen.at[s, "bus"]) not in split_result.dn_only_bus_indices
+        and not str(combined_net.sgen.at[s, "name"]).startswith("BoundarySgen|")
+    ]
+    tso_der_buses = [int(combined_net.sgen.at[s, "bus"]) for s in tso_der_indices]
 
     # Monitored voltages: all 380 kV buses (EHV) in TN
     tso_v_buses: List[int] = sorted(
@@ -478,7 +464,7 @@ def run_tso_voltage_control(
         probe_sens = JacobianSensitivities(tn_net_model)
     
     H_probe, m_probe = probe_sens.build_sensitivity_matrix_H(
-        der_bus_indices=tso_der_buses,
+        der_indices=tso_der_buses,
         observation_bus_indices=tso_v_buses,
         line_indices=tso_lines,
         oltc_trafo_indices=tso_oltc_candidates,
@@ -503,7 +489,7 @@ def run_tso_voltage_control(
     v_setpoints = np.full(len(tso_v_buses), v_setpoint_pu, dtype=np.float64)
 
     tso_config = TSOControllerConfig(
-        der_bus_indices=tso_der_buses,
+        der_indices=tso_der_buses,
         pcc_trafo_indices=pcc_trafo_indices,
         pcc_dso_controller_ids=pcc_dso_ids,
         oltc_trafo_indices=tso_oltc,
@@ -617,7 +603,7 @@ def run_tso_voltage_control(
             raise RuntimeError(f"TSO OFO step failed at iteration {it}: {e}")
 
         # Extract control variables
-        n_der_t = len(tso_config.der_bus_indices)
+        n_der_t = len(tso_config.der_indices)
         n_pcc_t = len(tso_config.pcc_trafo_indices)  # zero here
         n_gen_t = len(tso_config.gen_indices)
         n_oltc_t = len(tso_config.oltc_trafo_indices)

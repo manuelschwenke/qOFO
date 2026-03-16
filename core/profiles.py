@@ -44,20 +44,35 @@ def snapshot_base_values(net: pp.pandapowerNet) -> None:
 
 
 def apply_profiles(net: pp.pandapowerNet, profiles: pd.DataFrame, t: datetime) -> None:
-    """Apply profile scaling factors for time *t* to loads and sgens."""
+    """Apply profile scaling factors for time *t* to loads and sgens.
+
+    Each load uses the profile columns specified in its ``profile_p`` and
+    ``profile_q`` columns (e.g. ``mv_rural_pload``, ``HS4_pload``).
+    Each sgen uses the profile column specified in its ``profile`` column.
+    """
     idx = profiles.index.get_indexer([t], method="nearest")[0]
     row = profiles.iloc[idx]
 
-    # Loads: P *= mv_rural_pload, Q *= mv_rural_qload
-    if "mv_rural_pload" in row.index and "mv_rural_qload" in row.index:
-        fp, fq = float(row["mv_rural_pload"]), float(row["mv_rural_qload"])
-        net.load["p_mw"] = net.load["base_p_mw"] * fp
-        net.load["q_mvar"] = net.load["base_q_mvar"] * fq
+    # Loads: scale P and Q by per-load profile columns
+    if "profile_p" in net.load.columns:
+        for prof_name in net.load["profile_p"].dropna().unique():
+            if prof_name in row.index and not np.isnan(row[prof_name]):
+                mask = net.load["profile_p"] == prof_name
+                net.load.loc[mask, "p_mw"] = (
+                    net.load.loc[mask, "base_p_mw"] * float(row[prof_name])
+                )
+    if "profile_q" in net.load.columns:
+        for prof_name in net.load["profile_q"].dropna().unique():
+            if prof_name in row.index and not np.isnan(row[prof_name]):
+                mask = net.load["profile_q"] == prof_name
+                net.load.loc[mask, "q_mvar"] = (
+                    net.load.loc[mask, "base_q_mvar"] * float(row[prof_name])
+                )
 
     # Sgen P: scale by individual profile column (PV3 / WP7 / WP10 / …)
     if "profile" in net.sgen.columns:
         for prof_name in net.sgen["profile"].dropna().unique():
-            if prof_name in row.index:
+            if prof_name in row.index and not np.isnan(row[prof_name]):
                 mask = (net.sgen["profile"] == prof_name) & (
                     ~net.sgen["name"].astype(str).str.startswith("BOUND_")
                 )

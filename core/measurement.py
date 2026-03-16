@@ -19,12 +19,12 @@ from numpy.typing import NDArray
 class Measurement:
     """
     Container for measurements received by a controller at iteration k.
-    
+
     This class holds all measured quantities from the physical system that
     are needed for the OFO control loop. Measurements include bus voltages,
     branch currents, interface reactive power flows, and current actuator
     states.
-    
+
     Attributes
     ----------
     iteration : int
@@ -75,6 +75,7 @@ class Measurement:
         interface_q_hv_side_mvar: NDArray[np.float64],
         der_indices: NDArray[np.int64],
         der_q_mvar: NDArray[np.float64],
+        der_p_mw: NDArray[np.float64],
         oltc_indices: NDArray[np.int64],
         oltc_tap_positions: NDArray[np.int64],
         shunt_indices: NDArray[np.int64],
@@ -135,26 +136,145 @@ class Measurement:
         self.interface_q_hv_side_mvar = interface_q_hv_side_mvar
         self.der_indices = der_indices
         self.der_q_mvar = der_q_mvar
+        self.der_p_mw = der_p_mw
         self.oltc_indices = oltc_indices
         self.oltc_tap_positions = oltc_tap_positions
         self.shunt_indices = shunt_indices
         self.shunt_states = shunt_states
         self.gen_indices = gen_indices
         self.gen_vm_pu = gen_vm_pu
-        self.gen_p_mw = gen_p_mw if gen_p_mw is not None else np.array([], dtype=np.float64)
-        self.gen_q_mvar = gen_q_mvar if gen_q_mvar is not None else np.array([], dtype=np.float64)
-    
+        self.gen_p_mw = (
+            gen_p_mw if gen_p_mw is not None else np.array([], dtype=np.float64)
+        )
+        self.gen_q_mvar = (
+            gen_q_mvar if gen_q_mvar is not None else np.array([], dtype=np.float64)
+        )
+
     @property
     def n_bus_measurements(self) -> int:
         """Return the number of bus voltage measurements."""
         return len(self.bus_indices)
-    
+
     @property
     def n_branch_measurements(self) -> int:
         """Return the number of branch current measurements."""
         return len(self.branch_indices)
-    
+
     @property
     def n_interface_measurements(self) -> int:
         """Return the number of interface transformer Q measurements."""
         return len(self.interface_transformer_indices)
+
+
+def measure_tso(net, cfg, it: int):
+    """Build a TSO Measurement from a converged combined pandapower network."""
+    import numpy as np
+
+    all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
+    vm = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
+    i_ka = np.array(
+        [float(net.res_line.at[li, "i_from_ka"]) for li in cfg.current_line_indices],
+        dtype=np.float64,
+    )
+    q_iface = np.array(
+        [float(net.res_trafo3w.at[t, "q_hv_mvar"]) for t in cfg.pcc_trafo_indices],
+        dtype=np.float64,
+    )
+    der_q = np.array(
+        [float(net.res_sgen.at[s, "q_mvar"]) for s in cfg.der_indices], dtype=np.float64
+    )
+    der_p = np.array(
+        [float(net.res_sgen.at[s, "p_mw"]) for s in cfg.der_indices], dtype=np.float64
+    )
+    oltc_taps = np.array(
+        [int(net.trafo.at[t, "tap_pos"]) for t in cfg.oltc_trafo_indices],
+        dtype=np.int64,
+    )
+    shunt_states = np.zeros(len(cfg.shunt_bus_indices), dtype=np.int64)
+    for k, sb in enumerate(cfg.shunt_bus_indices):
+        mask = net.shunt["bus"] == sb
+        if mask.any():
+            shunt_states[k] = int(net.shunt.at[net.shunt.index[mask][0], "step"])
+    gen_vm = np.array(
+        [float(net.gen.at[g, "vm_pu"]) for g in cfg.gen_indices], dtype=np.float64
+    )
+    gen_p = np.array(
+        [float(net.res_gen.at[g, "p_mw"]) for g in cfg.gen_indices], dtype=np.float64
+    )
+    gen_q = np.array(
+        [float(net.res_gen.at[g, "q_mvar"]) for g in cfg.gen_indices], dtype=np.float64
+    )
+    return Measurement(
+        iteration=it,
+        bus_indices=all_bus,
+        voltage_magnitudes_pu=vm,
+        branch_indices=np.array(cfg.current_line_indices, dtype=np.int64),
+        current_magnitudes_ka=i_ka,
+        interface_transformer_indices=np.array(cfg.pcc_trafo_indices, dtype=np.int64),
+        interface_q_hv_side_mvar=q_iface,
+        der_indices=np.array(cfg.der_indices, dtype=np.int64),
+        der_q_mvar=der_q,
+        der_p_mw=der_p,
+        oltc_indices=np.array(cfg.oltc_trafo_indices, dtype=np.int64),
+        oltc_tap_positions=oltc_taps,
+        shunt_indices=np.array(cfg.shunt_bus_indices, dtype=np.int64),
+        shunt_states=shunt_states,
+        gen_indices=np.array(cfg.gen_indices, dtype=np.int64),
+        gen_vm_pu=gen_vm,
+        gen_p_mw=gen_p,
+        gen_q_mvar=gen_q,
+    )
+
+
+def measure_dso(net, cfg, it: int):
+    """Build a DSO Measurement from a converged combined pandapower network."""
+    import numpy as np
+
+    all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
+    vm = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
+    i_ka = np.array(
+        [float(net.res_line.at[li, "i_from_ka"]) for li in cfg.current_line_indices],
+        dtype=np.float64,
+    )
+    q_iface = np.array(
+        [
+            float(net.res_trafo3w.at[t, "q_hv_mvar"])
+            for t in cfg.interface_trafo_indices
+        ],
+        dtype=np.float64,
+    )
+    der_q = np.array(
+        [float(net.res_sgen.at[s, "q_mvar"]) for s in cfg.der_indices], dtype=np.float64
+    )
+    der_p = np.array(
+        [float(net.res_sgen.at[s, "p_mw"]) for s in cfg.der_indices], dtype=np.float64
+    )
+    oltc_taps = np.array(
+        [int(net.trafo3w.at[t, "tap_pos"]) for t in cfg.oltc_trafo_indices],
+        dtype=np.int64,
+    )
+    shunt_states = np.zeros(len(cfg.shunt_bus_indices), dtype=np.int64)
+    for k, sb in enumerate(cfg.shunt_bus_indices):
+        mask = net.shunt["bus"] == sb
+        if mask.any():
+            shunt_states[k] = int(net.shunt.at[net.shunt.index[mask][0], "step"])
+    return Measurement(
+        iteration=it,
+        bus_indices=all_bus,
+        voltage_magnitudes_pu=vm,
+        branch_indices=np.array(cfg.current_line_indices, dtype=np.int64),
+        current_magnitudes_ka=i_ka,
+        interface_transformer_indices=np.array(
+            cfg.interface_trafo_indices, dtype=np.int64
+        ),
+        interface_q_hv_side_mvar=q_iface,
+        der_indices=np.array(cfg.der_indices, dtype=np.int64),
+        der_q_mvar=der_q,
+        der_p_mw=der_p,
+        oltc_indices=np.array(cfg.oltc_trafo_indices, dtype=np.int64),
+        oltc_tap_positions=oltc_taps,
+        shunt_indices=np.array(cfg.shunt_bus_indices, dtype=np.int64),
+        shunt_states=shunt_states,
+        gen_indices=np.array([], dtype=np.int64),
+        gen_vm_pu=np.array([], dtype=np.float64),
+    )

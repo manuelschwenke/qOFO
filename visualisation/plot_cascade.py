@@ -20,22 +20,26 @@ Date: 2026-02-13
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, List, Optional
-import numpy as np
+
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.ticker import MaxNLocator
 
 if TYPE_CHECKING:
-    from run_cascade import IterationRecord
-    from controller.tso_controller import TSOControllerConfig
     from controller.dso_controller import DSOControllerConfig
+    from controller.tso_controller import TSOControllerConfig
+    from run_cascade import IterationRecord
+
+import os
 
 import matplotlib as mpl
-import os
+
 os.environ["QT_API"] = "pyqt5"
-mpl.use('Qt5Agg')
+mpl.use("Qt5Agg")
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
+
 
 def _collect_series(log: List[IterationRecord]):
     """Extract time series arrays from iteration log."""
@@ -46,67 +50,112 @@ def _collect_series(log: List[IterationRecord]):
     dn_v = np.array([r.plant_dn_voltages_pu for r in log])  # (T, n_dn_buses)
 
     # TSO series (only at TSO-active minutes)
-    tso_mask = np.array([r.tso_active and r.tso_q_der_mvar is not None
-                         for r in log])
+    tso_mask = np.array([r.tso_active and r.tso_q_der_mvar is not None for r in log])
     tso_min = minutes[tso_mask]
     tso_recs = [r for r in log if r.tso_active and r.tso_q_der_mvar is not None]
 
     tso_q_der = np.array([r.tso_q_der_mvar for r in tso_recs])
     tso_q_pcc = np.array([r.tso_q_pcc_set_mvar for r in tso_recs])
     tso_v_gen = np.array([r.tso_v_gen_pu for r in tso_recs])
-    tso_oltc = np.array([r.tso_oltc_taps for r in tso_recs]) if tso_recs and tso_recs[0].tso_oltc_taps is not None and len(tso_recs[0].tso_oltc_taps) > 0 else None
-    tso_shunt = np.array([r.tso_shunt_states for r in tso_recs]) if tso_recs and tso_recs[0].tso_shunt_states is not None and len(tso_recs[0].tso_shunt_states) > 0 else None
-    tso_obj = np.array([r.tso_objective for r in tso_recs # ToDo: Manually disabled
-                        if r.tso_objective is not None])
-    tso_obj_min = np.array([r.minute for r in tso_recs
-                            if r.tso_objective is not None])
+    tso_oltc = (
+        np.array([r.tso_oltc_taps for r in tso_recs])
+        if tso_recs
+        and tso_recs[0].tso_oltc_taps is not None
+        and len(tso_recs[0].tso_oltc_taps) > 0
+        else None
+    )
+    tso_shunt = (
+        np.array([r.tso_shunt_states for r in tso_recs])
+        if tso_recs
+        and tso_recs[0].tso_shunt_states is not None
+        and len(tso_recs[0].tso_shunt_states) > 0
+        else None
+    )
+    tso_obj = np.array(
+        [
+            r.tso_objective
+            for r in tso_recs  # ToDo: Manually disabled
+            if r.tso_objective is not None
+        ]
+    )
+    tso_obj_min = np.array([r.minute for r in tso_recs if r.tso_objective is not None])
 
     # DSO series
-    dso_mask = np.array([r.dso_active and r.dso_q_der_mvar is not None
-                         for r in log])
+    dso_mask = np.array([r.dso_active and r.dso_q_der_mvar is not None for r in log])
     dso_min = minutes[dso_mask]
     dso_recs = [r for r in log if r.dso_active and r.dso_q_der_mvar is not None]
 
     dso_q_der = np.array([r.dso_q_der_mvar for r in dso_recs])
-    dso_oltc = np.array([r.dso_oltc_taps for r in dso_recs]) if dso_recs and dso_recs[0].dso_oltc_taps is not None and len(dso_recs[0].dso_oltc_taps) > 0 else None
-    dso_shunt = np.array([r.dso_shunt_states for r in dso_recs]) if dso_recs and dso_recs[0].dso_shunt_states is not None and len(dso_recs[0].dso_shunt_states) > 0 else None
-    dso_q_set = np.array([r.dso_q_setpoint_mvar for r in dso_recs]) if dso_recs and dso_recs[0].dso_q_setpoint_mvar is not None else None
-    dso_q_act = np.array([r.dso_q_actual_mvar for r in dso_recs
-                          if r.dso_q_actual_mvar is not None])
-    dso_q_act_min = np.array([r.minute for r in dso_recs
-                              if r.dso_q_actual_mvar is not None])
-    dso_obj = np.array([r.dso_objective for r in dso_recs  # ToDo: Manually disabled
-                        if r.dso_objective is not None])
-    dso_obj_min = np.array([r.minute for r in dso_recs
-                            if r.dso_objective is not None])
+    dso_oltc = (
+        np.array([r.dso_oltc_taps for r in dso_recs])
+        if dso_recs
+        and dso_recs[0].dso_oltc_taps is not None
+        and len(dso_recs[0].dso_oltc_taps) > 0
+        else None
+    )
+    dso_shunt = (
+        np.array([r.dso_shunt_states for r in dso_recs])
+        if dso_recs
+        and dso_recs[0].dso_shunt_states is not None
+        and len(dso_recs[0].dso_shunt_states) > 0
+        else None
+    )
+    dso_q_set = (
+        np.array([r.dso_q_setpoint_mvar for r in dso_recs])
+        if dso_recs and dso_recs[0].dso_q_setpoint_mvar is not None
+        else None
+    )
+    dso_q_act = np.array(
+        [r.dso_q_actual_mvar for r in dso_recs if r.dso_q_actual_mvar is not None]
+    )
+    dso_q_act_min = np.array(
+        [r.minute for r in dso_recs if r.dso_q_actual_mvar is not None]
+    )
+    dso_obj = np.array(
+        [
+            r.dso_objective
+            for r in dso_recs  # ToDo: Manually disabled
+            if r.dso_objective is not None
+        ]
+    )
+    dso_obj_min = np.array([r.minute for r in dso_recs if r.dso_objective is not None])
 
     # Penalty term series (recorded every minute after PF)
-    tso_v_pen = np.array([r.tso_v_penalty for r in log
-                          if r.tso_v_penalty is not None])
-    tso_v_pen_min = np.array([r.minute for r in log
-                              if r.tso_v_penalty is not None])
-    dso_q_pen = np.array([r.dso_q_penalty for r in log
-                          if r.dso_q_penalty is not None])
-    dso_q_pen_min = np.array([r.minute for r in log
-                              if r.dso_q_penalty is not None])
+    tso_v_pen = np.array([r.tso_v_penalty for r in log if r.tso_v_penalty is not None])
+    tso_v_pen_min = np.array([r.minute for r in log if r.tso_v_penalty is not None])
+    dso_q_pen = np.array([r.dso_q_penalty for r in log if r.dso_q_penalty is not None])
+    dso_q_pen_min = np.array([r.minute for r in log if r.dso_q_penalty is not None])
 
     return dict(
         minutes=minutes,
-        tn_v=tn_v, dn_v=dn_v,
-        tso_min=tso_min, tso_q_der=tso_q_der, tso_q_pcc=tso_q_pcc,
-        tso_v_gen=tso_v_gen, tso_oltc=tso_oltc, tso_shunt=tso_shunt,
-        tso_obj=tso_obj, tso_obj_min=tso_obj_min,
-        tso_v_pen=tso_v_pen, tso_v_pen_min=tso_v_pen_min,
-        dso_min=dso_min, dso_q_der=dso_q_der,
-        dso_oltc=dso_oltc, dso_shunt=dso_shunt,
-        dso_q_set=dso_q_set, dso_q_act=dso_q_act,
+        tn_v=tn_v,
+        dn_v=dn_v,
+        tso_min=tso_min,
+        tso_q_der=tso_q_der,
+        tso_q_pcc=tso_q_pcc,
+        tso_v_gen=tso_v_gen,
+        tso_oltc=tso_oltc,
+        tso_shunt=tso_shunt,
+        tso_obj=tso_obj,
+        tso_obj_min=tso_obj_min,
+        tso_v_pen=tso_v_pen,
+        tso_v_pen_min=tso_v_pen_min,
+        dso_min=dso_min,
+        dso_q_der=dso_q_der,
+        dso_oltc=dso_oltc,
+        dso_shunt=dso_shunt,
+        dso_q_set=dso_q_set,
+        dso_q_act=dso_q_act,
         dso_q_act_min=dso_q_act_min,
-        dso_obj=dso_obj, dso_obj_min=dso_obj_min,
-        dso_q_pen=dso_q_pen, dso_q_pen_min=dso_q_pen_min,
+        dso_obj=dso_obj,
+        dso_obj_min=dso_obj_min,
+        dso_q_pen=dso_q_pen,
+        dso_q_pen_min=dso_q_pen_min,
     )
 
 
 # ─── TSO figure ─────────────────────────────────────────────────────────────
+
 
 def plot_tso(
     log: List[IterationRecord],
@@ -138,15 +187,17 @@ def plot_tso(
         n_input_rows += 1
 
     n_rows = 1 + n_input_rows + 1  # voltages + inputs + objective
-    fig, axes = plt.subplots(n_rows, 1, figsize=(12, 3.0 * n_rows),
-                             sharex=True, constrained_layout=True)
+    fig, axes = plt.subplots(
+        n_rows, 1, figsize=(12, 3.0 * n_rows), sharex=True, constrained_layout=True
+    )
     fig.suptitle("TSO Controller", fontsize=14, fontweight="bold")
 
     # ── 1) EHV voltages ──
     ax = axes[0]
     for j in range(s["tn_v"].shape[1]):
-        ax.plot(s["minutes"], s["tn_v"][:, j], lw=0.8, alpha=0.7,
-                label=f"Bus {v_buses[j]}")
+        ax.plot(
+            s["minutes"], s["tn_v"][:, j], lw=0.8, alpha=0.7, label=f"Bus {v_buses[j]}"
+        )
     if tso_config.v_setpoints_pu is not None:
         v_set = tso_config.v_setpoints_pu[0]
         ax.axhline(v_set, color="k", ls="--", lw=1.2, label=f"V_set = {v_set:.3f}")
@@ -163,8 +214,12 @@ def plot_tso(
     # Q_DER
     ax = axes[row]
     for j in range(s["tso_q_der"].shape[1]):
-        ax.plot(s["tso_min"], s["tso_q_der"][:, j], lw=1.0,
-                label=f"DER bus {tso_config.der_indices[j]}")
+        ax.plot(
+            s["tso_min"],
+            s["tso_q_der"][:, j],
+            lw=1.0,
+            label=f"DER bus {tso_config.der_indices[j]}",
+        )
     ax.set_ylabel("Q_DER [Mvar]")
     ax.set_title("TSO DER Reactive Power")
     ax.legend(fontsize=7, ncol=4, loc="upper left")
@@ -175,8 +230,12 @@ def plot_tso(
     if s["tso_v_gen"].shape[1] > 0:
         ax = axes[row]
         for j in range(s["tso_v_gen"].shape[1]):
-            ax.plot(s["tso_min"], s["tso_v_gen"][:, j], lw=1.0,
-                    label=f"Gen {tso_config.gen_indices[j]}")
+            ax.plot(
+                s["tso_min"],
+                s["tso_v_gen"][:, j],
+                lw=1.0,
+                label=f"Gen {tso_config.gen_indices[j]}",
+            )
         ax.set_ylabel("V_gen [p.u.]")
         ax.set_title("Generator AVR Setpoints")
         ax.legend(fontsize=7, ncol=4, loc="upper left")
@@ -187,8 +246,12 @@ def plot_tso(
     if s["tso_oltc"] is not None:
         ax = axes[row]
         for j in range(s["tso_oltc"].shape[1]):
-            ax.plot(s["tso_min"], s["tso_oltc"][:, j], lw=1.0,
-                    label=f"OLTC trafo {tso_config.oltc_trafo_indices[j]}")
+            ax.plot(
+                s["tso_min"],
+                s["tso_oltc"][:, j],
+                lw=1.0,
+                label=f"OLTC trafo {tso_config.oltc_trafo_indices[j]}",
+            )
         ax.set_ylabel("Tap Position")
         ax.set_title("Machine Transformer OLTC Taps")
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
@@ -200,8 +263,12 @@ def plot_tso(
     if s["tso_shunt"] is not None:
         ax = axes[row]
         for j in range(s["tso_shunt"].shape[1]):
-            ax.plot(s["tso_min"], s["tso_shunt"][:, j], lw=1.0,
-                    label=f"Shunt bus {tso_config.shunt_bus_indices[j]}")
+            ax.plot(
+                s["tso_min"],
+                s["tso_shunt"][:, j],
+                lw=1.0,
+                label=f"Shunt bus {tso_config.shunt_bus_indices[j]}",
+            )
         ax.set_ylabel("State")
         ax.set_title("TSO Shunt States")
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
@@ -212,12 +279,27 @@ def plot_tso(
     # ── TSO Objective ──
     ax = axes[row]
     if len(s["tso_obj"]) > 0:
-        ax.plot(s["tso_obj_min"], s["tso_obj"], lw=1.2, color="darkblue",
-                marker=".", markersize=3, label="Total objective")
+        ax.plot(
+            s["tso_obj_min"],
+            s["tso_obj"],
+            lw=1.2,
+            color="darkblue",
+            marker=".",
+            markersize=3,
+            label="Total objective",
+        )
     if len(s["tso_v_pen"]) > 0:
-        ax.plot(s["tso_v_pen_min"], s["tso_v_pen"], lw=1.0, color="orangered",
-                ls="--", marker=".", markersize=2, alpha=0.8,
-                label=r"$g_v \cdot \Sigma(V - V_{set})^2$")
+        ax.plot(
+            s["tso_v_pen_min"],
+            s["tso_v_pen"],
+            lw=1.0,
+            color="orangered",
+            ls="--",
+            marker=".",
+            markersize=2,
+            alpha=0.8,
+            label=r"$g_v \cdot \Sigma(V - V_{set})^2$",
+        )
     ax.set_ylabel("Objective")
     ax.set_title("TSO Objective Value")
     ax.set_yscale("log")
@@ -232,6 +314,7 @@ def plot_tso(
 
 
 # ─── DSO figure ─────────────────────────────────────────────────────────────
+
 
 def plot_dso(
     log: List[IterationRecord],
@@ -260,19 +343,35 @@ def plot_dso(
         n_input_rows += 1
 
     n_rows = 2 + n_input_rows + 1  # voltages + interface Q + inputs + objective
-    fig, axes = plt.subplots(n_rows, 1, figsize=(12, 3.0 * n_rows),
-                             sharex=True, constrained_layout=True)
+    fig, axes = plt.subplots(
+        n_rows, 1, figsize=(12, 3.0 * n_rows), sharex=True, constrained_layout=True
+    )
     fig.suptitle("DSO Controller", fontsize=14, fontweight="bold")
 
     # ── 1) DN voltages ──
     ax = axes[0]
     for j in range(s["dn_v"].shape[1]):
-        ax.plot(s["minutes"], s["dn_v"][:, j], lw=0.8, alpha=0.7,
-                label=f"Bus {v_buses[j]}" if j < 10 else None)
-    ax.axhline(dso_config.v_min_pu, color="r", ls="--", lw=1.2,
-               label=f"V_min = {dso_config.v_min_pu:.2f}")
-    ax.axhline(dso_config.v_max_pu, color="r", ls="--", lw=1.2,
-               label=f"V_max = {dso_config.v_max_pu:.2f}")
+        ax.plot(
+            s["minutes"],
+            s["dn_v"][:, j],
+            lw=0.8,
+            alpha=0.7,
+            label=f"Bus {v_buses[j]}" if j < 10 else None,
+        )
+    ax.axhline(
+        dso_config.v_min_pu,
+        color="r",
+        ls="--",
+        lw=1.2,
+        label=f"V_min = {dso_config.v_min_pu:.2f}",
+    )
+    ax.axhline(
+        dso_config.v_max_pu,
+        color="r",
+        ls="--",
+        lw=1.2,
+        label=f"V_max = {dso_config.v_max_pu:.2f}",
+    )
     ax.set_ylabel("Voltage [p.u.]")
     ax.set_title("DN Bus Voltages")
     ax.legend(fontsize=7, ncol=4, loc="upper left")
@@ -284,15 +383,29 @@ def plot_dso(
     if s["dso_q_set"] is not None:
         for j in range(s["dso_q_set"].shape[1]):
             c = prop_cycle_dso[j % len(prop_cycle_dso)]
-            ax.plot(s["dso_min"], s["dso_q_set"][:, j], ls="--", lw=1.0,
-                    color=c, label=f"Q_set [{j}] (from TSO)")
+            ax.plot(
+                s["dso_min"],
+                s["dso_q_set"][:, j],
+                ls="--",
+                lw=1.0,
+                color=c,
+                label=f"Q_set [{j}] (from TSO)",
+            )
     if len(s["dso_q_act"]) > 0:
         for j in range(s["dso_q_act"].shape[1]):
             c = prop_cycle_dso[j % len(prop_cycle_dso)]
-            ax.plot(s["dso_q_act_min"], s["dso_q_act"][:, j], lw=1.8,
-                    color=c, alpha=0.8, label=f"Q_actual [{j}]")
+            ax.plot(
+                s["dso_q_act_min"],
+                s["dso_q_act"][:, j],
+                lw=1.8,
+                color=c,
+                alpha=0.8,
+                label=f"Q_actual [{j}]",
+            )
     ax.set_ylabel("Q [Mvar]")
-    ax.set_title("TSO-DSO Interface Reactive Power (load conv., +Q into coupler from TN)")
+    ax.set_title(
+        "TSO-DSO Interface Reactive Power (load conv., +Q into coupler from TN)"
+    )
     ax.legend(fontsize=7, ncol=4, loc="upper left")
     ax.grid(True, alpha=0.3)
 
@@ -302,9 +415,13 @@ def plot_dso(
     # Q_DER
     ax = axes[row]
     for j in range(s["dso_q_der"].shape[1]):
-        ax.plot(s["dso_min"], s["dso_q_der"][:, j], lw=0.8,
-                alpha=0.7,
-                label=f"DER bus {dso_config.der_indices[j]}" if j < 10 else None)
+        ax.plot(
+            s["dso_min"],
+            s["dso_q_der"][:, j],
+            lw=0.8,
+            alpha=0.7,
+            label=f"DER bus {dso_config.der_indices[j]}" if j < 10 else None,
+        )
     ax.set_ylabel("Q_DER [Mvar]")
     ax.set_title("DSO DER Reactive Power")
     if len(dso_config.der_indices) <= 10:
@@ -316,8 +433,12 @@ def plot_dso(
     if s["dso_oltc"] is not None:
         ax = axes[row]
         for j in range(s["dso_oltc"].shape[1]):
-            ax.plot(s["dso_min"], s["dso_oltc"][:, j], lw=1.0,
-                    label=f"OLTC trafo3w {dso_config.oltc_trafo_indices[j]}")
+            ax.plot(
+                s["dso_min"],
+                s["dso_oltc"][:, j],
+                lw=1.0,
+                label=f"OLTC trafo3w {dso_config.oltc_trafo_indices[j]}",
+            )
         ax.set_ylabel("Tap Position")
         ax.set_title("Coupler OLTC Taps")
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
@@ -329,8 +450,12 @@ def plot_dso(
     if s["dso_shunt"] is not None:
         ax = axes[row]
         for j in range(s["dso_shunt"].shape[1]):
-            ax.plot(s["dso_min"], s["dso_shunt"][:, j], lw=1.0,
-                    label=f"Shunt bus {dso_config.shunt_bus_indices[j]}")
+            ax.plot(
+                s["dso_min"],
+                s["dso_shunt"][:, j],
+                lw=1.0,
+                label=f"Shunt bus {dso_config.shunt_bus_indices[j]}",
+            )
         ax.set_ylabel("State")
         ax.set_title("DSO Shunt States")
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
@@ -341,12 +466,27 @@ def plot_dso(
     # ── DSO Objective ──
     ax = axes[row]
     if len(s["dso_obj"]) > 0:
-        ax.plot(s["dso_obj_min"], s["dso_obj"], lw=1.2, color="darkgreen",
-                marker=".", markersize=3, label="Total objective")
+        ax.plot(
+            s["dso_obj_min"],
+            s["dso_obj"],
+            lw=1.2,
+            color="darkgreen",
+            marker=".",
+            markersize=3,
+            label="Total objective",
+        )
     if len(s["dso_q_pen"]) > 0:
-        ax.plot(s["dso_q_pen_min"], s["dso_q_pen"], lw=1.0, color="orangered",
-                ls="--", marker=".", markersize=2, alpha=0.8,
-                label=r"$g_q \cdot \Sigma(Q - Q_{set})^2$")
+        ax.plot(
+            s["dso_q_pen_min"],
+            s["dso_q_pen"],
+            lw=1.0,
+            color="orangered",
+            ls="--",
+            marker=".",
+            markersize=2,
+            alpha=0.8,
+            label=r"$g_q \cdot \Sigma(Q - Q_{set})^2$",
+        )
     ax.set_ylabel("Objective")
     ax.set_title("DSO Objective Value")
     ax.set_yscale("log")
@@ -361,6 +501,7 @@ def plot_dso(
 
 
 # ─── convenience wrapper ────────────────────────────────────────────────────
+
 
 def plot_all(
     log: List[IterationRecord],
@@ -378,6 +519,7 @@ def plot_all(
 
 
 # ─── live plotter ───────────────────────────────────────────────────────────
+
 
 class LivePlotter:
     """
@@ -416,12 +558,15 @@ class LivePlotter:
         self._tso_line_max_i_ka = tso_line_max_i_ka
         self._dso_line_max_i_ka = dso_line_max_i_ka
 
+        # Contingency events: list of (minute, description) tuples
+        self._contingency_events: List[tuple] = []
+
         # Accumulated data
         self._minutes: List[int] = []
         self._tn_v: List[np.ndarray] = []
         self._dn_v: List[np.ndarray] = []
-        self._tn_i: List[np.ndarray] = []   # TN line currents [kA]
-        self._dn_i: List[np.ndarray] = []   # DN line currents [kA]
+        self._tn_i: List[np.ndarray] = []  # TN line currents [kA]
+        self._dn_i: List[np.ndarray] = []  # DN line currents [kA]
         self._tso_min: List[int] = []
         self._tso_q_pcc: List[np.ndarray] = []
         self._tso_q_der: List[np.ndarray] = []
@@ -465,8 +610,12 @@ class LivePlotter:
             n_tso_rows += 1
         n_tso_rows += 1  # objective
         self._fig_tso, self._axes_tso = plt.subplots(
-            n_tso_rows, 1, figsize=(10, 2.5 * n_tso_rows),
-            sharex=True, constrained_layout=True)
+            n_tso_rows,
+            1,
+            figsize=(10, 2.5 * n_tso_rows),
+            sharex=True,
+            constrained_layout=True,
+        )
         self._fig_tso.suptitle("TSO Controller (live)", fontweight="bold")
 
         self._ax_tso_v = self._axes_tso[0]
@@ -534,8 +683,12 @@ class LivePlotter:
             n_dso_rows += 1
         n_dso_rows += 1  # objective
         self._fig_dso, self._axes_dso = plt.subplots(
-            n_dso_rows, 1, figsize=(10, 2.5 * n_dso_rows),
-            sharex=True, constrained_layout=True)
+            n_dso_rows,
+            1,
+            figsize=(10, 2.5 * n_dso_rows),
+            sharex=True,
+            constrained_layout=True,
+        )
         self._fig_dso.suptitle("DSO Controller (live)", fontweight="bold")
 
         # Store axes references
@@ -549,7 +702,8 @@ class LivePlotter:
         self._ax_dso_iface = self._axes_dso[1]
         self._ax_dso_iface.set_ylabel("Q [Mvar]")
         self._ax_dso_iface.set_title(
-            "TSO-DSO Interface Q (load conv., +Q into coupler from TN)")
+            "TSO-DSO Interface Q (load conv., +Q into coupler from TN)"
+        )
         self._ax_dso_iface.grid(True, alpha=0.3)
 
         self._ax_dso_qder = self._axes_dso[2]
@@ -600,6 +754,7 @@ class LivePlotter:
             backend = mpl.get_backend()
             if "Qt" in backend:
                 from PyQt5.QtWidgets import QApplication
+
                 app = QApplication.instance()
                 if app is not None:
                     screen = app.primaryScreen().availableGeometry()
@@ -624,9 +779,15 @@ class LivePlotter:
             self._tn_v.append(rec.plant_tn_voltages_pu)
         if rec.plant_dn_voltages_pu is not None:
             self._dn_v.append(rec.plant_dn_voltages_pu)
-        if hasattr(rec, "plant_tn_currents_ka") and rec.plant_tn_currents_ka is not None:
+        if (
+            hasattr(rec, "plant_tn_currents_ka")
+            and rec.plant_tn_currents_ka is not None
+        ):
             self._tn_i.append(rec.plant_tn_currents_ka)
-        if hasattr(rec, "plant_dn_currents_ka") and rec.plant_dn_currents_ka is not None:
+        if (
+            hasattr(rec, "plant_dn_currents_ka")
+            and rec.plant_dn_currents_ka is not None
+        ):
             self._dn_i.append(rec.plant_dn_currents_ka)
         if hasattr(rec, "tso_q_gen_mvar") and rec.tso_q_gen_mvar is not None:
             self._tso_q_gen_min.append(rec.minute)
@@ -640,7 +801,7 @@ class LivePlotter:
                 self._tso_v_gen.append(rec.tso_v_gen_pu)
             if rec.tso_oltc_taps is not None:
                 self._tso_oltc.append(rec.tso_oltc_taps)
-            if rec.tso_objective is not None: # ToDo: Manually disabled
+            if rec.tso_objective is not None:  # ToDo: Manually disabled
                 self._tso_obj_min.append(rec.minute)
                 self._tso_obj.append(rec.tso_objective)
         if rec.dso_active and rec.dso_q_setpoint_mvar is not None:
@@ -656,7 +817,7 @@ class LivePlotter:
                 self._dso_oltc.append(rec.dso_oltc_taps)
             if rec.dso_shunt_states is not None:
                 self._dso_shunt.append(rec.dso_shunt_states)
-            if rec.dso_objective is not None: # ToDo: Manually disabled
+            if rec.dso_objective is not None:  # ToDo: Manually disabled
                 self._dso_obj_min.append(rec.minute)
                 self._dso_obj.append(rec.dso_objective)
 
@@ -668,13 +829,50 @@ class LivePlotter:
             self._dso_q_pen_min.append(rec.minute)
             self._dso_q_pen.append(rec.dso_q_penalty)
 
+        # Collect any contingency events from this record
+        if hasattr(rec, "contingency_events") and rec.contingency_events:
+            for entry in rec.contingency_events:
+                # entry is either (verbose_desc, short_label) or a plain str (legacy)
+                if isinstance(entry, tuple):
+                    _desc, short_label = entry
+                else:
+                    short_label = str(entry)
+                self._contingency_events.append((rec.minute, short_label))
+
         if self._call_count % self._update_every != 0:
             return
 
         self._redraw()
 
+    def _draw_contingency_lines(self, ax) -> None:
+        """Draw a vertical dashed line + top label for every contingency event."""
+        import matplotlib.transforms as mtransforms
+
+        # x in data coordinates, y in axes fraction (0=bottom, 1=top)
+        base_transform = ax.get_xaxis_transform()
+        # shift the label a few points to the right of the line
+        offset_transform = mtransforms.offset_copy(
+            base_transform, fig=ax.figure, x=5, y=0, units="points"
+        )
+        for minute, short_label in self._contingency_events:
+            ax.axvline(minute, color="crimson", ls="--", lw=1.5, alpha=0.9, zorder=5)
+            ax.text(
+                minute,
+                0.5,  # vertical centre of the axes in axes fraction
+                short_label,
+                rotation=90,
+                va="center",
+                ha="left",
+                fontsize=8,
+                fontweight="bold",
+                color="crimson",
+                clip_on=True,
+                zorder=6,
+                transform=offset_transform,
+            )
+
     def _redraw(self) -> None:
-        mins = np.array(self._minutes[:len(self._tn_v)])
+        mins = np.array(self._minutes[: len(self._tn_v)])
 
         # ═══════════════ TSO FIGURE ═══════════════
 
@@ -690,25 +888,30 @@ class LivePlotter:
                 self._ax_tso_v.axhline(v_set, color="k", ls="--", lw=1.0)
             for j in range(tn.shape[1]):
                 self._ax_tso_v.plot(mins, tn[:, j], lw=0.7, alpha=0.7)
+            self._draw_contingency_lines(self._ax_tso_v)
 
         # TSO Q_DER
         if len(self._tso_q_der) > 0:
             qd_arr = np.array(self._tso_q_der)
-            td_arr = np.array(self._tso_min[:len(self._tso_q_der)])
+            td_arr = np.array(self._tso_min[: len(self._tso_q_der)])
             self._ax_tso_qder.clear()
             self._ax_tso_qder.set_ylabel("Q_DER [Mvar]")
             self._ax_tso_qder.set_title("TSO DER Reactive Power")
             self._ax_tso_qder.grid(True, alpha=0.3)
             for j in range(qd_arr.shape[1]):
                 self._ax_tso_qder.plot(
-                    td_arr, qd_arr[:, j], lw=1.0,
-                    label=f"DER bus {self._tso_cfg.der_indices[j]}")
+                    td_arr,
+                    qd_arr[:, j],
+                    lw=1.0,
+                    label=f"DER bus {self._tso_cfg.der_indices[j]}",
+                )
             self._ax_tso_qder.legend(fontsize=7, ncol=4, loc="upper left")
+            self._draw_contingency_lines(self._ax_tso_qder)
 
         # TSO Line Currents vs. Thermal Limits
         if self._ax_tso_current is not None and len(self._tn_i) > 0:
             tn_i = np.array(self._tn_i)
-            mins_i = np.array(self._minutes[:len(self._tn_i)])
+            mins_i = np.array(self._minutes[: len(self._tn_i)])
             self._ax_tso_current.clear()
             self._ax_tso_current.set_ylabel("I [kA]")
             self._ax_tso_current.set_title("TN Line Currents vs. Thermal Limits")
@@ -721,11 +924,14 @@ class LivePlotter:
                     lim = self._tso_line_max_i_ka[j]
                     if lim < 1e5:  # skip absurdly large limits
                         self._ax_tso_current.axhline(
-                            lim, color="r", ls="--", lw=0.8, alpha=0.5)
+                            lim, color="r", ls="--", lw=0.8, alpha=0.5
+                        )
                 # Draw one visible legend entry for the limit band
                 self._ax_tso_current.axhline(
-                    np.nan, color="r", ls="--", lw=0.8, label="thermal limit")
+                    np.nan, color="r", ls="--", lw=0.8, label="thermal limit"
+                )
                 self._ax_tso_current.legend(fontsize=7, loc="upper left")
+            self._draw_contingency_lines(self._ax_tso_current)
 
         # TSO Q_gen (synchronous generator reactive power output)
         if self._ax_tso_qgen is not None and len(self._tso_q_gen) > 0:
@@ -737,28 +943,36 @@ class LivePlotter:
             self._ax_tso_qgen.grid(True, alpha=0.3)
             for j in range(qg_arr.shape[1]):
                 self._ax_tso_qgen.plot(
-                    tg_arr, qg_arr[:, j], lw=1.0,
-                    label=f"Gen {self._tso_cfg.gen_indices[j]}")
+                    tg_arr,
+                    qg_arr[:, j],
+                    lw=1.0,
+                    label=f"Gen {self._tso_cfg.gen_indices[j]}",
+                )
             self._ax_tso_qgen.legend(fontsize=7, ncol=4, loc="upper left")
+            self._draw_contingency_lines(self._ax_tso_qgen)
 
         # TSO V_gen (AVR setpoints)
         if self._ax_tso_vgen is not None and len(self._tso_v_gen) > 0:
             vg_arr = np.array(self._tso_v_gen)
-            td_arr = np.array(self._tso_min[:len(self._tso_v_gen)])
+            td_arr = np.array(self._tso_min[: len(self._tso_v_gen)])
             self._ax_tso_vgen.clear()
             self._ax_tso_vgen.set_ylabel("V_gen [p.u.]")
             self._ax_tso_vgen.set_title("Generator AVR Setpoints")
             self._ax_tso_vgen.grid(True, alpha=0.3)
             for j in range(vg_arr.shape[1]):
                 self._ax_tso_vgen.plot(
-                    td_arr, vg_arr[:, j], lw=1.0,
-                    label=f"Gen {self._tso_cfg.gen_indices[j]}")
+                    td_arr,
+                    vg_arr[:, j],
+                    lw=1.0,
+                    label=f"Gen {self._tso_cfg.gen_indices[j]}",
+                )
             self._ax_tso_vgen.legend(fontsize=7, ncol=4, loc="upper left")
+            self._draw_contingency_lines(self._ax_tso_vgen)
 
         # TSO OLTC taps
         if self._ax_tso_oltc is not None and len(self._tso_oltc) > 0:
             ot_arr = np.array(self._tso_oltc)
-            td_arr = np.array(self._tso_min[:len(self._tso_oltc)])
+            td_arr = np.array(self._tso_min[: len(self._tso_oltc)])
             self._ax_tso_oltc.clear()
             self._ax_tso_oltc.set_ylabel("Tap Position")
             self._ax_tso_oltc.set_title("Machine Transformer OLTC Taps")
@@ -766,9 +980,13 @@ class LivePlotter:
             self._ax_tso_oltc.grid(True, alpha=0.3)
             for j in range(ot_arr.shape[1]):
                 self._ax_tso_oltc.plot(
-                    td_arr, ot_arr[:, j], lw=1.0,
-                    label=f"OLTC trafo {self._tso_cfg.oltc_trafo_indices[j]}")
+                    td_arr,
+                    ot_arr[:, j],
+                    lw=1.0,
+                    label=f"OLTC trafo {self._tso_cfg.oltc_trafo_indices[j]}",
+                )
             self._ax_tso_oltc.legend(fontsize=7, ncol=4, loc="upper left")
+            self._draw_contingency_lines(self._ax_tso_oltc)
 
         # TSO Objective
         if len(self._tso_obj) > 0 or len(self._tso_v_pen) > 0:
@@ -782,22 +1000,36 @@ class LivePlotter:
                 all_vals.extend(self._tso_obj)
             if len(self._tso_v_pen) > 0:
                 all_vals.extend(self._tso_v_pen)
-            if all_vals and all(v > 0 for v in all_vals): # ToDo: Manually disabled
+            if all_vals and all(v > 0 for v in all_vals):  # ToDo: Manually disabled
                 self._ax_tso_obj.set_yscale("log")
             if len(self._tso_obj) > 0:
                 obj_arr = np.array(self._tso_obj)
                 obj_min_arr = np.array(self._tso_obj_min)
-                self._ax_tso_obj.plot(obj_min_arr, obj_arr, lw=1.2,
-                                      color="darkblue", marker=".", markersize=3,
-                                      label="Total objective")
+                self._ax_tso_obj.plot(
+                    obj_min_arr,
+                    obj_arr,
+                    lw=1.2,
+                    color="darkblue",
+                    marker=".",
+                    markersize=3,
+                    label="Total objective",
+                )
             if len(self._tso_v_pen) > 0:
                 pen_arr = np.array(self._tso_v_pen)
                 pen_min_arr = np.array(self._tso_v_pen_min)
-                self._ax_tso_obj.plot(pen_min_arr, pen_arr, lw=1.0,
-                                      color="orangered", ls="--", marker=".",
-                                      markersize=2, alpha=0.8,
-                                      label=r"$g_v \cdot \Sigma(V - V_{set})^2$")
+                self._ax_tso_obj.plot(
+                    pen_min_arr,
+                    pen_arr,
+                    lw=1.0,
+                    color="orangered",
+                    ls="--",
+                    marker=".",
+                    markersize=2,
+                    alpha=0.8,
+                    label=r"$g_v \cdot \Sigma(V - V_{set})^2$",
+                )
             self._ax_tso_obj.legend(fontsize=7, ncol=2, loc="upper left")
+            self._draw_contingency_lines(self._ax_tso_obj)
 
         self._fig_tso.canvas.draw_idle()
         self._fig_tso.canvas.flush_events()
@@ -805,7 +1037,7 @@ class LivePlotter:
         # ═══════════════ DSO FIGURE ═══════════════
 
         # DSO voltages
-        mins_dn = np.array(self._minutes[:len(self._dn_v)])
+        mins_dn = np.array(self._minutes[: len(self._dn_v)])
         if len(self._dn_v) > 0:
             dn = np.array(self._dn_v)
             self._ax_dso_v.clear()
@@ -814,13 +1046,15 @@ class LivePlotter:
             self._ax_dso_v.grid(True, alpha=0.3)
             for j in range(dn.shape[1]):
                 self._ax_dso_v.plot(mins_dn, dn[:, j], lw=0.7, alpha=0.7)
+            self._draw_contingency_lines(self._ax_dso_v)
 
         # DSO Interface Q (setpoint vs actual) — moved here from TSO figure
         if len(self._tso_q_pcc) > 0 or len(self._dso_q_act) > 0:
             self._ax_dso_iface.clear()
             self._ax_dso_iface.set_ylabel("Q [Mvar]")
             self._ax_dso_iface.set_title(
-                "TSO-DSO Interface Q (load conv., +Q into coupler from TN)")
+                "TSO-DSO Interface Q (load conv., +Q into coupler from TN)"
+            )
             self._ax_dso_iface.grid(True, alpha=0.3)
 
             prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
@@ -830,20 +1064,31 @@ class LivePlotter:
                 tp_arr = np.array(self._tso_min)
                 for j in range(qp_arr.shape[1]):
                     c = prop_cycle[j % len(prop_cycle)]
-                    self._ax_dso_iface.plot(tp_arr, qp_arr[:, j], ls="--",
-                                            lw=1.0, color=c,
-                                            label=f"Q_set [{j}]")
+                    self._ax_dso_iface.plot(
+                        tp_arr,
+                        qp_arr[:, j],
+                        ls="--",
+                        lw=1.0,
+                        color=c,
+                        label=f"Q_set [{j}]",
+                    )
 
             if len(self._dso_q_act) > 0:
                 qa_arr = np.array(self._dso_q_act)
                 ta_arr = np.array(self._dso_q_act_min)
                 for j in range(qa_arr.shape[1]):
                     c = prop_cycle[j % len(prop_cycle)]
-                    self._ax_dso_iface.plot(ta_arr, qa_arr[:, j], lw=1.8,
-                                            color=c, alpha=0.8,
-                                            label=f"Q_actual [{j}]")
+                    self._ax_dso_iface.plot(
+                        ta_arr,
+                        qa_arr[:, j],
+                        lw=1.8,
+                        color=c,
+                        alpha=0.8,
+                        label=f"Q_actual [{j}]",
+                    )
 
             self._ax_dso_iface.legend(fontsize=7, ncol=4, loc="upper left")
+            self._draw_contingency_lines(self._ax_dso_iface)
 
         # DSO Q_DER
         if len(self._dso_q_der) > 0:
@@ -854,17 +1099,18 @@ class LivePlotter:
             self._ax_dso_qder.set_title("DSO DER Reactive Power")
             self._ax_dso_qder.grid(True, alpha=0.3)
             for j in range(qd_arr.shape[1]):
-                lbl = (f"DER bus {self._dso_cfg.der_indices[j]}"
-                       if j < 10 else None)
-                self._ax_dso_qder.plot(td_arr, qd_arr[:, j], lw=0.8,
-                                       alpha=0.7, label=lbl)
+                lbl = f"DER bus {self._dso_cfg.der_indices[j]}" if j < 10 else None
+                self._ax_dso_qder.plot(
+                    td_arr, qd_arr[:, j], lw=0.8, alpha=0.7, label=lbl
+                )
             if len(self._dso_cfg.der_indices) <= 10:
                 self._ax_dso_qder.legend(fontsize=7, ncol=4, loc="upper left")
+            self._draw_contingency_lines(self._ax_dso_qder)
 
         # DSO Line Currents vs. Thermal Limits
         if self._ax_dso_current is not None and len(self._dn_i) > 0:
             dn_i = np.array(self._dn_i)
-            mins_i_dn = np.array(self._minutes[:len(self._dn_i)])
+            mins_i_dn = np.array(self._minutes[: len(self._dn_i)])
             self._ax_dso_current.clear()
             self._ax_dso_current.set_ylabel("I [kA]")
             self._ax_dso_current.set_title("DN Line Currents vs. Thermal Limits")
@@ -877,16 +1123,19 @@ class LivePlotter:
                     lim = self._dso_line_max_i_ka[j]
                     if lim < 1e5:  # skip absurdly large limits
                         self._ax_dso_current.axhline(
-                            lim, color="r", ls="--", lw=0.8, alpha=0.5)
+                            lim, color="r", ls="--", lw=0.8, alpha=0.5
+                        )
                 # Draw one visible legend entry for the limit band
                 self._ax_dso_current.axhline(
-                    np.nan, color="r", ls="--", lw=0.8, label="thermal limit")
+                    np.nan, color="r", ls="--", lw=0.8, label="thermal limit"
+                )
                 self._ax_dso_current.legend(fontsize=7, loc="upper left")
+            self._draw_contingency_lines(self._ax_dso_current)
 
         # DSO OLTC taps
         if self._ax_dso_oltc is not None and len(self._dso_oltc) > 0:
             ot_arr = np.array(self._dso_oltc)
-            td_arr = np.array(self._dso_min[:len(self._dso_oltc)])
+            td_arr = np.array(self._dso_min[: len(self._dso_oltc)])
             self._ax_dso_oltc.clear()
             self._ax_dso_oltc.set_ylabel("Tap Position")
             self._ax_dso_oltc.set_title("Coupler OLTC Taps")
@@ -894,14 +1143,18 @@ class LivePlotter:
             self._ax_dso_oltc.grid(True, alpha=0.3)
             for j in range(ot_arr.shape[1]):
                 self._ax_dso_oltc.plot(
-                    td_arr, ot_arr[:, j], lw=1.0,
-                    label=f"OLTC trafo3w {self._dso_cfg.oltc_trafo_indices[j]}")
+                    td_arr,
+                    ot_arr[:, j],
+                    lw=1.0,
+                    label=f"OLTC trafo3w {self._dso_cfg.oltc_trafo_indices[j]}",
+                )
             self._ax_dso_oltc.legend(fontsize=7, ncol=4, loc="upper left")
+            self._draw_contingency_lines(self._ax_dso_oltc)
 
         # DSO shunt states
         if self._ax_dso_shunt is not None and len(self._dso_shunt) > 0:
             sh_arr = np.array(self._dso_shunt)
-            td_arr = np.array(self._dso_min[:len(self._dso_shunt)])
+            td_arr = np.array(self._dso_min[: len(self._dso_shunt)])
             self._ax_dso_shunt.clear()
             self._ax_dso_shunt.set_ylabel("State")
             self._ax_dso_shunt.set_title("DSO Shunt States")
@@ -909,9 +1162,13 @@ class LivePlotter:
             self._ax_dso_shunt.grid(True, alpha=0.3)
             for j in range(sh_arr.shape[1]):
                 self._ax_dso_shunt.plot(
-                    td_arr, sh_arr[:, j], lw=1.0,
-                    label=f"Shunt bus {self._dso_cfg.shunt_bus_indices[j]}")
+                    td_arr,
+                    sh_arr[:, j],
+                    lw=1.0,
+                    label=f"Shunt bus {self._dso_cfg.shunt_bus_indices[j]}",
+                )
             self._ax_dso_shunt.legend(fontsize=7, ncol=4, loc="upper left")
+            self._draw_contingency_lines(self._ax_dso_shunt)
 
         # DSO Objective
         if len(self._dso_obj) > 0 or len(self._dso_q_pen) > 0:
@@ -925,22 +1182,36 @@ class LivePlotter:
                 all_vals.extend(self._dso_obj)
             if len(self._dso_q_pen) > 0:
                 all_vals.extend(self._dso_q_pen)
-            if all_vals and all(v > 0 for v in all_vals): # ToDo: Manually disabled
+            if all_vals and all(v > 0 for v in all_vals):  # ToDo: Manually disabled
                 self._ax_dso_obj.set_yscale("log")
             if len(self._dso_obj) > 0:
                 obj_arr = np.array(self._dso_obj)
                 obj_min_arr = np.array(self._dso_obj_min)
-                self._ax_dso_obj.plot(obj_min_arr, obj_arr, lw=1.2,
-                                      color="darkgreen", marker=".", markersize=3,
-                                      label="Total objective")
+                self._ax_dso_obj.plot(
+                    obj_min_arr,
+                    obj_arr,
+                    lw=1.2,
+                    color="darkgreen",
+                    marker=".",
+                    markersize=3,
+                    label="Total objective",
+                )
             if len(self._dso_q_pen) > 0:
                 pen_arr = np.array(self._dso_q_pen)
                 pen_min_arr = np.array(self._dso_q_pen_min)
-                self._ax_dso_obj.plot(pen_min_arr, pen_arr, lw=1.0,
-                                      color="orangered", ls="--", marker=".",
-                                      markersize=2, alpha=0.8,
-                                      label=r"$g_q \cdot \Sigma(Q - Q_{set})^2$")
+                self._ax_dso_obj.plot(
+                    pen_min_arr,
+                    pen_arr,
+                    lw=1.0,
+                    color="orangered",
+                    ls="--",
+                    marker=".",
+                    markersize=2,
+                    alpha=0.8,
+                    label=r"$g_q \cdot \Sigma(Q - Q_{set})^2$",
+                )
             self._ax_dso_obj.legend(fontsize=7, ncol=2, loc="upper left")
+            self._draw_contingency_lines(self._ax_dso_obj)
 
         self._fig_dso.canvas.draw_idle()
         self._fig_dso.canvas.flush_events()

@@ -13,6 +13,11 @@ Produces two figures:
 Also provides a :class:`LivePlotter` callback for real-time visualisation
 during simulation.
 
+Colour Palette
+--------------
+All data series use the official TU Darmstadt PANTONE palette in the order:
+    5c, 1c, 8c, 6c, 3c, 10c, 4c, 2c, 9c, 7c, 11c
+
 Author: Manuel Schwenke
 Date: 2026-02-13
 """
@@ -36,6 +41,29 @@ import matplotlib as mpl
 
 os.environ["QT_API"] = "pyqt5"
 mpl.use("Qt5Agg")
+
+
+# ─── TU Darmstadt PANTONE colour palette ────────────────────────────────────
+
+#: Ordered colour sequence for all data series (5c, 1c, 8c, 6c, 3c, 10c, 4c, 2c, 9c, 7c, 11c).
+TU_COLOURS: List[str] = [
+    "#B1BD00",  # 0  –  5c  Yellow-green   (PANTONE 390)
+    "#004E8A",  # 1  –  1c  Dark blue      (PANTONE 2945)
+    "#CC4C03",  # 2  –  8c  Dark orange    (PANTONE 173)
+    "#D7AC00",  # 3  –  6c  Gold           (PANTONE 110)
+    "#008877",  # 4  –  3c  Teal           (PANTONE 3285)
+    "#951169",  # 5  –  10c Magenta        (PANTONE 249)
+    "#7FAB16",  # 6  –  4c  Olive green    (PANTONE 376)
+    "#00689D",  # 7  –  2c  Mid blue       (PANTONE 3015)
+    "#B90F22",  # 8  –  9c  Red            (PANTONE 193)
+    "#D28700",  # 9  –  7c  Amber          (PANTONE 124)
+    "#611C73",  # 10 –  11c Purple         (PANTONE 268)
+]
+
+
+def _c(index: int) -> str:
+    """Return the TU Darmstadt PANTONE colour for a zero-based series index."""
+    return TU_COLOURS[index % len(TU_COLOURS)]
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -196,7 +224,8 @@ def plot_tso(
     ax = axes[0]
     for j in range(s["tn_v"].shape[1]):
         ax.plot(
-            s["minutes"], s["tn_v"][:, j], lw=0.8, alpha=0.7, label=f"Bus {v_buses[j]}"
+            s["minutes"], s["tn_v"][:, j],
+            lw=0.8, alpha=0.7, color=_c(j), label=f"Bus {v_buses[j]}"
         )
     if tso_config.v_setpoints_pu is not None:
         v_set = tso_config.v_setpoints_pu[0]
@@ -217,7 +246,7 @@ def plot_tso(
         ax.plot(
             s["tso_min"],
             s["tso_q_der"][:, j],
-            lw=1.0,
+            lw=1.0, color=_c(j),
             label=f"DER bus {tso_config.der_indices[j]}",
         )
     ax.set_ylabel("Q_DER [Mvar]")
@@ -233,7 +262,7 @@ def plot_tso(
             ax.plot(
                 s["tso_min"],
                 s["tso_v_gen"][:, j],
-                lw=1.0,
+                lw=1.0, color=_c(j),
                 label=f"Gen {tso_config.gen_indices[j]}",
             )
         ax.set_ylabel("V_gen [p.u.]")
@@ -249,7 +278,7 @@ def plot_tso(
             ax.plot(
                 s["tso_min"],
                 s["tso_oltc"][:, j],
-                lw=1.0,
+                lw=1.0, color=_c(j),
                 label=f"OLTC trafo {tso_config.oltc_trafo_indices[j]}",
             )
         ax.set_ylabel("Tap Position")
@@ -266,7 +295,7 @@ def plot_tso(
             ax.plot(
                 s["tso_min"],
                 s["tso_shunt"][:, j],
-                lw=1.0,
+                lw=1.0, color=_c(j),
                 label=f"Shunt bus {tso_config.shunt_bus_indices[j]}",
             )
         ax.set_ylabel("State")
@@ -283,7 +312,7 @@ def plot_tso(
             s["tso_obj_min"],
             s["tso_obj"],
             lw=1.2,
-            color="darkblue",
+            color=_c(1),  # 1c – dark blue
             marker=".",
             markersize=3,
             label="Total objective",
@@ -354,22 +383,15 @@ def plot_dso(
         ax.plot(
             s["minutes"],
             s["dn_v"][:, j],
-            lw=0.8,
-            alpha=0.7,
+            lw=0.8, alpha=0.7, color=_c(j),
             label=f"Bus {v_buses[j]}" if j < 10 else None,
         )
     ax.axhline(
-        dso_config.v_min_pu,
-        color="r",
-        ls="--",
-        lw=1.2,
+        dso_config.v_min_pu, color="r", ls="--", lw=1.2,
         label=f"V_min = {dso_config.v_min_pu:.2f}",
     )
     ax.axhline(
-        dso_config.v_max_pu,
-        color="r",
-        ls="--",
-        lw=1.2,
+        dso_config.v_max_pu, color="r", ls="--", lw=1.2,
         label=f"V_max = {dso_config.v_max_pu:.2f}",
     )
     ax.set_ylabel("Voltage [p.u.]")
@@ -379,27 +401,20 @@ def plot_dso(
 
     # ── 2) Interface Q tracking ──
     ax = axes[1]
-    prop_cycle_dso = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     if s["dso_q_set"] is not None:
         for j in range(s["dso_q_set"].shape[1]):
-            c = prop_cycle_dso[j % len(prop_cycle_dso)]
             ax.plot(
                 s["dso_min"],
                 s["dso_q_set"][:, j],
-                ls="--",
-                lw=1.0,
-                color=c,
+                ls="--", lw=1.0, color=_c(j),
                 label=f"Q_set [{j}] (from TSO)",
             )
     if len(s["dso_q_act"]) > 0:
         for j in range(s["dso_q_act"].shape[1]):
-            c = prop_cycle_dso[j % len(prop_cycle_dso)]
             ax.plot(
                 s["dso_q_act_min"],
                 s["dso_q_act"][:, j],
-                lw=1.8,
-                color=c,
-                alpha=0.8,
+                lw=1.8, color=_c(j), alpha=0.8,
                 label=f"Q_actual [{j}]",
             )
     ax.set_ylabel("Q [Mvar]")
@@ -418,8 +433,7 @@ def plot_dso(
         ax.plot(
             s["dso_min"],
             s["dso_q_der"][:, j],
-            lw=0.8,
-            alpha=0.7,
+            lw=0.8, alpha=0.7, color=_c(j),
             label=f"DER bus {dso_config.der_indices[j]}" if j < 10 else None,
         )
     ax.set_ylabel("Q_DER [Mvar]")
@@ -436,7 +450,7 @@ def plot_dso(
             ax.plot(
                 s["dso_min"],
                 s["dso_oltc"][:, j],
-                lw=1.0,
+                lw=1.0, color=_c(j),
                 label=f"OLTC trafo3w {dso_config.oltc_trafo_indices[j]}",
             )
         ax.set_ylabel("Tap Position")
@@ -453,7 +467,7 @@ def plot_dso(
             ax.plot(
                 s["dso_min"],
                 s["dso_shunt"][:, j],
-                lw=1.0,
+                lw=1.0, color=_c(j),
                 label=f"Shunt bus {dso_config.shunt_bus_indices[j]}",
             )
         ax.set_ylabel("State")
@@ -470,7 +484,7 @@ def plot_dso(
             s["dso_obj_min"],
             s["dso_obj"],
             lw=1.2,
-            color="darkgreen",
+            color=_c(4),  # 3c – teal
             marker=".",
             markersize=3,
             label="Total objective",
@@ -539,6 +553,9 @@ class LivePlotter:
     **TSO figure:** EHV voltages, Q_DER, Q_gen, V_gen, OLTC taps, objective.
     **DSO figure:** DN voltages, interface Q tracking, Q_DER, OLTC taps,
     shunt states, objective.
+
+    All data series are coloured using the TU Darmstadt PANTONE palette
+    (order: 5c, 1c, 8c, 6c, 3c, 10c, 4c, 2c, 9c, 7c, 11c).
     """
 
     def __init__(
@@ -887,7 +904,7 @@ class LivePlotter:
                 v_set = self._tso_cfg.v_setpoints_pu[0]
                 self._ax_tso_v.axhline(v_set, color="k", ls="--", lw=1.0)
             for j in range(tn.shape[1]):
-                self._ax_tso_v.plot(mins, tn[:, j], lw=0.7, alpha=0.7)
+                self._ax_tso_v.plot(mins, tn[:, j], lw=0.7, alpha=0.7, color=_c(j))
             self._draw_contingency_lines(self._ax_tso_v)
 
         # TSO Q_DER
@@ -900,9 +917,7 @@ class LivePlotter:
             self._ax_tso_qder.grid(True, alpha=0.3)
             for j in range(qd_arr.shape[1]):
                 self._ax_tso_qder.plot(
-                    td_arr,
-                    qd_arr[:, j],
-                    lw=1.0,
+                    td_arr, qd_arr[:, j], lw=1.0, color=_c(j),
                     label=f"DER bus {self._tso_cfg.der_indices[j]}",
                 )
             self._ax_tso_qder.legend(fontsize=7, ncol=4, loc="upper left")
@@ -917,7 +932,9 @@ class LivePlotter:
             self._ax_tso_current.set_title("TN Line Currents vs. Thermal Limits")
             self._ax_tso_current.grid(True, alpha=0.3)
             for j in range(tn_i.shape[1]):
-                self._ax_tso_current.plot(mins_i, tn_i[:, j], lw=0.7, alpha=0.7)
+                self._ax_tso_current.plot(
+                    mins_i, tn_i[:, j], lw=0.7, alpha=0.7, color=_c(j)
+                )
             # Draw thermal limits as horizontal dashed lines
             if self._tso_line_max_i_ka is not None:
                 for j in range(len(self._tso_line_max_i_ka)):
@@ -943,9 +960,7 @@ class LivePlotter:
             self._ax_tso_qgen.grid(True, alpha=0.3)
             for j in range(qg_arr.shape[1]):
                 self._ax_tso_qgen.plot(
-                    tg_arr,
-                    qg_arr[:, j],
-                    lw=1.0,
+                    tg_arr, qg_arr[:, j], lw=1.0, color=_c(j),
                     label=f"Gen {self._tso_cfg.gen_indices[j]}",
                 )
             self._ax_tso_qgen.legend(fontsize=7, ncol=4, loc="upper left")
@@ -961,9 +976,7 @@ class LivePlotter:
             self._ax_tso_vgen.grid(True, alpha=0.3)
             for j in range(vg_arr.shape[1]):
                 self._ax_tso_vgen.plot(
-                    td_arr,
-                    vg_arr[:, j],
-                    lw=1.0,
+                    td_arr, vg_arr[:, j], lw=1.0, color=_c(j),
                     label=f"Gen {self._tso_cfg.gen_indices[j]}",
                 )
             self._ax_tso_vgen.legend(fontsize=7, ncol=4, loc="upper left")
@@ -980,9 +993,7 @@ class LivePlotter:
             self._ax_tso_oltc.grid(True, alpha=0.3)
             for j in range(ot_arr.shape[1]):
                 self._ax_tso_oltc.plot(
-                    td_arr,
-                    ot_arr[:, j],
-                    lw=1.0,
+                    td_arr, ot_arr[:, j], lw=1.0, color=_c(j),
                     label=f"OLTC trafo {self._tso_cfg.oltc_trafo_indices[j]}",
                 )
             self._ax_tso_oltc.legend(fontsize=7, ncol=4, loc="upper left")
@@ -1003,29 +1014,19 @@ class LivePlotter:
             if all_vals and all(v > 0 for v in all_vals):  # ToDo: Manually disabled
                 self._ax_tso_obj.set_yscale("log")
             if len(self._tso_obj) > 0:
-                obj_arr = np.array(self._tso_obj)
-                obj_min_arr = np.array(self._tso_obj_min)
                 self._ax_tso_obj.plot(
-                    obj_min_arr,
-                    obj_arr,
-                    lw=1.2,
-                    color="darkblue",
-                    marker=".",
-                    markersize=3,
+                    np.array(self._tso_obj_min),
+                    np.array(self._tso_obj),
+                    lw=1.2, color=_c(1),  # 1c – dark blue
+                    marker=".", markersize=3,
                     label="Total objective",
                 )
             if len(self._tso_v_pen) > 0:
-                pen_arr = np.array(self._tso_v_pen)
-                pen_min_arr = np.array(self._tso_v_pen_min)
                 self._ax_tso_obj.plot(
-                    pen_min_arr,
-                    pen_arr,
-                    lw=1.0,
-                    color="orangered",
-                    ls="--",
-                    marker=".",
-                    markersize=2,
-                    alpha=0.8,
+                    np.array(self._tso_v_pen_min),
+                    np.array(self._tso_v_pen),
+                    lw=1.0, color="orangered", ls="--",
+                    marker=".", markersize=2, alpha=0.8,
                     label=r"$g_v \cdot \Sigma(V - V_{set})^2$",
                 )
             self._ax_tso_obj.legend(fontsize=7, ncol=2, loc="upper left")
@@ -1045,10 +1046,12 @@ class LivePlotter:
             self._ax_dso_v.set_title("DN Bus Voltages")
             self._ax_dso_v.grid(True, alpha=0.3)
             for j in range(dn.shape[1]):
-                self._ax_dso_v.plot(mins_dn, dn[:, j], lw=0.7, alpha=0.7)
+                self._ax_dso_v.plot(
+                    mins_dn, dn[:, j], lw=0.7, alpha=0.7, color=_c(j)
+                )
             self._draw_contingency_lines(self._ax_dso_v)
 
-        # DSO Interface Q (setpoint vs actual) — moved here from TSO figure
+        # DSO Interface Q (setpoint vs actual)
         if len(self._tso_q_pcc) > 0 or len(self._dso_q_act) > 0:
             self._ax_dso_iface.clear()
             self._ax_dso_iface.set_ylabel("Q [Mvar]")
@@ -1057,19 +1060,13 @@ class LivePlotter:
             )
             self._ax_dso_iface.grid(True, alpha=0.3)
 
-            prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-
             if len(self._tso_q_pcc) > 0:
                 qp_arr = np.array(self._tso_q_pcc)
                 tp_arr = np.array(self._tso_min)
                 for j in range(qp_arr.shape[1]):
-                    c = prop_cycle[j % len(prop_cycle)]
                     self._ax_dso_iface.plot(
-                        tp_arr,
-                        qp_arr[:, j],
-                        ls="--",
-                        lw=1.0,
-                        color=c,
+                        tp_arr, qp_arr[:, j],
+                        ls="--", lw=1.0, color=_c(j),
                         label=f"Q_set [{j}]",
                     )
 
@@ -1077,13 +1074,9 @@ class LivePlotter:
                 qa_arr = np.array(self._dso_q_act)
                 ta_arr = np.array(self._dso_q_act_min)
                 for j in range(qa_arr.shape[1]):
-                    c = prop_cycle[j % len(prop_cycle)]
                     self._ax_dso_iface.plot(
-                        ta_arr,
-                        qa_arr[:, j],
-                        lw=1.8,
-                        color=c,
-                        alpha=0.8,
+                        ta_arr, qa_arr[:, j],
+                        lw=1.8, color=_c(j), alpha=0.8,
                         label=f"Q_actual [{j}]",
                     )
 
@@ -1101,7 +1094,7 @@ class LivePlotter:
             for j in range(qd_arr.shape[1]):
                 lbl = f"DER bus {self._dso_cfg.der_indices[j]}" if j < 10 else None
                 self._ax_dso_qder.plot(
-                    td_arr, qd_arr[:, j], lw=0.8, alpha=0.7, label=lbl
+                    td_arr, qd_arr[:, j], lw=0.8, alpha=0.7, color=_c(j), label=lbl
                 )
             if len(self._dso_cfg.der_indices) <= 10:
                 self._ax_dso_qder.legend(fontsize=7, ncol=4, loc="upper left")
@@ -1116,7 +1109,9 @@ class LivePlotter:
             self._ax_dso_current.set_title("DN Line Currents vs. Thermal Limits")
             self._ax_dso_current.grid(True, alpha=0.3)
             for j in range(dn_i.shape[1]):
-                self._ax_dso_current.plot(mins_i_dn, dn_i[:, j], lw=0.7, alpha=0.7)
+                self._ax_dso_current.plot(
+                    mins_i_dn, dn_i[:, j], lw=0.7, alpha=0.7, color=_c(j)
+                )
             # Draw thermal limits as horizontal dashed lines
             if self._dso_line_max_i_ka is not None:
                 for j in range(len(self._dso_line_max_i_ka)):
@@ -1125,7 +1120,6 @@ class LivePlotter:
                         self._ax_dso_current.axhline(
                             lim, color="r", ls="--", lw=0.8, alpha=0.5
                         )
-                # Draw one visible legend entry for the limit band
                 self._ax_dso_current.axhline(
                     np.nan, color="r", ls="--", lw=0.8, label="thermal limit"
                 )
@@ -1143,9 +1137,7 @@ class LivePlotter:
             self._ax_dso_oltc.grid(True, alpha=0.3)
             for j in range(ot_arr.shape[1]):
                 self._ax_dso_oltc.plot(
-                    td_arr,
-                    ot_arr[:, j],
-                    lw=1.0,
+                    td_arr, ot_arr[:, j], lw=1.0, color=_c(j),
                     label=f"OLTC trafo3w {self._dso_cfg.oltc_trafo_indices[j]}",
                 )
             self._ax_dso_oltc.legend(fontsize=7, ncol=4, loc="upper left")
@@ -1162,9 +1154,7 @@ class LivePlotter:
             self._ax_dso_shunt.grid(True, alpha=0.3)
             for j in range(sh_arr.shape[1]):
                 self._ax_dso_shunt.plot(
-                    td_arr,
-                    sh_arr[:, j],
-                    lw=1.0,
+                    td_arr, sh_arr[:, j], lw=1.0, color=_c(j),
                     label=f"Shunt bus {self._dso_cfg.shunt_bus_indices[j]}",
                 )
             self._ax_dso_shunt.legend(fontsize=7, ncol=4, loc="upper left")
@@ -1176,7 +1166,6 @@ class LivePlotter:
             self._ax_dso_obj.set_ylabel("Objective")
             self._ax_dso_obj.set_title("DSO Objective Value")
             self._ax_dso_obj.grid(True, alpha=0.3)
-            # Determine if log scale is safe
             all_vals = []
             if len(self._dso_obj) > 0:
                 all_vals.extend(self._dso_obj)
@@ -1185,29 +1174,19 @@ class LivePlotter:
             if all_vals and all(v > 0 for v in all_vals):  # ToDo: Manually disabled
                 self._ax_dso_obj.set_yscale("log")
             if len(self._dso_obj) > 0:
-                obj_arr = np.array(self._dso_obj)
-                obj_min_arr = np.array(self._dso_obj_min)
                 self._ax_dso_obj.plot(
-                    obj_min_arr,
-                    obj_arr,
-                    lw=1.2,
-                    color="darkgreen",
-                    marker=".",
-                    markersize=3,
+                    np.array(self._dso_obj_min),
+                    np.array(self._dso_obj),
+                    lw=1.2, color=_c(4),  # 3c – teal
+                    marker=".", markersize=3,
                     label="Total objective",
                 )
             if len(self._dso_q_pen) > 0:
-                pen_arr = np.array(self._dso_q_pen)
-                pen_min_arr = np.array(self._dso_q_pen_min)
                 self._ax_dso_obj.plot(
-                    pen_min_arr,
-                    pen_arr,
-                    lw=1.0,
-                    color="orangered",
-                    ls="--",
-                    marker=".",
-                    markersize=2,
-                    alpha=0.8,
+                    np.array(self._dso_q_pen_min),
+                    np.array(self._dso_q_pen),
+                    lw=1.0, color="orangered", ls="--",
+                    marker=".", markersize=2, alpha=0.8,
                     label=r"$g_q \cdot \Sigma(Q - Q_{set})^2$",
                 )
             self._ax_dso_obj.legend(fontsize=7, ncol=2, loc="upper left")

@@ -13,13 +13,13 @@ The MIQP problem solved at each OFO iteration is:
            w,z,Δs
 
 where:
-    g = w^T G_w w + ∇f^T H̃ w + z^T G_z z + Δs^T G_s Δs
+    g = w^T G_w w + ∇f^T H̃ w + z^T G_z z
 
 subject to:
     αw ∈ [u_LL - u^k, u_UL - u^k]             (input constraints)
     α∇H w ∈ [y_LL - y^k - z, y_UL - y^k + z]  (output constraints with slack)
     z ≥ 0                                      (slack non-negativity)
-    Δs ∈ ℤ                                     (discrete changes)
+    w_i ∈ ℤ                                    (integer variables)
 
 References
 ----------
@@ -31,7 +31,7 @@ Date: 2025-02-05
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Union
 import numpy as np
 from numpy.typing import NDArray
 
@@ -107,8 +107,6 @@ class MIQPProblem:
         Quadratic weighting matrix for control changes (n_total x n_total).
     G_z : NDArray[np.float64]
         Quadratic weighting matrix for slack variables (n_outputs x n_outputs).
-    G_s : NDArray[np.float64]
-        Quadratic weighting matrix for discrete changes (n_integer x n_integer).
     grad_f : NDArray[np.float64]
         Objective gradient vector (n_total,).
     H_tilde : NDArray[np.float64]
@@ -134,7 +132,6 @@ class MIQPProblem:
     alpha: float
     G_w: NDArray[np.float64]
     G_z: NDArray[np.float64]
-    G_s: NDArray[np.float64]
     grad_f: NDArray[np.float64]
     H_tilde: NDArray[np.float64]
     u_current: NDArray[np.float64]
@@ -159,12 +156,6 @@ class MIQPProblem:
             raise ValueError(
                 f"G_z shape {self.G_z.shape} does not match "
                 f"expected ({self.n_outputs}, {self.n_outputs})"
-            )
-        
-        if self.G_s.shape != (self.n_integer, self.n_integer):
-            raise ValueError(
-                f"G_s shape {self.G_s.shape} does not match "
-                f"expected ({self.n_integer}, {self.n_integer})"
             )
         
         if len(self.grad_f) != n_total:
@@ -279,7 +270,7 @@ class MIQPSolver:
     """
     
     # Solver preference order for MIQP problems
-    MIQP_SOLVERS = ['SCIP', 'GUROBI', 'MOSEK', 'ECOS_BB']
+    MIQP_SOLVERS = ['GUROBI'] #['SCIP', 'MOSEK', 'GUROBI', 'ECOS_BB']
     
     # Solver preference order for QP problems (continuous only)
     QP_SOLVERS = ['OSQP', 'ECOS', 'SCS', 'CVXOPT']
@@ -289,7 +280,7 @@ class MIQPSolver:
         solver: Optional[str] = None,
         verbose: bool = False,
         time_limit_s: float = 60.0,
-        mip_gap: float = 1e-4,
+        mip_gap: float = 1e-6,
     ) -> None:
         """
         Initialise the MIQP solver.
@@ -390,7 +381,7 @@ class MIQPSolver:
         # Objective function (Equation 27 from PSCC paper)
         # g = w^T G_w w + ∇f^T H̃ w + z^T G_z z
         objective = (
-            cp.quad_form(w, problem.G_w) +
+            cp.quad_form(w, problem.G_w, assume_PSD=True) +
             problem.grad_f @ w +
             cp.quad_form(z, problem.G_z)
         )
@@ -494,13 +485,11 @@ class MIQPSolver:
         # Combine w = [w_c; w_i] for matrix operations
         w = cp.hstack([w_c, w_i])
         
-        # Objective function (Equation 27 from PSCC paper)
-        # g = w^T G_w w + ∇f^T H̃ w + z^T G_z z + Δs^T G_s Δs
+        # Objective function: g = w^T G_w w + ∇f^T H̃ w + z^T G_z z
         objective = (
-            cp.quad_form(w, problem.G_w) +
+            cp.quad_form(w, problem.G_w, assume_PSD=True) +
             problem.grad_f @ w +
-            cp.quad_form(z, problem.G_z) +
-            cp.quad_form(w_i, problem.G_s)
+            cp.quad_form(z, problem.G_z)
         )
         
         # Constraints
@@ -515,22 +504,26 @@ class MIQPSolver:
         constraints.append(w_c <= w_c_upper)
         
         # Input constraints for integer variables
-        # Integer variables are changes in tap position or shunt state
-        # Typically limited to small changes per iteration (e.g., ±1, ±2)
-        w_i_lower = (problem.u_lower[n_continuous:] - 
-                     problem.u_current[n_continuous:]) / alpha
-        w_i_upper = (problem.u_upper[n_continuous:] - 
-                     problem.u_current[n_continuous:]) / alpha
-        
-        # Round bounds to integers for integer variables
-        w_i_lower_int = np.floor(w_i_lower).astype(np.int64)
-        w_i_upper_int = np.ceil(w_i_upper).astype(np.int64)
-        
+        # w_i represents the DIRECT change in discrete state (e.g., +1 tap,
+        # -1 shunt step).  No alpha scaling — these are physical switching
+        # decisions, not gradient-descent micro-steps.
+        w_i_lower_int = np.floor(
+            problem.u_lower[n_continuous:] - problem.u_current[n_continuous:]
+        ).astype(np.int64)
+        w_i_upper_int = np.ceil(
+            problem.u_upper[n_continuous:] - problem.u_current[n_continuous:]
+        ).astype(np.int64)
+
         constraints.append(w_i >= w_i_lower_int)
         constraints.append(w_i <= w_i_upper_int)
-        
+
         # Output constraints with slack variables
-        Hw = alpha * (problem.H_tilde @ w)
+        # Continuous part is scaled by α (gradient step), integer part is
+        # unscaled (direct state change):
+        #   Δy ≈ α · H_c · w_c  +  H_i · w_i
+        H_c = problem.H_tilde[:, :n_continuous]
+        H_i = problem.H_tilde[:, n_continuous:]
+        Hw = alpha * (H_c @ w_c) + H_i @ w_i
         y_error_lower = problem.y_lower - problem.y_current
         y_error_upper = problem.y_upper - problem.y_current
         
@@ -546,7 +539,6 @@ class MIQPSolver:
         
         if solver_name is not None:
             solver_kwargs['solver'] = solver_name
-            
             # Add solver-specific options
             if solver_name == 'SCIP':
                 solver_kwargs['scip_params'] = {
@@ -608,18 +600,17 @@ def build_miqp_problem(
     u_upper: NDArray[np.float64],
     y_lower: NDArray[np.float64],
     y_upper: NDArray[np.float64],
-    g_w: float,
-    g_u: float,
-    g_z: float,
-    g_s: float,
+    g_w: Union[float, NDArray[np.float64]],
+    g_u: Union[float, NDArray[np.float64]],
+    g_z: Union[float, NDArray[np.float64]],
     integer_indices: Optional[List[int]] = None,
 ) -> MIQPProblem:
     """
     Build an MIQP problem from OFO controller data.
-    
+
     This is a convenience function that constructs the weight matrices
     and problem structure from scalar weights and sensitivity data.
-    
+
     Parameters
     ----------
     alpha : float
@@ -640,23 +631,33 @@ def build_miqp_problem(
         Lower bounds on outputs.
     y_upper : NDArray[np.float64]
         Upper bounds on outputs.
-    g_w : float
-        Scalar weight for control variable changes.
-    g_u : float
-        Scalar weight for control variable usage (regularisation).
-    g_z : float
-        Scalar weight for slack variables (constraint violations).
-    g_s : float
-        Scalar weight for discrete variable changes.
+    g_w : float or NDArray[np.float64]
+        Weight for control variable changes. Either a scalar (applied
+        uniformly to all variables), a 1-D array of length n_total with
+        per-variable weights for the diagonal of G_w, or a 2-D
+        (n_total x n_total) symmetric matrix for coupled weights
+        (e.g. OLTC cross-penalties).  When 2-D, the g_u regularisation
+        is added to the diagonal only.
+    g_u : float or NDArray[np.float64]
+        Weight for control variable usage (regularisation).  Either a
+        scalar (uniform for all variables) or a per-variable array of
+        length n_total.  Set entries to 0 for actuators that should
+        not be regularised towards zero (e.g. OLTC taps, shunts).
+    g_z : float or NDArray[np.float64]
+        Weight for slack variables (constraint violations).  Either a
+        scalar (uniform for all outputs) or a 1-D array of length
+        ``n_outputs`` with per-output weights.  Use lower values for
+        outputs that cannot be tightly controlled (e.g. branch currents
+        in a reactive-power controller).
     integer_indices : List[int], optional
         Indices of integer variables within u_current. If None, all
         variables are treated as continuous.
-    
+
     Returns
     -------
     MIQPProblem
         The constructed MIQP problem.
-    
+
     Raises
     ------
     ValueError
@@ -664,59 +665,88 @@ def build_miqp_problem(
     """
     n_total = len(u_current)
     n_outputs = len(y_current)
-    
+
     if integer_indices is None:
         integer_indices = []
-    
+
     n_integer = len(integer_indices)
     n_continuous = n_total - n_integer
-    
+
     # Validate dimensions
     if H.shape != (n_outputs, n_total):
         raise ValueError(
             f"H shape {H.shape} does not match expected "
             f"({n_outputs}, {n_total})"
         )
-    
+
     if len(grad_f) != n_total:
         raise ValueError(
             f"grad_f length {len(grad_f)} does not match n_total {n_total}"
         )
-    
+
     if len(u_lower) != n_total:
         raise ValueError(
             f"u_lower length {len(u_lower)} does not match n_total {n_total}"
         )
-    
+
     if len(u_upper) != n_total:
         raise ValueError(
             f"u_upper length {len(u_upper)} does not match n_total {n_total}"
         )
-    
+
     if len(y_lower) != n_outputs:
         raise ValueError(
             f"y_lower length {len(y_lower)} does not match n_outputs {n_outputs}"
         )
-    
+
     if len(y_upper) != n_outputs:
         raise ValueError(
             f"y_upper length {len(y_upper)} does not match n_outputs {n_outputs}"
         )
-    
+
     # Build weight matrices
-    # G_w combines the change weight and usage weight
-    # G_w = g_w * I + α² * g_u * I
-    G_w = (g_w + alpha**2 * g_u) * np.eye(n_total)
-    
-    # G_z is the slack variable weight
-    G_z = g_z * np.eye(n_outputs)
-    
-    # G_s is the discrete change weight
-    G_s = g_s * np.eye(n_integer) if n_integer > 0 else np.zeros((0, 0))
-    
-    # Modified gradient includes regularisation term
-    # grad_f_mod = grad_f + 2 * α * g_u * u_current
-    grad_f_mod = grad_f + 2 * alpha * g_u * u_current
+    # ─────────────────────
+    # Continuous variables:  w_c = Δu / α   (gradient-descent micro-step)
+    #   Quadratic: G_w_c = diag(g_w + α² · g_u)
+    #   Linear:    grad_c = grad_f + 2 · α · g_u · u
+    #
+    # Integer variables:     w_i = Δu        (direct state change, no α)
+    #   Quadratic: G_w_i = diag(g_w + g_u)   (no α² factor)
+    #   Linear:    grad_i = grad_f + 2 · g_u · u  (no α factor)
+    g_w_arr = np.asarray(g_w, dtype=np.float64)
+    g_u_vec = np.broadcast_to(np.asarray(g_u, dtype=np.float64), (n_total,)).copy()
+
+    continuous_mask = np.ones(n_total, dtype=bool)
+    for idx in integer_indices:
+        continuous_mask[idx] = False
+
+    if g_w_arr.ndim == 2:
+        # Full (n_total x n_total) weight matrix — use directly, add g_u
+        # to diagonal only.
+        G_w = g_w_arr.copy()
+        diag_idx = np.arange(n_total)
+        G_w[diag_idx[continuous_mask], diag_idx[continuous_mask]] += (
+            alpha**2 * g_u_vec[continuous_mask]
+        )
+        G_w[diag_idx[~continuous_mask], diag_idx[~continuous_mask]] += (
+            g_u_vec[~continuous_mask]
+        )
+    else:
+        # Scalar or 1-D vector → build diagonal G_w
+        g_w_vec = np.broadcast_to(g_w_arr, (n_total,)).copy()
+        diag_Gw = g_w_vec.copy()
+        diag_Gw[continuous_mask] += alpha**2 * g_u_vec[continuous_mask]
+        diag_Gw[~continuous_mask] += g_u_vec[~continuous_mask]
+        G_w = np.diag(diag_Gw)
+
+    # G_z is the slack variable weight (scalar or per-output vector)
+    g_z_vec = np.broadcast_to(np.asarray(g_z, dtype=np.float64), (n_outputs,)).copy()
+    G_z = np.diag(g_z_vec)
+
+    # Modified gradient: continuous get α·g_u, integer get plain g_u
+    grad_f_mod = grad_f.copy()
+    grad_f_mod[continuous_mask] += 2.0 * alpha * g_u_vec[continuous_mask] * u_current[continuous_mask]
+    grad_f_mod[~continuous_mask] += 2.0 * g_u_vec[~continuous_mask] * u_current[~continuous_mask]
     
     # Reorder u and H to put continuous variables first, then integer
     continuous_indices = [i for i in range(n_total) if i not in integer_indices]
@@ -739,7 +769,6 @@ def build_miqp_problem(
         alpha=alpha,
         G_w=G_w_reordered,
         G_z=G_z,
-        G_s=G_s,
         grad_f=grad_f_reordered,
         H_tilde=H_reordered,
         u_current=u_current_reordered,

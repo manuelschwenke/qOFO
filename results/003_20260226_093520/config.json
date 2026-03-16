@@ -1,0 +1,85 @@
+{
+  "v_setpoint_pu": 1.05,
+  "dso_v_setpoint_pu": 1.05,
+  "n_minutes": 60,
+  "tso_period_min": 3,
+  "dso_period_min": 1,
+  "start_time": "2016-06-10T00:00:00",
+  "profiles_csv": "\\\\e5server\\homefolders$\\mschwenke\\Python_Projekte\\qOFO_GH\\data\\profiles.csv",
+  "use_profiles": true,
+  "verbose": 1,
+  "live_plot": true,
+  "g_v": 250000,
+  "g_q": 1,
+  "dso_g_v": 20000.0,
+  "alpha": 1.0,
+  "g_z": 1000000000000.0,
+  "gw_tso_q_der": 0.4,
+  "gw_tso_q_pcc": 0.2,
+  "gw_tso_v_gen": 5000000.0,
+  "gw_tso_oltc": 40.0,
+  "gw_tso_shunt": 2000.0,
+  "gw_oltc_cross_tso": 0.0,
+  "gw_dso_q_der": 4.0,
+  "gw_dso_oltc": 100.0,
+  "gw_dso_shunt": 3000.0,
+  "gw_oltc_cross_dso": 0.0,
+  "gu_tso_q_der": 0.0,
+  "gu_tso_q_pcc": 0.0,
+  "gu_tso_v_gen": 0.0,
+  "gu_tso_oltc": 0.0,
+  "gu_tso_shunt": 0.0,
+  "gu_dso_q_der": 0.0,
+  "gu_dso_oltc": 0.0,
+  "gu_dso_shunt": 0.0,
+  "gen_xd_pu": 1.2,
+  "gen_i_f_max_pu": 2.65,
+  "gen_beta": 0.15,
+  "gen_q0_pu": 0.4,
+  "enable_reserve_observer": true,
+  "reserve_q_threshold_mvar": 40.0,
+  "reserve_q_release_mvar": -40.0,
+  "reserve_cooldown_min": 3,
+  "dso_oltc_init_tol_pu": 0.01,
+  "contingencies": [
+    {
+      "minute": 100,
+      "element_type": "line",
+      "element_index": 3,
+      "action": "trip"
+    },
+    {
+      "minute": 150,
+      "element_type": "gen",
+      "element_index": 0,
+      "action": "trip"
+    },
+    {
+      "minute": 200,
+      "element_type": "line",
+      "element_index": 11,
+      "action": "trip"
+    },
+    {
+      "minute": 300,
+      "element_type": "line",
+      "element_index": 3,
+      "action": "restore"
+    },
+    {
+      "minute": 330,
+      "element_type": "line",
+      "element_index": 11,
+      "action": "restore"
+    },
+    {
+      "minute": 360,
+      "element_type": "gen",
+      "element_index": 0,
+      "action": "restore"
+    }
+  ],
+  "_wall_time_s": 64.26,
+  "_saved_at": "2026-02-26T09:35:20.667035",
+  "_run_dir": "003_20260226_093520"
+}

@@ -58,6 +58,7 @@ from core.measurement import Measurement
 from core.actuator_bounds import ActuatorBounds
 from core.message import SetpointMessage, CapabilityMessage
 from sensitivity.jacobian import JacobianSensitivities
+from sensitivity.sensitivity_updater import SensitivityUpdater
 
 
 @dataclass
@@ -67,8 +68,8 @@ class TSOControllerConfig:
 
     Attributes
     ----------
-    der_bus_indices : List[int]
-        Pandapower bus indices where transmission-connected DERs are located.
+    der_indices : List[int]
+        Pandapower sgen indices for transmission-connected DERs.
     pcc_trafo_indices : List[int]
         Pandapower transformer indices for TSO-DSO interface (PCC) transformers.
         These are the transformers through which DSO areas are connected.
@@ -95,10 +96,15 @@ class TSOControllerConfig:
         Voltage setpoints at monitored EHV buses [p.u.]. If provided, the
         objective includes a voltage-schedule tracking term. Must have the
         same length as voltage_bus_indices.
-    gamma_v_tracking : float
-        Weight for voltage setpoint tracking in the objective gradient.
+    g_v : float
+        Weight for voltage-schedule tracking in the objective function.
+        Scales the gradient ``2 · g_v · (V - V_set)^T · ∂V/∂u``.
+        Higher values make the controller track the voltage setpoints
+        more aggressively.  Must be balanced against the change penalty
+        ``g_w``: the effective per-iteration step scales as
+        ``α · g_v / g_w``.  Default 1.0 (unweighted tracking).
     """
-    der_bus_indices: List[int]
+    der_indices: List[int]
     pcc_trafo_indices: List[int]
     pcc_dso_controller_ids: List[str]
     oltc_trafo_indices: List[int]
@@ -106,15 +112,23 @@ class TSOControllerConfig:
     shunt_q_steps_mvar: List[float]
     voltage_bus_indices: List[int]
     current_line_indices: List[int]
-    v_min_pu: float = 0.95
+    v_min_pu: float = 0.90
     v_max_pu: float = 1.10
-    i_max_pu: float = 1.0
+    i_max_pu: float = 1.0 #1.0
+    current_line_max_i_ka: Optional[List[float]] = None
+    """Per-line thermal rating [kA]. Must have the same length as
+    ``current_line_indices``. If ``None``, limits are not enforced."""
     v_setpoints_pu: Optional[NDArray[np.float64]] = None
-    gamma_v_tracking: float = 1.0
+    g_v: float = 1.0
     gen_indices: List[int] = field(default_factory=list)
     gen_bus_indices: List[int] = field(default_factory=list)
     gen_vm_min_pu: float = 0.95
     gen_vm_max_pu: float = 1.10
+
+    k_t_avt: float = 1.0
+    """Achieved-Value Tracking factor for PCC-Q reset.
+    0.0 = no reset (current behaviour), 1.0 = full reset (recommended).
+    Blends: u_pcc <- (1 - k_t) * u_cmd + k_t * q_measured."""
 
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
@@ -139,11 +153,13 @@ class TSOControllerConfig:
             raise ValueError(
                 f"i_max_pu must be positive, got {self.i_max_pu}"
             )
-        if self.gamma_v_tracking < 0:
-            raise ValueError(
-                f"gamma_v_tracking must be non-negative, "
-                f"got {self.gamma_v_tracking}"
-            )
+        if self.current_line_max_i_ka is not None:
+            if len(self.current_line_max_i_ka) != len(self.current_line_indices):
+                raise ValueError(
+                    f"current_line_max_i_ka length ({len(self.current_line_max_i_ka)}) "
+                    f"must match current_line_indices length "
+                    f"({len(self.current_line_indices)})"
+                )
         if self.v_setpoints_pu is not None:
             if len(self.v_setpoints_pu) != len(self.voltage_bus_indices):
                 raise ValueError(
@@ -177,7 +193,13 @@ class TSOController(BaseOFOController):
         [ Q_DER (continuous) | Q_PCC_set (continuous) | s_OLTC (integer) | s_shunt (integer) ]
 
     Output variable ordering within y:
-        [ V_bus (p.u.) | Q_PCC (Mvar) | I_line (p.u.) ]
+        [ V_bus (p.u.) | I_line (p.u.) ]
+
+    Note: Q_PCC rows have been removed from the output vector and H matrix.
+    Q_PCC_set is a direct decision variable; the TSO does not need to
+    observe Q_PCC as an output.  The code for Q_PCC rows is retained
+    (commented out) in _extract_outputs, _get_output_limits, and
+    _build_sensitivity_matrix so it can be re-enabled if needed.
 
     Attributes
     ----------
@@ -229,12 +251,19 @@ class TSOController(BaseOFOController):
         # Initialise PCC capability bounds to large symmetric range
         # until DSO controllers report actual capabilities
         n_pcc = len(config.pcc_trafo_indices)
-        self.pcc_capability_min_mvar = np.full(n_pcc, -np.inf)
-        self.pcc_capability_max_mvar = np.full(n_pcc, +np.inf)
+        self.pcc_capability_min_mvar = np.full(n_pcc, -1E6)
+        self.pcc_capability_max_mvar = np.full(n_pcc, +1E6)
 
         # Cache for the sensitivity matrix
         self._H_cache: Optional[NDArray[np.float64]] = None
         self._H_mappings: Optional[Dict] = None
+        self._sensitivity_updater: Optional[SensitivityUpdater] = None
+
+        # Cached measurement for capability-curve bounds (set in step())
+        self._last_measurement: Optional[Measurement] = None
+
+        # Achieved-Value Tracking verbosity (set from run_cascade)
+        self._avt_verbose: int = 0
 
     # =========================================================================
     # Public interface for cascaded hierarchy communication
@@ -300,7 +329,7 @@ class TSOController(BaseOFOController):
                 "Controller not initialised. Call initialise() first."
             )
 
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
 
         # PCC setpoint values sit after the DER entries in u
@@ -357,7 +386,7 @@ class TSOController(BaseOFOController):
 
         Ordering: [ Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt ]
         """
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -375,7 +404,7 @@ class TSOController(BaseOFOController):
         measurement: Measurement,
     ) -> NDArray[np.float64]:
         """Extract current control values from measurements."""
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -386,11 +415,11 @@ class TSOController(BaseOFOController):
         idx = 0
 
         # --- Transmission-connected DER Q setpoints ---
-        for der_bus in self.config.der_bus_indices:
-            meas_idx = np.where(measurement.der_indices == der_bus)[0]
+        for der_idx in self.config.der_indices:
+            meas_idx = np.where(measurement.der_indices == der_idx)[0]
             if len(meas_idx) == 0:
                 raise ValueError(
-                    f"DER at bus {der_bus} not found in measurement"
+                    f"DER {der_idx} not found in measurement.der_indices"
                 )
             u[idx] = float(measurement.der_q_mvar[meas_idx[0]])
             idx += 1
@@ -448,12 +477,16 @@ class TSOController(BaseOFOController):
         """
         Extract current output values from measurements.
 
-        Output ordering: [ V_bus | Q_PCC | I_line ]
+        Output ordering: [ V_bus | I_line ]
+
+        Note: Q_PCC rows have been removed.  Q_PCC_set is a direct
+        decision variable and does not need to appear as an output.
+        The commented-out block below can be re-enabled if Q_PCC
+        output tracking is needed in the future.
         """
         n_v = len(self.config.voltage_bus_indices)
-        n_pcc = len(self.config.pcc_trafo_indices)
         n_i = len(self.config.current_line_indices)
-        n_outputs = n_v + n_pcc + n_i
+        n_outputs = n_v + n_i
 
         y = np.zeros(n_outputs)
         idx = 0
@@ -468,17 +501,20 @@ class TSOController(BaseOFOController):
             y[idx] = measurement.voltage_magnitudes_pu[meas_idx[0]]
             idx += 1
 
-        # PCC reactive power measurements
-        for trafo_idx in self.config.pcc_trafo_indices:
-            meas_idx = np.where(
-                measurement.interface_transformer_indices == trafo_idx
-            )[0]
-            if len(meas_idx) == 0:
-                raise ValueError(
-                    f"PCC transformer {trafo_idx} not found in measurement"
-                )
-            y[idx] = measurement.interface_q_hv_side_mvar[meas_idx[0]]
-            idx += 1
+        # --- Q_PCC rows removed (Q_PCC_set is a direct decision variable) ---
+        # To re-enable, uncomment this block and update n_outputs above:
+        # n_pcc = len(self.config.pcc_trafo_indices)
+        # n_outputs = n_v + n_pcc + n_i  # (also update above)
+        # for trafo_idx in self.config.pcc_trafo_indices:
+        #     meas_idx = np.where(
+        #         measurement.interface_transformer_indices == trafo_idx
+        #     )[0]
+        #     if len(meas_idx) == 0:
+        #         raise ValueError(
+        #             f"PCC transformer {trafo_idx} not found in measurement"
+        #         )
+        #     y[idx] = measurement.interface_q_hv_side_mvar[meas_idx[0]]
+        #     idx += 1
 
         # Current measurements
         for line_idx in self.config.current_line_indices:
@@ -496,13 +532,10 @@ class TSOController(BaseOFOController):
         self,
         measurement: Measurement,
     ) -> NDArray[np.float64]:
-        """
-        Extract DER active power for capability calculation.
+        """Extract DER active power from measurement for capability calculation."""
+        p_current = measurement.der_p_mw.copy()
 
-        Note: The Measurement class currently does not carry DER P values.
-        The installed capacity from ActuatorBounds is used as a proxy.
-        """
-        return self.actuator_bounds.der_p_max_mw.copy()
+        return p_current
 
     def _compute_input_bounds(
         self,
@@ -512,9 +545,19 @@ class TSOController(BaseOFOController):
         Compute operating-point-dependent input bounds.
 
         For PCC setpoints, the bounds are updated from capability messages.
-        AVR setpoints are bounded by fixed min/max values in the config.
+        AVR setpoints start from the fixed ``[gen_vm_min, gen_vm_max]`` band
+        and are then tightened using the detailed generator capability curve
+        (Milano §12.2.1) when ``gen_params`` is available and the measured
+        generator Q approaches a thermal limit.
+
+        The tightening logic works as follows: if the current Q_gen is
+        within a margin of Q_max (overexcitation / rotor limit), the upper
+        V_gen bound is clamped to the current setpoint so the MIQP cannot
+        increase voltage further (which would push Q_gen past the limit).
+        Similarly, if Q_gen is near Q_min (underexcitation / stator limit),
+        the lower V_gen bound is clamped to prevent further voltage decrease.
         """
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -534,11 +577,50 @@ class TSOController(BaseOFOController):
         u_lower[n_der:n_der + n_pcc] = self.pcc_capability_min_mvar
         u_upper[n_der:n_der + n_pcc] = self.pcc_capability_max_mvar
 
-        # --- AVR setpoint bounds (fixed) ---
+        # --- AVR setpoint bounds ---
         avr_start = n_der + n_pcc
         avr_end = avr_start + n_gen
         u_lower[avr_start:avr_end] = self.config.gen_vm_min_pu
         u_upper[avr_start:avr_end] = self.config.gen_vm_max_pu
+
+        # Tighten V_gen bounds using generator capability curve
+        if (
+            self.actuator_bounds.gen_params is not None
+            and self._last_measurement is not None
+            and len(self._last_measurement.gen_p_mw) == n_gen
+            and len(self._last_measurement.gen_q_mvar) == n_gen
+        ):
+            meas = self._last_measurement
+            gen_p = meas.gen_p_mw
+            gen_v = meas.gen_vm_pu
+            gen_q = meas.gen_q_mvar
+
+            gen_q_min, gen_q_max = self.actuator_bounds.compute_gen_q_bounds(
+                gen_p, gen_v,
+            )
+
+            # Margin: clamp V_gen when Q is within this fraction of the limit
+            margin_frac = 0.1  # 10% of the capability range
+
+            for k in range(n_gen):
+                q_range = gen_q_max[k] - gen_q_min[k]
+                if q_range <= 0:
+                    continue
+                margin = margin_frac * q_range
+
+                # Near overexcitation limit → block V_gen increase
+                if gen_q[k] >= gen_q_max[k] - margin:
+                    u_upper[avr_start + k] = min(
+                        u_upper[avr_start + k],
+                        self._u_current[avr_start + k],
+                    )
+
+                # Near underexcitation limit → block V_gen decrease
+                if gen_q[k] <= gen_q_min[k] + margin:
+                    u_lower[avr_start + k] = max(
+                        u_lower[avr_start + k],
+                        self._u_current[avr_start + k],
+                    )
 
         # --- OLTC tap bounds (fixed mechanical limits) ---
         tap_min, tap_max = self.actuator_bounds.get_oltc_tap_bounds()
@@ -562,44 +644,46 @@ class TSOController(BaseOFOController):
         """
         Get output constraint limits.
 
-        If voltage setpoints are configured, the voltage outputs are
-        constrained to the setpoint value (y_lower = y_upper = v_set),
-        effectively implementing voltage-schedule tracking via soft
-        constraints.  Otherwise, the general voltage band is used.
+        Output ordering: [ V_bus | I_line ]
 
-        PCC Q outputs have no hard limits (±∞); tracking is handled
-        by the DSO layer through the setpoint messages.
+        Voltage outputs are constrained to the permissible band
+        [v_min_pu, v_max_pu].  Tracking toward voltage setpoints
+        (if configured) is handled by the quadratic objective in
+        ``_compute_objective_gradient()``, not by tight constraints.
+
+        Note: Q_PCC rows have been removed from the output vector.
         """
         n_v = len(self.config.voltage_bus_indices)
-        n_pcc = len(self.config.pcc_trafo_indices)
         n_i = len(self.config.current_line_indices)
-        n_outputs = n_v + n_pcc + n_i
+        n_outputs = n_v + n_i
 
         y_lower = np.zeros(n_outputs)
         y_upper = np.zeros(n_outputs)
         idx = 0
 
-        # --- Voltage limits or setpoints ---
+        # --- Voltage limits (band constraints) ---
         for j in range(n_v):
-            if self.config.v_setpoints_pu is not None:
-                # Tight band around setpoint → tracked via slack penalty
-                y_lower[idx] = self.config.v_setpoints_pu[j]
-                y_upper[idx] = self.config.v_setpoints_pu[j]
+            y_lower[idx] = self.config.v_min_pu
+            y_upper[idx] = self.config.v_max_pu
+            idx += 1
+
+        # --- Q_PCC limits removed (Q_PCC_set is a direct decision variable) ---
+        # To re-enable, uncomment this block and update n_outputs above:
+        # n_pcc = len(self.config.pcc_trafo_indices)
+        # n_outputs = n_v + n_pcc + n_i  # (also update above)
+        # for _ in range(n_pcc):
+        #     y_lower[idx] = -1E6
+        #     y_upper[idx] = 1E6
+        #     idx += 1
+
+        # --- Current limits (upper only, kA) ---
+        for j in range(n_i):
+            if self.config.current_line_max_i_ka is not None:
+                i_lim_ka = self.config.i_max_pu * self.config.current_line_max_i_ka[j]
             else:
-                y_lower[idx] = self.config.v_min_pu
-                y_upper[idx] = self.config.v_max_pu
-            idx += 1
-
-        # --- PCC Q: no hard limits (tracking is objective-based) ---
-        for _ in range(n_pcc):
-            y_lower[idx] = -np.inf
-            y_upper[idx] = np.inf
-            idx += 1
-
-        # --- Current limits (upper only) ---
-        for _ in range(n_i):
+                i_lim_ka = 1E6  # no limit if ratings not provided
             y_lower[idx] = 0.0
-            y_upper[idx] = self.config.i_max_pu
+            y_upper[idx] = i_lim_ka
             idx += 1
 
         return y_lower, y_upper
@@ -613,7 +697,7 @@ class TSOController(BaseOFOController):
 
         The TSO objective combines:
             1. DER usage regularisation:  2 · g_u · Q_DER^k
-            2. Voltage-schedule tracking: 2 · γ_v · (V^k - V_set)
+            2. Voltage-schedule tracking: 2 · g_v · (V^k - V_set)
                projected onto the control space via sensitivities
             3. PCC setpoint terms are zero (tracking handled by DSOs)
 
@@ -631,7 +715,7 @@ class TSOController(BaseOFOController):
         n_total = self.n_controls
         grad_f = np.zeros(n_total)
 
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_v = len(self.config.voltage_bus_indices)
 
@@ -658,10 +742,8 @@ class TSOController(BaseOFOController):
             # Voltage outputs are the first n_v rows of H
             dV_du = H[:n_v, :]
 
-            # ∇f contribution: 2 · γ · (V - V_set)^T · ∂V/∂u
-            grad_f += (
-                2.0 * self.config.gamma_v_tracking * (v_error @ dV_du)
-            )
+            # ∇f contribution: 2 · g_v · (V - V_set)^T · ∂V/∂u
+            grad_f += 2.0 * self.config.g_v * (v_error @ dV_du)
 
         return grad_f
 
@@ -672,16 +754,14 @@ class TSOController(BaseOFOController):
         The matrix maps control variable changes to output changes:
             Δy ≈ H · Δu
 
-        Columns correspond to:  [ Q_DER | Q_PCC_set | s_OLTC | s_shunt ]
-        Rows correspond to:     [ V_bus | Q_PCC     | I_line ]
+        Columns correspond to:  [ Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt ]
+        Rows correspond to:     [ V_bus | I_line ]
 
-        For PCC setpoint columns, the TSO does not have direct physical
-        sensitivities (the PCC Q is realised by the DSO).  These columns
-        are filled with identity-like entries: a unit change in Q_PCC_set
-        is expected to produce a unit change in the measured Q_PCC output,
-        i.e.  ∂Q_PCC_j / ∂Q_PCC_set_j = 1.  All other entries in the
-        PCC setpoint columns are zero.  This is a first-order
-        approximation assuming perfect DSO tracking.
+        Note: Q_PCC rows have been removed from the output vector.
+        Q_PCC_set is a direct decision variable; its effect on the
+        output vector is only through the voltage and current rows
+        (via ∂V/∂Q_PCC_set and ∂I/∂Q_PCC_set).  The code for Q_PCC
+        identity rows is retained (commented out) below.
 
         Returns
         -------
@@ -691,7 +771,7 @@ class TSOController(BaseOFOController):
         if self._H_cache is not None:
             return self._H_cache
 
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -700,20 +780,16 @@ class TSOController(BaseOFOController):
         n_i = len(self.config.current_line_indices)
 
         n_controls = n_der + n_pcc + n_gen + n_oltc + n_shunt
-        n_outputs = n_v + n_pcc + n_i
+        n_outputs = n_v + n_i  # Q_PCC rows removed
 
         H = np.zeros((n_outputs, n_controls), dtype=np.float64)
 
         # --- Physical sensitivities for DER / OLTC / shunt columns ---
-        # Build sub-matrix from JacobianSensitivities for the physical
-        # actuators: columns = [DER, OLTC, shunt], rows = [V, Q_PCC, I]
-        #
-        # Determine whether PCC transformers are 2W or 3W in the network.
-        # After splitting, the TN network may not contain the PCC trafos
-        # at all (they are replaced by boundary sgens).  In that case we
-        # build H without Q_trafo rows and add PCC setpoint identity rows
-        # manually below.
         net = self.sensitivities.net
+
+        der_bus_indices = [
+            int(net.sgen.at[s, 'bus']) for s in self.config.der_indices
+        ]
 
         pcc_in_trafo = all(
             t in net.trafo.index for t in self.config.pcc_trafo_indices
@@ -727,8 +803,12 @@ class TSOController(BaseOFOController):
             )
         )
 
+        # Note: We no longer request Q_trafo rows from the physical
+        # sensitivity builder, since Q_PCC is not an output anymore.
+        # However, we still pass trafo indices so the builder can
+        # include them in the internal row mapping (may affect V/I rows).
         kw = dict(
-            der_bus_indices=self.config.der_bus_indices,
+            der_bus_indices=der_bus_indices,
             observation_bus_indices=self.config.voltage_bus_indices,
             line_indices=self.config.current_line_indices,
             oltc_trafo_indices=self.config.oltc_trafo_indices,
@@ -739,96 +819,223 @@ class TSOController(BaseOFOController):
             kw["trafo_indices"] = self.config.pcc_trafo_indices
         elif pcc_in_trafo3w:
             kw["trafo3w_indices"] = self.config.pcc_trafo_indices
-        # else: no trafo Q outputs — PCC handled via identity below
 
         H_physical, mappings = self.sensitivities.build_sensitivity_matrix_H(
             **kw,
         )
 
         # H_physical columns: [DER (n_der), OLTC (n_oltc), shunt (n_shunt)]
-        # H_physical rows: depends on whether PCC trafos are in the network
-        #   If present: [Q_trafo (n_pcc), V_bus (n_v), I_line (n_i)]
-        #   If absent:  [V_bus (n_v), I_line (n_i)]
+        # H_physical rows (when PCC trafos present):
+        #   [Q_trafo (n_pcc), V_bus (n_v), I_line (n_i)]
+        # H_physical rows (when no PCC trafos):
+        #   [V_bus (n_v), I_line (n_i)]
         #
-        # Target H rows:      [V_bus (n_v), Q_PCC (n_pcc), I_line (n_i)]
-        # Target H columns:   [DER (n_der), PCC_set (n_pcc), OLTC (n_oltc),
-        #                       shunt (n_shunt)]
+        # Target H rows:      [V_bus (n_v), I_line (n_i)]
+        # Target H columns:   [DER (n_der), PCC_set (n_pcc), V_gen (n_gen),
+        #                       OLTC (n_oltc), shunt (n_shunt)]
 
-        # Determine how many Q_trafo rows are in H_physical
         has_pcc_rows = pcc_in_trafo or pcc_in_trafo3w
         n_q_phys = n_pcc if has_pcc_rows else 0
 
-        # H_physical row ranges:
-        #   Q_trafo : 0              .. n_q_phys - 1       (may be 0 rows)
+        # H_physical row ranges (skip Q_trafo rows):
         #   V_bus   : n_q_phys       .. n_q_phys + n_v - 1
         #   I_line  : n_q_phys + n_v .. end
-        # H_physical column ranges:
-        #   DER   : 0         .. n_der - 1
-        #   OLTC  : n_der     .. n_der + n_oltc - 1
-        #   shunt : n_der + n_oltc .. end
 
-        # Map to target row ordering [V, Q_PCC, I]
         # DER columns → target column 0..n_der-1
-        # V rows
         H[:n_v, :n_der] = H_physical[n_q_phys:n_q_phys + n_v, :n_der]
-        # Q_PCC rows (from physical if available, else zero — will be
-        # overridden by identity columns for PCC setpoints below)
-        if has_pcc_rows:
-            H[n_v:n_v + n_pcc, :n_der] = H_physical[:n_q_phys, :n_der]
-        # I rows
-        H[n_v + n_pcc:, :n_der] = H_physical[n_q_phys + n_v:, :n_der]
+        H[n_v:, :n_der] = H_physical[n_q_phys + n_v:, :n_der]
+
+        # --- Q_PCC rows removed from H ---
+        # Previously, Q_PCC occupied rows H[n_v:n_v+n_pcc, :].
+        # The identity ∂Q_PCC_j/∂Q_PCC_set_j = 1 was placed at
+        # H[n_v+j, n_der+j].  This is no longer needed because
+        # Q_PCC_set is a pure decision variable without output tracking.
+        #
+        # To re-enable Q_PCC rows, change n_outputs = n_v + n_pcc + n_i,
+        # shift I rows down by n_pcc, and uncomment:
+        # for j in range(n_pcc):
+        #     H[n_v + j, n_der + j] = 1.0
 
         # PCC setpoint columns → target column n_der..n_der+n_pcc-1
-        # Perfect-tracking approximation: ∂Q_PCC_j / ∂Q_PCC_set_j = 1
-        for j in range(n_pcc):
-            H[n_v + j, n_der + j] = 1.0
+        # Q_PCC_set uses *load convention* on the HV port: positive means
+        # reactive power flowing INTO the coupler FROM the HV bus.
+        # Jacobian sensitivities use generator convention, so PCC columns
+        # must be negated: ∂V/∂Q_PCC_set(load) = −∂V/∂Q_inj(gen).
+        pcc_hv_buses = []
+        for t in self.config.pcc_trafo_indices:
+            if pcc_in_trafo3w:
+                pcc_hv_buses.append(int(net.trafo3w.at[t, "hv_bus"]))
+            elif pcc_in_trafo:
+                pcc_hv_buses.append(int(net.trafo.at[t, "hv_bus"]))
+        if pcc_hv_buses:
+            # ∂V/∂Q_inj at PCC HV buses → negate for load convention
+            dV_dQ_pcc, obs_map, pcc_map = self.sensitivities.compute_dV_dQ_der(
+                der_bus_indices=pcc_hv_buses,
+                observation_bus_indices=self.config.voltage_bus_indices,
+            )
+            for j_pcc, bus in enumerate(pcc_hv_buses):
+                col = n_der + j_pcc
+                if bus in pcc_map:
+                    j_jac = pcc_map.index(bus)
+                    for i_obs, obs_bus in enumerate(obs_map):
+                        i_row = self.config.voltage_bus_indices.index(obs_bus)
+                        H[i_row, col] = -dV_dQ_pcc[i_obs, j_jac]
+            # ∂I/∂Q_inj at PCC HV buses → negate for load convention
+            if self.config.current_line_indices:
+                dI_dQ_pcc, line_map, pcc_map_i = \
+                    self.sensitivities.compute_dI_dQ_der_matrix(
+                        line_indices=self.config.current_line_indices,
+                        der_bus_indices=pcc_hv_buses,
+                    )
+                for j_pcc, bus in enumerate(pcc_hv_buses):
+                    col = n_der + j_pcc
+                    if bus in pcc_map_i:
+                        j_jac = pcc_map_i.index(bus)
+                        for i_line in range(len(line_map)):
+                            H[n_v + i_line, col] = -dI_dQ_pcc[i_line, j_jac]
 
-        # OLTC columns → target column n_der+n_pcc..n_der+n_pcc+n_oltc-1
+        # OLTC columns → target column n_der+n_pcc+n_gen..n_der+n_pcc+n_gen+n_oltc-1
         col_oltc_phys = slice(n_der, n_der + n_oltc)
-        col_oltc_target = slice(n_der + n_pcc, n_der + n_pcc + n_oltc)
+        col_oltc_target = slice(n_der + n_pcc + n_gen, n_der + n_pcc + n_gen + n_oltc)
         H[:n_v, col_oltc_target] = H_physical[
             n_q_phys:n_q_phys + n_v, col_oltc_phys
         ]
-        if has_pcc_rows:
-            H[n_v:n_v + n_pcc, col_oltc_target] = H_physical[
-                :n_q_phys, col_oltc_phys
-            ]
-        H[n_v + n_pcc:, col_oltc_target] = H_physical[
+        H[n_v:, col_oltc_target] = H_physical[
             n_q_phys + n_v:, col_oltc_phys
         ]
 
-        # Shunt columns → target column n_der+n_pcc+n_oltc..end
+        # Shunt columns → target column n_der+n_pcc+n_gen+n_oltc..end
         col_sh_phys = slice(n_der + n_oltc, n_der + n_oltc + n_shunt)
-        col_sh_target = slice(n_der + n_pcc + n_oltc, n_controls)
+        col_sh_target = slice(n_der + n_pcc + n_gen + n_oltc, n_controls)
         H[:n_v, col_sh_target] = H_physical[
             n_q_phys:n_q_phys + n_v, col_sh_phys
         ]
-        if has_pcc_rows:
-            H[n_v:n_v + n_pcc, col_sh_target] = H_physical[
-                :n_q_phys, col_sh_phys
-            ]
-        H[n_v + n_pcc:, col_sh_target] = H_physical[
+        H[n_v:, col_sh_target] = H_physical[
             n_q_phys + n_v:, col_sh_phys
         ]
 
-        # --- AVR columns: approximate ∂V/∂V_AVR as identity on local bus ---
+        # --- AVR columns: ∂V_obs / ∂V_gen from Jacobian-based sensitivity ---
         avr_start = n_der + n_pcc
-        for k, bus in enumerate(self.config.gen_bus_indices):
-            try:
-                v_row = self.config.voltage_bus_indices.index(bus)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Generator bus {bus} not in voltage_bus_indices; "
-                    f"cannot define AVR sensitivity."
-                ) from exc
+        gen_terminal_buses = [
+            int(net.gen.at[g, "bus"]) for g in self.config.gen_indices
+        ]
+        dV_dVgen, obs_map, gen_map = \
+            self.sensitivities.compute_dV_dVgen_matrix(
+                gen_bus_indices_pp=gen_terminal_buses,
+                observation_bus_indices=self.config.voltage_bus_indices,
+            )
+        for k, gen_bus_pp in enumerate(gen_terminal_buses):
             col = avr_start + k
-            H[v_row, col] = 1.0
+            if gen_bus_pp in gen_map:
+                j_gen = gen_map.index(gen_bus_pp)
+                for i_obs, obs_bus in enumerate(obs_map):
+                    i_row = self.config.voltage_bus_indices.index(obs_bus)
+                    H[i_row, col] = dV_dVgen[i_obs, j_gen]
+
+        if self.config.current_line_indices:
+            dI_dVgen, line_map, gen_map_i = \
+                self.sensitivities.compute_dI_dVgen_matrix(
+                    line_indices=self.config.current_line_indices,
+                    gen_bus_indices_pp=gen_terminal_buses,
+                )
+            for k, gen_bus_pp in enumerate(gen_terminal_buses):
+                col = avr_start + k
+                if gen_bus_pp in gen_map_i:
+                    j_gen = gen_map_i.index(gen_bus_pp)
+                    for i_line, l_idx in enumerate(line_map):
+                        # The lines are mapped to the lower part of H (after voltages)
+                        H[n_v + i_line, col] = dI_dVgen[i_line, j_gen]
+
+        # NOTE: ∂Q_PCC / ∂V_gen entries are NOT filled here.
+        # Q_PCC rows have been removed entirely. The sensitivity method
+        # compute_dQtrafo3w_hv_dVgen_matrix() is available if Q_PCC
+        # rows are re-enabled in the future.
 
         self._H_cache = H
         self._H_mappings = mappings
+
+        # TSO H column layout: [DER | PCC_set | V_gen_set | OLTC | shunt]
+        col_shunt_start = n_der + n_pcc + n_gen + n_oltc
+
+        self._sensitivity_updater = SensitivityUpdater(
+            H=H,
+            mappings=mappings,
+            sensitivities=self.sensitivities,
+            update_interval_min=1,
+            col_shunt_start=col_shunt_start,
+        )
+
         return H
+
+    def apply_avt_reset(self, measurement: Measurement) -> None:
+        """Replace PCC-Q entries in _u_current with measured achieved values.
+
+        Implements the Achieved-Value Tracking (AVT) anti-windup mechanism.
+        Before each MIQP solve, the PCC-Q components of the internal state
+        are reset toward the physically realised Q at the TSO-DSO interface,
+        controlled by ``config.k_t_avt`` (0 = no reset, 1 = full reset).
+        """
+        if self._u_current is None:
+            return
+        n_pcc = len(self.config.pcc_trafo_indices)
+        if n_pcc == 0:
+            return
+        k_t = self.config.k_t_avt
+        if k_t == 0.0:
+            return
+
+        n_der = len(self.config.der_indices)
+        pcc_slice = slice(n_der, n_der + n_pcc)
+
+        # Extract measured Q at each PCC interface
+        q_measured = np.empty(n_pcc, dtype=np.float64)
+        for i, trafo_idx in enumerate(self.config.pcc_trafo_indices):
+            meas_idx = np.where(
+                measurement.interface_transformer_indices == trafo_idx
+            )[0]
+            if len(meas_idx) == 0:
+                return  # measurement incomplete — skip reset
+            q_measured[i] = measurement.interface_q_hv_side_mvar[meas_idx[0]]
+
+        u_old = self._u_current[pcc_slice].copy()
+        # Blend: (1 - k_t) * u_commanded + k_t * q_measured
+        self._u_current[pcc_slice] = (1.0 - k_t) * u_old + k_t * q_measured
+
+        if self._avt_verbose > 1:
+            delta = self._u_current[pcc_slice] - u_old
+            if np.any(np.abs(delta) > 1e-6):
+                print(f"    [AVT] PCC-Q reset (k_t={k_t}):")
+                for i, t in enumerate(self.config.pcc_trafo_indices):
+                    print(f"      trafo {t}: {u_old[i]:.2f} -> "
+                          f"{self._u_current[n_der + i]:.2f} Mvar")
+
+    def step(self, measurement: Measurement) -> ControllerOutput:
+        """
+        Execute one OFO iteration with voltage-dependent sensitivity updates.
+
+        Before delegating to :meth:`BaseOFOController.step`, this method
+        rescales shunt columns by ``(V_measured / V_cached)²`` to account
+        for the constant-susceptance nature of shunt devices, and caches
+        the measurement for use in ``_compute_input_bounds`` (generator
+        capability-curve bounds depend on measured P and V).
+        """
+        # Cache measurement for capability-curve bounds in _compute_input_bounds
+        self._last_measurement = measurement
+        # Ensure H is built
+        if self._H_cache is None:
+            self._build_sensitivity_matrix()
+        # Update state-dependent columns (shunt V² rescaling)
+        if self._sensitivity_updater is not None:
+            self._H_cache = self._sensitivity_updater.update(
+                measurement, measurement.iteration,
+            )
+        # Achieved-Value Tracking: reset PCC-Q to measured values
+        self.apply_avt_reset(measurement)
+
+        return super().step(measurement)
 
     def invalidate_sensitivity_cache(self) -> None:
         """Invalidate the cached sensitivity matrix."""
         self._H_cache = None
         self._H_mappings = None
+        self._sensitivity_updater = None

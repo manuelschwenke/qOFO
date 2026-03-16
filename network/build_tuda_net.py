@@ -249,7 +249,13 @@ def _create_static_generators(net: pp.pandapowerNet) -> None:
 
 
 def _create_loads(net: pp.pandapowerNet, load_scaling: float) -> None:
-    """Create HV loads at every DN bus (scaled by *load_scaling*)."""
+    """Create HV loads at every DN bus and EHV loads at TN buses.
+
+    DN loads (HV/MV substations) are scaled by *load_scaling*.
+    EHV loads represent large industrial/city loads at 380 kV buses and
+    use separate profiles (HS4 for EHV 1–3, HS5 for EHV 4–5).
+    """
+    # --- DN loads (110 kV) ---
     for i in range(10):
         pp.create_load(
             net,
@@ -261,6 +267,35 @@ def _create_loads(net: pp.pandapowerNet, load_scaling: float) -> None:
             subnet="DN",
             profile_p="mv_rural_pload",
             profile_q="mv_rural_qload",
+        )
+
+    # --- EHV loads (380 kV) ---
+    # EHV 1–3 (TN|Bus_0 .. TN|Bus_2): profile HS4
+    for i in range(3):
+        pp.create_load(
+            net,
+            bus=pp.get_element_index(net, "bus", f"TN|Bus_{i}"),
+            sn_mva=250.0,
+            p_mw=200.0,
+            q_mvar=100.0,
+            name=f"EHV_Load_{i + 1}",
+            subnet="TN",
+            profile_p="HS4_pload",
+            profile_q="HS4_qload",
+        )
+
+    # EHV 4–5 (TN|Bus_3 .. TN|Bus_4): profile HS5
+    for i in range(3, 5):
+        pp.create_load(
+            net,
+            bus=pp.get_element_index(net, "bus", f"TN|Bus_{i}"),
+            sn_mva=250.0,
+            p_mw=200.0,
+            q_mvar=100.0,
+            name=f"EHV_Load_{i + 1}",
+            subnet="TN",
+            profile_p="HS5_pload",
+            profile_q="HS5_qload",
         )
 
 
@@ -386,9 +421,9 @@ def _create_single_coupler(
     reactor_idx = pp.create_shunt(
         net, bus=lv_bus,
         q_mvar=50.0, p_mw=0.0, vn_kv=_TR3W["vn_lv_kv"],
-        step=1, max_step=1,
+        step=0, max_step=1,
         name=f"Reactor|Tertiary|{label}",
-        in_service=True, type="reactor",
+        in_service=True, type="reactor", subnet='DN'
     )
 
     return trafo3w_idx, lv_bus, [reactor_idx]
@@ -496,7 +531,7 @@ def _add_tn_shunt(
         step=0, max_step=1,
         name=f"TN_Shunt@EHV{ehv_bus_no}",
         in_service=True,
-        type="capacitor" if q_mvar < 0 else "reactor",
+        type="capacitor" if q_mvar < 0 else "reactor", subnet='TN'
     )
 
 
@@ -588,3 +623,6 @@ def build_tuda_net(
     pp.runpp(net, run_control=True, calculate_voltage_angles=True)
 
     return net, meta
+
+if __name__ == "__main__":
+    net, meta = build_tuda_net()

@@ -13,7 +13,7 @@ The DSO controller:
 - Reports capability bounds to TSO
 
 The objective function includes a setpoint tracking term:
-    ∇f^HV = 2 · (Q_interface - Q_set) · ∂Q_interface/∂u
+    ∇f = 2 · (Q_interface - Q_set) · ∂Q_interface/∂u
 
 References
 ----------
@@ -39,6 +39,7 @@ from core.measurement import Measurement
 from core.actuator_bounds import ActuatorBounds
 from core.message import SetpointMessage, CapabilityMessage
 from sensitivity.jacobian import JacobianSensitivities
+from sensitivity.sensitivity_updater import SensitivityUpdater
 
 
 @dataclass
@@ -48,8 +49,8 @@ class DSOControllerConfig:
     
     Attributes
     ----------
-    der_bus_indices : List[int]
-        Pandapower bus indices where DERs are connected.
+    der_indices : List[int]
+        Pandapower sgen indices for controllable DERs.
     oltc_trafo_indices : List[int]
         Pandapower transformer indices with OLTCs.
     shunt_bus_indices : List[int]
@@ -68,21 +69,56 @@ class DSOControllerConfig:
         Maximum voltage limit in per-unit.
     i_max_pu : float
         Maximum current limit as fraction of line rating.
-    gamma_q_tracking : float
-        Weight for Q setpoint tracking in objective.
+    g_q : float
+        Weight for Q-interface tracking in the objective function.
+        Scales the gradient ``2 · g_q · (Q - Q_set)^T · ∂Q/∂u``.
+        Higher values make the controller track the TSO's reactive
+        power setpoints more aggressively.  Must be balanced against
+        the change penalty ``g_w``: the effective per-iteration step
+        scales as ``g_q / g_w``.  Default 1.0 (unweighted).
+    v_setpoints_pu : Optional[NDArray[np.float64]]
+        Voltage setpoints at monitored DN buses [p.u.].  If provided,
+        the objective includes a soft voltage-schedule tracking term.
+        Must have the same length as *voltage_bus_indices*.
+        Default ``None`` (no voltage tracking).
+    g_v : float
+        Weight for voltage-schedule tracking in the objective function.
+        Scales the gradient ``2 · g_v · (V - V_set)^T · ∂V/∂u``.
+        Should be kept small relative to the TSO's g_v so that DSO
+        voltage tracking remains a secondary, soft objective behind
+        Q-interface tracking.  Default 1.0.
     """
-    der_bus_indices: List[int]
+    der_indices: List[int]
     oltc_trafo_indices: List[int]
     shunt_bus_indices: List[int]
     shunt_q_steps_mvar: List[float]
     interface_trafo_indices: List[int]
     voltage_bus_indices: List[int]
     current_line_indices: List[int]
-    v_min_pu: float = 0.95
-    v_max_pu: float = 1.05
-    i_max_pu: float = 1.0
-    gamma_q_tracking: float = 1.0
-    
+    v_min_pu: float = 0.9
+    v_max_pu: float = 1.1
+    i_max_pu: float = 1.0 # 1.0
+    current_line_max_i_ka: Optional[List[float]] = None
+    """Per-line thermal rating [kA]. Must have the same length as
+    ``current_line_indices``. If ``None``, limits are not enforced."""
+    g_q: float = 1.0
+    g_qi: float = 0.0
+    """Weight for integral Q-tracking term.  When > 0, a leaky integrator
+    accumulates Q-interface errors over iterations, building pressure for
+    discrete switching actions (OLTC, shunts) when continuous DERs cannot
+    satisfy the setpoint.  The integral gradient contribution is
+    ``2 · g_qi · integral^T · ∂Q/∂u``.  Default 0.0 (disabled)."""
+    lambda_qi: float = 0.9
+    """Decay factor for the leaky integrator (0 ≤ λ ≤ 1).  Controls how
+    fast past errors are forgotten.  1.0 = pure integration (no decay),
+    0.9 = gradual decay.  Only used when *g_qi* > 0."""
+    q_integral_max_mvar: float = 50.0
+    """Anti-windup clamp for the integral accumulator [Mvar].  Limits each
+    element of the integral to ``[-max, +max]`` to prevent excessive
+    buildup when Q-capability limits are hit."""
+    v_setpoints_pu: Optional[NDArray[np.float64]] = None
+    g_v: float = 1.0
+
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
         if len(self.shunt_bus_indices) != len(self.shunt_q_steps_mvar):
@@ -97,10 +133,32 @@ class DSOControllerConfig:
             )
         if self.i_max_pu <= 0:
             raise ValueError(f"i_max_pu must be positive, got {self.i_max_pu}")
-        if self.gamma_q_tracking < 0:
+        if self.current_line_max_i_ka is not None:
+            if len(self.current_line_max_i_ka) != len(self.current_line_indices):
+                raise ValueError(
+                    f"current_line_max_i_ka length ({len(self.current_line_max_i_ka)}) "
+                    f"must match current_line_indices length "
+                    f"({len(self.current_line_indices)})"
+                )
+        if self.g_qi < 0:
+            raise ValueError(f"g_qi must be non-negative, got {self.g_qi}")
+        if not (0.0 <= self.lambda_qi <= 1.0):
             raise ValueError(
-                f"gamma_q_tracking must be non-negative, got {self.gamma_q_tracking}"
+                f"lambda_qi must be in [0, 1], got {self.lambda_qi}"
             )
+        if self.q_integral_max_mvar <= 0:
+            raise ValueError(
+                f"q_integral_max_mvar must be positive, got "
+                f"{self.q_integral_max_mvar}"
+            )
+        if self.v_setpoints_pu is not None:
+            if len(self.v_setpoints_pu) != len(self.voltage_bus_indices):
+                raise ValueError(
+                    f"v_setpoints_pu length ({len(self.v_setpoints_pu)}) "
+                    f"must match voltage_bus_indices length "
+                    f"({len(self.voltage_bus_indices)})"
+                )
+
 
 
 class DSOController(BaseOFOController):
@@ -165,14 +223,24 @@ class DSOController(BaseOFOController):
         )
         
         self.config = config
-        
+
         # Initialise Q setpoints to zero (no tracking until TSO sends message)
         n_interfaces = len(config.interface_trafo_indices)
         self.q_setpoint_mvar = np.zeros(n_interfaces)
-        
+
+        # Integral Q-error accumulator (leaky integrator for PI-like behaviour)
+        self._q_error_integral = np.zeros(n_interfaces)
+
+        # Shunt bound overrides from Reserve Observer.
+        # Keys: shunt index (0-based within shunt vector).
+        # Values: (lower, upper) bound override for that shunt.
+        # Cleared after each step.
+        self._shunt_bound_overrides: Dict[int, tuple] = {}
+
         # Cache the sensitivity matrix structure
         self._H_cache: Optional[NDArray[np.float64]] = None
         self._H_mappings: Optional[Dict] = None
+        self._sensitivity_updater: Optional[SensitivityUpdater] = None
     
     def receive_setpoint(self, message: SetpointMessage) -> None:
         """
@@ -210,6 +278,10 @@ class DSOController(BaseOFOController):
             msg_idx = list(message.interface_transformer_indices).index(trafo_idx)
             self.q_setpoint_mvar[i] = message.q_setpoints_mvar[msg_idx]
     
+    def reset_integral(self) -> None:
+        """Reset the Q-error integral accumulator to zero."""
+        self._q_error_integral[:] = 0.0
+
     def generate_capability_message(
         self,
         target_controller_id: str,
@@ -245,7 +317,7 @@ class DSOController(BaseOFOController):
         # Extract ∂Q_interface/∂Q_DER from H matrix
         # The first n_interfaces rows of H correspond to Q_interface outputs
         n_interfaces = len(self.config.interface_trafo_indices)
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         
         dQ_interface_dQ_der = self._H_cache[:n_interfaces, :n_der]
         
@@ -275,13 +347,40 @@ class DSOController(BaseOFOController):
             q_max_mvar=q_interface_max,
         )
     
+    def set_shunt_overrides(self, overrides: Dict[int, tuple]) -> None:
+        """
+        Set shunt bound overrides from the Reserve Observer.
+
+        Parameters
+        ----------
+        overrides : Dict[int, tuple]
+            Mapping from shunt index (0-based within the DSO shunt
+            vector) to ``(lower, upper)`` bound.  These are applied
+            in :meth:`_compute_input_bounds` and cleared after each
+            call to :meth:`step`.
+        """
+        self._shunt_bound_overrides = overrides.copy()
+
     # =========================================================================
     # Implementation of abstract methods
     # =========================================================================
-    
+
+    def get_interface_der_sensitivity(self) -> NDArray[np.float64]:
+        """
+        Return the ∂Q_interface / ∂Q_DER sub-matrix, shape (n_interfaces, n_der).
+
+        Builds the full H matrix on first call if not yet cached. Subsequent
+        calls return the cached result without recomputation.
+        """
+        if self._H_cache is None:
+            self._build_sensitivity_matrix()
+        n_interfaces = len(self.config.interface_trafo_indices)
+        n_der = len(self.config.der_indices)
+        return self._H_cache[:n_interfaces, :n_der]
+
     def _get_control_structure(self) -> Tuple[int, int, List[int]]:
         """Define the control variable structure."""
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
         
@@ -298,7 +397,7 @@ class DSOController(BaseOFOController):
         measurement: Measurement,
     ) -> NDArray[np.float64]:
         """Extract current control values from measurements."""
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
         n_total = n_der + n_oltc + n_shunt
@@ -306,7 +405,7 @@ class DSOController(BaseOFOController):
         u = np.zeros(n_total)
         
         # DER Q setpoints
-        for i, der_idx in enumerate(self.config.der_bus_indices):
+        for i, der_idx in enumerate(self.config.der_indices):
             # Find DER in measurement by matching indices
             meas_idx = np.where(measurement.der_indices == der_idx)[0]
             if len(meas_idx) == 0:
@@ -376,18 +475,17 @@ class DSOController(BaseOFOController):
         self,
         measurement: Measurement,
     ) -> NDArray[np.float64]:
-        """Extract DER active power for capability calculation."""
-        # Note: The Measurement class currently does not include DER P values.
-        # For now, we use the installed capacity from actuator_bounds.
-        # In a real implementation, this would come from measurements.
-        return self.actuator_bounds.der_p_max_mw.copy()
+        """Extract DER active power from measurement for capability calculation."""
+        p_current = measurement.der_p_mw.copy()
+
+        return p_current
     
     def _compute_input_bounds(
         self,
         der_p_current: NDArray[np.float64],
     ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Compute operating-point-dependent input bounds."""
-        n_der = len(self.config.der_bus_indices)
+        n_der = len(self.config.der_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
         n_total = n_der + n_oltc + n_shunt
@@ -409,7 +507,13 @@ class DSOController(BaseOFOController):
         state_min, state_max = self.actuator_bounds.get_shunt_state_bounds()
         u_lower[n_der + n_oltc:] = state_min.astype(np.float64)
         u_upper[n_der + n_oltc:] = state_max.astype(np.float64)
-        
+
+        # Apply Reserve Observer overrides
+        shunt_offset = n_der + n_oltc
+        for j, (lo, hi) in self._shunt_bound_overrides.items():
+            u_lower[shunt_offset + j] = lo
+            u_upper[shunt_offset + j] = hi
+
         return u_lower, u_upper
     
     def _get_output_limits(self) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
@@ -425,8 +529,8 @@ class DSOController(BaseOFOController):
         
         # Interface Q: no hard limits (tracking via objective)
         for _ in range(n_interfaces):
-            y_lower[idx] = -np.inf
-            y_upper[idx] = np.inf
+            y_lower[idx] = -1E6
+            y_upper[idx] = 1E6
             idx += 1
         
         # Voltage limits
@@ -435,10 +539,14 @@ class DSOController(BaseOFOController):
             y_upper[idx] = self.config.v_max_pu
             idx += 1
         
-        # Current limits (upper only, normalised to rating)
-        for _ in range(n_current):
+        # Current limits (upper only, kA)
+        for j in range(n_current):
+            if self.config.current_line_max_i_ka is not None:
+                i_lim_ka = self.config.i_max_pu * self.config.current_line_max_i_ka[j]
+            else:
+                i_lim_ka = 1E6  # no limit if ratings not provided
             y_lower[idx] = 0.0
-            y_upper[idx] = self.config.i_max_pu
+            y_upper[idx] = i_lim_ka
             idx += 1
         
         return y_lower, y_upper
@@ -449,41 +557,75 @@ class DSOController(BaseOFOController):
     ) -> NDArray[np.float64]:
         """
         Compute the objective function gradient.
-        
-        The DSO objective is to track the TSO setpoint:
-            f(u) = γ · ||Q_interface - Q_set||²
-        
-        The gradient is:
-            ∇f = 2 · γ · (Q_interface - Q_set) · ∂Q_interface/∂u
+
+        The DSO objective combines two terms:
+
+        1. **Q-interface tracking** (primary):
+           f_q(u) = g_q · ||Q_interface - Q_set||²
+           ∇f_q  = 2 · g_q · (Q - Q_set)^T · ∂Q/∂u
+
+        2. **Voltage-schedule tracking** (secondary, optional):
+           f_v(u) = g_v · ||V - V_set||²
+           ∇f_v  = 2 · g_v · (V - V_set)^T · ∂V/∂u
+
+        The voltage term is only active when *v_setpoints_pu* is
+        configured.  It should be weighted softly (small g_v) so that
+        Q-interface tracking remains the dominant objective.
         """
         n_total = self.n_controls
         grad_f = np.zeros(n_total)
-        
-        # Get current interface Q values
+
+        # Get sensitivity matrix (use cache if available)
+        H = self._build_sensitivity_matrix()
+
         n_interfaces = len(self.config.interface_trafo_indices)
+        n_v = len(self.config.voltage_bus_indices)
+
+        # --- Component 1: Q-interface tracking ---
         q_interface = np.zeros(n_interfaces)
-        
         for i, trafo_idx in enumerate(self.config.interface_trafo_indices):
             meas_idx = np.where(
                 measurement.interface_transformer_indices == trafo_idx
             )[0]
             if len(meas_idx) > 0:
                 q_interface[i] = measurement.interface_q_hv_side_mvar[meas_idx[0]]
-        
-        # Compute Q tracking error
+
         q_error = q_interface - self.q_setpoint_mvar
-        
-        # Get sensitivity matrix (use cache if available)
-        H = self._build_sensitivity_matrix()
-        
-        # Extract ∂Q_interface/∂u (first n_interfaces rows)
         dQ_du = H[:n_interfaces, :]
-        
-        # Compute gradient: ∇f = 2 · γ · (Q - Q_set)^T · ∂Q/∂u
-        grad_f = 2.0 * self.config.gamma_q_tracking * (q_error @ dQ_du)
-        
+        grad_f += 2.0 * self.config.g_q * (q_error @ dQ_du)
+
+        # --- Integral Q-tracking component (leaky integrator) ---
+        if self.config.g_qi > 0.0:
+            # Leaky integrator: s_{k+1} = lambda * s_k + e_k
+            self._q_error_integral = (
+                self.config.lambda_qi * self._q_error_integral + q_error
+            )
+            # Anti-windup: clamp accumulator
+            np.clip(
+                self._q_error_integral,
+                -self.config.q_integral_max_mvar,
+                self.config.q_integral_max_mvar,
+                out=self._q_error_integral,
+            )
+            grad_f += 2.0 * self.config.g_qi * (self._q_error_integral @ dQ_du)
+
+        # --- Component 2: Voltage-schedule tracking (optional) ---
+        if self.config.v_setpoints_pu is not None:
+            v_current = np.zeros(n_v)
+            for j, bus_idx in enumerate(self.config.voltage_bus_indices):
+                meas_idx = np.where(measurement.bus_indices == bus_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(f"Bus {bus_idx} not found in measurement")
+                v_current[j] = measurement.voltage_magnitudes_pu[meas_idx[0]]
+
+            v_error = v_current - self.config.v_setpoints_pu
+
+            # Voltage rows start after interface Q rows in H
+            dV_du = H[n_interfaces:n_interfaces + n_v, :]
+            grad_f += 2.0 * self.config.g_v * (v_error @ dV_du)
+
         return grad_f
-    
+
     def _build_sensitivity_matrix(self) -> NDArray[np.float64]:
         """Build the input-output sensitivity matrix H."""
         if self._H_cache is not None:
@@ -511,9 +653,14 @@ class DSOController(BaseOFOController):
             )
         )
 
+        # Map DER indices (sgen) to their corresponding buses for sensitivity
+        der_bus_indices = [
+            int(net.sgen.at[s, "bus"]) for s in self.config.der_indices
+        ]
+
         # Build keyword arguments depending on transformer type
         kw = dict(
-            der_bus_indices=self.config.der_bus_indices,
+            der_bus_indices=der_bus_indices,
             observation_bus_indices=self.config.voltage_bus_indices,
             line_indices=self.config.current_line_indices,
             shunt_bus_indices=self.config.shunt_bus_indices,
@@ -530,13 +677,48 @@ class DSOController(BaseOFOController):
             kw["oltc_trafo_indices"] = self.config.oltc_trafo_indices
 
         H, mappings = self.sensitivities.build_sensitivity_matrix_H(**kw)
-        
+
         self._H_cache = H
         self._H_mappings = mappings
-        
+
+        # Create the sensitivity updater for voltage-dependent corrections.
+        # DSO has no machine transformer OLTCs, so only shunt updates apply.
+        self._sensitivity_updater = SensitivityUpdater(
+            H=H,
+            mappings=mappings,
+            sensitivities=self.sensitivities,
+            update_interval_min=1,
+        )
+
         return H
-    
+
+    def step(self, measurement: Measurement) -> ControllerOutput:
+        """
+        Execute one OFO iteration with voltage-dependent sensitivity updates.
+
+        Before delegating to :meth:`BaseOFOController.step`, this method
+        rescales shunt columns of the cached H matrix using the measured
+        bus voltages.  The V² correction accounts for the constant-susceptance
+        nature of shunt devices (MSR / MSC).
+
+        After the step, shunt bound overrides from the Reserve Observer
+        are cleared so they must be re-set each iteration.
+        """
+        # Ensure H is built
+        if self._H_cache is None:
+            self._build_sensitivity_matrix()
+        # Update state-dependent shunt columns
+        if self._sensitivity_updater is not None:
+            self._H_cache = self._sensitivity_updater.update(
+                measurement, measurement.iteration
+            )
+        result = super().step(measurement)
+        # Clear one-shot overrides
+        self._shunt_bound_overrides.clear()
+        return result
+
     def invalidate_sensitivity_cache(self) -> None:
         """Invalidate the cached sensitivity matrix."""
         self._H_cache = None
         self._H_mappings = None
+        self._sensitivity_updater = None

@@ -1,0 +1,67 @@
+========================================================================
+  CASCADE SIMULATION SUMMARY
+========================================================================
+  Date:         2026-03-11 13:36:24
+  V setpoint TSO: 1.050 p.u.
+  V setpoint DSO: 1.050 p.u.
+  Duration:     240 min  (4.0 h)
+  TSO period:   3 min
+  DSO period:   1 min
+  Profiles:     OFF  (profiles.csv)
+  Start time:   2016-06-01 00:00
+  Wall time:    273.9 s  (4.6 min)
+
+  TSO steps: 81,  DSO steps: 240
+
+  ── Objective Weights ──
+  g_v (TSO V tracking):   250000
+  g_q (DSO Q tracking):   1
+  dso_g_v (DSO V track):  10000.0
+  alpha:                  1.0
+  g_z:                    1000000000000.0
+  gz_tso_current:         1000.0
+  gz_dso_current:         1000.0
+
+  ── TSO g_w (change damping) ──
+  Q_DER:   0.4
+  Q_PCC:   0.2
+  V_gen:   5000000.0
+  OLTC:    40.0
+  Shunt:   2000.0
+  OLTC cross: 0.0
+
+  ── DSO g_w (change damping) ──
+  Q_DER:   10.0
+  OLTC:    100.0
+  Shunt:   4000.0
+  OLTC cross: 0.0
+
+  ── Generator Capability ──
+  xd:        1.2 p.u.
+  i_f_max:   2.65 p.u.
+  beta:      0.15
+  q0:        0.4 p.u.
+
+  ── Reserve Observer ──
+  Enabled:     True
+  Threshold:   40.0 Mvar
+  Release:     -40.0 Mvar
+  Cooldown:    3 min
+
+  ── Contingencies ──
+  min   45: TRIP line 3
+  min   60: TRIP line 11
+  min   90: TRIP gen 0
+  min  105: RESTORE line 3
+  min  120: RESTORE line 11
+  min  180: RESTORE gen 0
+
+  ── Final TN Voltages ──
+  min=1.0476  mean=1.0503  max=1.0536
+  max |V - V_set| = 0.0036 p.u.
+
+  ── Final DN Voltages ──
+  min=1.0086  mean=1.0367  max=1.0617
+  max |V - V_set| = 0.0414 p.u.
+
+========================================================================

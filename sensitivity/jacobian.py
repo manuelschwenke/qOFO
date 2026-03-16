@@ -56,7 +56,10 @@ The following Sensitivities are implemented:
 -------------
 9)  ∂I_ij/∂Q_n = Y_ij·(∂V_i/∂Q_n - ∂V_j/∂Q_n)                  -> compute_dI_dQ_der()
     and ∂|I_ij|/∂Q_n = (1/|I_ij|) Re{I_ij*·∂I_ij/∂Q_n}         -> compute_dI_dQ_der_matrix()
-10) ∂I_ij/∂s_i:                                                 -> ToDo: Not implemented yet!
+10) ∂I_ij/∂s_i (2W):                                               -> compute_dI_ds_2w()
+                                                                   -> compute_dI_ds_2w_matrix()
+10b)∂I_ij/∂s_i (3W):                                               -> compute_dI_ds_3w()
+                                                                   -> compute_dI_ds_3w_matrix()
 11) ∂I_ij/∂Q_shunt: uses equations from 9)                      -> compute_dI_dQ_shunt()
 
 Author: Manuel Schwenke
@@ -68,378 +71,60 @@ References
 [2] Milano, F. "Power System Modelling and Scripting", Springer 2010
 [3] Kundur & Malik, "Power System Stability and Control", 2nd ed.
 """
+from multiprocessing.managers import Value
+from optparse import Values
 
+# imports
 import numpy as np
 from numpy.typing import NDArray
 from typing import Tuple, List, Optional, Dict
 import pandapower as pp
 import copy
+from sensitivity.index_helper import (get_jacobian_indices, get_ppc_trafo_index, pp_bus_to_ppc_bus,
+                                      get_jacobian_indices_ppc, get_ppc_trafo3w_branch_indices,
+                                      _get_trafo3w_hv_branch_data)
 
+def _apply_offdiagonal_scaling(
+    submatrix: NDArray[np.float64],
+    scale_factor: float,
+) -> NDArray[np.float64]:
+    """Scale all off-diagonal elements of a square submatrix by a given factor.
 
-def get_jacobian_indices(net: pp.pandapowerNet, bus_idx: int) -> Tuple[Optional[int], Optional[int]]:
-    """
-    Get Jacobian indices for a bus.
-    
-    The Jacobian is structured with PV buses first, then PQ buses.
-    Voltage magnitude indices are only available for PQ buses.
-    
-    Parameters
-    ----------
-    net : pp.pandapowerNet
-        Pandapower network with solved power flow (contains _ppc internal data).
-    bus_idx : int
-        Pandapower bus index.
-    
-    Returns
-    -------
-    theta_idx : int or None
-        Index in the Jacobian for voltage angle of this bus.
-        None if bus is slack.
-    v_idx : int or None
-        Index in the Jacobian for voltage magnitude of this bus.
-        None if bus is PV or slack (voltage is fixed).
-    
-    Raises
-    ------
-    ValueError
-        If the network does not have the required internal power flow data.
-    """
-    if not hasattr(net, '_ppc') or 'internal' not in net._ppc:
-        raise ValueError("Network must have converged power flow with internal data.")
-    
-    pq_buses = net._ppc['internal']['pq']
-    pv_buses = net._ppc['internal']['pv']
-    
-    # Check if bus is PQ (both angle and magnitude in state vector)
-    if bus_idx in pq_buses:
-        pq_idx = list(pq_buses).index(bus_idx)
-        n_pv = len(pv_buses)
-        theta_idx = n_pv + pq_idx
-        v_idx = pq_idx
-        return theta_idx, v_idx
-    
-    # Check if bus is PV (only angle in state vector)
-    elif bus_idx in pv_buses:
-        pv_idx = list(pv_buses).index(bus_idx)
-        theta_idx = pv_idx
-        return theta_idx, None
-    
-    # Bus is slack (not in state vector)
-    else:
-        return None, None
-
-
-def get_ppc_trafo_index(net: pp.pandapowerNet, trafo_idx: int) -> Optional[int]:
-    """
-    Get the pypower branch index for a pandapower transformer.
-
-    In pandapower's internal pypower representation, branches are ordered as:
-    [lines, trafos, trafo3w, impedances, ...]. This function finds the
-    correct index for a given transformer.
+    This is used to reduce the cross-coupling terms in the dQtr3w_ds block of
+    the H matrix, e.g. to account for modelling uncertainty in inter-transformer
+    reactive power sensitivities.
 
     Parameters
     ----------
-    net : pp.pandapowerNet
-        Pandapower network with solved power flow.
-    trafo_idx : int
-        Pandapower transformer index.
+    submatrix : NDArray[np.float64]
+        Square matrix of shape (n, n).
+    scale_factor : float
+        Multiplicative factor applied to all off-diagonal elements.
+        Must be in (0, 1] for physical plausibility; values outside this
+        range are not blocked but should be used with caution.
 
     Returns
     -------
-    ppc_idx : int or None
-        Index in _ppc['branch'] array, or None if not found.
+    NDArray[np.float64]
+        Modified matrix with scaled off-diagonal elements.
 
     Raises
     ------
     ValueError
-        If the network does not have the required internal lookup data.
+        If the submatrix is not square.
     """
-    if not hasattr(net, '_ppc'):
-        raise ValueError("Network must have converged power flow with _ppc data.")
-
-    # Try using lookup tables first (if available)
-    if hasattr(net, '_pd2ppc_lookups') and net._pd2ppc_lookups is not None:
-        try:
-            trafo_start = net._pd2ppc_lookups['branch']['trafo'][0]
-            ppc_idx = trafo_start + trafo_idx
-            if ppc_idx >= len(net._ppc['branch']):
-                return None
-            return ppc_idx
-        except (KeyError, IndexError, TypeError):
-            pass
-
-    # Fallback: In standard pandapower, transformers follow lines in branch array
-    # Branch order: lines first, then transformers
-    n_lines = len(net.line) if 'line' in net else 0
-    ppc_idx = n_lines + trafo_idx
-
-    if ppc_idx >= len(net._ppc['branch']):
-        return None
-
-    return ppc_idx
-
-
-def pp_bus_to_ppc_bus(net: pp.pandapowerNet, pp_bus_idx: int) -> int:
-    """
-    Map a pandapower bus index to its internal pypower (_ppc) bus index.
-
-    In pandapower, bus ordering may differ between the user-facing DataFrame
-    and the internal pypower representation.  This is particularly relevant
-    when auxiliary buses are created for 3-winding transformer star points.
-
-    Parameters
-    ----------
-    net : pp.pandapowerNet
-        Pandapower network with solved power flow.
-    pp_bus_idx : int
-        Pandapower bus index (as in ``net.bus.index``).
-
-    Returns
-    -------
-    ppc_bus_idx : int
-        Corresponding index in ``net._ppc['bus']``.
-
-    Raises
-    ------
-    ValueError
-        If the mapping cannot be established.
-    """
-    if not hasattr(net, '_pd2ppc_lookups') or net._pd2ppc_lookups is None:
+    n_rows, n_cols = submatrix.shape
+    if n_rows != n_cols:
         raise ValueError(
-            "Network must have _pd2ppc_lookups (run power flow first)."
+            f"Off-diagonal scaling requires a square submatrix, "
+            f"got shape ({n_rows}, {n_cols})."
         )
 
-    bus_lookup = net._pd2ppc_lookups.get('bus')
-    if bus_lookup is None:
-        raise ValueError("Bus lookup table not available in _pd2ppc_lookups.")
-
-    if pp_bus_idx < 0 or pp_bus_idx >= len(bus_lookup):
-        raise ValueError(
-            f"Pandapower bus index {pp_bus_idx} out of range for "
-            f"bus lookup of length {len(bus_lookup)}."
-        )
-
-    ppc_bus_idx = int(bus_lookup[pp_bus_idx])
-    return ppc_bus_idx
-
-
-def get_jacobian_indices_ppc(
-    net: pp.pandapowerNet,
-    ppc_bus_idx: int,
-) -> Tuple[Optional[int], Optional[int]]:
-    """
-    Get Jacobian matrix indices for a bus specified by its _ppc bus index.
-
-    This is the internal-index counterpart of :func:`get_jacobian_indices`.
-    It is required for auxiliary buses (e.g. 3-winding transformer star points)
-    which have no pandapower bus index but do appear in the Jacobian.
-
-    Parameters
-    ----------
-    net : pp.pandapowerNet
-        Pandapower network with solved power flow.
-    ppc_bus_idx : int
-        Internal pypower bus index.
-
-    Returns
-    -------
-    theta_idx : int or None
-        Row/column index for the voltage angle of this bus in the Jacobian.
-        ``None`` if the bus is the slack bus.
-    v_idx : int or None
-        Row/column index for the voltage magnitude of this bus in the
-        reduced Jacobian (``dV_dQ_reduced``).  ``None`` if the bus is PV
-        or slack.
-    """
-    if not hasattr(net, '_ppc') or 'internal' not in net._ppc:
-        raise ValueError(
-            "Network must have converged power flow with internal data."
-        )
-
-    pq_buses = net._ppc['internal']['pq']
-    pv_buses = net._ppc['internal']['pv']
-
-    # Check PQ buses (both angle and magnitude in state vector)
-    pq_match = np.where(pq_buses == ppc_bus_idx)[0]
-    if len(pq_match) > 0:
-        pq_pos = int(pq_match[0])
-        n_pv = len(pv_buses)
-        theta_idx = n_pv + pq_pos
-        v_idx = pq_pos
-        return theta_idx, v_idx
-
-    # Check PV buses (only angle in state vector)
-    pv_match = np.where(pv_buses == ppc_bus_idx)[0]
-    if len(pv_match) > 0:
-        pv_pos = int(pv_match[0])
-        theta_idx = pv_pos
-        return theta_idx, None
-
-    # Bus is slack or reference (not in state vector)
-    return None, None
-
-
-def get_ppc_trafo3w_branch_indices(
-    net: pp.pandapowerNet,
-    trafo3w_idx: int,
-) -> Tuple[int, int, int, int]:
-    """
-    Get the three internal pypower branch indices for a 3-winding transformer.
-
-    Pandapower decomposes each 3-winding transformer into three 2-winding
-    equivalent branches connected through an auxiliary star-point bus:
-
-        HV bus ─── [HV branch] ─── star bus ─── [MV branch] ─── MV bus
-                                      │
-                                 [LV branch]
-                                      │
-                                   LV bus
-
-    This function identifies which ``_ppc['branch']`` entries correspond
-    to the HV, MV, and LV windings by matching their terminal buses.
-
-    Parameters
-    ----------
-    net : pp.pandapowerNet
-        Pandapower network with solved power flow.
-    trafo3w_idx : int
-        Index into ``net.trafo3w``.
-
-    Returns
-    -------
-    hv_branch_idx : int
-        ``_ppc['branch']`` index for the HV winding (HV bus ↔ star bus).
-    mv_branch_idx : int
-        ``_ppc['branch']`` index for the MV winding (MV bus ↔ star bus).
-    lv_branch_idx : int
-        ``_ppc['branch']`` index for the LV winding (LV bus ↔ star bus).
-    aux_bus_ppc : int
-        ``_ppc['bus']`` index for the auxiliary star-point bus.
-
-    Raises
-    ------
-    ValueError
-        If the trafo3w index is not found, the lookup is unavailable,
-        or the internal branch structure cannot be resolved.
-    """
-    if trafo3w_idx not in net.trafo3w.index:
-        raise ValueError(
-            f"Three-winding transformer {trafo3w_idx} not found in network."
-        )
-
-    if not hasattr(net, '_pd2ppc_lookups') or net._pd2ppc_lookups is None:
-        raise ValueError(
-            "Network must have _pd2ppc_lookups (run power flow first)."
-        )
-
-    # --- Locate the branch range for trafo3w elements in _ppc ---
-    branch_lookup = net._pd2ppc_lookups.get('branch')
-    if branch_lookup is None or 'trafo3w' not in branch_lookup:
-        raise ValueError(
-            "Branch lookup for trafo3w not available in _pd2ppc_lookups."
-        )
-
-    t3w_range = branch_lookup['trafo3w']
-    t3w_start = t3w_range[0]
-
-    # Position of this trafo3w element in the DataFrame (handles
-    # non-contiguous indices after row deletions)
-    trafo3w_positions = list(net.trafo3w.index)
-    if trafo3w_idx not in trafo3w_positions:
-        raise ValueError(
-            f"trafo3w index {trafo3w_idx} not in net.trafo3w.index."
-        )
-    pos = trafo3w_positions.index(trafo3w_idx)
-
-    # Pandapower orders 3W branches by winding type first, then by element:
-    #   [all HV branches, all MV branches, all LV branches]
-    # i.e. for N trafo3w elements the layout is:
-    #   HV[0..N-1], MV[0..N-1], LV[0..N-1]
-    N = len(net.trafo3w)
-    candidate_indices = [
-        t3w_start + pos,           # HV branch
-        t3w_start + N + pos,       # MV branch
-        t3w_start + 2 * N + pos,   # LV branch
-    ]
-
-    n_branches = len(net._ppc['branch'])
-    for ci in candidate_indices:
-        if ci >= n_branches:
-            raise ValueError(
-                f"Computed branch index {ci} out of range "
-                f"(n_branches={n_branches}).  Check trafo3w lookup."
-            )
-
-    # --- Map pandapower HV/MV/LV buses to _ppc bus indices ---
-    hv_bus_pp = int(net.trafo3w.at[trafo3w_idx, 'hv_bus'])
-    mv_bus_pp = int(net.trafo3w.at[trafo3w_idx, 'mv_bus'])
-    lv_bus_pp = int(net.trafo3w.at[trafo3w_idx, 'lv_bus'])
-
-    hv_bus_ppc = pp_bus_to_ppc_bus(net, hv_bus_pp)
-    mv_bus_ppc = pp_bus_to_ppc_bus(net, mv_bus_pp)
-    lv_bus_ppc = pp_bus_to_ppc_bus(net, lv_bus_pp)
-
-    known_buses = {hv_bus_ppc, mv_bus_ppc, lv_bus_ppc}
-
-    # --- Identify which branch belongs to which winding ---
-    hv_branch_idx: Optional[int] = None
-    mv_branch_idx: Optional[int] = None
-    lv_branch_idx: Optional[int] = None
-    aux_bus_ppc: Optional[int] = None
-
-    for br_idx in candidate_indices:
-        from_bus = int(net._ppc['branch'][br_idx, 0])
-        to_bus = int(net._ppc['branch'][br_idx, 1])
-
-        # One end is a known winding bus, the other is the auxiliary star bus
-        if from_bus in known_buses:
-            winding_bus = from_bus
-            star_bus = to_bus
-        elif to_bus in known_buses:
-            winding_bus = to_bus
-            star_bus = from_bus
-        else:
-            raise ValueError(
-                f"Branch {br_idx} (from={from_bus}, to={to_bus}) does not "
-                f"connect to any known winding bus of trafo3w {trafo3w_idx}."
-            )
-
-        # Record auxiliary bus (must be consistent across all 3 branches)
-        if aux_bus_ppc is None:
-            aux_bus_ppc = star_bus
-        elif aux_bus_ppc != star_bus:
-            raise ValueError(
-                f"Inconsistent auxiliary bus: expected {aux_bus_ppc}, "
-                f"got {star_bus} for branch {br_idx}."
-            )
-
-        # Assign branch to the correct winding
-        if winding_bus == hv_bus_ppc:
-            hv_branch_idx = br_idx
-        elif winding_bus == mv_bus_ppc:
-            mv_branch_idx = br_idx
-        elif winding_bus == lv_bus_ppc:
-            lv_branch_idx = br_idx
-
-    # Validate that all three branches were found
-    if hv_branch_idx is None:
-        raise ValueError(
-            f"Could not identify HV branch for trafo3w {trafo3w_idx}."
-        )
-    if mv_branch_idx is None:
-        raise ValueError(
-            f"Could not identify MV branch for trafo3w {trafo3w_idx}."
-        )
-    if lv_branch_idx is None:
-        raise ValueError(
-            f"Could not identify LV branch for trafo3w {trafo3w_idx}."
-        )
-    if aux_bus_ppc is None:
-        raise ValueError(
-            f"Could not identify auxiliary star bus for trafo3w {trafo3w_idx}."
-        )
-
-    return hv_branch_idx, mv_branch_idx, lv_branch_idx, aux_bus_ppc
+    result = submatrix.copy()
+    # Identify off-diagonal positions and apply scaling
+    off_diag_mask = ~np.eye(n_rows, dtype=bool)
+    result[off_diag_mask] *= scale_factor
+    return result
 
 
 class JacobianSensitivities:
@@ -495,20 +180,19 @@ class JacobianSensitivities:
         ValueError
             If the network has not converged or lacks required internal data.
         """
+        # error handling
         if not net.converged:
             raise ValueError("Network power flow must have converged.")
-        
         if not hasattr(net, '_ppc') or 'internal' not in net._ppc:
             raise ValueError("Network must have internal power flow data (_ppc).")
-        
         if 'J' not in net._ppc['internal']:
             raise ValueError("Network must have Jacobian matrix in internal data.")
         
-        # Store deep copy of network state
+        # Store deep copy of network state -> this is the network state all sensitivites are based on
         self.net = copy.deepcopy(net)
         
         # Extract Jacobian from power flow solution
-        self.J = np.array(self.net._ppc['internal']['J'].todense())
+        self.J = np.array(self.net._ppc['internal']['J'].todense()) # ToDo: Dense or Sparse?
         
         # Extract bus type information
         self.pq_buses = self.net._ppc['internal']['pq']
@@ -647,22 +331,182 @@ class JacobianSensitivities:
             raise ValueError("No valid DER buses found (all may be PV or slack).")
         
         # Extract submatrix from reduced Jacobian
+        #            column
+        #  row      dV_1/dQ_1   dV_1/dQ_2   dV_1/dQ_m
+        #           dV_2/dQ_1   dV_2/dQ_2   dV_2/dQ_m
+        #           dV_n/dQ_1   dV_n/dQ_2   dV_n/dQ_m
         sensitivity_matrix = self.dV_dQ_reduced[np.ix_(obs_jacobian_rows, der_jacobian_cols)]
-        
+
         return sensitivity_matrix, obs_bus_mapping, der_bus_mapping
-    
+
+    # =========================================================================
+    # A2. Bus Voltage to PV Generator Voltage Setpoint Sensitivity
+    # =========================================================================
+
+    def compute_dV_dVgen(
+        self,
+        gen_bus_ppc: int,
+        observation_bus_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int]]:
+        """
+        Compute observation-bus voltage sensitivity to a PV-bus voltage change.
+
+        For a PV generator bus *k*, this computes ∂V_obs / ∂V_gen by
+        constructing the column ∂g/∂V_k (the mismatch sensitivity to the
+        PV-bus voltage magnitude) and propagating it through J⁻¹:
+
+            Δx = -J⁻¹ · (∂g/∂V_k) · ΔV_k
+
+        Parameters
+        ----------
+        gen_bus_ppc : int
+            Pypower (ppc) bus index of the PV generator bus.
+        observation_bus_indices : List[int]
+            Pandapower bus indices where voltages are observed.
+
+        Returns
+        -------
+        dV_dVgen : NDArray[np.float64]
+            Sensitivity vector of shape ``(n_obs,)`` in [p.u. / p.u.].
+        observation_bus_mapping : List[int]
+            Ordered list of observation bus indices actually included.
+        """
+        bus_data = self.net._ppc['bus']
+        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
+
+        n_bus = bus_data.shape[0]
+        V_complex = bus_data[:, 7] * np.exp(1j * np.deg2rad(bus_data[:, 8]))
+
+        k = gen_bus_ppc
+        V_k = V_complex[k]
+        Vm_k = np.abs(V_k)
+
+        # Build ∂g/∂V_k  (state-sized vector: [Δθ_PV, Δθ_PQ, ΔV_PQ])
+        # The power injections at every bus i depend on V_k if Y_ik ≠ 0.
+        # S_i = V_i · (Σ_j Y_ij V_j)*
+        # ∂S_i/∂Vm_k = V_i · conj(Y_ik) · exp(jθ_k)     for i ≠ k
+        # ∂S_k/∂Vm_k = (2 Vm_k conj(Y_kk) + Σ_{j≠k} V_j conj(Y_kj)) · exp(jθ_k)
+        #            ... but separating P and Q is cleaner via real-form.
+
+        # ∂P_i/∂Vm_k and ∂Q_i/∂Vm_k for all buses
+        dP_dVk = np.zeros(n_bus)
+        dQ_dVk = np.zeros(n_bus)
+        theta = np.angle(V_complex)
+        Vm = np.abs(V_complex)
+        G = np.real(Ybus)
+        B = np.imag(Ybus)
+
+        for i in range(n_bus):
+            cos_ik = np.cos(theta[i] - theta[k])
+            sin_ik = np.sin(theta[i] - theta[k])
+            if i == k:
+                # ∂P_k/∂Vm_k = 2 Vm_k G_kk + Σ_{j≠k} Vm_j (G_kj cos + B_kj sin)
+                dP_dVk[i] = 2 * Vm[k] * G[k, k]
+                dQ_dVk[i] = -2 * Vm[k] * B[k, k]
+                for j in range(n_bus):
+                    if j != k:
+                        cos_kj = np.cos(theta[k] - theta[j])
+                        sin_kj = np.sin(theta[k] - theta[j])
+                        dP_dVk[i] += Vm[j] * (G[k, j] * cos_kj + B[k, j] * sin_kj)
+                        dQ_dVk[i] += Vm[j] * (G[k, j] * sin_kj - B[k, j] * cos_kj)
+            else:
+                dP_dVk[i] = Vm[i] * (G[i, k] * cos_ik + B[i, k] * sin_ik)
+                dQ_dVk[i] = Vm[i] * (G[i, k] * sin_ik - B[i, k] * cos_ik)
+
+        # Map to Jacobian ordering: [P_PV, P_PQ, Q_PQ]
+        pv_list = list(self.pv_buses)
+        pq_list = list(self.pq_buses)
+
+        dg_dVk = np.zeros(self.x_size)
+        for idx_pv, bus_pv in enumerate(pv_list):
+            dg_dVk[idx_pv] = dP_dVk[bus_pv]
+        n_pv = len(pv_list)
+        for idx_pq, bus_pq in enumerate(pq_list):
+            dg_dVk[n_pv + idx_pq] = dP_dVk[bus_pq]
+            dg_dVk[self.n_theta + idx_pq] = dQ_dVk[bus_pq]
+
+        # Δx = -J⁻¹ · ∂g/∂V_k
+        dx_dVk = -self.J_inv @ dg_dVk
+
+        # Extract ΔV_PQ at observation buses
+        dV_full = dx_dVk[self.n_theta:]  # V_PQ part
+
+        obs_rows: List[int] = []
+        obs_map: List[int] = []
+        for bus_idx in observation_bus_indices:
+            ppc_bus = pp_bus_to_ppc_bus(self.net, bus_idx)
+            if ppc_bus == k:
+                # The PV bus itself: ∂V_k/∂V_k = 1
+                obs_rows.append(-1)  # sentinel
+                obs_map.append(bus_idx)
+            else:
+                _, v_idx = get_jacobian_indices_ppc(self.net, ppc_bus)
+                if v_idx is not None and v_idx < len(dV_full):
+                    obs_rows.append(v_idx)
+                    obs_map.append(bus_idx)
+
+        dV_dVgen = np.zeros(len(obs_map))
+        for i, r in enumerate(obs_rows):
+            if r == -1:
+                dV_dVgen[i] = 1.0
+            else:
+                dV_dVgen[i] = dV_full[r]
+
+        return dV_dVgen, obs_map
+
+    def compute_dV_dVgen_matrix(
+        self,
+        gen_bus_indices_pp: List[int],
+        observation_bus_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """
+        Compute observation-bus voltage sensitivities for multiple PV generators.
+
+        Parameters
+        ----------
+        gen_bus_indices_pp : List[int]
+            Pandapower bus indices of PV generator buses.
+        observation_bus_indices : List[int]
+            Pandapower bus indices where voltages are observed.
+
+        Returns
+        -------
+        dV_dVgen : NDArray[np.float64]
+            Matrix of shape ``(n_obs, n_gen)`` [p.u. / p.u.].
+        observation_bus_mapping : List[int]
+            Ordered list of observation bus indices actually included.
+        gen_bus_mapping : List[int]
+            Ordered list of generator bus indices actually included.
+        """
+        # Use first generator to establish observation bus mapping
+        first_ppc = pp_bus_to_ppc_bus(self.net, gen_bus_indices_pp[0])
+        _, obs_map = self.compute_dV_dVgen(first_ppc, observation_bus_indices)
+
+        n_obs = len(obs_map)
+        n_gen = len(gen_bus_indices_pp)
+        result = np.zeros((n_obs, n_gen))
+        gen_map: List[int] = []
+
+        for j, gen_bus_pp in enumerate(gen_bus_indices_pp):
+            gen_bus_ppc = pp_bus_to_ppc_bus(self.net, gen_bus_pp)
+            dV, om = self.compute_dV_dVgen(gen_bus_ppc, observation_bus_indices)
+            # om should match obs_map (same observation buses)
+            result[:, j] = dV
+            gen_map.append(gen_bus_pp)
+
+        return result, obs_map, gen_map
+
     # =========================================================================
     # B. Bus Voltage to OLTC Position Sensitivity (Eq. 11 PSCC 2026)
     # =========================================================================
     
-    def compute_dV_ds(
+    def compute_dV_ds_2w(
         self,
         trafo_idx: int,
         observation_bus_indices: List[int],
-        delta_s: float = 1.0,
     ) -> Tuple[NDArray[np.float64], List[int]]:
         """
-        Compute bus voltage sensitivity to transformer tap position change.
+        Compute bus voltage sensitivity to transformer tap position change for two-winding trafos.
         
         This implements Equation (11) from the PSCC 2026 paper:
             ΔV = Δτ_i [D_21  D_22] (∂g/∂τ_i) Δs_i
@@ -675,8 +519,6 @@ class JacobianSensitivities:
             Pandapower transformer index.
         observation_bus_indices : List[int]
             Pandapower bus indices where voltages are observed.
-        delta_s : float, optional
-            Tap step size (default: 1.0 tap step).
         
         Returns
         -------
@@ -703,10 +545,11 @@ class JacobianSensitivities:
         lv_bus = self.net.trafo.at[trafo_idx, 'lv_bus']
         
         # Get voltage and angle at transformer terminals
-        U_i = self.net.res_bus.at[hv_bus, 'vm_pu']
-        U_j = self.net.res_bus.at[lv_bus, 'vm_pu']
+        V_i = self.net.res_bus.at[hv_bus, 'vm_pu']
+        V_j = self.net.res_bus.at[lv_bus, 'vm_pu']
         theta_i = np.deg2rad(self.net.res_bus.at[hv_bus, 'va_degree'])
         theta_j = np.deg2rad(self.net.res_bus.at[lv_bus, 'va_degree'])
+        theta = theta_i - theta_j
         
         # Get tap parameters
         s0 = self.net.trafo.at[trafo_idx, 'tap_pos']
@@ -729,27 +572,27 @@ class JacobianSensitivities:
         
         # Compute ∂g/∂τ (power injection derivatives with respect to tap ratio)
         # These are the derivatives of the power balance equations
-        dg_dtau = np.zeros(self.x_size)
+        dg_dtau = np.zeros(self.x_size)     # self.x_size = self.n_theta + self.n_v (number of equations)
         
         # Active power derivatives at HV and LV buses
-        dP_dtau_i = (-2.0 * g * U_i**2 / tau**3 + 
-                     U_i * U_j * (g * np.cos(theta_i - theta_j) + b * np.sin(theta_i - theta_j)) / tau**2)
-        dP_dtau_j = (U_i * U_j * (g * np.cos(theta_i - theta_j) + b * np.sin(theta_i - theta_j)) / tau**2)
+        dPi_dtau = (V_i * V_j * (g * np.cos(theta) + b * np.sin(theta)) / tau**2        # ij
+                     - 2 * g * V_i**2 / tau**3)                                         # ii
+        dPj_dtau = (V_j * V_i * (g * np.cos(theta) - b * np.sin(theta)) / tau**2)       # ij
         
         # Reactive power derivatives at HV and LV buses
-        dQ_dtau_i = (2.0 * b * U_i**2 / tau**3 + 
-                     U_i * U_j * (g * np.sin(theta_i - theta_j) - b * np.cos(theta_i - theta_j)) / tau**2)
-        dQ_dtau_j = (U_i * U_j * (g * np.sin(theta_i - theta_j) - b * np.cos(theta_i - theta_j)) / tau**2)
+        dQi_dtau = (V_i * V_j * (g * np.sin(theta) - b * np.cos(theta)) / (tau**2) +    # ij
+                    + 2 * b * V_i ** 2 / (tau ** 3))                                    # ii
+        dQj_dtau = (V_j * V_i * (- g * np.sin(theta) - b * np.cos(theta)) / tau**2)       # ij
         
         # Accumulate derivatives into dg_dtau vector
         if theta_i_idx is not None:
-            dg_dtau[theta_i_idx] += dP_dtau_i
+            dg_dtau[theta_i_idx] += dPi_dtau
         if theta_j_idx is not None:
-            dg_dtau[theta_j_idx] += dP_dtau_j
+            dg_dtau[theta_j_idx] += dPj_dtau
         if v_i_idx is not None:
-            dg_dtau[self.n_theta + v_i_idx] += dQ_dtau_i
+            dg_dtau[self.n_theta + v_i_idx] += dQi_dtau
         if v_j_idx is not None and (self.n_theta + v_j_idx) < self.x_size:
-            dg_dtau[self.n_theta + v_j_idx] += dQ_dtau_j
+            dg_dtau[self.n_theta + v_j_idx] += dQj_dtau
         
         # Compute full state sensitivity: dx/ds = -J^{-1} (∂g/∂τ) Δτ
         # Note: The minus sign comes from implicit function theorem
@@ -772,10 +615,10 @@ class JacobianSensitivities:
             raise ValueError("No valid observation buses found.")
         
         dV_ds = dV_ds_full[obs_jacobian_rows]
-        
+
         return dV_ds, obs_bus_mapping
-    
-    def compute_dV_ds_matrix(
+
+    def compute_dV_ds_2w_matrix(
         self,
         trafo_indices: List[int],
         observation_bus_indices: List[int],
@@ -811,17 +654,16 @@ class JacobianSensitivities:
         
         for j, trafo_idx in enumerate(trafo_indices):
             try:
-                dV_ds_col, obs_mapping = self.compute_dV_ds(
+                dV_ds_col, obs_mapping = self.compute_dV_ds_2w(
                     trafo_idx=trafo_idx,
                     observation_bus_indices=observation_bus_indices,
-                    delta_s=1.0,
                 )
                 sensitivity_matrix[:len(dV_ds_col), j] = dV_ds_col
                 trafo_mapping.append(trafo_idx)
                 if obs_bus_mapping is None:
                     obs_bus_mapping = obs_mapping
             except ValueError:
-                # Skip invalid transformers
+                print(ValueError)
                 continue
         
         if obs_bus_mapping is None:
@@ -833,13 +675,13 @@ class JacobianSensitivities:
     # C. Transformer Q to DER Reactive Power Infeed Sensitivity (Eq. 12-14 PSCC 2026)
     # =========================================================================
     
-    def compute_dQtrafo_dQ_der(
+    def compute_dQtrafo_dQder_2w(
         self,
         trafo_idx: int,
         der_bus_idx: int,
     ) -> float:
         """
-        Compute transformer reactive power flow sensitivity to DER reactive power.
+        Compute two winding transformer reactive power flow sensitivity to DER reactive power.
         
         This implements Equation (14) from the PSCC 2026 paper:
             ΔQ_ij = (∂Q_ij/∂V_i · ∂V_i/∂Q_n + ∂Q_ij/∂V_j · ∂V_j/∂Q_n) ΔQ_n
@@ -861,9 +703,9 @@ class JacobianSensitivities:
         ValueError
             If transformer or DER bus is not found or cannot be processed.
         """
+        # error handling
         if trafo_idx not in self.net.trafo.index:
             raise ValueError(f"Transformer {trafo_idx} not found in network.")
-        
         ppc_br_idx = get_ppc_trafo_index(self.net, trafo_idx)
         if ppc_br_idx is None:
             raise ValueError(f"Could not find pypower branch index for transformer {trafo_idx}.")
@@ -873,10 +715,11 @@ class JacobianSensitivities:
         lv_bus = self.net.trafo.at[trafo_idx, 'lv_bus']
         
         # Get voltage states
-        U_i = self.net.res_bus.at[hv_bus, 'vm_pu']
-        U_j = self.net.res_bus.at[lv_bus, 'vm_pu']
+        V_i = self.net.res_bus.at[hv_bus, 'vm_pu']
+        V_j = self.net.res_bus.at[lv_bus, 'vm_pu']
         theta_i = np.deg2rad(self.net.res_bus.at[hv_bus, 'va_degree'])
         theta_j = np.deg2rad(self.net.res_bus.at[lv_bus, 'va_degree'])
+        theta = theta_i - theta_j
         
         # Get transformer parameters
         r_pu = self.net._ppc['branch'][ppc_br_idx, 2]
@@ -886,23 +729,23 @@ class JacobianSensitivities:
         b = y_pu.imag
         
         # Get tap ratio
+        s0 = self.net.trafo.at[trafo_idx, 'tap_pos']
         delta_tau = self.net.trafo.at[trafo_idx, 'tap_step_percent'] / 100.0
-        tau = 1.0 + self.net.trafo.at[trafo_idx, 'tap_pos'] * delta_tau
+        tau = 1.0 +  s0 * delta_tau
         
         # Get Jacobian indices
-        _, v_i_idx = get_jacobian_indices(self.net, hv_bus)
-        _, v_j_idx = get_jacobian_indices(self.net, lv_bus)
-        _, v_der_idx = get_jacobian_indices(self.net, der_bus_idx)
-        
+        _, v_i_idx = get_jacobian_indices(self.net, hv_bus) # index for Q-equation @ hv bus
+        _, v_j_idx = get_jacobian_indices(self.net, lv_bus) # index for Q-equation @ lv bus
+        _, v_der_idx = get_jacobian_indices(self.net, der_bus_idx) # index for Q-equation @ der bus
         if v_i_idx is None or v_j_idx is None or v_der_idx is None:
             raise ValueError("Could not find Jacobian indices for buses.")
         
         # Compute ∂Q_ij/∂V_i and ∂Q_ij/∂V_j (Equation 12)
         # Q_ij = -b * U_i^2 / τ^2 + U_i * U_j * (b * cos(θ_i - θ_j) - g * sin(θ_i - θ_j)) / τ
-        dQ_ij_dV_i = (b * (-2.0 * U_i / tau**2 + U_j * np.cos(theta_i - theta_j) / tau) - 
-                      g * U_j * np.sin(theta_i - theta_j) / tau)
-        dQ_ij_dV_j = (b * U_i * np.cos(theta_i - theta_j) / tau - 
-                      g * U_i * np.sin(theta_i - theta_j) / tau)
+        dQ_ij_dV_i = (b * (-2.0 * V_i / (tau**2) + V_j * np.cos(theta) / tau) -
+                      g * V_j * np.sin(theta) / tau)
+        dQ_ij_dV_j = (b * V_i * np.cos(theta) / tau -
+                      g * V_i * np.sin(theta) / tau)
         
         # Get voltage sensitivities from reduced Jacobian (Equation 13)
         if v_i_idx >= self.dV_dQ_reduced.shape[0] or v_der_idx >= self.dV_dQ_reduced.shape[1]:
@@ -918,7 +761,7 @@ class JacobianSensitivities:
         
         return sensitivity
     
-    def compute_dQtrafo_dQ_der_matrix(
+    def compute_dQtrafo_dQder_2w_matrix(
         self,
         trafo_indices: List[int],
         der_bus_indices: List[int],
@@ -960,6 +803,7 @@ class JacobianSensitivities:
                 if j == 0 or der_bus_idx not in der_bus_mapping:
                     der_bus_mapping.append(der_bus_idx)
             except ValueError:
+                print(ValueError)
                 continue
         
         for i, trafo_idx in enumerate(trafo_indices):
@@ -969,7 +813,7 @@ class JacobianSensitivities:
                     if der_bus_idx not in der_bus_mapping:
                         continue
                     j_mapped = der_bus_mapping.index(der_bus_idx)
-                    sensitivity_matrix[i, j_mapped] = self.compute_dQtrafo_dQ_der(trafo_idx, der_bus_idx)
+                    sensitivity_matrix[i, j_mapped] = self.compute_dQtrafo_dQder_2w(trafo_idx, der_bus_idx)
             except ValueError:
                 continue
         
@@ -979,11 +823,10 @@ class JacobianSensitivities:
     # D. Transformer Q to OLTC Position Sensitivity (Eq. 15-17)
     # =========================================================================
     
-    def compute_dQtrafo_ds(
+    def compute_dQtrafo_2w_ds(
         self,
         meas_trafo_idx: int,
         chg_trafo_idx: int,
-        delta_s: float = 1.0,
     ) -> float:
         """
         Compute transformer reactive power flow sensitivity to tap position change.
@@ -1001,8 +844,6 @@ class JacobianSensitivities:
             Pandapower transformer index where Q is measured.
         chg_trafo_idx : int
             Pandapower transformer index where tap is changed.
-        delta_s : float, optional
-            Tap step size (default: 1.0 tap step).
         
         Returns
         -------
@@ -1014,12 +855,14 @@ class JacobianSensitivities:
         ValueError
             If transformers are not found or cannot be processed.
         """
+        # error handling
         if meas_trafo_idx not in self.net.trafo.index:
             raise ValueError(f"Measurement transformer {meas_trafo_idx} not found.")
         if chg_trafo_idx not in self.net.trafo.index:
             raise ValueError(f"Change transformer {chg_trafo_idx} not found.")
         
         # === Part 1: Compute ∂g/∂τ for the change transformer ===
+        # ========================================================
         ppc_br_idx_chg = get_ppc_trafo_index(self.net, chg_trafo_idx)
         if ppc_br_idx_chg is None:
             raise ValueError(f"Could not find pypower index for transformer {chg_trafo_idx}.")
@@ -1027,10 +870,11 @@ class JacobianSensitivities:
         hv_bus_chg = self.net.trafo.at[chg_trafo_idx, 'hv_bus']
         lv_bus_chg = self.net.trafo.at[chg_trafo_idx, 'lv_bus']
         
-        U_i_chg = self.net.res_bus.at[hv_bus_chg, 'vm_pu']
-        U_j_chg = self.net.res_bus.at[lv_bus_chg, 'vm_pu']
+        V_i_chg = self.net.res_bus.at[hv_bus_chg, 'vm_pu']
+        V_j_chg = self.net.res_bus.at[lv_bus_chg, 'vm_pu']
         theta_i_chg = np.deg2rad(self.net.res_bus.at[hv_bus_chg, 'va_degree'])
         theta_j_chg = np.deg2rad(self.net.res_bus.at[lv_bus_chg, 'va_degree'])
+        theta_chg = theta_i_chg - theta_j_chg
         
         s0_chg = self.net.trafo.at[chg_trafo_idx, 'tap_pos']
         delta_tau_chg = self.net.trafo.at[chg_trafo_idx, 'tap_step_percent'] / 100.0
@@ -1041,37 +885,37 @@ class JacobianSensitivities:
         y_pu_chg = 1.0 / complex(r_pu_chg, x_pu_chg)
         g_chg = y_pu_chg.real
         b_chg = y_pu_chg.imag
-        
-        theta_i_idx_chg, v_i_idx_chg = get_jacobian_indices(self.net, hv_bus_chg)
-        theta_j_idx_chg, v_j_idx_chg = get_jacobian_indices(self.net, lv_bus_chg)
-        
+
+        # Get jacobian indices
+        theta_i_idx_chg, v_i_idx_chg = get_jacobian_indices(self.net, hv_bus_chg) # P_i, Q_i indices
+        theta_j_idx_chg, v_j_idx_chg = get_jacobian_indices(self.net, lv_bus_chg) # P_j, Q_j indices
         if theta_i_idx_chg is None or theta_j_idx_chg is None:
             raise ValueError("Could not find Jacobian indices for change transformer buses.")
         
         # Compute ∂g/∂τ
         dg_dtau = np.zeros(self.x_size)
-        
-        dP_dtau_i = (-2.0 * g_chg * U_i_chg**2 / tau_chg**3 + 
-                     U_i_chg * U_j_chg * (g_chg * np.cos(theta_i_chg - theta_j_chg) + 
-                                          b_chg * np.sin(theta_i_chg - theta_j_chg)) / tau_chg**2)
-        dP_dtau_j = (U_i_chg * U_j_chg * (g_chg * np.cos(theta_i_chg - theta_j_chg) + 
-                                           b_chg * np.sin(theta_i_chg - theta_j_chg)) / tau_chg**2)
-        dQ_dtau_i = (2.0 * b_chg * U_i_chg**2 / tau_chg**3 + 
-                     U_i_chg * U_j_chg * (g_chg * np.sin(theta_i_chg - theta_j_chg) - 
-                                          b_chg * np.cos(theta_i_chg - theta_j_chg)) / tau_chg**2)
-        dQ_dtau_j = (U_i_chg * U_j_chg * (g_chg * np.sin(theta_i_chg - theta_j_chg) - 
-                                           b_chg * np.cos(theta_i_chg - theta_j_chg)) / tau_chg**2)
-        
+
+        # Active power derivatives at HV and LV buses
+        dPi_dtau = (V_i_chg * V_j_chg * (g_chg * np.cos(theta_chg) + b_chg * np.sin(theta_chg)) / tau_chg ** 2
+                    - 2 * g_chg * V_i_chg ** 2 / tau_chg ** 3)  # ii
+        dPj_dtau = (V_j_chg * V_i_chg * (g_chg * np.cos(theta_chg) - b_chg * np.sin(theta_chg)) / tau_chg ** 2)
+
+        # Reactive power derivatives at HV and LV buses
+        dQi_dtau = (V_i_chg * V_j_chg * (g_chg * np.sin(theta_chg) - b_chg * np.cos(theta_chg)) / (tau_chg ** 2) +
+                    + 2 * b_chg * V_i_chg ** 2 / (tau_chg ** 3))  # ii
+        dQj_dtau = (V_j_chg * V_i_chg * (-g_chg * np.sin(theta_chg) - b_chg * np.cos(theta_chg)) / tau_chg ** 2)
+
         if theta_i_idx_chg is not None:
-            dg_dtau[theta_i_idx_chg] += dP_dtau_i
+            dg_dtau[theta_i_idx_chg] += dPi_dtau
         if theta_j_idx_chg is not None:
-            dg_dtau[theta_j_idx_chg] += dP_dtau_j
+            dg_dtau[theta_j_idx_chg] += dPj_dtau
         if v_i_idx_chg is not None:
-            dg_dtau[self.n_theta + v_i_idx_chg] += dQ_dtau_i
+            dg_dtau[self.n_theta + v_i_idx_chg] += dQi_dtau
         if v_j_idx_chg is not None and (self.n_theta + v_j_idx_chg) < self.x_size:
-            dg_dtau[self.n_theta + v_j_idx_chg] += dQ_dtau_j
+            dg_dtau[self.n_theta + v_j_idx_chg] += dQj_dtau
         
         # === Part 2: Compute ∂Q_ij/∂x for the measurement transformer ===
+        # ================================================================
         ppc_br_idx_meas = get_ppc_trafo_index(self.net, meas_trafo_idx)
         if ppc_br_idx_meas is None:
             raise ValueError(f"Could not find pypower index for transformer {meas_trafo_idx}.")
@@ -1079,11 +923,12 @@ class JacobianSensitivities:
         hv_bus_meas = self.net.trafo.at[meas_trafo_idx, 'hv_bus']
         lv_bus_meas = self.net.trafo.at[meas_trafo_idx, 'lv_bus']
         
-        U_i_meas = self.net.res_bus.at[hv_bus_meas, 'vm_pu']
-        U_j_meas = self.net.res_bus.at[lv_bus_meas, 'vm_pu']
+        V_i_meas = self.net.res_bus.at[hv_bus_meas, 'vm_pu']
+        V_j_meas = self.net.res_bus.at[lv_bus_meas, 'vm_pu']
         theta_i_meas = np.deg2rad(self.net.res_bus.at[hv_bus_meas, 'va_degree'])
         theta_j_meas = np.deg2rad(self.net.res_bus.at[lv_bus_meas, 'va_degree'])
-        
+        theta_meas = theta_i_meas - theta_j_meas
+
         s0_meas = self.net.trafo.at[meas_trafo_idx, 'tap_pos']
         delta_tau_meas = self.net.trafo.at[meas_trafo_idx, 'tap_step_percent'] / 100.0
         tau_meas = 1.0 + s0_meas * delta_tau_meas
@@ -1093,33 +938,33 @@ class JacobianSensitivities:
         y_pu_meas = 1.0 / complex(r_pu_meas, x_pu_meas)
         g_meas = y_pu_meas.real
         b_meas = y_pu_meas.imag
-        
+
+        # Get jacbian indices
         theta_i_idx_meas, v_i_idx_meas = get_jacobian_indices(self.net, hv_bus_meas)
         theta_j_idx_meas, v_j_idx_meas = get_jacobian_indices(self.net, lv_bus_meas)
-        
         if theta_i_idx_meas is None or theta_j_idx_meas is None:
             raise ValueError("Could not find Jacobian indices for measurement transformer buses.")
         
         # Compute ∂Q_ij/∂x
         dQ_dx = np.zeros(self.x_size)
         
-        dQ_dtheta_i = (-b_meas * U_i_meas * U_j_meas * np.sin(theta_i_meas - theta_j_meas) / tau_meas - 
-                       g_meas * U_i_meas * U_j_meas * np.cos(theta_i_meas - theta_j_meas) / tau_meas)
-        dQ_dtheta_j = (b_meas * U_i_meas * U_j_meas * np.sin(theta_i_meas - theta_j_meas) / tau_meas + 
-                       g_meas * U_i_meas * U_j_meas * np.cos(theta_i_meas - theta_j_meas) / tau_meas)
-        dQ_dU_i = (b_meas * (-2.0 * U_i_meas / tau_meas**2 + U_j_meas * np.cos(theta_i_meas - theta_j_meas) / tau_meas) - 
-                   g_meas * U_j_meas * np.sin(theta_i_meas - theta_j_meas) / tau_meas)
-        dQ_dU_j = (b_meas * U_i_meas * np.cos(theta_i_meas - theta_j_meas) / tau_meas - 
-                   g_meas * U_i_meas * np.sin(theta_i_meas - theta_j_meas) / tau_meas)
-        
+        dQ_ij_dtheta_i = V_i_meas * V_j_meas / tau_meas  * (-b_meas * np.sin(theta_meas)
+                                                            - g_meas * np.cos(theta_meas))
+        dQ_ij_dtheta_j = V_i_meas * V_j_meas / tau_meas * (b_meas * np.sin(theta_meas)
+                                                            + g_meas * np.cos(theta_meas))
+        dQ_ij_dV_i = (b_meas * (-2.0 * V_i_meas / (tau_meas**2) + V_j_meas * np.cos(theta_meas) / tau_meas) -
+                      g_meas * V_j_meas * np.sin(theta_meas) / tau_meas)
+        dQ_ij_dV_j = V_i_meas / tau_meas * (b_meas * np.cos(theta_meas)
+                                            - g_meas * np.sin(theta_meas))
+
         if theta_i_idx_meas is not None:
-            dQ_dx[theta_i_idx_meas] += dQ_dtheta_i
+            dQ_dx[theta_i_idx_meas] += dQ_ij_dtheta_i
         if theta_j_idx_meas is not None:
-            dQ_dx[theta_j_idx_meas] += dQ_dtheta_j
+            dQ_dx[theta_j_idx_meas] += dQ_ij_dtheta_j
         if v_i_idx_meas is not None:
-            dQ_dx[self.n_theta + v_i_idx_meas] += dQ_dU_i
+            dQ_dx[self.n_theta + v_i_idx_meas] += dQ_ij_dV_i
         if v_j_idx_meas is not None and (self.n_theta + v_j_idx_meas) < self.x_size:
-            dQ_dx[self.n_theta + v_j_idx_meas] += dQ_dU_j
+            dQ_dx[self.n_theta + v_j_idx_meas] += dQ_ij_dV_j
         
         # === Part 3: Compute indirect effect (A) ===
         # A = ∂Q_ij/∂x · J^{-1} · ∂g/∂τ
@@ -1130,17 +975,17 @@ class JacobianSensitivities:
         direct_effect = 0.0
         if meas_trafo_idx == chg_trafo_idx:
             # ∂Q_ij/∂τ (direct derivative of Q flow with respect to tap ratio)
-            dQ_dtau_direct = (2.0 * b_meas * U_i_meas**2 / tau_meas**3 -
-                              b_meas * U_i_meas * U_j_meas * np.cos(theta_i_meas - theta_j_meas) / tau_meas**2 +
-                              g_meas * U_i_meas * U_j_meas * np.sin(theta_i_meas - theta_j_meas) / tau_meas**2)
-            direct_effect = dQ_dtau_direct * delta_tau_meas
+            dQ_dtau_direct = (2.0 * b_meas * V_i_meas**2 / tau_meas**3 -
+                              b_meas * V_i_meas * V_j_meas * np.cos(theta_i_meas - theta_j_meas) / tau_meas**2 +
+                              g_meas * V_i_meas * V_j_meas * np.sin(theta_i_meas - theta_j_meas) / tau_meas**2)
+            direct_effect = dQ_dtau_direct * delta_tau_chg
 
         # Total sensitivity (Equation 17), scaled from per-unit to Mvar
-        sensitivity = (indirect_effect + direct_effect) * self.net.sn_mva
+        sensitivity = (indirect_effect + direct_effect)
 
         return sensitivity
-    
-    def compute_dQtrafo_ds_matrix(
+
+    def compute_dQtrafo_ds_2w_matrix(
         self,
         trafo_indices: List[int],
     ) -> Tuple[NDArray[np.float64], List[int]]:
@@ -1170,8 +1015,9 @@ class JacobianSensitivities:
         for i, meas_idx in enumerate(trafo_indices):
             for j, chg_idx in enumerate(trafo_indices):
                 try:
-                    sensitivity_matrix[i, j] = self.compute_dQtrafo_ds(meas_idx, chg_idx, delta_s=1.0)
+                    sensitivity_matrix[i, j] = self.compute_dQtrafo_2w_ds(meas_idx, chg_idx)
                 except ValueError:
+                    print(ValueError)
                     sensitivity_matrix[i, j] = 0.0
         
         return sensitivity_matrix, trafo_mapping
@@ -1179,100 +1025,97 @@ class JacobianSensitivities:
     # =========================================================================
     # E. Branch Current to DER Reactive Power Infeed Sensitivity (Eq. 18-20)
     # =========================================================================
-    
+
     def compute_dI_dQ_der(
-        self,
-        line_idx: int,
-        der_bus_idx: int,
+            self,
+            line_idx: int,
+            der_bus_idx: int,
     ) -> float:
         """
         Compute branch current magnitude sensitivity to DER reactive power.
-        
-        This implements Equations (19) and (20) from the PSCC 2026 paper:
-            ∂I_ij/∂Q_n = Y_ij (∂V_i/∂Q_n - ∂V_j/∂Q_n)
-            ∂|I_ij|/∂Q_n = (1/|I_ij|) Re{I_ij* · ∂I_ij/∂Q_n}
-        
-        Parameters
-        ----------
-        line_idx : int
-            Pandapower line index.
-        der_bus_idx : int
-            Pandapower bus index where the DER is connected.
-        
-        Returns
-        -------
-        sensitivity : float
-            Sensitivity ∂|I|/∂Q in [kA/Mvar] (or per-unit equivalent).
-        
-        Raises
-        ------
-        ValueError
-            If line or DER bus is not found or cannot be processed.
         """
         if line_idx not in self.net.line.index:
             raise ValueError(f"Line {line_idx} not found in network.")
-        
+
         # Get line buses
         from_bus = self.net.line.at[line_idx, 'from_bus']
         to_bus = self.net.line.at[line_idx, 'to_bus']
-        
+
         # Get voltage states
         U_from = self.net.res_bus.at[from_bus, 'vm_pu']
         U_to = self.net.res_bus.at[to_bus, 'vm_pu']
         theta_from = np.deg2rad(self.net.res_bus.at[from_bus, 'va_degree'])
         theta_to = np.deg2rad(self.net.res_bus.at[to_bus, 'va_degree'])
-        
+
         # Compute complex voltages
         V_from = U_from * np.exp(1j * theta_from)
         V_to = U_to * np.exp(1j * theta_to)
-        
-        # Get line impedance in per-unit
-        base_voltage_kv = self.net.bus.at[from_bus, 'vn_kv']
-        base_impedance = base_voltage_kv**2 / self.net.sn_mva
-        
-        r_ohm = self.net.line.at[line_idx, 'r_ohm_per_km'] * self.net.line.at[line_idx, 'length_km']
-        x_ohm = self.net.line.at[line_idx, 'x_ohm_per_km'] * self.net.line.at[line_idx, 'length_km']
-        
-        r_pu = r_ohm / base_impedance
-        x_pu = x_ohm / base_impedance
-        
+
+        # Get line's ppc branch index
+        line_start = self.net._pd2ppc_lookups['branch']['line'][0]
+        pos = list(self.net.line.index).index(line_idx)
+        ppc_line_idx = line_start + pos
+
+        # Get series admittance AND shunt susceptance
+        r_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 2]))
+        x_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 3]))
+        b_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 4]))
+
         Y_line = 1.0 / complex(r_pu, x_pu)
-        
-        # Compute current phasor (Equation 18)
-        I_ij = Y_line * (V_from - V_to)
+        Y_shunt = 1j * b_pu / 2.0  # Shunt admittance at the from-bus
+
+        # Compute current phasor with the Pi-model shunt included (Equation 18)
+        I_ij = Y_line * (V_from - V_to) + Y_shunt * V_from
         I_mag = np.abs(I_ij)
-        
+
         if I_mag < 1e-10:
-            # Avoid division by zero for very small currents
             return 0.0
-        
-        # Get Jacobian indices
-        _, v_from_idx = get_jacobian_indices(self.net, from_bus)
-        _, v_to_idx = get_jacobian_indices(self.net, to_bus)
+
+        # Get Jacobian indices (theta_idx, v_idx) for each bus
+        theta_from_idx, v_from_idx = get_jacobian_indices(self.net, from_bus)
+        theta_to_idx, v_to_idx = get_jacobian_indices(self.net, to_bus)
         _, v_der_idx = get_jacobian_indices(self.net, der_bus_idx)
-        
-        if v_from_idx is None or v_to_idx is None or v_der_idx is None:
-            raise ValueError("Could not find Jacobian indices for buses.")
-        
-        # Get voltage sensitivities
-        if (v_from_idx >= self.dV_dQ_reduced.shape[0] or 
-            v_to_idx >= self.dV_dQ_reduced.shape[0] or 
-            v_der_idx >= self.dV_dQ_reduced.shape[1]):
+
+        if v_der_idx is None:
+            raise ValueError("DER bus must be a PQ bus to compute Q injection sensitivity.")
+
+        if v_der_idx >= self.dV_dQ_reduced.shape[1]:
             raise ValueError("Jacobian index out of bounds.")
-        
-        dV_from_dQ = self.dV_dQ_reduced[v_from_idx, v_der_idx]
-        dV_to_dQ = self.dV_dQ_reduced[v_to_idx, v_der_idx]
-        
-        # Compute current phasor derivative (Equation 19)
-        # Simplified: assuming small angle changes, dV/dQ primarily affects magnitude
-        dI_ij_dQ = Y_line * (dV_from_dQ * np.exp(1j * theta_from) - 
-                             dV_to_dQ * np.exp(1j * theta_to))
-        
-        # Compute magnitude derivative (Equation 20)
-        sensitivity = (1.0 / I_mag) * np.real(np.conj(I_ij) * dI_ij_dQ)
-        
+
+        if (v_from_idx is not None and v_from_idx >= self.dV_dQ_reduced.shape[0]) or \
+                (v_to_idx is not None and v_to_idx >= self.dV_dQ_reduced.shape[0]):
+            raise ValueError("Jacobian index out of bounds.")
+
+        # Column in J_inv for a Q perturbation at der_bus
+        col = self.n_theta + v_der_idx
+
+        # ∂|V|/∂Q_pu — PV buses have constant voltage magnitude, so derivative is 0.0
+        dVmag_from_dQpu = self.dV_dQ_reduced[v_from_idx, v_der_idx] if v_from_idx is not None else 0.0
+        dVmag_to_dQpu = self.dV_dQ_reduced[v_to_idx, v_der_idx] if v_to_idx is not None else 0.0
+
+        # ∂θ/∂Q_pu — from upper-right block of full J_inv
+        dTheta_from_dQpu = self.J_inv[theta_from_idx, col] if theta_from_idx is not None else 0.0
+        dTheta_to_dQpu = self.J_inv[theta_to_idx, col] if theta_to_idx is not None else 0.0
+
+        # Full complex voltage sensitivity ∂V_i/∂Q_pu
+        dV_from_dQmvar = (dVmag_from_dQpu + 1j * U_from * dTheta_from_dQpu) \
+                         * np.exp(1j * theta_from) / self.net.sn_mva
+        dV_to_dQmvar = (dVmag_to_dQpu + 1j * U_to * dTheta_to_dQpu) \
+                       * np.exp(1j * theta_to) / self.net.sn_mva
+
+        # ∂I_ij/∂Q_Mvar — Include the derivative of the shunt term!
+        dI_ij_dQmvar = Y_line * (dV_from_dQmvar - dV_to_dQmvar) + Y_shunt * dV_from_dQmvar
+
+        # ∂|I_ij|/∂Q_Mvar (Equation 20)
+        dI_mag_dQmvar = (1.0 / I_mag) * np.real(np.conj(I_ij) * dI_ij_dQmvar)
+
+        # Convert p.u. current → kA via current base
+        base_voltage_kv = self.net.bus.at[from_bus, 'vn_kv']
+        I_base_kA = self.net.sn_mva / (np.sqrt(3) * base_voltage_kv)
+        sensitivity = dI_mag_dQmvar * I_base_kA  # [kA/Mvar]
+
         return sensitivity
-    
+
     def compute_dI_dQ_der_matrix(
         self,
         line_indices: List[int],
@@ -1315,7 +1158,392 @@ class JacobianSensitivities:
                     sensitivity_matrix[i, j] = 0.0
         
         return sensitivity_matrix, line_mapping, der_bus_mapping
-    
+
+    def compute_dI_ds_2w(
+            self,
+            line_idx: int,
+            trafo_idx: int,
+    ) -> float:
+        """
+        Compute branch current magnitude sensitivity to two-winding transformer tap position.
+        """
+        if line_idx not in self.net.line.index:
+            raise ValueError(f"Line {line_idx} not found in network.")
+        if trafo_idx not in self.net.trafo.index:
+            raise ValueError(f"Transformer {trafo_idx} not found in network.")
+
+        # --- 1. Compute dx/ds for the transformer ---
+        ppc_br_idx = get_ppc_trafo_index(self.net, trafo_idx)
+        if ppc_br_idx is None:
+            raise ValueError(f"Could not find pypower index for transformer {trafo_idx}.")
+
+        hv_bus = self.net.trafo.at[trafo_idx, 'hv_bus']
+        lv_bus = self.net.trafo.at[trafo_idx, 'lv_bus']
+
+        V_i = self.net.res_bus.at[hv_bus, 'vm_pu']
+        V_j = self.net.res_bus.at[lv_bus, 'vm_pu']
+        theta_i = np.deg2rad(self.net.res_bus.at[hv_bus, 'va_degree'])
+        theta_j = np.deg2rad(self.net.res_bus.at[lv_bus, 'va_degree'])
+        theta = theta_i - theta_j
+
+        s0 = self.net.trafo.at[trafo_idx, 'tap_pos']
+        delta_tau = self.net.trafo.at[trafo_idx, 'tap_step_percent'] / 100.0
+        tau = 1.0 + s0 * delta_tau
+
+        r_pu_tr = self.net._ppc['branch'][ppc_br_idx, 2]
+        x_pu_tr = self.net._ppc['branch'][ppc_br_idx, 3]
+        y_pu_tr = 1.0 / complex(r_pu_tr, x_pu_tr)
+        g = y_pu_tr.real
+        b = y_pu_tr.imag
+
+        theta_i_idx, v_i_idx = get_jacobian_indices(self.net, hv_bus)
+        theta_j_idx, v_j_idx = get_jacobian_indices(self.net, lv_bus)
+
+        dg_dtau = np.zeros(self.x_size)
+
+        dPi_dtau = (V_i * V_j * (g * np.cos(theta) + b * np.sin(theta)) / tau ** 2 - 2 * g * V_i ** 2 / tau ** 3)
+        dPj_dtau = (V_j * V_i * (g * np.cos(theta) - b * np.sin(theta)) / tau ** 2)
+        dQi_dtau = (V_i * V_j * (g * np.sin(theta) - b * np.cos(theta)) / tau ** 2 + 2 * b * V_i ** 2 / tau ** 3)
+        dQj_dtau = (V_j * V_i * (-g * np.sin(theta) - b * np.cos(theta)) / tau ** 2)
+
+        if theta_i_idx is not None: dg_dtau[theta_i_idx] += dPi_dtau
+        if theta_j_idx is not None: dg_dtau[theta_j_idx] += dPj_dtau
+        if v_i_idx is not None: dg_dtau[self.n_theta + v_i_idx] += dQi_dtau
+        if v_j_idx is not None and (self.n_theta + v_j_idx) < self.x_size:
+            dg_dtau[self.n_theta + v_j_idx] += dQj_dtau
+
+        dx_ds = -self.J_inv @ dg_dtau * delta_tau
+
+        # --- 2. Compute branch current sensitivity ---
+        from_bus = self.net.line.at[line_idx, 'from_bus']
+        to_bus = self.net.line.at[line_idx, 'to_bus']
+
+        U_from = self.net.res_bus.at[from_bus, 'vm_pu']
+        U_to = self.net.res_bus.at[to_bus, 'vm_pu']
+        theta_from = np.deg2rad(self.net.res_bus.at[from_bus, 'va_degree'])
+        theta_to = np.deg2rad(self.net.res_bus.at[to_bus, 'va_degree'])
+
+        V_from = U_from * np.exp(1j * theta_from)
+        V_to = U_to * np.exp(1j * theta_to)
+
+        line_start = self.net._pd2ppc_lookups['branch']['line'][0]
+        pos = list(self.net.line.index).index(line_idx)
+        ppc_line_idx = line_start + pos
+
+        r_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 2]))
+        x_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 3]))
+        b_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 4]))
+
+        Y_line = 1.0 / complex(r_pu, x_pu)
+        Y_shunt = 1j * b_pu / 2.0
+
+        I_ij = Y_line * (V_from - V_to) + Y_shunt * V_from
+        I_mag = np.abs(I_ij)
+        if I_mag < 1e-10:
+            return 0.0
+
+        theta_from_idx, v_from_idx = get_jacobian_indices(self.net, from_bus)
+        theta_to_idx, v_to_idx = get_jacobian_indices(self.net, to_bus)
+
+        dTheta_from_ds = dx_ds[theta_from_idx] if theta_from_idx is not None else 0.0
+        dTheta_to_ds = dx_ds[theta_to_idx] if theta_to_idx is not None else 0.0
+        dVmag_from_ds = dx_ds[self.n_theta + v_from_idx] if v_from_idx is not None else 0.0
+        dVmag_to_ds = dx_ds[self.n_theta + v_to_idx] if v_to_idx is not None else 0.0
+
+        dV_from_ds = (dVmag_from_ds + 1j * U_from * dTheta_from_ds) * np.exp(1j * theta_from)
+        dV_to_ds = (dVmag_to_ds + 1j * U_to * dTheta_to_ds) * np.exp(1j * theta_to)
+
+        dI_ij_ds = Y_line * (dV_from_ds - dV_to_ds) + Y_shunt * dV_from_ds
+        dI_mag_ds = (1.0 / I_mag) * np.real(np.conj(I_ij) * dI_ij_ds)
+
+        base_voltage_kv = self.net.bus.at[from_bus, 'vn_kv']
+        I_base_kA = self.net.sn_mva / (np.sqrt(3) * base_voltage_kv)
+
+        return dI_mag_ds * I_base_kA
+
+    def compute_dI_ds_2w_matrix(
+            self,
+            line_indices: List[int],
+            trafo_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        n_lines = len(line_indices)
+        n_trafos = len(trafo_indices)
+        if n_lines == 0 or n_trafos == 0:
+            return np.zeros((n_lines, n_trafos)), [], []
+
+        sensitivity_matrix = np.zeros((n_lines, n_trafos))
+        line_mapping = list(line_indices)
+        trafo_mapping = list(trafo_indices)
+
+        for i, line_idx in enumerate(line_indices):
+            for j, trafo_idx in enumerate(trafo_indices):
+                try:
+                    sensitivity_matrix[i, j] = self.compute_dI_ds_2w(line_idx, trafo_idx)
+                except ValueError:
+                    sensitivity_matrix[i, j] = 0.0
+
+        return sensitivity_matrix, line_mapping, trafo_mapping
+
+    def compute_dI_ds_3w(
+            self,
+            line_idx: int,
+            trafo3w_idx: int,
+    ) -> float:
+        """
+        Compute branch current magnitude sensitivity to 3W transformer HV OLTC tap.
+
+        Uses the implicit function theorem applied to the HV-star branch of a
+        3-winding transformer, then chains through the pi-model current formula.
+
+        Parameters
+        ----------
+        line_idx : int
+            Pandapower line index for the current measurement.
+        trafo3w_idx : int
+            Pandapower ``net.trafo3w`` index.
+
+        Returns
+        -------
+        sensitivity : float
+            d|I_line|/ds  [kA per tap step].
+
+        Raises
+        ------
+        ValueError
+            If the line or transformer is not found.
+        """
+        if line_idx not in self.net.line.index:
+            raise ValueError(f"Line {line_idx} not found in network.")
+        if trafo3w_idx not in self.net.trafo3w.index:
+            raise ValueError(f"Transformer 3W {trafo3w_idx} not found in network.")
+
+        # --- 1. Compute dx/ds for the 3W transformer ---
+        d = _get_trafo3w_hv_branch_data(self.net, trafo3w_idx)
+        dg_dtau = self._compute_dg_dtau_3w(d)
+
+        # Full state sensitivity:  dx/ds = -J^{-1} (dg/dtau) * delta_tau
+        dx_ds = -self.J_inv @ dg_dtau * d['delta_tau']
+
+        # --- 2. Compute branch current sensitivity ---
+        from_bus = self.net.line.at[line_idx, 'from_bus']
+        to_bus = self.net.line.at[line_idx, 'to_bus']
+
+        U_from = self.net.res_bus.at[from_bus, 'vm_pu']
+        U_to = self.net.res_bus.at[to_bus, 'vm_pu']
+        theta_from = np.deg2rad(self.net.res_bus.at[from_bus, 'va_degree'])
+        theta_to = np.deg2rad(self.net.res_bus.at[to_bus, 'va_degree'])
+
+        V_from = U_from * np.exp(1j * theta_from)
+        V_to = U_to * np.exp(1j * theta_to)
+
+        line_start = self.net._pd2ppc_lookups['branch']['line'][0]
+        pos = list(self.net.line.index).index(line_idx)
+        ppc_line_idx = line_start + pos
+
+        r_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 2]))
+        x_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 3]))
+        b_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 4]))
+
+        Y_line = 1.0 / complex(r_pu, x_pu)
+        Y_shunt = 1j * b_pu / 2.0
+
+        I_ij = Y_line * (V_from - V_to) + Y_shunt * V_from
+        I_mag = np.abs(I_ij)
+        if I_mag < 1e-10:
+            return 0.0
+
+        theta_from_idx, v_from_idx = get_jacobian_indices(self.net, from_bus)
+        theta_to_idx, v_to_idx = get_jacobian_indices(self.net, to_bus)
+
+        dTheta_from_ds = dx_ds[theta_from_idx] if theta_from_idx is not None else 0.0
+        dTheta_to_ds = dx_ds[theta_to_idx] if theta_to_idx is not None else 0.0
+        dVmag_from_ds = dx_ds[self.n_theta + v_from_idx] if v_from_idx is not None else 0.0
+        dVmag_to_ds = dx_ds[self.n_theta + v_to_idx] if v_to_idx is not None else 0.0
+
+        dV_from_ds = (dVmag_from_ds + 1j * U_from * dTheta_from_ds) * np.exp(1j * theta_from)
+        dV_to_ds = (dVmag_to_ds + 1j * U_to * dTheta_to_ds) * np.exp(1j * theta_to)
+
+        dI_ij_ds = Y_line * (dV_from_ds - dV_to_ds) + Y_shunt * dV_from_ds
+        dI_mag_ds = (1.0 / I_mag) * np.real(np.conj(I_ij) * dI_ij_ds)
+
+        base_voltage_kv = self.net.bus.at[from_bus, 'vn_kv']
+        I_base_kA = self.net.sn_mva / (np.sqrt(3) * base_voltage_kv)
+
+        return dI_mag_ds * I_base_kA
+
+    def compute_dI_ds_3w_matrix(
+            self,
+            line_indices: List[int],
+            trafo3w_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """
+        Compute branch current sensitivity matrix for multiple 3W OLTC taps.
+
+        Parameters
+        ----------
+        line_indices : List[int]
+            Pandapower line indices.
+        trafo3w_indices : List[int]
+            Pandapower ``net.trafo3w`` indices with OLTC.
+
+        Returns
+        -------
+        sensitivity_matrix : NDArray[np.float64]
+            Matrix of shape ``(n_lines, n_trafo3w)``.
+        line_mapping : List[int]
+        trafo3w_mapping : List[int]
+        """
+        n_lines = len(line_indices)
+        n_trafos = len(trafo3w_indices)
+        if n_lines == 0 or n_trafos == 0:
+            return np.zeros((n_lines, n_trafos)), [], []
+
+        sensitivity_matrix = np.zeros((n_lines, n_trafos))
+        line_mapping = list(line_indices)
+        trafo_mapping = list(trafo3w_indices)
+
+        for i, line_idx in enumerate(line_indices):
+            for j, trafo3w_idx in enumerate(trafo3w_indices):
+                try:
+                    sensitivity_matrix[i, j] = self.compute_dI_ds_3w(line_idx, trafo3w_idx)
+                except ValueError:
+                    sensitivity_matrix[i, j] = 0.0
+
+        return sensitivity_matrix, line_mapping, trafo_mapping
+
+    def compute_dI_dVgen(
+            self,
+            line_idx: int,
+            gen_bus_ppc: int,
+    ) -> float:
+        """
+        Compute branch current magnitude sensitivity to PV generator voltage setpoint.
+        """
+        if line_idx not in self.net.line.index:
+            raise ValueError(f"Line {line_idx} not found in network.")
+
+        # --- 1. Compute dx/dVk for the generator ---
+        bus_data = self.net._ppc['bus']
+        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
+        n_bus = bus_data.shape[0]
+        V_complex = bus_data[:, 7] * np.exp(1j * np.deg2rad(bus_data[:, 8]))
+
+        k = gen_bus_ppc
+        Vm = np.abs(V_complex)
+        theta = np.angle(V_complex)
+        G = np.real(Ybus)
+        B = np.imag(Ybus)
+
+        dP_dVk = np.zeros(n_bus)
+        dQ_dVk = np.zeros(n_bus)
+        for i in range(n_bus):
+            cos_ik = np.cos(theta[i] - theta[k])
+            sin_ik = np.sin(theta[i] - theta[k])
+            if i == k:
+                dP_dVk[i] = 2 * Vm[k] * G[k, k]
+                dQ_dVk[i] = -2 * Vm[k] * B[k, k]
+                for j_bus in range(n_bus):
+                    if j_bus != k:
+                        cos_kj = np.cos(theta[k] - theta[j_bus])
+                        sin_kj = np.sin(theta[k] - theta[j_bus])
+                        dP_dVk[i] += Vm[j_bus] * (G[k, j_bus] * cos_kj + B[k, j_bus] * sin_kj)
+                        dQ_dVk[i] += Vm[j_bus] * (G[k, j_bus] * sin_kj - B[k, j_bus] * cos_kj)
+            else:
+                dP_dVk[i] = Vm[i] * (G[i, k] * cos_ik + B[i, k] * sin_ik)
+                dQ_dVk[i] = Vm[i] * (G[i, k] * sin_ik - B[i, k] * cos_ik)
+
+        pv_list = list(self.pv_buses)
+        pq_list = list(self.pq_buses)
+        dg_dVk = np.zeros(self.x_size)
+
+        for idx_pv, bus_pv in enumerate(pv_list):
+            dg_dVk[idx_pv] = dP_dVk[bus_pv]
+        n_pv = len(pv_list)
+        for idx_pq, bus_pq in enumerate(pq_list):
+            dg_dVk[n_pv + idx_pq] = dP_dVk[bus_pq]
+            dg_dVk[self.n_theta + idx_pq] = dQ_dVk[bus_pq]
+
+        dx_dVk = -self.J_inv @ dg_dVk
+
+        # --- 2. Compute branch current sensitivity ---
+        from_bus = self.net.line.at[line_idx, 'from_bus']
+        to_bus = self.net.line.at[line_idx, 'to_bus']
+
+        U_from = self.net.res_bus.at[from_bus, 'vm_pu']
+        U_to = self.net.res_bus.at[to_bus, 'vm_pu']
+        theta_from = np.deg2rad(self.net.res_bus.at[from_bus, 'va_degree'])
+        theta_to = np.deg2rad(self.net.res_bus.at[to_bus, 'va_degree'])
+
+        V_from = U_from * np.exp(1j * theta_from)
+        V_to = U_to * np.exp(1j * theta_to)
+
+        line_start = self.net._pd2ppc_lookups['branch']['line'][0]
+        pos = list(self.net.line.index).index(line_idx)
+        ppc_line_idx = line_start + pos
+
+        r_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 2]))
+        x_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 3]))
+        b_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 4]))
+
+        Y_line = 1.0 / complex(r_pu, x_pu)
+        Y_shunt = 1j * b_pu / 2.0
+
+        I_ij = Y_line * (V_from - V_to) + Y_shunt * V_from
+        I_mag = np.abs(I_ij)
+        if I_mag < 1e-10:
+            return 0.0
+
+        theta_from_idx, v_from_idx = get_jacobian_indices(self.net, from_bus)
+        theta_to_idx, v_to_idx = get_jacobian_indices(self.net, to_bus)
+
+        dTheta_from_dVk = dx_dVk[theta_from_idx] if theta_from_idx is not None else 0.0
+        dTheta_to_dVk = dx_dVk[theta_to_idx] if theta_to_idx is not None else 0.0
+
+        # For magnitudes, if a bus is the PV generator bus, its dVmag/dVk = 1.0
+        from_ppc = pp_bus_to_ppc_bus(self.net, from_bus)
+        to_ppc = pp_bus_to_ppc_bus(self.net, to_bus)
+
+        dVmag_from_dVk = 1.0 if from_ppc == gen_bus_ppc else (
+            dx_dVk[self.n_theta + v_from_idx] if v_from_idx is not None else 0.0)
+        dVmag_to_dVk = 1.0 if to_ppc == gen_bus_ppc else (
+            dx_dVk[self.n_theta + v_to_idx] if v_to_idx is not None else 0.0)
+
+        dV_from_dVk = (dVmag_from_dVk + 1j * U_from * dTheta_from_dVk) * np.exp(1j * theta_from)
+        dV_to_dVk = (dVmag_to_dVk + 1j * U_to * dTheta_to_dVk) * np.exp(1j * theta_to)
+
+        dI_ij_dVk = Y_line * (dV_from_dVk - dV_to_dVk) + Y_shunt * dV_from_dVk
+        dI_mag_dVk = (1.0 / I_mag) * np.real(np.conj(I_ij) * dI_ij_dVk)
+
+        base_voltage_kv = self.net.bus.at[from_bus, 'vn_kv']
+        I_base_kA = self.net.sn_mva / (np.sqrt(3) * base_voltage_kv)
+
+        return dI_mag_dVk * I_base_kA
+
+    def compute_dI_dVgen_matrix(
+            self,
+            line_indices: List[int],
+            gen_bus_indices_pp: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        n_lines = len(line_indices)
+        n_gens = len(gen_bus_indices_pp)
+        if n_lines == 0 or n_gens == 0:
+            return np.zeros((n_lines, n_gens)), [], []
+
+        sensitivity_matrix = np.zeros((n_lines, n_gens))
+        line_mapping = list(line_indices)
+        gen_mapping = list(gen_bus_indices_pp)
+
+        for j, gen_bus_pp in enumerate(gen_bus_indices_pp):
+            gen_bus_ppc = pp_bus_to_ppc_bus(self.net, gen_bus_pp)
+            for i, line_idx in enumerate(line_indices):
+                try:
+                    sensitivity_matrix[i, j] = self.compute_dI_dVgen(line_idx, gen_bus_ppc)
+                except ValueError:
+                    sensitivity_matrix[i, j] = 0.0
+
+        return sensitivity_matrix, line_mapping, gen_mapping
+
+
     # =========================================================================
     # F. Shunt Reactive Power Sensitivity (for switchable shunts)
     # =========================================================================
@@ -1365,8 +1593,13 @@ class JacobianSensitivities:
         if len(der_map) == 0:
             raise ValueError(f"Shunt bus {shunt_bus_idx} is not valid for Q injection.")
 
-        # Negate to account for load-convention sign, then scale by step size
-        dV_dQ_shunt = -dV_dQ[:, 0] * q_step_mvar
+        # Negate to account for load-convention sign, then scale by step size.
+        # Shunts are constant-susceptance devices: Q_shunt = B * V².
+        # The q_step_mvar is the rated step at V=1 pu, so the actual
+        # reactive power per step at the current operating point is
+        # q_step_mvar * V_pu².
+        V_pu = self.net.res_bus.at[shunt_bus_idx, 'vm_pu']
+        dV_dQ_shunt = -dV_dQ[:, 0] * q_step_mvar * V_pu ** 2
 
         return dV_dQ_shunt, obs_map
 
@@ -1403,93 +1636,16 @@ class JacobianSensitivities:
         if len(der_map) == 0:
             raise ValueError(f"Shunt bus {shunt_bus_idx} is not valid for Q injection.")
 
-        # Negate to account for load-convention sign, then scale by step size
-        dI_dQ_shunt = -dI_dQ[:, 0] * q_step_mvar
+        # Negate to account for load-convention sign, then scale by step size.
+        # Shunts are constant-susceptance: Q_shunt = B * V².
+        V_pu = self.net.res_bus.at[shunt_bus_idx, 'vm_pu']
+        dI_dQ_shunt = -dI_dQ[:, 0] * q_step_mvar * V_pu ** 2
 
         return dI_dQ_shunt, line_map
 
     # =========================================================================
     # G. Three-Winding Transformer Sensitivities
     # =========================================================================
-
-    def _get_trafo3w_hv_branch_data(
-        self,
-        trafo3w_idx: int,
-    ) -> Dict:
-        """
-        Extract all data needed for HV-side sensitivity computations
-        of a 3-winding transformer.
-
-        Returns a dictionary with keys:
-            hv_branch_idx, aux_bus_ppc, hv_bus_ppc, aux_bus_ppc,
-            U_hv, U_aux, theta_hv, theta_aux, tau, delta_tau,
-            g, b, r_pu, x_pu,
-            theta_hv_jac, v_hv_jac, theta_aux_jac, v_aux_jac
-
-        Raises
-        ------
-        ValueError
-            If the transformer or its buses cannot be processed.
-        """
-        hv_br, _, _, aux_bus_ppc = get_ppc_trafo3w_branch_indices(
-            self.net, trafo3w_idx
-        )
-
-        # Pandapower and _ppc bus indices
-        hv_bus_pp = int(self.net.trafo3w.at[trafo3w_idx, 'hv_bus'])
-        hv_bus_ppc = pp_bus_to_ppc_bus(self.net, hv_bus_pp)
-
-        # Voltage states from _ppc bus results
-        U_hv = float(self.net._ppc['bus'][hv_bus_ppc, 7])     # VM column
-        U_aux = float(self.net._ppc['bus'][aux_bus_ppc, 7])
-        theta_hv = float(np.deg2rad(self.net._ppc['bus'][hv_bus_ppc, 8]))   # VA column
-        theta_aux = float(np.deg2rad(self.net._ppc['bus'][aux_bus_ppc, 8]))
-
-        # Tap ratio from _ppc branch data
-        tap_ppc = float(self.net._ppc['branch'][hv_br, 8])
-        # Pandapower tap parameters
-        s0 = float(self.net.trafo3w.at[trafo3w_idx, 'tap_pos'])
-        delta_tau = float(
-            self.net.trafo3w.at[trafo3w_idx, 'tap_step_percent']
-        ) / 100.0
-        # Effective tap ratio: pandapower stores the final tap in _ppc.
-        # For sensitivity, we need delta_tau for the derivative d(tau)/ds.
-        tau = tap_ppc if abs(tap_ppc) > 1e-12 else (1.0 + s0 * delta_tau)
-
-        # Branch impedance
-        r_pu = float(self.net._ppc['branch'][hv_br, 2])
-        x_pu = float(self.net._ppc['branch'][hv_br, 3])
-        y_pu = 1.0 / complex(r_pu, x_pu)
-        g = y_pu.real
-        b = y_pu.imag
-
-        # Jacobian indices (using _ppc bus indices)
-        theta_hv_jac, v_hv_jac = get_jacobian_indices_ppc(
-            self.net, hv_bus_ppc
-        )
-        theta_aux_jac, v_aux_jac = get_jacobian_indices_ppc(
-            self.net, aux_bus_ppc
-        )
-
-        return {
-            'hv_branch_idx': hv_br,
-            'hv_bus_ppc': hv_bus_ppc,
-            'aux_bus_ppc': aux_bus_ppc,
-            'U_hv': U_hv,
-            'U_aux': U_aux,
-            'theta_hv': theta_hv,
-            'theta_aux': theta_aux,
-            'tau': tau,
-            'delta_tau': delta_tau,
-            'g': g,
-            'b': b,
-            'r_pu': r_pu,
-            'x_pu': x_pu,
-            'theta_hv_jac': theta_hv_jac,
-            'v_hv_jac': v_hv_jac,
-            'theta_aux_jac': theta_aux_jac,
-            'v_aux_jac': v_aux_jac,
-        }
 
     def _compute_dg_dtau_3w(
         self,
@@ -1535,7 +1691,7 @@ class JacobianSensitivities:
         dP_dtau_j = (
             U_i * U_j * (
                 g * np.cos(theta_i - theta_j)
-                + b * np.sin(theta_i - theta_j)
+                - b * np.sin(theta_i - theta_j)
             ) / tau**2
         )
 
@@ -1549,7 +1705,7 @@ class JacobianSensitivities:
         )
         dQ_dtau_j = (
             U_i * U_j * (
-                g * np.sin(theta_i - theta_j)
+                - g * np.sin(theta_i - theta_j)
                 - b * np.cos(theta_i - theta_j)
             ) / tau**2
         )
@@ -1640,7 +1796,6 @@ class JacobianSensitivities:
         self,
         trafo3w_idx: int,
         observation_bus_indices: List[int],
-        delta_s: float = 1.0,
     ) -> Tuple[NDArray[np.float64], List[int]]:
         """
         Compute bus voltage sensitivity to a 3W transformer OLTC tap change.
@@ -1658,8 +1813,6 @@ class JacobianSensitivities:
             Pandapower ``net.trafo3w`` index.
         observation_bus_indices : List[int]
             Pandapower bus indices where voltages are observed.
-        delta_s : float, optional
-            Tap step size (default: 1.0 tap step).
 
         Returns
         -------
@@ -1673,7 +1826,7 @@ class JacobianSensitivities:
         ValueError
             If the transformer is not found or observation buses are invalid.
         """
-        d = self._get_trafo3w_hv_branch_data(trafo3w_idx)
+        d = _get_trafo3w_hv_branch_data(self.net, trafo3w_idx)
         dg_dtau = self._compute_dg_dtau_3w(d)
 
         # Full state sensitivity:  Δx = -J⁻¹ · (∂g/∂τ) · Δτ
@@ -1776,7 +1929,7 @@ class JacobianSensitivities:
         ValueError
             If transformer or DER bus cannot be processed.
         """
-        d = self._get_trafo3w_hv_branch_data(trafo3w_idx)
+        d = _get_trafo3w_hv_branch_data(self.net, trafo3w_idx)
 
         U_i = d['U_hv']
         U_j = d['U_aux']
@@ -1872,7 +2025,6 @@ class JacobianSensitivities:
         self,
         meas_trafo3w_idx: int,
         chg_trafo3w_idx: int,
-        delta_s: float = 1.0,
     ) -> float:
         """
         Compute HV-side Q sensitivity of a 3W transformer to a 3W OLTC
@@ -1893,8 +2045,6 @@ class JacobianSensitivities:
             ``net.trafo3w`` index where Q is measured (HV side).
         chg_trafo3w_idx : int
             ``net.trafo3w`` index where the OLTC tap is changed.
-        delta_s : float
-            Tap step size (default: 1.0).
 
         Returns
         -------
@@ -1902,11 +2052,11 @@ class JacobianSensitivities:
             ∂Q_HV_meas / ∂s_chg [Mvar per tap step].
         """
         # Data for the change transformer (for ∂g/∂τ)
-        d_chg = self._get_trafo3w_hv_branch_data(chg_trafo3w_idx)
+        d_chg = _get_trafo3w_hv_branch_data(self.net, chg_trafo3w_idx)
         dg_dtau = self._compute_dg_dtau_3w(d_chg)
 
         # Data for the measurement transformer (for ∂Q_HV/∂x)
-        d_meas = self._get_trafo3w_hv_branch_data(meas_trafo3w_idx)
+        d_meas = _get_trafo3w_hv_branch_data(self.net, meas_trafo3w_idx)
         dQ_dx = self._compute_dQhv_dx_3w(d_meas)
 
         # Component A (indirect effect):
@@ -1934,8 +2084,7 @@ class JacobianSensitivities:
             )
             direct = dQ_dtau_direct * d_meas['delta_tau']
 
-        # Scale from per-unit to Mvar
-        return (indirect + direct) * self.net.sn_mva
+        return (indirect + direct)
 
     def compute_dQtrafo3w_hv_ds_matrix(
         self,
@@ -2000,11 +2149,176 @@ class JacobianSensitivities:
         sensitivity : float
             ∂Q_HV / ∂(shunt state) [Mvar per state step].
         """
-        # Negate to account for load-convention sign of shunt.q_mvar
+        # Negate to account for load-convention sign of shunt.q_mvar.
+        # Shunts are constant-susceptance: Q_shunt = B * V².
+        V_pu = self.net.res_bus.at[shunt_bus_idx, 'vm_pu']
         return (
             -self.compute_dQtrafo3w_hv_dQ_der(trafo3w_idx, shunt_bus_idx)
             * q_step_mvar
+            * V_pu ** 2
         )
+
+    def compute_dQtrafo3w_hv_dVgen(
+        self,
+        trafo3w_idx: int,
+        gen_bus_ppc: int,
+        observation_bus_indices_for_gen: Optional[List[int]] = None,
+    ) -> float:
+        """
+        Compute HV-side Q sensitivity of a 3W transformer to a PV
+        generator voltage setpoint change.
+
+        Uses the chain rule:
+
+            ∂Q_HV/∂V_gen = ∂Q_HV/∂V_hv · ∂V_hv/∂V_gen
+                          + ∂Q_HV/∂V_star · ∂V_star/∂V_gen
+
+        where ``∂Q_HV/∂V_hv`` and ``∂Q_HV/∂V_star`` are the branch-
+        level partial derivatives (same as in ``compute_dQtrafo3w_hv_dQ_der``)
+        and ``∂V_bus/∂V_gen`` comes from ``compute_dV_dVgen``.
+
+        Parameters
+        ----------
+        trafo3w_idx : int
+            ``net.trafo3w`` index.
+        gen_bus_ppc : int
+            Pypower (ppc) bus index of the PV generator bus.
+
+        Returns
+        -------
+        sensitivity : float
+            ∂Q_HV / ∂V_gen [Mvar / p.u.].
+        """
+        d = _get_trafo3w_hv_branch_data(self.net, trafo3w_idx)
+
+        U_i = d['U_hv']
+        U_j = d['U_aux']
+        theta_i = d['theta_hv']
+        theta_j = d['theta_aux']
+        tau = d['tau']
+        g_val = d['g']
+        b_val = d['b']
+
+        # ∂Q_HV/∂V_hv and ∂Q_HV/∂V_star (identical to compute_dQtrafo3w_hv_dQ_der)
+        dQ_dV_hv = (
+            b_val * (-2.0 * U_i / tau**2
+                     + U_j * np.cos(theta_i - theta_j) / tau)
+            - g_val * U_j * np.sin(theta_i - theta_j) / tau
+        )
+        dQ_dV_star = (
+            b_val * U_i * np.cos(theta_i - theta_j) / tau
+            - g_val * U_i * np.sin(theta_i - theta_j) / tau
+        )
+
+        # ∂V/∂V_gen at hv_bus and aux_bus
+        hv_bus_pp = int(self.net.trafo3w.at[trafo3w_idx, 'hv_bus'])
+        # The aux bus is internal to pandapower (not in net.bus), so we
+        # need to use the ppc bus index directly and extract from dx/dVk.
+        # Re-use the full dV_dVgen computation and request both buses.
+        #
+        # For the HV bus: use compute_dV_dVgen with [hv_bus_pp]
+        # For the aux bus: extract from the state vector directly
+        v_hv_jac = d['v_hv_jac']
+        v_aux_jac = d['v_aux_jac']
+
+        # Run full sensitivity computation for this generator
+        bus_data = self.net._ppc['bus']
+        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
+        n_bus = bus_data.shape[0]
+        V_complex = bus_data[:, 7] * np.exp(1j * np.deg2rad(bus_data[:, 8]))
+
+        k = gen_bus_ppc
+        V_k = V_complex[k]
+        Vm = np.abs(V_complex)
+        theta = np.angle(V_complex)
+        G = np.real(Ybus)
+        B = np.imag(Ybus)
+
+        dP_dVk = np.zeros(n_bus)
+        dQ_dVk = np.zeros(n_bus)
+        for i in range(n_bus):
+            cos_ik = np.cos(theta[i] - theta[k])
+            sin_ik = np.sin(theta[i] - theta[k])
+            if i == k:
+                dP_dVk[i] = 2 * Vm[k] * G[k, k]
+                dQ_dVk[i] = -2 * Vm[k] * B[k, k]
+                for j_bus in range(n_bus):
+                    if j_bus != k:
+                        cos_kj = np.cos(theta[k] - theta[j_bus])
+                        sin_kj = np.sin(theta[k] - theta[j_bus])
+                        dP_dVk[i] += Vm[j_bus] * (G[k, j_bus] * cos_kj + B[k, j_bus] * sin_kj)
+                        dQ_dVk[i] += Vm[j_bus] * (G[k, j_bus] * sin_kj - B[k, j_bus] * cos_kj)
+            else:
+                dP_dVk[i] = Vm[i] * (G[i, k] * cos_ik + B[i, k] * sin_ik)
+                dQ_dVk[i] = Vm[i] * (G[i, k] * sin_ik - B[i, k] * cos_ik)
+
+        pv_list = list(self.pv_buses)
+        pq_list = list(self.pq_buses)
+        dg_dVk = np.zeros(self.x_size)
+        for idx_pv, bus_pv in enumerate(pv_list):
+            dg_dVk[idx_pv] = dP_dVk[bus_pv]
+        n_pv = len(pv_list)
+        for idx_pq, bus_pq in enumerate(pq_list):
+            dg_dVk[n_pv + idx_pq] = dP_dVk[bus_pq]
+            dg_dVk[self.n_theta + idx_pq] = dQ_dVk[bus_pq]
+
+        dx_dVk = -self.J_inv @ dg_dVk
+        dV_full = dx_dVk[self.n_theta:]   # V_PQ part
+
+        sensitivity = 0.0
+
+        if v_hv_jac is not None and v_hv_jac < len(dV_full):
+            dV_hv_dVgen = dV_full[v_hv_jac]
+            sensitivity += dQ_dV_hv * dV_hv_dVgen
+        else:
+            # HV bus is a PV bus (generator bus itself) — dV/dVgen = 1
+            # if it IS the generator, else check if slack
+            if d['hv_bus_ppc'] == gen_bus_ppc:
+                sensitivity += dQ_dV_hv * 1.0
+
+        if v_aux_jac is not None and v_aux_jac < len(dV_full):
+            dV_star_dVgen = dV_full[v_aux_jac]
+            sensitivity += dQ_dV_star * dV_star_dVgen
+
+        return sensitivity
+
+    def compute_dQtrafo3w_hv_dVgen_matrix(
+        self,
+        trafo3w_indices: List[int],
+        gen_bus_indices_pp: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """
+        Compute HV-side Q sensitivity matrix for multiple 3W transformers
+        with respect to multiple PV generator voltage setpoints.
+
+        Parameters
+        ----------
+        trafo3w_indices : List[int]
+            ``net.trafo3w`` indices for measurement transformers.
+        gen_bus_indices_pp : List[int]
+            Pandapower bus indices of PV generator buses.
+
+        Returns
+        -------
+        sensitivity_matrix : NDArray[np.float64]
+            Shape ``(n_trafo3w, n_gen)`` [Mvar / p.u.].
+        trafo3w_mapping : List[int]
+        gen_bus_mapping : List[int]
+        """
+        n_t3w = len(trafo3w_indices)
+        n_gen = len(gen_bus_indices_pp)
+        if n_t3w == 0 or n_gen == 0:
+            return np.zeros((n_t3w, n_gen)), [], []
+
+        matrix = np.zeros((n_t3w, n_gen))
+        for j, gen_bus_pp in enumerate(gen_bus_indices_pp):
+            gen_bus_ppc = pp_bus_to_ppc_bus(self.net, gen_bus_pp)
+            for i, t3w_idx in enumerate(trafo3w_indices):
+                matrix[i, j] = self.compute_dQtrafo3w_hv_dVgen(
+                    t3w_idx, gen_bus_ppc,
+                )
+
+        return matrix, list(trafo3w_indices), list(gen_bus_indices_pp)
 
     # =========================================================================
     # Combined Sensitivity Matrix Construction
@@ -2080,6 +2394,7 @@ class JacobianSensitivities:
             * ``'obs_buses'``: observation bus indices (V outputs)
             * ``'lines'``: line indices (I outputs)
             * ``'input_types'``: list of ``'continuous'`` / ``'integer'``
+            * ``'shunt_cached_v_pu'``: cached V_pu at shunt buses (for updater)
 
         Raises
         ------
@@ -2111,7 +2426,7 @@ class JacobianSensitivities:
 
         # --- 2W trafo Q rows ---
         if trafo_indices:
-            dQtr2w_dQder, trafo_map, _ = self.compute_dQtrafo_dQ_der_matrix(
+            dQtr2w_dQder, trafo_map, _ = self.compute_dQtrafo_dQder_2w_matrix(
                 trafo_indices, der_bus_indices
             )
         else:
@@ -2161,7 +2476,7 @@ class JacobianSensitivities:
 
         for oltc_idx in oltc_trafo_indices:
             try:
-                dV_col, _ = self.compute_dV_ds(
+                dV_col, _ = self.compute_dV_ds_2w(
                     trafo_idx=oltc_idx,
                     observation_bus_indices=observation_bus_indices,
                 )
@@ -2169,7 +2484,7 @@ class JacobianSensitivities:
                 dQtr2w_col = np.zeros(n_trafo2w_out)
                 for i, mt in enumerate(trafo_map):
                     try:
-                        dQtr2w_col[i] = self.compute_dQtrafo_ds(
+                        dQtr2w_col[i] = self.compute_dQtrafo_2w_ds(
                             meas_trafo_idx=mt, chg_trafo_idx=oltc_idx
                         )
                     except ValueError:
@@ -2180,7 +2495,13 @@ class JacobianSensitivities:
                 # Jacobian, which is negligible for separated TSO/DSO).
                 dQtr3w_col = np.zeros(n_trafo3w_out)
                 # Branch current (TODO: implement dI/ds)
+                #dI_col = np.zeros(n_line_out)
                 dI_col = np.zeros(n_line_out)
+                for i_line, line_idx in enumerate(line_indices):
+                    try:
+                        dI_col[i_line] = self.compute_dI_ds_2w(line_idx, oltc_idx)
+                    except ValueError:
+                        dI_col[i_line] = 0.0
 
                 dV_ds2w_list.append(dV_col)
                 dQtr2w_ds2w_list.append(dQtr2w_col)
@@ -2216,8 +2537,13 @@ class JacobianSensitivities:
                         )
                     except ValueError:
                         dQtr3w_col[i] = 0.0
-                # Branch current (TODO: implement dI/ds)
+                # Branch current w.r.t. 3W OLTC tap
                 dI_col = np.zeros(n_line_out)
+                for i_line, line_idx in enumerate(line_indices):
+                    try:
+                        dI_col[i_line] = self.compute_dI_ds_3w(line_idx, oltc3w_idx)
+                    except ValueError:
+                        dI_col[i_line] = 0.0
 
                 dV_ds3w_list.append(dV_col)
                 dQtr2w_ds3w_list.append(dQtr2w_col)
@@ -2245,13 +2571,15 @@ class JacobianSensitivities:
                     q_step_mvar=q_step,
                 )
                 # 2W trafo Q w.r.t. shunt
+                # Shunts are constant-susceptance: Q_shunt = B * V².
+                V_pu_shunt = self.net.res_bus.at[shunt_bus, 'vm_pu']
                 dQtr2w_col = np.zeros(n_trafo2w_out)
                 for i, mt in enumerate(trafo_map):
                     try:
                         # Negate for shunt load-convention sign
-                        dQtr2w_col[i] = -self.compute_dQtrafo_dQ_der(
+                        dQtr2w_col[i] = -self.compute_dQtrafo_dQder_2w(
                             trafo_idx=mt, der_bus_idx=shunt_bus
-                        ) * q_step
+                        ) * q_step * V_pu_shunt ** 2
                     except ValueError:
                         dQtr2w_col[i] = 0.0
                 # 3W trafo Q_HV w.r.t. shunt
@@ -2337,6 +2665,18 @@ class JacobianSensitivities:
             H[row_v:row_v + n_bus_out, c] = dV
             H[row_i:row_i + n_line_out, c] = dI
 
+        # --- Off-diagonal scaling of dQtr3w_ds submatrix ---
+        # The cross-transformer coupling terms (off-diagonal) are attenuated by
+        # a tunable factor to account for modelling uncertainty.
+        # Only applied when the block is square (nmeas == nchg == ntrafo3w).
+        # _OFFDIAG_SCALE_DQTR3W_DS: float = 0.1  # Tuning parameter
+        #
+        # if n_oltc3w > 0 and n_trafo3w_out == n_oltc3w:
+        #     block = H[row_q3w: row_q3w + n_trafo3w_out, col_oltc3w: col_oltc3w + n_oltc3w]
+        #     H[row_q3w: row_q3w + n_trafo3w_out, col_oltc3w: col_oltc3w + n_oltc3w] = (
+        #         _apply_offdiagonal_scaling(block, _OFFDIAG_SCALE_DQTR3W_DS)
+        #     )
+
         # --- Shunt columns ---
         for j, (dQtr2w, dQtr3w, dV, dI) in enumerate(zip(
             dQtr2w_dshunt_list, dQtr3w_dshunt_list,
@@ -2356,6 +2696,11 @@ class JacobianSensitivities:
             + ['integer'] * n_shunt_actual
         )
 
+        # Cached voltages at shunt buses for SensitivityUpdater V² rescaling
+        shunt_cached_v_pu = np.array([
+            self.net.res_bus.at[bus, 'vm_pu'] for bus in shunt_map
+        ]) if shunt_map else np.array([])
+
         mappings = {
             'der_buses': der_bus_indices,
             'oltc_trafos': oltc2w_map,
@@ -2366,6 +2711,7 @@ class JacobianSensitivities:
             'obs_buses': obs_bus_map,
             'lines': line_map,
             'input_types': input_types,
+            'shunt_cached_v_pu': shunt_cached_v_pu,
         }
 
         return H, mappings

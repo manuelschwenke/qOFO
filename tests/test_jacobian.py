@@ -587,7 +587,7 @@ class TestComputeDVDs:
         sens = JacobianSensitivities(simple_network)
 
         try:
-            dV_ds, obs_map = sens.compute_dV_ds(
+            dV_ds, obs_map = sens.compute_dV_ds_2w(
                 trafo_idx=0,
                 observation_bus_indices=[1, 2, 3],
             )
@@ -608,7 +608,7 @@ class TestComputeDVDs:
 
         try:
             # Get analytical sensitivity for LV bus (bus 1)
-            dV_ds, obs_map = sens.compute_dV_ds(
+            dV_ds, obs_map = sens.compute_dV_ds_2w(
                 trafo_idx=0,
                 observation_bus_indices=[1],
             )
@@ -638,7 +638,7 @@ class TestComputeDVDs:
         sens = JacobianSensitivities(simple_network)
 
         with pytest.raises(ValueError, match="not found"):
-            sens.compute_dV_ds(
+            sens.compute_dV_ds_2w(
                 trafo_idx=999,
                 observation_bus_indices=[1],
             )
@@ -648,7 +648,7 @@ class TestComputeDVDs:
         sens = JacobianSensitivities(multi_trafo_network)
 
         try:
-            dV_ds_mat, obs_map, trafo_map = sens.compute_dV_ds_matrix(
+            dV_ds_mat, obs_map, trafo_map = sens.compute_dV_ds_2w_matrix(
                 trafo_indices=[0, 1],
                 observation_bus_indices=[1, 2],
             )
@@ -674,7 +674,7 @@ class TestComputeDQtrafoDQDer:
 
         try:
             # Get analytical sensitivity
-            analytical = sens.compute_dQtrafo_dQ_der(trafo_idx=0, der_bus_idx=3)
+            analytical = sens.compute_dQtrafo_dQder_2w(trafo_idx=0, der_bus_idx=3)
 
             # Get numerical sensitivity
             numerical = numerical_dQtrafo_dQ_der(
@@ -702,7 +702,7 @@ class TestComputeDQtrafoDQDer:
         sens = JacobianSensitivities(simple_network)
 
         try:
-            dQ_dQ, trafo_map, der_map = sens.compute_dQtrafo_dQ_der_matrix(
+            dQ_dQ, trafo_map, der_map = sens.compute_dQtrafo_dQder_2w_matrix(
                 trafo_indices=[0],
                 der_bus_indices=[3],
             )
@@ -716,7 +716,7 @@ class TestComputeDQtrafoDQDer:
         sens = JacobianSensitivities(simple_network)
 
         with pytest.raises(ValueError, match="not found"):
-            sens.compute_dQtrafo_dQ_der(trafo_idx=999, der_bus_idx=3)
+            sens.compute_dQtrafo_dQder_2w(trafo_idx=999, der_bus_idx=3)
 
 
 class TestComputeDQtrafoDs:
@@ -732,7 +732,7 @@ class TestComputeDQtrafoDs:
 
         try:
             # Sensitivity of trafo 0 Q to trafo 0 tap
-            sensitivity = sens.compute_dQtrafo_ds(
+            sensitivity = sens.compute_dQtrafo_2w_ds(
                 meas_trafo_idx=0,
                 chg_trafo_idx=0,
             )
@@ -754,7 +754,7 @@ class TestComputeDQtrafoDs:
 
         try:
             # Sensitivity of trafo 0 Q to trafo 1 tap (cross-sensitivity)
-            sensitivity = sens.compute_dQtrafo_ds(
+            sensitivity = sens.compute_dQtrafo_2w_ds(
                 meas_trafo_idx=0,
                 chg_trafo_idx=1,
             )
@@ -775,7 +775,7 @@ class TestComputeDQtrafoDs:
         sens = JacobianSensitivities(multi_trafo_network)
 
         try:
-            dQ_ds, trafo_map = sens.compute_dQtrafo_ds_matrix(trafo_indices=[0, 1])
+            dQ_ds, trafo_map = sens.compute_dQtrafo_ds_2w_matrix(trafo_indices=[0, 1])
 
             # Should be square matrix
             assert dQ_ds.shape == (len(trafo_map), len(trafo_map))

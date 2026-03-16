@@ -32,7 +32,7 @@ class TestActuatorBounds:
         assert bounds.n_shunts == 2
     
     def test_der_q_bounds_full_power(self):
-        """Test DER Q bounds at full active power output."""
+        """Test DER Q bounds at full active power output (VDE-AR-N 4120 v2)."""
         bounds = ActuatorBounds(
             der_indices=np.array([0], dtype=np.int64),
             der_s_rated_mva=np.array([100.0], dtype=np.float64),
@@ -43,15 +43,14 @@ class TestActuatorBounds:
             shunt_indices=np.array([], dtype=np.int64),
             shunt_q_mvar=np.array([], dtype=np.float64),
         )
-        
-        # At full power (P = P_max), Q capability should be ±0.33 * S_rated
+
+        # VDE-AR-N 4120 v2: at P/Sn >= 0.2, Q in [-0.33, +0.41] * S_rated
         q_min, q_max = bounds.compute_der_q_bounds(
             der_p_current_mw=np.array([100.0], dtype=np.float64)
         )
-        
-        expected_q = 0.33 * 100.0  # 33 Mvar
-        assert np.isclose(q_max[0], expected_q, rtol=0.01)
-        assert np.isclose(q_min[0], -expected_q, rtol=0.01)
+
+        assert np.isclose(q_max[0], 0.41 * 100.0, rtol=0.01)   # +41 Mvar
+        assert np.isclose(q_min[0], -0.33 * 100.0, rtol=0.01)   # -33 Mvar
     
     def test_der_q_bounds_zero_power(self):
         """Test DER Q bounds at zero active power output."""
@@ -75,7 +74,7 @@ class TestActuatorBounds:
         assert np.isclose(q_min[0], 0.0, atol=0.01)
     
     def test_der_q_bounds_partial_power(self):
-        """Test DER Q bounds at partial active power output."""
+        """Test DER Q bounds at partial active power output (VDE-AR-N 4120 v2)."""
         bounds = ActuatorBounds(
             der_indices=np.array([0], dtype=np.int64),
             der_s_rated_mva=np.array([100.0], dtype=np.float64),
@@ -86,15 +85,58 @@ class TestActuatorBounds:
             shunt_indices=np.array([], dtype=np.int64),
             shunt_q_mvar=np.array([], dtype=np.float64),
         )
-        
-        # At P = 0.5 * P_max (above threshold), full Q capability
+
+        # At P = 50 MW (P/Sn = 0.5 >= 0.2), full VDE v2 capability
         q_min, q_max = bounds.compute_der_q_bounds(
             der_p_current_mw=np.array([50.0], dtype=np.float64)
         )
-        
-        expected_q = 0.33 * 100.0  # 33 Mvar
-        assert np.isclose(q_max[0], expected_q, rtol=0.01)
-        assert np.isclose(q_min[0], -expected_q, rtol=0.01)
+
+        assert np.isclose(q_max[0], 0.41 * 100.0, rtol=0.01)   # +41 Mvar
+        assert np.isclose(q_min[0], -0.33 * 100.0, rtol=0.01)   # -33 Mvar
+
+    def test_der_q_bounds_transition_region(self):
+        """Test DER Q bounds in the 0.1-0.2 transition region (VDE-AR-N 4120 v2)."""
+        bounds = ActuatorBounds(
+            der_indices=np.array([0], dtype=np.int64),
+            der_s_rated_mva=np.array([100.0], dtype=np.float64),
+            der_p_max_mw=np.array([100.0], dtype=np.float64),
+            oltc_indices=np.array([], dtype=np.int64),
+            oltc_tap_min=np.array([], dtype=np.int64),
+            oltc_tap_max=np.array([], dtype=np.int64),
+            shunt_indices=np.array([], dtype=np.int64),
+            shunt_q_mvar=np.array([], dtype=np.float64),
+        )
+
+        # At P/Sn = 0.15 (midpoint of transition): linear interpolation
+        # Q_min = (-0.10 + 0.5 * (-0.33 - (-0.10))) * 100 = -21.5
+        # Q_max = ( 0.10 + 0.5 * ( 0.41 -   0.10)) * 100 = +25.5
+        q_min, q_max = bounds.compute_der_q_bounds(
+            der_p_current_mw=np.array([15.0], dtype=np.float64)
+        )
+
+        assert np.isclose(q_min[0], -21.5, atol=0.01)
+        assert np.isclose(q_max[0],  25.5, atol=0.01)
+
+    def test_der_q_bounds_dead_zone(self):
+        """Test DER Q bounds below P/Sn = 0.1 (VDE-AR-N 4120 v2 dead zone)."""
+        bounds = ActuatorBounds(
+            der_indices=np.array([0], dtype=np.int64),
+            der_s_rated_mva=np.array([100.0], dtype=np.float64),
+            der_p_max_mw=np.array([100.0], dtype=np.float64),
+            oltc_indices=np.array([], dtype=np.int64),
+            oltc_tap_min=np.array([], dtype=np.int64),
+            oltc_tap_max=np.array([], dtype=np.int64),
+            shunt_indices=np.array([], dtype=np.int64),
+            shunt_q_mvar=np.array([], dtype=np.float64),
+        )
+
+        # At P/Sn = 0.05 (below 0.1 threshold): no Q capability
+        q_min, q_max = bounds.compute_der_q_bounds(
+            der_p_current_mw=np.array([5.0], dtype=np.float64)
+        )
+
+        assert np.isclose(q_min[0], 0.0, atol=0.01)
+        assert np.isclose(q_max[0], 0.0, atol=0.01)
     
     def test_oltc_tap_bounds(self):
         """Test OLTC tap position bounds."""

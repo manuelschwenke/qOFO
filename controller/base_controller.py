@@ -25,7 +25,7 @@ Date: 2025-02-06
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Union
 import numpy as np
 from numpy.typing import NDArray
 
@@ -54,43 +54,55 @@ class OFOParameters:
     alpha : float
         Step size (gain) for the OFO update. Must be positive.
         Larger values lead to faster but potentially less stable convergence.
-    g_w : float
+    g_w : float or NDArray[np.float64]
         Weight for control variable changes (w^T G_w w term).
         Penalises large changes in setpoints per iteration.
-    g_u : float
+        Either a scalar (uniform for all variables), a 1-D array of
+        length n_total with per-variable diagonal weights, or a 2-D
+        symmetric (n_total x n_total) matrix for coupled weights
+        (e.g. OLTC cross-penalties).
+    g_u : float or NDArray[np.float64]
         Weight for control variable usage (regularisation).
         Penalises deviation from zero/neutral setpoints.
-    g_z : float
+        Either a scalar (uniform for all variables) or an array of
+        length n_total with per-variable weights.  Set to 0 for
+        actuators that should not be regularised (e.g. OLTC, shunt).
+    g_z : float or NDArray[np.float64]
         Weight for slack variables (soft constraint violations).
         Higher values enforce output constraints more strictly.
-    g_s : float
-        Weight for discrete variable changes (OLTC taps, shunt switching).
-        Penalises frequent switching of discrete actuators.
+        Either a scalar (uniform for all outputs) or a 1-D array
+        of length n_outputs with per-output weights.  Use lower
+        values for outputs that cannot be tightly controlled
+        (e.g. branch currents in a reactive-power controller).
     max_iter_per_step : int
         Maximum MIQP solver iterations per OFO step.
     solver_verbose : bool
         Whether to print solver output for debugging.
     """
     alpha: float
-    g_w: float
-    g_z: float
-    g_s: float
-    g_u: float = 0.0
+    g_w: Union[float, NDArray[np.float64]]
+    g_z: Union[float, NDArray[np.float64]]
+    g_u: Union[float, NDArray[np.float64]] = 0.0
     max_iter_per_step: int = 100
     solver_verbose: bool = False
-    
+
     def __post_init__(self) -> None:
         """Validate parameters after initialisation."""
         if self.alpha <= 0:
             raise ValueError(f"alpha must be positive, got {self.alpha}")
-        if self.g_w < 0:
-            raise ValueError(f"g_w must be non-negative, got {self.g_w}")
-        if self.g_u < 0:
+        g_w_arr = np.asarray(self.g_w)
+        if g_w_arr.ndim <= 1 and np.any(g_w_arr < 0):
+            raise ValueError(f"g_w diagonal must be non-negative, got {self.g_w}")
+        if g_w_arr.ndim == 2 and g_w_arr.shape[0] != g_w_arr.shape[1]:
+            raise ValueError(
+                f"g_w matrix must be square, got shape {g_w_arr.shape}"
+            )
+        g_u_arr = np.asarray(self.g_u)
+        if np.any(g_u_arr < 0):
             raise ValueError(f"g_u must be non-negative, got {self.g_u}")
-        if self.g_z < 0:
+        g_z_arr = np.asarray(self.g_z)
+        if np.any(g_z_arr < 0):
             raise ValueError(f"g_z must be non-negative, got {self.g_z}")
-        if self.g_s < 0:
-            raise ValueError(f"g_s must be non-negative, got {self.g_s}")
 
 
 @dataclass
@@ -232,7 +244,7 @@ class BaseOFOController(ABC):
         self.solver = MIQPSolver(
             verbose=params.solver_verbose,
             time_limit_s=60.0,
-            mip_gap=1e-4,
+            mip_gap=1e-6,
         )
         
         # Initialise iteration counter
@@ -288,14 +300,22 @@ class BaseOFOController(ABC):
         """
         # Extract initial control values from measurement
         u_init = self._extract_control_values(measurement)
-        
+
         # Set internal state
         self._u_current = u_init.copy()
         self.iteration = measurement.iteration
-        
+
         # Set dimensions (to be defined by subclass in _get_control_structure)
         self._n_continuous, self._n_integer, self._integer_indices = \
             self._get_control_structure()
+
+        # Integer switching cooldown: after an integer variable switches,
+        # lock it for _int_cooldown iterations to prevent chattering.
+        # Large discrete steps (e.g. 50 Mvar shunts) need enough time for
+        # the continuous DERs to absorb the transient before the next
+        # switching decision is made.
+        self._int_cooldown = 3  # number of iterations to lock after switching
+        self._int_lock_until: dict[int, int] = {}   # idx -> iteration when lock expires
     
     def step(self, measurement: Measurement) -> ControllerOutput:
         """
@@ -338,7 +358,19 @@ class BaseOFOController(ABC):
         
         # Step 3: Compute input bounds (operating-point-dependent)
         u_lower, u_upper = self._compute_input_bounds(der_p_current)
-        
+
+        # Step 3b: Integer variables may change by at most ±1 per iteration.
+        # This prevents multi-step jumps (e.g. OLTC jumping 5 taps at once).
+        for idx in self._integer_indices:
+            u_lower[idx] = max(u_lower[idx], self._u_current[idx] - 1)
+            u_upper[idx] = min(u_upper[idx], self._u_current[idx] + 1)
+
+        # Step 3c: Enforce integer cooldown — lock recently-switched integers
+        for idx in self._integer_indices:
+            if idx in self._int_lock_until and self.iteration < self._int_lock_until[idx]:
+                u_lower[idx] = self._u_current[idx]
+                u_upper[idx] = self._u_current[idx]
+
         # Step 4: Get output bounds
         y_lower, y_upper = self._get_output_limits()
         
@@ -362,18 +394,18 @@ class BaseOFOController(ABC):
             g_w=self.params.g_w,
             g_u=self.params.g_u,
             g_z=self.params.g_z,
-            g_s=self.params.g_s,
             integer_indices=self._integer_indices,
         )
         
         result = self.solver.solve(problem)
-        
+
         if not result.is_feasible:
             raise RuntimeError(
                 f"MIQP solver failed at iteration {self.iteration}: "
                 f"{result.status}"
             )
-        
+
+
         # Step 8: Compute full sigma (combining continuous and integer)
         sigma = np.zeros(self.n_controls)
         
@@ -387,24 +419,38 @@ class BaseOFOController(ABC):
             sigma[ci] = result.w_continuous[i]
         for i, ii in enumerate(self._integer_indices):
             sigma[ii] = float(result.w_integer[i])
-        
-        # Step 9: Apply OFO update: u^{k+1} = u^k + α · σ^k
-        u_new = self._u_current + self.params.alpha * sigma
-        
-        # Clip to bounds (safety check)
-        #u_new = np.clip(u_new, u_lower, u_upper)
-        
+
+        # Step 9: Apply OFO update
+        #   Continuous: u^{k+1} = u^k + α · σ^k   (gradient micro-step)
+        #   Integer:    u^{k+1} = u^k + σ^k        (direct state change)
+        u_new = self._u_current.copy()
+        for i in range(self.n_controls):
+            if i in self._integer_indices:
+                u_new[i] += sigma[i]                     # direct
+            else:
+                u_new[i] += self.params.alpha * sigma[i]  # scaled
+
         # Round integer variables
         for idx in self._integer_indices:
             u_new[idx] = np.round(u_new[idx])
-        
+
         # Step 10: Predict new outputs
-        y_predicted = y_current + self.params.alpha * (H @ sigma)
+        #   Δy ≈ α · H_c · σ_c  +  H_i · σ_i
+        y_predicted = y_current.copy()
+        for i in range(self.n_controls):
+            if i in self._integer_indices:
+                y_predicted += H[:, i] * sigma[i]
+            else:
+                y_predicted += self.params.alpha * H[:, i] * sigma[i]
         
-        # Step 11: Update internal state
+        # Step 11: Update internal state and set cooldown for switched integers
+        for idx in self._integer_indices:
+            if u_new[idx] != self._u_current[idx]:
+                self._int_lock_until[idx] = self.iteration + 1 + self._int_cooldown
+
         self._u_current = u_new.copy()
         self.iteration += 1
-        
+
         # Step 12: Extract continuous and integer parts
         u_continuous = np.array([
             u_new[i] for i in range(self.n_controls) 

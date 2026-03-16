@@ -151,12 +151,15 @@ def _make_dso_measurement(
         ),
         der_indices=np.array(der_indices, dtype=np.int64),
         der_q_mvar=np.full(len(der_indices), 5.0),
+        der_p_mw=np.full(len(der_indices), 80.0),
         oltc_indices=np.array(oltc_trafo_indices, dtype=np.int64),
         oltc_tap_positions=np.zeros(
             len(oltc_trafo_indices), dtype=np.int64
         ),
         shunt_indices=np.array(shunt_bus_indices, dtype=np.int64),
         shunt_states=np.zeros(len(shunt_bus_indices), dtype=np.int64),
+        gen_indices=np.array([], dtype=np.int64),
+        gen_vm_pu=np.array([], dtype=np.float64),
     )
 
 
@@ -1147,3 +1150,142 @@ class TestBaseOFOControllerViaSubclass:
                 actuator_bounds=_make_actuator_bounds(0, 0, 0),
                 sensitivities=_make_mock_sensitivities(0, 0),
             )
+
+
+# =============================================================================
+# Tests for Achieved-Value Tracking (AVT) Reset
+# =============================================================================
+
+
+class TestTSOAvtReset:
+    """Tests for the Achieved-Value Tracking reset on PCC-Q components."""
+
+    def _make_controller(self, k_t_avt: float = 1.0):
+        """Create a TSO controller with configurable AVT factor."""
+        der_buses = [2, 3]
+        pcc_trafos = [0]
+        dso_ids = ["dso_1"]
+        oltc_trafos = [1]
+        shunt_buses = [4]
+        voltage_buses = [0, 1, 2]
+        current_lines = [0]
+
+        n_der = len(der_buses)
+        n_pcc = len(pcc_trafos)
+        n_oltc = len(oltc_trafos)
+        n_shunt = len(shunt_buses)
+        n_outputs_phys = n_pcc + len(voltage_buses) + len(current_lines)
+
+        config = TSOControllerConfig(
+            der_indices=der_buses,
+            pcc_trafo_indices=pcc_trafos,
+            pcc_dso_controller_ids=dso_ids,
+            oltc_trafo_indices=oltc_trafos,
+            shunt_bus_indices=shunt_buses,
+            shunt_q_steps_mvar=[50.0],
+            voltage_bus_indices=voltage_buses,
+            current_line_indices=current_lines,
+            k_t_avt=k_t_avt,
+        )
+
+        params = OFOParameters(alpha=0.03, g_w=0.2, g_z=1000.0, g_u=0.01)
+        controller = TSOController(
+            controller_id="tso_avt_test",
+            params=params,
+            config=config,
+            network_state=_make_network_state(),
+            actuator_bounds=_make_actuator_bounds(n_der, n_oltc, n_shunt),
+            sensitivities=_make_mock_sensitivities(
+                n_outputs=n_outputs_phys,
+                n_der=n_der, n_oltc=n_oltc, n_shunt=n_shunt,
+            ),
+        )
+        return controller
+
+    def _make_measurement(self, interface_q: float = 10.0) -> Measurement:
+        """Create a measurement with configurable interface Q."""
+        return _make_dso_measurement(
+            der_indices=[2, 3],
+            oltc_trafo_indices=[1],
+            shunt_bus_indices=[4],
+            interface_trafo_indices=[0],
+            voltage_bus_indices=[0, 1, 2],
+            current_line_indices=[0],
+        )
+
+    def _make_measurement_with_q(self, q_val: float) -> Measurement:
+        """Create a measurement with a specific interface Q value."""
+        m = self._make_measurement()
+        m.interface_q_hv_side_mvar = np.array([q_val])
+        return m
+
+    def test_avt_full_reset(self) -> None:
+        """K_t=1.0 replaces PCC-Q with measured values; other entries unchanged."""
+        ctrl = self._make_controller(k_t_avt=1.0)
+        meas_init = self._make_measurement()
+        ctrl.initialise(meas_init)
+
+        # Manually drift _u_current PCC-Q to 50.0 (simulating windup)
+        n_der = len(ctrl.config.der_indices)
+        ctrl._u_current[n_der] = 50.0
+        u_before = ctrl._u_current.copy()
+
+        # Measurement reports Q_ach = 30.0
+        meas_reset = self._make_measurement_with_q(30.0)
+        ctrl.apply_avt_reset(meas_reset)
+
+        # PCC-Q should be fully reset to 30.0
+        assert_allclose(ctrl._u_current[n_der], 30.0)
+        # All other entries unchanged
+        assert_allclose(ctrl._u_current[:n_der], u_before[:n_der])
+        assert_allclose(ctrl._u_current[n_der + 1:], u_before[n_der + 1:])
+
+    def test_avt_partial_reset(self) -> None:
+        """K_t=0.5 produces a 50/50 blend."""
+        ctrl = self._make_controller(k_t_avt=0.5)
+        meas_init = self._make_measurement()
+        ctrl.initialise(meas_init)
+
+        n_der = len(ctrl.config.der_indices)
+        ctrl._u_current[n_der] = 50.0
+
+        meas_reset = self._make_measurement_with_q(30.0)
+        ctrl.apply_avt_reset(meas_reset)
+
+        # Expected: 0.5 * 50.0 + 0.5 * 30.0 = 40.0
+        assert_allclose(ctrl._u_current[n_der], 40.0)
+
+    def test_avt_disabled_when_kt_zero(self) -> None:
+        """K_t=0.0 leaves _u_current unchanged."""
+        ctrl = self._make_controller(k_t_avt=0.0)
+        meas_init = self._make_measurement()
+        ctrl.initialise(meas_init)
+
+        n_der = len(ctrl.config.der_indices)
+        ctrl._u_current[n_der] = 50.0
+        u_before = ctrl._u_current.copy()
+
+        meas_reset = self._make_measurement_with_q(30.0)
+        ctrl.apply_avt_reset(meas_reset)
+
+        # Nothing should change
+        assert_allclose(ctrl._u_current, u_before)
+
+    def test_avt_noop_when_uninitialised(self) -> None:
+        """No error when _u_current is None."""
+        ctrl = self._make_controller(k_t_avt=1.0)
+        assert ctrl._u_current is None
+        meas = self._make_measurement()
+        # Should not raise
+        ctrl.apply_avt_reset(meas)
+
+    def test_avt_noop_when_no_pcc(self) -> None:
+        """No error when pcc_trafo_indices is empty."""
+        ctrl = self._make_controller(k_t_avt=1.0)
+        ctrl.config.pcc_trafo_indices = []
+        ctrl.config.pcc_dso_controller_ids = []
+        meas = self._make_measurement()
+        ctrl.initialise(meas)
+        u_before = ctrl._u_current.copy()
+        ctrl.apply_avt_reset(meas)
+        assert_allclose(ctrl._u_current, u_before)

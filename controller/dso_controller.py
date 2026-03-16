@@ -475,11 +475,10 @@ class DSOController(BaseOFOController):
         self,
         measurement: Measurement,
     ) -> NDArray[np.float64]:
-        """Extract DER active power for capability calculation."""
-        # Note: The Measurement class currently does not include DER P values.
-        # For now, we use the installed capacity from actuator_bounds.
-        # In a real implementation, this would come from measurements.
-        return self.actuator_bounds.der_p_max_mw.copy()
+        """Extract DER active power from measurement for capability calculation."""
+        p_current = measurement.der_p_mw.copy()
+
+        return p_current
     
     def _compute_input_bounds(
         self,
@@ -496,9 +495,8 @@ class DSOController(BaseOFOController):
         
         # DER Q bounds (P-dependent)
         q_min, q_max = self.actuator_bounds.compute_der_q_bounds(der_p_current)
-        print(f'q_min: {q_min}, q_max: {q_max}')
-        u_lower[:n_der] = q_min # ToDo: Also loosen here to test controller performance
-        u_upper[:n_der] = q_max # ToDo: Also loosen here to test controller performance
+        u_lower[:n_der] = q_min
+        u_upper[:n_der] = q_max
         
         # OLTC tap bounds (fixed)
         tap_min, tap_max = self.actuator_bounds.get_oltc_tap_bounds()

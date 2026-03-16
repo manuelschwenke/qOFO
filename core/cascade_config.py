@@ -178,6 +178,7 @@ class CascadeConfig:
     gu_tso_q_pcc: float = 0.0
     gu_tso_v_gen: float = 0.0
     gu_tso_oltc: float = 0.0
+    gu_tso_oltc: float = 0.0
     gu_tso_shunt: float = 0.0
 
     gu_dso_q_der: float = 0.0
@@ -215,6 +216,11 @@ class CascadeConfig:
     # ── DSO OLTC initialisation ───────────────────────────────────────────
     dso_oltc_init_tol_pu: float = 0.01
     """Tolerance band for pandapower DiscreteTapControl initialisation."""
+
+    # ── Achieved-Value Tracking ────────────────────────────────────────────
+    k_t_avt: float = 1.0
+    """Achieved-Value Tracking factor for TSO PCC-Q reset.
+    1.0 = full reset to measured Q (recommended), 0.0 = disabled."""
 
     # ── Contingency events ────────────────────────────────────────────────
     contingencies: List = field(default_factory=list)
@@ -387,6 +393,9 @@ class CascadeConfig:
 
         # DSO OLTC init
         d["dso_oltc_init_tol_pu"] = self.dso_oltc_init_tol_pu
+
+        # Achieved-Value Tracking
+        d["k_t_avt"] = self.k_t_avt
 
         # Contingencies
         d["contingencies"] = [

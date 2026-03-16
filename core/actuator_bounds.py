@@ -264,57 +264,59 @@ class ActuatorBounds:
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """
         Compute DER reactive power bounds based on current active power output.
-        
-        The bounds are derived from the capability curve according to
-        VDE-AR-N 4120 for HV-connected DERs. The reactive power range
-        depends on the ratio P/P_installed.
-        
+
+        The bounds are derived from the VDE-AR-N 4120 Variant 2 capability
+        curve for HV-connected DERs.  Both the P normalisation and Q limits
+        use the rated apparent power S_n as reference, matching the standard
+        definition where the diagram axes are P/S_n and Q/S_n.
+
         Parameters
         ----------
         der_p_current_mw : NDArray[np.float64]
             Current active power output of each DER in MW.
-        
+
         Returns
         -------
         q_min_mvar : NDArray[np.float64]
             Minimum reactive power for each DER in Mvar (underexcited/consuming).
         q_max_mvar : NDArray[np.float64]
             Maximum reactive power for each DER in Mvar (overexcited/producing).
-        
+
         Notes
         -----
         Sign convention:
             - Positive Q: overexcited (producing/injecting reactive power)
             - Negative Q: underexcited (consuming/absorbing reactive power)
-        
-        The capability curve is approximated as per VDE-AR-N 4120 Figure 1:
-            - At P/P_inst >= 0.2: Q/P_inst in [-0.33, +0.33]
-            - At P/P_inst < 0.2: Q range reduced proportionally
+
+        VDE-AR-N 4120 Variant 2 breakpoints (in p.u. of S_n):
+            - P/S_n < 0.1:  Q = 0 (dead zone)
+            - P/S_n = 0.1:  Q in [-0.10, +0.10] * S_n
+            - P/S_n = 0.2:  Q in [-0.33, +0.41] * S_n
+            - P/S_n >= 0.2: Q in [-0.33, +0.41] * S_n
         """
         n_der = len(self.der_indices)
         q_min_mvar = np.zeros(n_der)
         q_max_mvar = np.zeros(n_der)
-        
+
         for i in range(n_der):
             p_current = der_p_current_mw[i]
-            p_max = self.der_p_max_mw[i]
             s_rated = self.der_s_rated_mva[i]
-            
-            # Compute P ratio (normalised to installed capacity)
-            if p_max > 0.0:
-                p_ratio = p_current / p_max
+
+            # Normalise P by S_rated (VDE convention: P/S_n)
+            if s_rated > 0.0:
+                p_ratio = abs(p_current) / s_rated
             else:
                 p_ratio = 0.0
-            
-            # Compute Q capability based on VDE-AR-N 4120 curve
+
+            # Compute Q capability based on VDE-AR-N 4120 Variant 2 curve
             q_min, q_max = self._compute_single_der_q_capability(
                 p_ratio=p_ratio,
                 s_rated_mva=s_rated,
             )
-            
+
             q_min_mvar[i] = q_min
             q_max_mvar[i] = q_max
-        
+
         return q_min_mvar, q_max_mvar
     
     def _compute_single_der_q_capability(
@@ -324,44 +326,53 @@ class ActuatorBounds:
     ) -> tuple[float, float]:
         """
         Compute Q capability for a single DER based on its P ratio.
-        
-        This implements a simplified version of the VDE-AR-N 4120 capability
-        curve for HV-connected generation units.
-        
+
+        Implements VDE-AR-N 4120 Variant 2 (Teillastbetrieb) capability
+        curve for HV-connected generation units.  The curve is asymmetric
+        and piecewise-linear with three regions:
+
+        ====== ================ ================
+        P/Sn     Q_min/Sn         Q_max/Sn
+        ====== ================ ================
+        < 0.1    0.0              0.0
+        0.1      -0.10            +0.10
+        0.2      -0.33            +0.41
+        >= 0.2   -0.33            +0.41
+        ====== ================ ================
+
         Parameters
         ----------
         p_ratio : float
             Ratio of current active power to installed capacity (P/P_inst).
         s_rated_mva : float
             Rated apparent power of the DER in MVA.
-        
+
         Returns
         -------
         q_min : float
-            Minimum reactive power in Mvar.
+            Minimum reactive power in Mvar (underexcited/capacitive).
         q_max : float
-            Maximum reactive power in Mvar.
+            Maximum reactive power in Mvar (overexcited/inductive).
         """
-        # VDE-AR-N 4120 specifies Q/P_inst ratio limits
-        # Simplified: constant Q capability factor of 0.33 for P >= 0.2
-        # Below P = 0.2, capability reduces (here: linear reduction)
-        
-        q_capability_factor = 0.33  # Q/P_inst at full capability
-        p_threshold = 0.2  # Below this, capability is reduced
-        
-        if p_ratio >= p_threshold:
-            # Full Q capability available
-            q_factor = q_capability_factor
+        # VDE-AR-N 4120 Variant 2 breakpoints (p.u. of S_rated)
+        #   P:     [0.0,  0.1,  0.2,  1.0]
+        #   Q_min: [0.0, -0.10, -0.33, -0.33]
+        #   Q_max: [0.0, +0.10, +0.41, +0.41]
+
+        if p_ratio < 0.1:
+            # Dead zone: no Q capability below 10 % active power
+            q_min = 0.0
+            q_max = 0.0
+        elif p_ratio < 0.2:
+            # Transition region: linear ramp from (0.1 → 0.2)
+            t = (p_ratio - 0.1) / 0.1  # 0 at P=0.1, 1 at P=0.2
+            q_min = (-0.10 + t * (-0.33 - (-0.10))) * s_rated_mva
+            q_max = ( 0.10 + t * ( 0.41 -   0.10))  * s_rated_mva
         else:
-            # Reduced capability at low active power
-            # Linear interpolation from 0 at P=0 to full at P=0.2
-            q_factor = q_capability_factor * (p_ratio / p_threshold)
-        
-        # Q limits based on rated apparent power
-        # Note: This is a simplification; actual curve is more complex
-        q_max = q_factor * s_rated_mva  # Overexcited limit
-        q_min = -q_factor * s_rated_mva  # Underexcited limit
-        
+            # Full capability: constant above P = 0.2
+            q_min = -0.33 * s_rated_mva
+            q_max =  0.41 * s_rated_mva
+
         return q_min, q_max
     
     def get_oltc_tap_bounds(

@@ -125,6 +125,11 @@ class TSOControllerConfig:
     gen_vm_min_pu: float = 0.95
     gen_vm_max_pu: float = 1.10
 
+    k_t_avt: float = 1.0
+    """Achieved-Value Tracking factor for PCC-Q reset.
+    0.0 = no reset (current behaviour), 1.0 = full reset (recommended).
+    Blends: u_pcc <- (1 - k_t) * u_cmd + k_t * q_measured."""
+
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
         if len(self.pcc_trafo_indices) != len(self.pcc_dso_controller_ids):
@@ -256,6 +261,9 @@ class TSOController(BaseOFOController):
 
         # Cached measurement for capability-curve bounds (set in step())
         self._last_measurement: Optional[Measurement] = None
+
+        # Achieved-Value Tracking verbosity (set from run_cascade)
+        self._avt_verbose: int = 0
 
     # =========================================================================
     # Public interface for cascaded hierarchy communication
@@ -524,13 +532,10 @@ class TSOController(BaseOFOController):
         self,
         measurement: Measurement,
     ) -> NDArray[np.float64]:
-        """
-        Extract DER active power for capability calculation.
+        """Extract DER active power from measurement for capability calculation."""
+        p_current = measurement.der_p_mw.copy()
 
-        Note: The Measurement class currently does not carry DER P values.
-        The installed capacity from ActuatorBounds is used as a proxy.
-        """
-        return self.actuator_bounds.der_p_max_mw.copy()
+        return p_current
 
     def _compute_input_bounds(
         self,
@@ -962,6 +967,48 @@ class TSOController(BaseOFOController):
 
         return H
 
+    def apply_avt_reset(self, measurement: Measurement) -> None:
+        """Replace PCC-Q entries in _u_current with measured achieved values.
+
+        Implements the Achieved-Value Tracking (AVT) anti-windup mechanism.
+        Before each MIQP solve, the PCC-Q components of the internal state
+        are reset toward the physically realised Q at the TSO-DSO interface,
+        controlled by ``config.k_t_avt`` (0 = no reset, 1 = full reset).
+        """
+        if self._u_current is None:
+            return
+        n_pcc = len(self.config.pcc_trafo_indices)
+        if n_pcc == 0:
+            return
+        k_t = self.config.k_t_avt
+        if k_t == 0.0:
+            return
+
+        n_der = len(self.config.der_indices)
+        pcc_slice = slice(n_der, n_der + n_pcc)
+
+        # Extract measured Q at each PCC interface
+        q_measured = np.empty(n_pcc, dtype=np.float64)
+        for i, trafo_idx in enumerate(self.config.pcc_trafo_indices):
+            meas_idx = np.where(
+                measurement.interface_transformer_indices == trafo_idx
+            )[0]
+            if len(meas_idx) == 0:
+                return  # measurement incomplete — skip reset
+            q_measured[i] = measurement.interface_q_hv_side_mvar[meas_idx[0]]
+
+        u_old = self._u_current[pcc_slice].copy()
+        # Blend: (1 - k_t) * u_commanded + k_t * q_measured
+        self._u_current[pcc_slice] = (1.0 - k_t) * u_old + k_t * q_measured
+
+        if self._avt_verbose > 1:
+            delta = self._u_current[pcc_slice] - u_old
+            if np.any(np.abs(delta) > 1e-6):
+                print(f"    [AVT] PCC-Q reset (k_t={k_t}):")
+                for i, t in enumerate(self.config.pcc_trafo_indices):
+                    print(f"      trafo {t}: {u_old[i]:.2f} -> "
+                          f"{self._u_current[n_der + i]:.2f} Mvar")
+
     def step(self, measurement: Measurement) -> ControllerOutput:
         """
         Execute one OFO iteration with voltage-dependent sensitivity updates.
@@ -982,6 +1029,9 @@ class TSOController(BaseOFOController):
             self._H_cache = self._sensitivity_updater.update(
                 measurement, measurement.iteration,
             )
+        # Achieved-Value Tracking: reset PCC-Q to measured values
+        self.apply_avt_reset(measurement)
+
         return super().step(measurement)
 
     def invalidate_sensitivity_cache(self) -> None:

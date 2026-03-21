@@ -56,9 +56,17 @@ class ReserveObserverConfig:
     q_threshold_mvar: float = 15.0
     q_release_mvar: float = 5.0
     shunt_q_steps_mvar: List[float] = field(default_factory=list)
-    cooldown_min: int = 3
+    cooldown_min: int = 15
     """Minimum minutes between consecutive engage/release actions on the
-    same interface.  Prevents overreaction to transient conditions."""
+    same interface.  Ignored when ``cooldown_s`` is set."""
+    cooldown_s: Optional[float] = None
+    """Minimum seconds between consecutive engage/release actions.
+    Overrides ``cooldown_min`` when set."""
+
+    @property
+    def effective_cooldown_s(self) -> float:
+        """Cooldown in seconds (``cooldown_s`` if set, else ``cooldown_min * 60``)."""
+        return self.cooldown_s if self.cooldown_s is not None else self.cooldown_min * 60.0
 
     def __post_init__(self) -> None:
         if self.q_release_mvar >= self.q_threshold_mvar:
@@ -115,9 +123,9 @@ class ReserveObserver:
         self.config = config
         n_interfaces = len(config.shunt_q_steps_mvar)
         self._engaged: List[bool] = [False] * n_interfaces
-        # Per-interface minute of last engage/release action (for cooldown).
+        # Per-interface time of last engage/release action (seconds, for cooldown).
         # Initialised to -∞ so the first action is never blocked.
-        self._last_action_min: List[int] = [-999] * n_interfaces
+        self._last_action_time_s: List[float] = [-1e9] * n_interfaces
 
     def evaluate(
             self,
@@ -125,6 +133,7 @@ class ReserveObserver:
             shunt_states: NDArray[np.int64],
             dQ_dQder: Optional[NDArray[np.float64]] = None,
             minute: int = 0,
+            time_s: Optional[float] = None,
     ) -> ShuntOverride:
         """
         Evaluate per-interface DER Q burden and return shunt overrides.
@@ -145,6 +154,10 @@ class ReserveObserver:
             as it does not respect per-interface sign conventions.
         minute : int, optional
             Current simulation minute (used for cooldown tracking).
+            Ignored when ``time_s`` is provided.
+        time_s : float, optional
+            Current simulation time in seconds.  Overrides ``minute``
+            when provided.
 
         Returns
         -------
@@ -158,6 +171,9 @@ class ReserveObserver:
             If ``dQ_dQder`` is ``None``. The aggregate fallback is
             explicitly unsupported to prevent silently incorrect results.
         """
+        # Resolve time to seconds
+        t_s = time_s if time_s is not None else minute * 60.0
+        cooldown_s = self.config.effective_cooldown_s
         if dQ_dQder is None:
             print('NONE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
             raise ValueError(
@@ -210,14 +226,14 @@ class ReserveObserver:
                 burden = -q_contribution[j]
 
             # Cooldown: skip switching decisions if the last action on this
-            # interface was less than cooldown_min minutes ago.
-            in_cooldown = (minute - self._last_action_min[j]) < self.config.cooldown_min
+            # interface was less than cooldown_s seconds ago.
+            in_cooldown = (t_s - self._last_action_time_s[j]) < cooldown_s
 
             if not self._engaged[j]:
                 # Engage when burden exceeds the threshold
                 if burden > self.config.q_threshold_mvar and not in_cooldown:
                     self._engaged[j] = True
-                    self._last_action_min[j] = minute
+                    self._last_action_time_s[j] = t_s
                     if not currently_on:
                         override.force_engage.append(j)
             else:
@@ -225,7 +241,7 @@ class ReserveObserver:
                 # (hysteresis band prevents chattering)
                 if burden < self.config.q_release_mvar and not in_cooldown:
                     self._engaged[j] = False
-                    self._last_action_min[j] = minute
+                    self._last_action_time_s[j] = t_s
                     if currently_on:
                         override.force_release.append(j)
                 else:

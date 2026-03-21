@@ -537,8 +537,19 @@ class TSOController(BaseOFOController):
 
         return p_current
 
+    def _extract_trafo_reactive_power(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """
+        Extract current trafo ractive power flow for capability calculation.
+        """
+        q_current = measurement.interface_q_hv_side_mvar.copy()
+        return q_current
+
     def _compute_input_bounds(
         self,
+        tso_dso_interface_q_current: NDArray[np.float64],
         der_p_current: NDArray[np.float64],
     ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
         """
@@ -574,8 +585,12 @@ class TSOController(BaseOFOController):
         u_upper[:n_der] = q_max
 
         # --- PCC setpoint bounds (from DSO capability messages) ---
-        u_lower[n_der:n_der + n_pcc] = self.pcc_capability_min_mvar
-        u_upper[n_der:n_der + n_pcc] = self.pcc_capability_max_mvar
+        u_lower[n_der:n_der + n_pcc] = tso_dso_interface_q_current + self.pcc_capability_min_mvar
+        u_upper[n_der:n_der + n_pcc] = tso_dso_interface_q_current + self.pcc_capability_max_mvar
+
+        # DEBUG
+        #print(f'ppc capability min: {u_lower[n_der:n_der + n_pcc]}')
+        #print(f'pcc capability max: {u_upper[n_der:n_der + n_pcc]}')
 
         # --- AVR setpoint bounds ---
         avr_start = n_der + n_pcc

@@ -21,6 +21,10 @@ functions.
 from __future__ import annotations
 
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import warnings
 from datetime import datetime, timedelta
 from typing import List
@@ -45,12 +49,11 @@ from core.profiles import (
     snapshot_base_values,
 )
 from network.build_tuda_net import build_tuda_net
+from run.contingency import _apply_contingency
+from run.helpers import _build_Gw, _network_state, _sgen_at_bus, print_summary
+from run.plant_io import _apply_dso, _apply_tso
+from run.records import A2S, A3S, CascadeResult, ContingencyEvent, IterationRecord
 from sensitivity.jacobian import JacobianSensitivities
-
-from .contingency import _apply_contingency
-from .helpers import _build_Gw, _network_state, _sgen_at_bus
-from .plant_io import _apply_dso, _apply_tso
-from .records import A2S, A3S, CascadeResult, ContingencyEvent, IterationRecord
 
 
 def run_cascade(
@@ -76,9 +79,6 @@ def run_cascade(
     # ── Unpack frequently-used config fields for readability ──────────────
     v_setpoint_pu = config.v_setpoint_pu
     dso_v_setpoint_pu = config.effective_dso_v_setpoint_pu
-    n_minutes = config.n_minutes
-    tso_period_min = config.tso_period_min
-    dso_period_min = config.dso_period_min
     start_time = config.start_time
     profiles_csv = config.profiles_csv
     verbose = config.verbose
@@ -90,7 +90,20 @@ def run_cascade(
     gw_oltc_cross_tso = config.gw_oltc_cross_tso
     gw_oltc_cross_dso = config.gw_oltc_cross_dso
     contingencies = list(config.contingencies) if config.contingencies else []
-    reserve_cooldown_min = config.reserve_cooldown_min
+
+    # ── Timing: work in seconds internally ─────────────────────────────────
+    tso_period_s = config.effective_tso_period_s
+    dso_period_s = config.effective_dso_period_s
+    dt_s = config.effective_sim_step_s          # simulation timestep [s]
+    n_total_s = config.effective_n_seconds       # total duration [s]
+    n_steps = int(n_total_s / dt_s)
+    sub_minute = config.uses_sub_minute_timing
+
+    def _fmt_period(s: float) -> str:
+        """Format a period in seconds to a human-readable string."""
+        if s >= 60.0 and s % 60 == 0:
+            return f"{int(s // 60)} min"
+        return f"{s:.1f} s"
 
     if verbose > 0:
         print("=" * 72)
@@ -100,18 +113,25 @@ def run_cascade(
             )
         else:
             print(f"  CASCADED OFO  --  V_set = {v_setpoint_pu:.3f} p.u.")
+        dur_str = _fmt_period(n_total_s) if sub_minute else f"{n_total_s // 60} min"
         print(
             f"  Profiles: {os.path.basename(profiles_csv)}  "
-            f"start={start_time:%d.%m.%Y %H:%M}  {n_minutes} min"
+            f"start={start_time:%d.%m.%Y %H:%M}  {dur_str}"
         )
         print("=" * 72)
         if contingencies:
             print(f"  Scheduled contingencies ({len(contingencies)}):")
             for ev in contingencies:
-                print(
-                    f"    min {ev.minute:4d}: {ev.action.upper()} "
-                    f"{ev.element_type} {ev.element_index}"
-                )
+                if ev.time_s is not None:
+                    print(
+                        f"    t={ev.time_s:.0f}s: {ev.action.upper()} "
+                        f"{ev.element_type} {ev.element_index}"
+                    )
+                else:
+                    print(
+                        f"    min {ev.minute:4d}: {ev.action.upper()} "
+                        f"{ev.element_type} {ev.element_index}"
+                    )
 
     # contingencies already unpacked as list above
 
@@ -122,7 +142,7 @@ def run_cascade(
         net.controller.drop(net.controller.index, inplace=True)
 
     # Load time-series profiles and snapshot base load/gen values
-    profiles = load_profiles(profiles_csv, timestep_min=dso_period_min)
+    profiles = load_profiles(profiles_csv, timestep_s=dt_s)
     snapshot_base_values(net)
 
     # Apply profiles at t=0 and re-run PF so sensitivities + init use realistic operating point
@@ -519,7 +539,9 @@ def run_cascade(
 
     if verbose > 0:
         print(
-            f"Running cascade: {n_minutes} min  (TSO/{tso_period_min}m, DSO/{dso_period_min}m)"
+            f"Running cascade: {_fmt_period(n_total_s)}  "
+            f"(TSO/{_fmt_period(tso_period_s)}, DSO/{_fmt_period(dso_period_s)})  "
+            f"[{n_steps} steps, dt={_fmt_period(dt_s)}]"
         )
         print(
             f"  TSO: {len(tso_der_buses)} DER, {len(tso_oltc)} OLTC, "
@@ -580,19 +602,31 @@ def run_cascade(
     # 8) Cascade loop
     log: List[IterationRecord] = []
 
-    for minute in range(1, n_minutes + 1):
-        run_tso = (minute == 1) or (minute % tso_period_min == 0)
-        run_dso = minute % dso_period_min == 0
-        rec = IterationRecord(minute=minute, tso_active=run_tso, dso_active=run_dso)
+    def _is_period_hit(time_s: float, period_s: float) -> bool:
+        """Check if *time_s* is a multiple of *period_s* (with tolerance)."""
+        remainder = time_s % period_s
+        return remainder < 1e-9 or abs(remainder - period_s) < 1e-9
 
-        # Apply time-series profiles for this minute
+    for step in range(1, n_steps + 1):
+        time_s = step * dt_s
+        minute = int(time_s / 60)
+        run_tso = (step == 1) or _is_period_hit(time_s, tso_period_s)
+        run_dso = _is_period_hit(time_s, dso_period_s)
+        rec = IterationRecord(
+            minute=minute, time_s=time_s, tso_active=run_tso, dso_active=run_dso,
+        )
+
+        # Apply time-series profiles for this timestep
         if use_profiles:
-            t_now = start_time + timedelta(minutes=minute)
+            t_now = start_time + timedelta(seconds=time_s)
             apply_profiles(net, profiles, t_now)
 
         # ── Apply contingency events ──────────────────────────────────
         if contingencies:
-            fired = [ev for ev in contingencies if ev.minute == minute]
+            fired = [
+                ev for ev in contingencies
+                if abs(ev.effective_time_s - time_s) < 1e-9
+            ]
             if fired:
                 events = []
                 for ev in fired:
@@ -612,7 +646,7 @@ def run_cascade(
         # TSO step
         if run_tso:
             try:
-                tso_out = tso.step(_measure_tso(net, tso_config, minute))
+                tso_out = tso.step(_measure_tso(net, tso_config, step))
                 u = tso_out.u_new
                 n_d = len(tso_config.der_indices)
                 n_p = len(tso_config.pcc_trafo_indices)
@@ -645,7 +679,7 @@ def run_cascade(
                     merged = SetpointMessage(
                         source_controller_id="tso_main",
                         target_controller_id=dso_id,
-                        iteration=minute,
+                        iteration=step,
                         interface_transformer_indices=np.concatenate(
                             [m.interface_transformer_indices for m in msgs]
                         ),
@@ -656,12 +690,12 @@ def run_cascade(
                     dso.receive_setpoint(merged)
             except RuntimeError as e:
                 if verbose > 0:
-                    print(f"  [min {minute:3d}] TSO FAILED: {e}")
+                    print(f"  [t={time_s:.0f}s] TSO FAILED: {e}")
 
         # DSO step
         if run_dso:
             try:
-                dso_meas = _measure_dso(net, dso_config, minute)
+                dso_meas = _measure_dso(net, dso_config, step)
 
                 # Reserve Observer: per-interface DER Q burden → shunt overrides
                 if (
@@ -683,7 +717,7 @@ def run_cascade(
 
                     # --- Debug: state BEFORE evaluate ---
                     if verbose > 2:
-                        print(f"    [ReserveObs min {minute}] --- BEFORE evaluate ---")
+                        print(f"    [ReserveObs t={time_s:.0f}s] --- BEFORE evaluate ---")
                         print(f"      engaged_flags = {reserve_obs._engaged}")
                         print(f"      shunt_states  = {shunt_st.tolist()}")
                         print(f"      der_q (sum={np.sum(der_q):.2f} Mvar):")
@@ -722,21 +756,21 @@ def run_cascade(
                                     f"release={reserve_obs.config.q_release_mvar:.1f}"
                                 )
                                 engaged_before = reserve_obs._engaged[j]
-                                last_act = reserve_obs._last_action_min[j]
-                                cd_remaining = max(
-                                    0,
-                                    reserve_obs.config.cooldown_min
-                                    - (minute - last_act),
+                                last_act_s = reserve_obs._last_action_time_s[j]
+                                cd_remaining_s = max(
+                                    0.0,
+                                    reserve_obs.config.effective_cooldown_s
+                                    - (time_s - last_act_s),
                                 )
-                                in_cd = cd_remaining > 0
+                                in_cd = cd_remaining_s > 0
                                 cd_str = (
-                                    f"COOLDOWN {cd_remaining}min remaining"
+                                    f"COOLDOWN {cd_remaining_s:.0f}s remaining"
                                     if in_cd
                                     else "no cooldown"
                                 )
                                 print(
                                     f"        cooldown: {cd_str}  "
-                                    f"(last_action=min {last_act})"
+                                    f"(last_action=t={last_act_s:.0f}s)"
                                 )
                                 if not engaged_before:
                                     would_engage = (
@@ -783,7 +817,7 @@ def run_cascade(
                             print(f"      dQ_dQder = None (fallback: aggregate sum)")
 
                     obs_result = reserve_obs.evaluate(
-                        der_q, shunt_st, dQ_dQder, minute=minute
+                        der_q, shunt_st, dQ_dQder, time_s=time_s,
                     )
 
                     # --- Debug: result AFTER evaluate ---
@@ -826,7 +860,7 @@ def run_cascade(
                 )
             except RuntimeError as e:
                 if verbose > 0:
-                    print(f"  [min {minute:3d}] DSO FAILED: {e}")
+                    print(f"  [t={time_s:.0f}s] DSO FAILED: {e}")
 
         # Power flow
         pp.runpp(net, run_control=False, calculate_voltage_angles=True)
@@ -872,7 +906,8 @@ def run_cascade(
             tags = "TSO+DSO" if (run_tso and run_dso) else ("TSO" if run_tso else "DSO")
             v_tn = rec.plant_tn_voltages_pu
             v_dn = rec.plant_dn_voltages_pu
-            print(f"  [min {minute:3d}] {tags}")
+            t_label = f"min {minute:3d}" if not sub_minute else f"t={time_s:.0f}s"
+            print(f"  [{t_label}] {tags}")
             print(
                 f"    TN V: min={np.min(v_tn):.4f} mean={np.mean(v_tn):.4f} max={np.max(v_tn):.4f}"
             )
@@ -933,81 +968,6 @@ def run_cascade(
                 print(f"      Q_act   = {A2S(rec.dso_q_actual_mvar)} Mvar  (plant)")
             print()
 
-            # DEBUG ########################################################################
-            # # --- DER active power injections ---
-            # tso_der_p = np.array(
-            #     [float(net.res_sgen.at[s, 'p_mw'])
-            #      for s in net.sgen.index
-            #      if int(net.sgen.at[s, 'bus']) not in dn_buses
-            #      and not str(net.sgen.at[s, 'name']).startswith('BOUND')],
-            #     dtype=np.float64,
-            # )
-            # dso_der_p = np.array(
-            #     [float(net.res_sgen.at[s, 'p_mw'])
-            #      for s in net.sgen.index
-            #      if int(net.sgen.at[s, 'bus']) in dn_buses
-            #      and not str(net.sgen.at[s, 'name']).startswith('BOUND')],
-            #     dtype=np.float64,
-            # )
-            # gen_p = np.array(
-            #     [float(net.res_gen.at[g, 'p_mw']) for g in tso_gen_indices],
-            #     dtype=np.float64,
-            # )
-            #
-            # # --- Load active power consumption ---
-            # tso_load_p = np.array(
-            #     [float(net.res_load.at[l, 'p_mw'])
-            #      for l in net.load.index
-            #      if int(net.load.at[l, 'bus']) not in dn_buses],
-            #     dtype=np.float64,
-            # )
-            # dso_load_p = np.array(
-            #     [float(net.res_load.at[l, 'p_mw'])
-            #      for l in net.load.index
-            #      if int(net.load.at[l, 'bus']) in dn_buses],
-            #     dtype=np.float64,
-            # )
-            #
-            # print(f"  TSO DER P  sum={tso_der_p.sum():.1f} MW  {A2S(tso_der_p)} MW")
-            # print(f"  DSO DER P  sum={dso_der_p.sum():.1f} MW  {A2S(dso_der_p)} MW")
-            # if len(gen_p):
-            #     print(f"  TSO Gen P  sum={gen_p.sum():.1f} MW  {A2S(gen_p)} MW")
-            # print(f"  TSO Load P sum={tso_load_p.sum():.1f} MW  {A2S(tso_load_p)} MW")
-            # print(f"  DSO Load P sum={dso_load_p.sum():.1f} MW  {A2S(dso_load_p)} MW")
-            # --- DEBUG: Print Actual Currents and Limits ---
-            # tso_i_actual = np.array(
-            #     [float(net.res_line.at[li, 'i_from_ka']) for li in tso_lines],
-            #     dtype=np.float64,
-            # )
-            # dso_i_actual = np.array(
-            #     [float(net.res_line.at[li, 'i_from_ka']) for li in dso_lines],
-            #     dtype=np.float64,
-            # )
-            #
-            # tso_i_lim = np.array(tso_config.current_line_max_i_ka, dtype=np.float64)
-            # dso_i_lim = np.array(dso_config.current_line_max_i_ka, dtype=np.float64)
-            #
-            # tso_violated = np.any(tso_i_actual > tso_i_lim * tso_config.i_max_pu)
-            # dso_violated = np.any(dso_i_actual > dso_i_lim * dso_config.i_max_pu)
-            #
-            # tso_flag = "  *** VIOLATION ***" if tso_violated else ""
-            # dso_flag = "  *** VIOLATION ***" if dso_violated else ""
-            #
-            # # Calculate maximum currents
-            # tso_max_i = np.max(tso_i_actual) if len(tso_i_actual) > 0 else 0.0
-            # dso_max_i = np.max(dso_i_actual) if len(dso_i_actual) > 0 else 0.0
-            #
-            # print(
-            #     f"  TN I actual [kA]  {A2S(tso_i_actual)}")
-            # print(
-            #     f"  (lim×{tso_config.i_max_pu:.2f}: {A2S(tso_i_lim * tso_config.i_max_pu)}){tso_flag}")
-            # print(f"  TN I max    [kA]  {tso_max_i:.3f}")
-            # print(
-            #     f"  DN I actual [kA]  {A2S(dso_i_actual)}")
-            # print(
-            #     f"  (lim×{dso_config.i_max_pu:.2f}: {A2S(dso_i_lim * dso_config.i_max_pu)}){dso_flag}")
-            # print(f"  DN I max    [kA]  {dso_max_i:.3f}")
-
     if live_plotter is not None:
         live_plotter.finish()
 
@@ -1025,38 +985,47 @@ def main():
     from core.cascade_config import CascadeConfig
     from core.results_storage import save_results
 
-    # ── Configuration (single place for ALL parameters) ───────────────────
+    start_min = 600
+    duration = 120
+    step = 1
+    start_sp = 1.05
+    end_sp = 1.07
+
+    num_steps = duration // step
+    delta = (end_sp - start_sp) / num_steps
+
+# ── Configuration (single place for ALL parameters) ───────────────────
     config = CascadeConfig(
         # Simulation
         v_setpoint_pu=1.05,
-        n_minutes=24 * 60,
+        n_minutes=12 * 60,
         tso_period_min=3,
         dso_period_min=1,
-        start_time=datetime(2016, 1, 6, 0, 0),
+        start_time=datetime(2016, 5, 1, 8, 0),
         use_profiles=True,
         verbose=1,
         live_plot=True,
         # Objective weights
         g_v=250000,
         g_q=1,
-        dso_g_v=50000.0,
+        dso_g_v=150000,
         # OFO
         alpha=1.0,
         g_z=1e12,
         # TSO g_w
-        gw_tso_q_der=0.4,
-        gw_tso_q_pcc=0.2,
-        gw_tso_v_gen=5e6,
-        gw_tso_oltc=40.0,
-        gw_tso_shunt=2000.0,
+        gw_tso_q_der=0.3,
+        gw_tso_q_pcc=0.1,
+        gw_tso_v_gen=2e6,
+        gw_tso_oltc=30.0,
+        gw_tso_shunt=5000.0,
         gw_oltc_cross_tso=0.0,
         # DSO g_w
         gw_dso_q_der=10.0,
-        gw_dso_oltc=60.0,
-        gw_dso_shunt=4000.0,
+        gw_dso_oltc=120.0,
+        gw_dso_shunt=5000.0,
         gw_oltc_cross_dso=0.0,
         # DSO integral Q-tracking (PI-like)
-        g_qi=0.2,
+        g_qi=0.3,
         lambda_qi=0.95,
         q_integral_max_mvar=50.0,
         # Generator capability
@@ -1065,39 +1034,41 @@ def main():
         gen_beta=0.15,
         gen_q0_pu=0.4,
         # Reserve Observer
-        enable_reserve_observer=True,
-        reserve_q_threshold_mvar=50.0,
-        reserve_q_release_mvar=-50.0,
+        enable_reserve_observer=False,
+        reserve_q_threshold_mvar=45.0,
+        reserve_q_release_mvar=-45.0,
         reserve_cooldown_min=15,
         # Contingencies
-        contingencies=[
-            ContingencyEvent(minute=60, element_type="line", element_index=3),
-            ContingencyEvent(minute=120, element_type="line", element_index=11),
-            # ContingencyEvent(minute=120, element_type="line", element_index=16),
-            ContingencyEvent(minute=180, element_type="gen", element_index=0),
+        contingencies = [
+            ContingencyEvent(minute=90, element_type="line", element_index=3),
+            ContingencyEvent(minute=60, element_type="gen", element_index=0),
             ContingencyEvent(
-                minute=240, element_type="line", element_index=3, action="restore"
-            ),
-            # ContingencyEvent(minute=210, element_type="line", element_index=16, action="restore"),
-            ContingencyEvent(
-                minute=270, element_type="line", element_index=11, action="restore"
+                minute=270, element_type="line", element_index=3, action="restore"
             ),
             ContingencyEvent(
-                minute=360, element_type="gen", element_index=0, action="restore"
+                minute=300, element_type="gen", element_index=0, action="restore"
             ),
             ContingencyEvent(
-                minute=480,
+                minute=360,
                 element_type="ext_grid",
                 element_index=0,
                 action="setpoint_change",
-                new_setpoint=1.04,
+                new_setpoint=1.06,
             ),
+            # ramp of setpoints from 1.04 to 1.06
+            # *[
+            #     ContingencyEvent(
+            #         minute=start_min + i * step,
+            #         element_type="ext_grid",
+            #         element_index=0,
+            #         action="setpoint_change",
+            #         new_setpoint=start_sp + (i + 1) * delta,
+            #     )
+            #     for i in range(num_steps)
+            # ],
+            ContingencyEvent(minute=420, element_type="line", element_index=11),
             ContingencyEvent(
-                minute=660,
-                element_type="ext_grid",
-                element_index=0,
-                action="setpoint_change",
-                new_setpoint=1.05,
+                minute=480, element_type="line", element_index=11, action="restore"
             ),
         ],
     )
@@ -1106,8 +1077,6 @@ def main():
     t0 = _time.perf_counter()
     result = run_cascade(config)
     wall_time = _time.perf_counter() - t0
-
-    from run.helpers import print_summary
 
     print_summary(config.v_setpoint_pu, result.log)
 

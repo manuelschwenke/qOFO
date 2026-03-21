@@ -314,7 +314,7 @@ class BaseOFOController(ABC):
         # Large discrete steps (e.g. 50 Mvar shunts) need enough time for
         # the continuous DERs to absorb the transient before the next
         # switching decision is made.
-        self._int_cooldown = 3  # number of iterations to lock after switching
+        self._int_cooldown = 6  # number of iterations to lock after switching
         self._int_lock_until: dict[int, int] = {}   # idx -> iteration when lock expires
     
     def step(self, measurement: Measurement) -> ControllerOutput:
@@ -353,11 +353,12 @@ class BaseOFOController(ABC):
         # Step 1: Extract current outputs from measurements
         y_current = self._extract_outputs(measurement)
         
-        # Step 2: Get current actuator P values for capability calculation
+        # Step 2: Get current actuator P values for capability calculation and current Q_TSO_DSO values
         der_p_current = self._extract_der_active_power(measurement)
+        tso_dso_interface_q_current = self._extract_trafo_reactive_power(measurement)
         
         # Step 3: Compute input bounds (operating-point-dependent)
-        u_lower, u_upper = self._compute_input_bounds(der_p_current)
+        u_lower, u_upper = self._compute_input_bounds(tso_dso_interface_q_current, der_p_current)
 
         # Step 3b: Integer variables may change by at most ±1 per iteration.
         # This prevents multi-step jumps (e.g. OLTC jumping 5 taps at once).
@@ -561,10 +562,32 @@ class BaseOFOController(ABC):
             DER active power outputs in MW.
         """
         pass
+
+    @abstractmethod
+    def _extract_trafo_reactive_power(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """
+        Extract current trafo ractive power flow for capability calculation.
+
+        Parameters
+        ----------
+        measurement : Measurement
+            Current system measurements.
+
+        Returns
+        -------
+        q_tso_dso : NDArray[np.float64]
+            Trafo reactive power flows in Mvar.
+        """
+        pass
+
     
     @abstractmethod
     def _compute_input_bounds(
         self,
+        tso_dso_interface_q_current: NDArray[np.float64],
         der_p_current: NDArray[np.float64],
     ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
         """

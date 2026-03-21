@@ -17,8 +17,23 @@ DEFAULT_PROFILES_CSV = os.path.join(
 )
 
 
-def load_profiles(csv_path: str, timestep_min: int = 15) -> pd.DataFrame:
-    """Load profiles CSV and interpolate to *timestep_min* resolution.
+def load_profiles(
+    csv_path: str,
+    timestep_min: int = 15,
+    timestep_s: float | None = None,
+) -> pd.DataFrame:
+    """Load profiles CSV and interpolate to the requested resolution.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to the semicolon-delimited profiles CSV.
+    timestep_min : int
+        Target resolution in minutes (default 15).
+        Ignored when *timestep_s* is provided.
+    timestep_s : float, optional
+        Target resolution in seconds.  Overrides *timestep_min* when set.
+        Allows sub-minute interpolation (e.g. ``timestep_s=10``).
 
     Returns a DataFrame indexed by ``DatetimeIndex`` with one column per
     profile (e.g. ``PV3``, ``WP7``, ``mv_rural_pload``, …).
@@ -29,8 +44,16 @@ def load_profiles(csv_path: str, timestep_min: int = 15) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["time"]).set_index("time").sort_index()
     df = df[~df.index.duplicated(keep="first")]
-    if timestep_min < 15:
-        df = df.resample(f"{timestep_min}min").interpolate(method="linear")
+
+    # Determine effective resolution in seconds
+    eff_s = timestep_s if timestep_s is not None else timestep_min * 60.0
+    native_s = 15 * 60  # CSV is 15-minute resolution
+
+    if eff_s < native_s:
+        if eff_s >= 60.0 and eff_s % 60 == 0:
+            df = df.resample(f"{int(eff_s // 60)}min").interpolate(method="linear")
+        else:
+            df = df.resample(f"{int(eff_s)}s").interpolate(method="linear")
     return df
 
 

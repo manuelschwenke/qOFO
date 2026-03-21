@@ -23,6 +23,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
+
 os.environ["QT_API"] = "pyqt5"
 import matplotlib as mpl
 mpl.use('Qt5Agg')

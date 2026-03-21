@@ -477,11 +477,21 @@ class DSOController(BaseOFOController):
     ) -> NDArray[np.float64]:
         """Extract DER active power from measurement for capability calculation."""
         p_current = measurement.der_p_mw.copy()
-
         return p_current
+
+    def _extract_trafo_reactive_power(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """
+        Extract current trafo ractive power flow for capability calculation.
+        """
+        q_current = measurement.interface_q_hv_side_mvar.copy()
+        return q_current
     
     def _compute_input_bounds(
         self,
+        tso_dso_interface_q_current: NDArray[np.float64],
         der_p_current: NDArray[np.float64],
     ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Compute operating-point-dependent input bounds."""

@@ -194,6 +194,7 @@ def plot_tso(
     tso_config: TSOControllerConfig,
     *,
     show: bool = True,
+    der_names: Optional[List[str]] = None,
 ) -> plt.Figure:
     """
     Plot TSO controller results.
@@ -245,13 +246,14 @@ def plot_tso(
     row = 1
 
     # Q_DER
+    _tso_der_names = der_names or [f"sgen {idx}" for idx in tso_config.der_indices]
     ax = axes[row]
     for j in range(s["tso_q_der"].shape[1]):
         ax.plot(
             s["tso_min"],
             s["tso_q_der"][:, j],
             lw=1.0, color=_c(j),
-            label=f"DER bus {tso_config.der_indices[j]}",
+            label=_tso_der_names[j],
         )
     ax.set_ylabel("Q_DER [Mvar]")
     ax.set_title("TSO DER Reactive Power")
@@ -354,6 +356,7 @@ def plot_dso(
     dso_config: DSOControllerConfig,
     *,
     show: bool = True,
+    der_names: Optional[List[str]] = None,
 ) -> plt.Figure:
     """
     Plot DSO controller results.
@@ -432,13 +435,14 @@ def plot_dso(
     row = 2
 
     # Q_DER
+    _dso_der_names = der_names or [f"sgen {idx}" for idx in dso_config.der_indices]
     ax = axes[row]
     for j in range(s["dso_q_der"].shape[1]):
         ax.plot(
             s["dso_min"],
             s["dso_q_der"][:, j],
             lw=0.8, alpha=0.7, color=_c(j),
-            label=f"DER bus {dso_config.der_indices[j]}" if j < 10 else None,
+            label=_dso_der_names[j] if j < 10 else None,
         )
     ax.set_ylabel("Q_DER [Mvar]")
     ax.set_title("DSO DER Reactive Power")
@@ -527,10 +531,12 @@ def plot_all(
     dso_config: DSOControllerConfig,
     *,
     show: bool = True,
+    tso_der_names: Optional[List[str]] = None,
+    dso_der_names: Optional[List[str]] = None,
 ) -> tuple:
     """Plot both TSO and DSO figures. Returns (fig_tso, fig_dso)."""
-    fig_tso = plot_tso(log, tso_config, show=False)
-    fig_dso = plot_dso(log, dso_config, show=False)
+    fig_tso = plot_tso(log, tso_config, show=False, der_names=tso_der_names)
+    fig_dso = plot_dso(log, dso_config, show=False, der_names=dso_der_names)
     if show:
         plt.show()
     return fig_tso, fig_dso
@@ -569,11 +575,23 @@ class LivePlotter:
         update_every: int = 1,
         tso_line_max_i_ka: Optional[np.ndarray] = None,
         dso_line_max_i_ka: Optional[np.ndarray] = None,
+        sub_minute: bool = False,
+        tso_der_names: Optional[List[str]] = None,
+        dso_der_names: Optional[List[str]] = None,
     ) -> None:
         self._tso_cfg = tso_config
         self._dso_cfg = dso_config
         self._update_every = update_every
         self._call_count = 0
+        self._sub_minute = sub_minute
+
+        # DER display names (fall back to sgen index if not provided)
+        self._tso_der_names = tso_der_names or [
+            f"sgen {idx}" for idx in tso_config.der_indices
+        ]
+        self._dso_der_names = dso_der_names or [
+            f"sgen {idx}" for idx in dso_config.der_indices
+        ]
 
         # Thermal limits for current plots (kA, one per monitored line)
         self._tso_line_max_i_ka = tso_line_max_i_ka
@@ -691,7 +709,7 @@ class LivePlotter:
         self._ax_tso_obj.set_title("TSO Objective Value")
         self._ax_tso_obj.grid(True, alpha=0.3)
 
-        self._axes_tso[-1].set_xlabel("Time [min]")
+        self._axes_tso[-1].set_xlabel("Time [s]" if sub_minute else "Time [min]")
 
         # ── DSO figure: V + interface Q + Q_DER + I_line + OLTC + shunt + objective ──
         self._has_dso_current = len(dso_config.current_line_indices) > 0
@@ -768,7 +786,7 @@ class LivePlotter:
         self._ax_dso_obj.set_title("DSO Objective Value")
         self._ax_dso_obj.grid(True, alpha=0.3)
 
-        self._axes_dso[-1].set_xlabel(r"Time $t$/ min")
+        self._axes_dso[-1].set_xlabel(r"Time $t$ / s" if sub_minute else r"Time $t$ / min")
 
         # Dock figures side-by-side: TSO on the left, DSO on the right
         self._position_windows_side_by_side()
@@ -799,8 +817,11 @@ class LivePlotter:
         """Feed one IterationRecord and refresh plots."""
         self._call_count += 1
         # Use time_s for fractional-minute support; fall back to minute field
-        t_min = rec.time_s / 60.0 if rec.time_s > 0 else float(rec.minute)
-        self._minutes.append(t_min)
+        if self._sub_minute:
+            t_val = rec.time_s if rec.time_s > 0 else float(rec.minute) * 60.0
+        else:
+            t_val = rec.time_s / 60.0 if rec.time_s > 0 else float(rec.minute)
+        self._minutes.append(t_val)
 
         if rec.plant_tn_voltages_pu is not None:
             self._tn_v.append(rec.plant_tn_voltages_pu)
@@ -929,7 +950,7 @@ class LivePlotter:
             for j in range(qd_arr.shape[1]):
                 self._ax_tso_qder.plot(
                     td_arr, qd_arr[:, j], lw=1.0, color=_c(j),
-                    label=f"DER bus {self._tso_cfg.der_indices[j]}",
+                    label=self._tso_der_names[j],
                 )
             self._ax_tso_qder.legend(fontsize=7, ncol=4, loc="upper left")
             self._draw_contingency_lines(self._ax_tso_qder)
@@ -1106,7 +1127,7 @@ class LivePlotter:
             self._ax_dso_qder.set_title("DSO DER Reactive Power")
             self._ax_dso_qder.grid(True, alpha=0.3)
             for j in range(qd_arr.shape[1]):
-                lbl = f"DER bus {self._dso_cfg.der_indices[j]}" if j < 10 else None
+                lbl = self._dso_der_names[j] if j < 10 else None
                 self._ax_dso_qder.plot(
                     td_arr, qd_arr[:, j], lw=0.8, alpha=0.7, color=_c(j), label=lbl
                 )

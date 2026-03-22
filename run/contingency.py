@@ -54,7 +54,11 @@ def _apply_contingency(
         )
 
     if verbose > 0:
+        if ev.time_s is not None:
+            t_label = f"t={ev.time_s:.0f}s"
+        else:
+            t_label = f"min {ev.minute}"
         print(f"\n  {'=' * 60}")
-        print(f"  *** CONTINGENCY min {ev.minute}: {desc}")
+        print(f"  *** CONTINGENCY {t_label}: {desc}")
         print(f"  {'=' * 60}\n")
     return desc, short_label

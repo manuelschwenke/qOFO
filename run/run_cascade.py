@@ -314,6 +314,14 @@ def run_cascade(
     if live_plot and live_plotter is None:
         from visualisation.plot_cascade import LivePlotter
 
+        # Resolve DER display names from the network
+        _tso_der_names = [
+            str(net.sgen.at[s, "name"]) for s in tso_config.der_indices
+        ]
+        _dso_der_names = [
+            str(net.sgen.at[s, "name"]) for s in dso_config.der_indices
+        ]
+
         live_plotter = LivePlotter(
             tso_config,
             dso_config,
@@ -321,6 +329,9 @@ def run_cascade(
             * tso_config.i_max_pu,
             dso_line_max_i_ka=np.array(dso_line_max_i_ka, dtype=np.float64)
             * dso_config.i_max_pu,
+            sub_minute=sub_minute,
+            tso_der_names=_tso_der_names,
+            dso_der_names=_dso_der_names,
         )
 
     # 5) Actuator bounds (from combined network)

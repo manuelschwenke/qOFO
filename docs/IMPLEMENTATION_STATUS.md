@@ -3,7 +3,7 @@
 This document tracks the implementation status of all modules and functionalities
 in the cascaded Online Feedback Optimisation (OFO) controller framework.
 
-**Last Updated:** 2026-02-10 (Phase 5 + Architecture Corrections)
+**Last Updated:** 2026-03-20 (Phase 7: Stability Analysis Module)
 
 ---
 
@@ -95,6 +95,15 @@ Use for validation and debugging of analytical sensitivities.
 | `split_tn_dn_net.py` | `split_network()` | ✅ Implemented | Split combined network into separate TN and DN models |
 | `split_tn_dn_net.py` | `validate_split()` | ✅ Implemented | Verify split reproduces combined operating point |
 
+### Analysis (`analysis/`)
+
+| Module | Class/Function | Status | Description |
+|--------|----------------|--------|-------------|
+| `stability_analysis.py` | `ControllerStabilityResult` | ✅ Implemented | Per-layer result dataclass (σ_max, L_eff, α_max, per-actuator margins) |
+| `stability_analysis.py` | `CascadeStabilityResult` | ✅ Implemented | Top-level result container for the full cascade |
+| `stability_analysis.py` | `analyse_stability()` | ✅ Implemented | Main entry point: SVD + Lipschitz bounds from CascadeConfig + H matrices |
+| `stability_analysis.py` | `recommend_gw_min()` | ✅ Implemented | Minimum recommended g_w from H and g_obj with configurable safety factor |
+
 ### Run Scripts
 
 | Script | Status | Description |
@@ -115,6 +124,7 @@ Use for validation and debugging of analytical sensitivities.
 | `test_miqp_solver.py` | ✅ Implemented | Unit tests for MIQP solver |
 | `test_controller.py` | ✅ Implemented | Unit tests for BaseOFO, TSO, and DSO controllers, including cascaded messaging |
 | `test_network.py` | ✅ Implemented | Unit tests for network build, split, and split validation |
+| `test_stability_analysis.py` | ❌ Not yet implemented | Unit tests for stability_analysis module |
 
 ---
 
@@ -133,6 +143,20 @@ Use for validation and debugging of analytical sensitivities.
 | Objective gradient computation (TSO: V schedule) | ✅ Implemented | CIGRE 2026 Synopsis |
 | Safety clipping and integer rounding | ✅ Implemented | BaseOFOController.step() |
 | Predicted output computation | ✅ Implemented | y_pred = y + α·H·σ |
+
+### Stability Analysis
+
+| Functionality | Status | Reference |
+|---------------|--------|-----------|
+| Lipschitz constant estimation: L_eff = 2·g_obj·σ_max(H)² | ✅ Implemented | Lyapunov descent condition |
+| Maximum stable step size: α_max = 2 / L_eff | ✅ Implemented | Gradient descent theory |
+| Per-actuator stability margins: g_w[i] − α·L_eff/2 | ✅ Implemented | Per-variable Hessian bound |
+| H matrix condition number reporting | ✅ Implemented | Sensitivity quality indicator |
+| DSO cascade convergence rate ρ_D | ✅ Implemented | Singular perturbation / time-scale separation |
+| DSO cascade margin: 1 − ρ_D^(T_T/T_D) | ✅ Implemented | Cascade stability criterion |
+| Minimum g_w recommendation with safety factor | ✅ Implemented | recommend_gw_min() |
+| STABLE / MARGINAL / UNSTABLE classification | ✅ Implemented | analyse_stability() |
+| Formatted console stability report | ✅ Implemented | _print_report() |
 
 ### Sensitivity Calculations
 
@@ -266,6 +290,24 @@ See `ARCHITECTURE.md` for detailed documentation.
    to the controller-specific ordering. Verify consistency when adding new output
    types.
 
+### Analysis Module
+
+1. **DSO convergence rate approximation**: The spectral radius ρ_D ≈ max(0, 1 − α/g_w_min)
+   is an upper bound derived from the most conservative (smallest) actuator weight.
+   The true spectral radius depends on the full MIQP system and is generally smaller.
+   The bound is therefore conservative: if the analysis reports convergence, it is
+   guaranteed; if it reports marginal/insufficient, simulate to confirm.
+
+2. **L_eff uses dominant objective term only**: The Lipschitz constant estimate
+   L_eff = 2·g_obj·σ_max(H)² omits the G_w and G_u contributions to the Hessian.
+   This is intentional (G_w and G_u stabilise; only the objective drives instability),
+   but means the bound is slightly conservative.
+
+3. **Integer actuators treated as continuous**: The SVD is taken over the full H matrix
+   including OLTC and shunt columns. Integer variables are subject to separate cooldown
+   and hysteresis logic in the controller; the Lipschitz bound applies strictly to the
+   continuous subproblem only.
+
 ---
 
 ## Phase Completion Status
@@ -279,6 +321,7 @@ See `ARCHITECTURE.md` for detailed documentation.
 | Phase 5a | ✅ Complete | Network module (build_tuda_net, split_network, validate_split) |
 | Phase 5b | ✅ Complete | Integration scripts with correct measurement architecture |
 | Phase 6 | ✅ Complete | Numerical sensitivity validation module |
+| Phase 7 | ✅ Complete | Stability analysis module (Lipschitz / SVD bounds, cascade margin) |
 
 ---
 
@@ -304,6 +347,7 @@ See `ARCHITECTURE.md` for detailed documentation.
 | 2026-02-10 | **CRITICAL FIX**: Corrected run_tso_voltage_control.py to measure from combined network |
 | 2026-02-10 | Verified run_cascade.py and run_dso_reactive_power_control.py follow correct architecture |
 | 2026-02-10 | Added ARCHITECTURE.md documenting combined network vs model networks principle |
+| 2026-03-20 | Added analysis/stability_analysis.py: SVD-based Lipschitz bounds, cascade margin (Phase 7) |
 
 ---
 

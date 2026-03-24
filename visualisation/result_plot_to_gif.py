@@ -166,33 +166,49 @@ def _extract_data(log: List[IterationRecord]):
 #  Drawing helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _draw_contingency_lines(ax, events, up_to_minute: int) -> None:
-    """Draw vertical dashed contingency lines up to the current frame minute."""
-    import matplotlib.transforms as mtransforms
-
-    base_transform = ax.get_xaxis_transform()
-    offset_transform = mtransforms.offset_copy(
-        base_transform, fig=ax.figure, x=5, y=0, units="points"
-    )
-    for minute, short_label in events:
+def _draw_contingency_lines(ax, events, up_to_minute: float) -> None:
+    """Draw a vertical dashed line for every contingency event up to the current frame."""
+    for minute, _label in events:
         if minute > up_to_minute:
             continue
         ax.axvline(minute, color="black", ls="--", lw=1.5, alpha=0.9, zorder=5)
-        ax.text(
+
+
+def _draw_contingency_labels(top_ax, events, up_to_minute: float) -> None:
+    """Draw contingency event labels above the top subplot of a column.
+
+    Labels are drawn only once per figure at y > 1.0 in axes-fraction
+    coordinates, with clip_on=False so they are not clipped by the axes
+    boundary. Mirrors the identical method in LivePlotter.
+    """
+    import matplotlib.transforms as mtransforms
+
+    base_transform = top_ax.get_xaxis_transform()
+    for minute, short_label in events:
+        if minute > up_to_minute:
+            continue
+        top_ax.text(
             minute,
-            0.5,
+            1.05,
             short_label,
-            rotation=90,
-            va="center",
-            ha="left",
+            rotation=0,
+            va="bottom",
+            ha="center",
             fontsize=8,
             fontweight="bold",
             color="black",
-            clip_on=True,
+            clip_on=False,
             zorder=6,
-            transform=offset_transform,
-            bbox=dict(facecolor="white", alpha=0.4, edgecolor="none", linewidth=0),
+            transform=base_transform,
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="white",
+                edgecolor="black",
+                linewidth=0.8,
+                alpha=0.85,
+            ),
         )
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -205,12 +221,15 @@ def result_plot_to_gif(
     dso_config: DSOControllerConfig,
     output_path: str = "cascade_result.gif",
     fps: int = 15,
-    frame_every: int = 3,
+    frame_every: float = 1.0,      # minutes between frames (float now)
     tso_line_max_i_ka: Optional[np.ndarray] = None,
     dso_line_max_i_ka: Optional[np.ndarray] = None,
     dpi: int = 100,
     tso_der_names: Optional[List[str]] = None,
     dso_der_names: Optional[List[str]] = None,
+    start_minute: Optional[float] = None,  # first animated frame (history already visible)
+    end_minute: Optional[float] = None,    # last animated frame (inclusive)
+    loop: int = 1,
 ) -> str:
     """
     Render an animated GIF of all cascade result panels (except objectives).
@@ -255,25 +274,39 @@ def result_plot_to_gif(
     _tso_der_names = tso_der_names or [f"sgen {idx}" for idx in tso_config.der_indices]
     _dso_der_names = dso_der_names or [f"sgen {idx}" for idx in dso_config.der_indices]
 
-    # Auto-increase frame_every for long simulations to cap at ~200 frames
-    max_frames = 200
-    min_frame_every = max(frame_every, int(np.ceil(total_minutes / max_frames)))
+    total_minutes = data["minutes"][-1]
+
+    # Resolve DER display names
+    _tso_der_names = tso_der_names or [f"sgen {idx}" for idx in tso_config.der_indices]
+    _dso_der_names = dso_der_names or [f"sgen {idx}" for idx in dso_config.der_indices]
+
+    # ── Determine animation window ──                          ← INSERT FROM HERE
+    t_start = float(data["minutes"][0]) if start_minute is None else float(start_minute)
+    t_end = float(total_minutes) if end_minute is None else float(end_minute)
+
+    if t_start < float(data["minutes"][0]) or t_end > float(total_minutes):
+        raise ValueError(
+            f"Requested window [{t_start}, {t_end}] min is outside "
+            f"the log range [{data['minutes'][0]}, {total_minutes}] min."
+        )
+    if t_start >= t_end:
+        raise ValueError(
+            f"start_minute ({t_start}) must be strictly less than end_minute ({t_end})."
+        )
+
+    max_frames = 1000
+    duration = t_end - t_start
+    min_frame_every = duration / max_frames
     if min_frame_every > frame_every:
         print(
-            f"NOTE: auto-adjusted frame_every {frame_every} -> {min_frame_every} "
-            f"to keep frame count <= {max_frames}"
+            f"NOTE: auto-adjusted frame_every {frame_every} -> "
+            f"{min_frame_every:.3f} to keep frame count <= {max_frames}"
         )
         frame_every = min_frame_every
 
-    # Frame indices: which minute-indices to render
-    frame_minutes = list(range(
-        data["minutes"][0],
-        total_minutes + 1,
-        frame_every,
-    ))
-    # Always include the last minute
-    if frame_minutes[-1] != total_minutes:
-        frame_minutes.append(total_minutes)
+    frame_minutes = list(np.arange(t_start, t_end, frame_every))
+    if not frame_minutes or abs(frame_minutes[-1] - t_end) > 1e-9:
+        frame_minutes.append(t_end)
 
     # ── Detect which subplot rows are needed ──
     has_tso_current = len(tso_config.current_line_indices) > 0
@@ -308,6 +341,8 @@ def result_plot_to_gif(
         figsize=(18, 2.2 * n_rows),
         constrained_layout=True,
     )
+    fig.set_constrained_layout_pads(h_pad=0.05, hspace=0.05)  # ← add here
+
     # If only one row, axes is 1-D — normalise to 2-D
     if n_rows == 1:
         axes = axes[np.newaxis, :]
@@ -408,7 +443,7 @@ def result_plot_to_gif(
         # TSO voltages
         ax_tso_v.clear()
         ax_tso_v.set_ylabel("Voltage / p.u.")
-        ax_tso_v.set_title("EHV Bus Voltages", fontsize=10)
+        ax_tso_v.set_title("EHV Bus Voltages", fontsize=10, pad=20)   # ← pad=20
         ax_tso_v.grid(True, alpha=0.3)
         if tso_config.v_setpoints_pu is not None:
             ax_tso_v.axhline(tso_config.v_setpoints_pu[0], color="k", ls="--", lw=1.0)
@@ -417,7 +452,7 @@ def result_plot_to_gif(
             m = mins_all[:n_mins]
             for j in range(tn.shape[1]):
                 ax_tso_v.plot(m, tn[:, j], lw=0.7, alpha=0.7, color=_c(j))
-        ax_tso_v.set_xlim(mins_all[0], mins_all[-1])
+        ax_tso_v.set_xlim(mins_all[0], t_end)
         _draw_contingency_lines(ax_tso_v, contingency_events, minute)
 
         # TSO Q_DER
@@ -434,7 +469,7 @@ def result_plot_to_gif(
                         label=_tso_der_names[j],
                     )
                 ax_tso_qder.legend(fontsize=6, ncol=4, loc="upper left")
-        ax_tso_qder.set_xlim(mins_all[0], mins_all[-1])
+        ax_tso_qder.set_xlim(mins_all[0], t_end)
         _draw_contingency_lines(ax_tso_qder, contingency_events, minute)
 
         # TSO Line Currents
@@ -455,7 +490,7 @@ def result_plot_to_gif(
                         ax_tso_current.axhline(lim, color="r", ls="--", lw=0.8, alpha=0.5)
                 ax_tso_current.axhline(np.nan, color="r", ls="--", lw=0.8, label="thermal limit")
                 ax_tso_current.legend(fontsize=6, loc="upper left")
-            ax_tso_current.set_xlim(mins_all[0], mins_all[-1])
+            ax_tso_current.set_xlim(mins_all[0], t_end)
             _draw_contingency_lines(ax_tso_current, contingency_events, minute)
 
         # TSO Q_gen
@@ -473,7 +508,7 @@ def result_plot_to_gif(
                             label=f"Gen {tso_config.gen_indices[j]}",
                         )
                     ax_tso_qgen.legend(fontsize=6, ncol=4, loc="upper left")
-            ax_tso_qgen.set_xlim(mins_all[0], mins_all[-1])
+            ax_tso_qgen.set_xlim(mins_all[0], t_end)
             _draw_contingency_lines(ax_tso_qgen, contingency_events, minute)
 
         # TSO V_gen
@@ -491,7 +526,7 @@ def result_plot_to_gif(
                             label=f"Gen {tso_config.gen_indices[j]}",
                         )
                     ax_tso_vgen.legend(fontsize=6, ncol=4, loc="upper left")
-            ax_tso_vgen.set_xlim(mins_all[0], mins_all[-1])
+            ax_tso_vgen.set_xlim(mins_all[0], t_end)
             _draw_contingency_lines(ax_tso_vgen, contingency_events, minute)
 
         # TSO OLTC
@@ -510,7 +545,7 @@ def result_plot_to_gif(
                             label=f"OLTC trafo {tso_config.oltc_trafo_indices[j]}",
                         )
                     ax_tso_oltc.legend(fontsize=6, ncol=4, loc="upper left")
-            ax_tso_oltc.set_xlim(mins_all[0], mins_all[-1])
+            ax_tso_oltc.set_xlim(mins_all[0], t_end)
             _draw_contingency_lines(ax_tso_oltc, contingency_events, minute)
 
         # ═══════════════ DSO (right column) ═══════════════
@@ -518,10 +553,8 @@ def result_plot_to_gif(
         # DSO voltages
         ax_dso_v.clear()
         ax_dso_v.set_ylabel(r"Voltage $V$ / p.u.")
-        ax_dso_v.set_title("DN Bus Voltages", fontsize=10)
+        ax_dso_v.set_title("DN Bus Voltages", fontsize=10, pad=20)
         ax_dso_v.grid(True, alpha=0.3)
-        ax_dso_v.axhline(dso_config.v_min_pu, color="r", ls="--", lw=1.0)
-        ax_dso_v.axhline(dso_config.v_max_pu, color="r", ls="--", lw=1.0)
         if dso_config.v_setpoints_pu is not None:
             ax_dso_v.axhline(dso_config.v_setpoints_pu[0], color="k", ls="--", lw=1.0)
         if all_dn_v is not None and n_mins > 0:
@@ -529,7 +562,14 @@ def result_plot_to_gif(
             m = mins_all[:n_mins]
             for j in range(dn.shape[1]):
                 ax_dso_v.plot(m, dn[:, j], lw=0.7, alpha=0.7, color=_c(j))
-        ax_dso_v.set_xlim(mins_all[0], mins_all[-1])
+        # Lock y-axis to data range before drawing limit lines.
+        ax_dso_v.relim()
+        ax_dso_v.autoscale_view()
+        y_lo, y_hi = ax_dso_v.get_ylim()
+        ax_dso_v.set_ylim(y_lo, y_hi)
+        ax_dso_v.axhline(dso_config.v_min_pu, color="r", ls="--", lw=1.0)
+        ax_dso_v.axhline(dso_config.v_max_pu, color="r", ls="--", lw=1.0)
+        ax_dso_v.set_xlim(mins_all[0], t_end)
         _draw_contingency_lines(ax_dso_v, contingency_events, minute)
 
         # DSO Interface Q
@@ -557,7 +597,7 @@ def result_plot_to_gif(
                         label=f"Q_actual [{j}]",
                     )
         ax_dso_iface.legend(fontsize=6, ncol=4, loc="upper left")
-        ax_dso_iface.set_xlim(mins_all[0], mins_all[-1])
+        ax_dso_iface.set_xlim(mins_all[0], t_end)
         _draw_contingency_lines(ax_dso_iface, contingency_events, minute)
 
         # DSO Q_DER
@@ -575,7 +615,7 @@ def result_plot_to_gif(
                     )
                 if len(dso_config.der_indices) <= 10:
                     ax_dso_qder.legend(fontsize=6, ncol=4, loc="upper left")
-        ax_dso_qder.set_xlim(mins_all[0], mins_all[-1])
+        ax_dso_qder.set_xlim(mins_all[0], t_end)
         _draw_contingency_lines(ax_dso_qder, contingency_events, minute)
 
         # DSO Line Currents
@@ -596,7 +636,7 @@ def result_plot_to_gif(
                         ax_dso_current.axhline(lim, color="r", ls="--", lw=0.8, alpha=0.5)
                 ax_dso_current.axhline(np.nan, color="r", ls="--", lw=0.8, label="thermal limit")
                 ax_dso_current.legend(fontsize=6, loc="upper left")
-            ax_dso_current.set_xlim(mins_all[0], mins_all[-1])
+            ax_dso_current.set_xlim(mins_all[0], t_end)
             _draw_contingency_lines(ax_dso_current, contingency_events, minute)
 
         # DSO OLTC
@@ -615,7 +655,7 @@ def result_plot_to_gif(
                             label=f"OLTC trafo3w {dso_config.oltc_trafo_indices[j]}",
                         )
                     ax_dso_oltc.legend(fontsize=6, ncol=4, loc="upper left")
-            ax_dso_oltc.set_xlim(mins_all[0], mins_all[-1])
+            ax_dso_oltc.set_xlim(mins_all[0], t_end)
             _draw_contingency_lines(ax_dso_oltc, contingency_events, minute)
 
         # DSO Shunt
@@ -634,7 +674,7 @@ def result_plot_to_gif(
                             label=f"Shunt bus {dso_config.shunt_bus_indices[j]}",
                         )
                     ax_dso_shunt.legend(fontsize=6, ncol=4, loc="upper left")
-            ax_dso_shunt.set_xlim(mins_all[0], mins_all[-1])
+            ax_dso_shunt.set_xlim(mins_all[0], t_end)
             _draw_contingency_lines(ax_dso_shunt, contingency_events, minute)
 
         # Bottom row x-label
@@ -647,6 +687,8 @@ def result_plot_to_gif(
             if last_visible is not None:
                 last_visible.set_xlabel(r"Time $t$ / min")
 
+        _draw_contingency_labels(ax_tso_v, contingency_events, minute)
+        _draw_contingency_labels(ax_dso_v, contingency_events, minute)
         # Progress indicator
         fig.suptitle(
             f"Cascade OFO Simulation  —  t = {minute} min",
@@ -665,7 +707,8 @@ def result_plot_to_gif(
 
     # We drive the writer manually instead of using FuncAnimation.save()
     # so we can print progress.
-    writer = PillowWriter(fps=fps)
+    meta = {"loop": loop} if loop != 1 else {}
+    writer = PillowWriter(fps=fps, metadata=meta)
     writer.setup(fig, output_path, dpi=dpi)
 
     import time as _time
@@ -746,7 +789,7 @@ def main() -> None:
     parser.add_argument(
         "run_dir",
         nargs="?",
-        default=None,
+        default=r'Z:\Python_Projekte\qOFO_GH\results\048_20260323_155808',
         help=(
             "Path to a specific run directory.  "
             "If omitted, the latest run in results/ is used."
@@ -757,17 +800,31 @@ def main() -> None:
         help="Frames per second (default: 15).",
     )
     parser.add_argument(
-        "--frame-every", type=int, default=3,
+        "--frame-every", type=int, default=1,
         help="Render one frame every N minutes (default: 3).",
     )
     parser.add_argument(
-        "--dpi", type=int, default=100,
+        "--dpi", type=int, default=80,
         help="Resolution in DPI (default: 100).",
     )
     parser.add_argument(
         "-o", "--output", type=str, default=None,
         help="Output GIF path.  Default: <run_dir>/cascade_result.gif",
     )
+    parser.add_argument(
+        "--start-minute", type=float, default=0.5,
+        help="First animated frame in minutes. History before this is shown statically.",
+    )
+    parser.add_argument(
+        "--end-minute", type=float, default=720,
+        help="Last animated frame in minutes. Defaults to end of simulation.",
+    )
+
+    parser.add_argument(
+        "--loop", type=int, default=1,
+        help="GIF loop count. 0 = infinite (default), 1 = play once.",
+    )
+
     args = parser.parse_args()
 
     # Resolve run directory
@@ -807,6 +864,9 @@ def main() -> None:
         tso_line_max_i_ka=tso_lim,
         dso_line_max_i_ka=dso_lim,
         dpi=args.dpi,
+        start_minute=args.start_minute,
+        end_minute=args.end_minute,
+        loop=args.loop,
     )
 
 

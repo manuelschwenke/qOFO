@@ -97,7 +97,12 @@
       "Bash(/c/ProgramData/miniconda3/Scripts/conda.exe run -n qOFO_clean python -c \"import pandas as pd; df=pd.read_csv\\(''data/profiles.csv'',delimiter='';''\\); print\\(df.columns.tolist\\(\\)\\); print\\(df[[''HS4_pload'',''HS4_qload'',''HS5_pload'',''HS5_qload'']].head\\(10\\)\\); print\\(''any NaN?'',df[[''HS4_pload'',''HS4_qload'',''HS5_pload'',''HS5_qload'']].isna\\(\\).sum\\(\\).to_dict\\(\\)\\)\")",
       "Bash(/c/ProgramData/miniconda3/Scripts/conda.exe run -n qOFO_clean python -c \"import pandas as pd; df=pd.read_csv\\(''data/profiles.csv'',delimiter='';''\\); print\\(''Last 5 rows:''\\); print\\(df.tail\\(5\\)[[''time'',''HS4_pload'',''HS5_pload'']]\\); print\\(\\); print\\(''Rows with NaN in HS4_pload:''\\); print\\(df[df[''HS4_pload''].isna\\(\\)][[''time'',''HS4_pload'',''HS5_pload'']]\\)\")",
       "Bash(/c/ProgramData/miniconda3/Scripts/conda.exe run -n qOFO_clean python -m pytest tests/test_actuator_bounds.py -v)",
-      "Bash(/c/ProgramData/miniconda3/Scripts/conda.exe run -n qOFO_clean python -m pytest tests/test_controller.py::TestTSOAvtReset -v)"
+      "Bash(/c/ProgramData/miniconda3/Scripts/conda.exe run -n qOFO_clean python -m pytest tests/test_controller.py::TestTSOAvtReset -v)",
+      "WebSearch",
+      "WebFetch(domain:people.ee.ethz.ch)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(xargs grep:*)",
+      "Bash(cat:*)"
     ]
   }
 }

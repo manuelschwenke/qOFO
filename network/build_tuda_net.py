@@ -238,14 +238,14 @@ def _create_static_generators(net: pp.pandapowerNet) -> None:
         op_diagram="VDE-AR-N-4120-v2",
     )
 
-    # TSO large-scale wind farm
-    pp.create_sgen(
-        net,
-        bus=pp.get_element_index(net, "bus", "TN|Bus_1"),
-        p_mw=150.0, q_mvar=0.0, sn_mva=150.0, type="WP",
-        name="TN|Wind_1", profile="WP10", subnet="TN",
-        op_diagram="VDE-AR-N-4120-v2",
-    )
+    # # TSO large-scale wind farm
+    # pp.create_sgen(
+    #     net,
+    #     bus=pp.get_element_index(net, "bus", "TN|Bus_1"),
+    #     p_mw=150.0, q_mvar=0.0, sn_mva=150.0, type="WP",
+    #     name="TN|Wind_1", profile="WP10", subnet="TN",
+    #     op_diagram="VDE-AR-N-4120-v2",
+    # )
 
 
 def _create_loads(net: pp.pandapowerNet, load_scaling: float) -> None:
@@ -304,7 +304,7 @@ def _create_external_grid(net: pp.pandapowerNet, vm_pu: float) -> None:
     pp.create_ext_grid(
         net,
         bus=pp.get_element_index(net, "bus", "TN|Bus_6"),
-        vm_pu=1.07, va_degree=0.0,
+        vm_pu=vm_pu+0.01, va_degree=0.0,
         name="External grid",
         s_sc_max_mva=10000.0, rx_max=0.1, rx_min=0.1,
         subnet="TN",
@@ -316,7 +316,7 @@ def _create_conventional_generator(net: pp.pandapowerNet) -> None:
     pp.create_gen(
         net,
         bus=pp.get_element_index(net, "bus", "TN|Bus_4"),
-        sn_mva=600.0, p_mw=500.0, vm_pu=1.05,
+        sn_mva=800.0, p_mw=700.0, vm_pu=1.05,
         name="TN_PP_0", subnet="TN",
     )
 

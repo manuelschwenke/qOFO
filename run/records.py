@@ -72,8 +72,8 @@ class IterationRecord:
     minute: int
     time_s: float = 0.0
     """Simulation time in seconds for this record."""
-    tso_active: bool
-    dso_active: bool
+    tso_active: bool = False
+    dso_active: bool = False
     # TSO optimisation variables [Q_DER | Q_PCC_set | V_gen | s_OLTC | s_shunt]
     tso_q_der_mvar: Optional[NDArray[np.float64]] = None
     tso_q_pcc_set_mvar: Optional[NDArray[np.float64]] = None

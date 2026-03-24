@@ -587,7 +587,7 @@ def main() -> None:
         v_setpoint_pu=1.05,
         n_minutes=12 * 60,
         tso_period_min=3,
-        dso_period_min=1,
+        dso_period_s=30,
         start_time=datetime(2016, 5, 1, 8, 0),
         use_profiles=True,
         verbose=1,
@@ -595,33 +595,33 @@ def main() -> None:
         # Objective weights
         g_v=250000,
         g_q=1,
-        dso_g_v=100000.0,
+        dso_g_v=100000,
         # OFO
         alpha=1.0,
         g_z=1e12,
         # TSO g_w
-        gw_tso_q_der=0.3,
+        gw_tso_q_der=0.1,
         gw_tso_q_pcc=0.1,
         gw_tso_v_gen=2e6,
-        gw_tso_oltc=30.0,
-        gw_tso_shunt=5000.0,
-        gw_oltc_cross_tso=0.0,
-        # DSO g_w (unused but kept for config consistency)
-        gw_dso_q_der=10.0,
-        gw_dso_oltc=120.0,
+        gw_tso_oltc=40.0,
+        gw_tso_shunt=4000.0,
+        gw_oltc_cross_tso=0,
+        # DSO g_w
+        gw_dso_q_der=10,
+        gw_dso_oltc=150.0,
         gw_dso_shunt=5000.0,
-        gw_oltc_cross_dso=0.0,
-        # DSO integral Q-tracking (unused)
-        g_qi=0.3,
-        lambda_qi=0.95,
+        gw_oltc_cross_dso=0,
+        # DSO integral Q-tracking
+        g_qi=0.15,
+        lambda_qi=0.9,
         q_integral_max_mvar=50.0,
         # Generator capability
         gen_xd_pu=1.2,
         gen_i_f_max_pu=2.65,
         gen_beta=0.15,
         gen_q0_pu=0.4,
-        # Reserve Observer (unused in TSO-only)
-        enable_reserve_observer=True,
+        # Reserve Observer
+        enable_reserve_observer=False,
         reserve_q_threshold_mvar=45.0,
         reserve_q_release_mvar=-45.0,
         reserve_cooldown_min=15,
@@ -640,7 +640,7 @@ def main() -> None:
                 element_type="ext_grid",
                 element_index=0,
                 action="setpoint_change",
-                new_setpoint=1.06,
+                new_setpoint=1.05,
             ),
             # ramp of setpoints from 1.04 to 1.06
             # *[

@@ -52,9 +52,9 @@ from core.profiles import (
 )
 from network.build_tuda_net import build_tuda_net
 from run.contingency import _apply_contingency
-from run.helpers import _build_Gw, _network_state
+from run.helpers import _build_Gw, _network_state, print_summary
 from run.plant_io import _apply_tso
-from run.records import A2S, A3S, ContingencyEvent, IterationRecord
+from run.records import A2S, A3S, CascadeResult, ContingencyEvent, IterationRecord
 from sensitivity.jacobian import JacobianSensitivities
 
 
@@ -66,7 +66,7 @@ def run_tso_only(
     config: CascadeConfig,
     *,
     live_plotter=None,
-) -> List[IterationRecord]:
+) -> CascadeResult:
     """
     Run a TSO-only OFO voltage controller on the combined network.
 
@@ -88,8 +88,8 @@ def run_tso_only(
 
     Returns
     -------
-    log : list[IterationRecord]
-        One record per simulation minute.
+    result : CascadeResult
+        Simulation result containing the iteration log and controller configs.
     """
     v_setpoint_pu = config.v_setpoint_pu
     dso_v_setpoint_pu = config.effective_dso_v_setpoint_pu
@@ -521,7 +521,7 @@ def run_tso_only(
             [float(net.res_trafo3w.at[t, "q_hv_mvar"]) for t in coupler_3w_indices],
             dtype=np.float64,
         )
-        # No TSO setpoint in TSO-only → show zero line
+        # No TSO setpoint in TSO-only — show zero line
         rec.dso_q_setpoint_mvar = np.zeros(len(coupler_3w_indices), dtype=np.float64)
 
         # Penalty from plant measurements
@@ -561,7 +561,7 @@ def run_tso_only(
     if live_plotter is not None:
         live_plotter.finish()
 
-    return log
+    return CascadeResult(log=log, tso_config=tso_config, dso_config=dso_config)
 
 
 # ==============================================================================
@@ -570,6 +570,7 @@ def run_tso_only(
 
 def main() -> None:
     from core.cascade_config import CascadeConfig
+    from core.results_storage import save_results
     from run.records import ContingencyEvent
 
     start_min = 390
@@ -668,29 +669,14 @@ def main() -> None:
     print()
 
     t0 = _time.perf_counter()
-    log = run_tso_only(config)
+    result = run_tso_only(config)
     wall_time = _time.perf_counter() - t0
 
-    # Summary
-    final = log[-1]
-    if final.plant_tn_voltages_pu is not None:
-        v = final.plant_tn_voltages_pu
-        v_set = config.v_setpoint_pu
-        print()
-        print("=" * 72)
-        print(f"  TSO-ONLY FINAL SUMMARY  ({wall_time:.1f}s wall time)")
-        print("=" * 72)
-        print(
-            f"  V_set = {v_set:.3f} p.u.,  "
-            f"V_min = {np.min(v):.4f} p.u.,  "
-            f"V_mean = {np.mean(v):.4f} p.u.,  "
-            f"V_max = {np.max(v):.4f} p.u."
-        )
-        print(f"  Max |V - V_set| = {np.max(np.abs(v - v_set)):.4f} p.u.")
-        n_tso = sum(1 for r in log if r.tso_active)
-        print(f"  TSO steps: {n_tso}")
-        print("=" * 72)
-        print()
+    print_summary(config.v_setpoint_pu, result.log)
+
+    # ── Save results ─────────────────────────────────────────────────────
+    run_dir = save_results(result, config, wall_time_s=wall_time)
+    print(f"\nResults saved to: {run_dir}")
 
 
 if __name__ == "__main__":

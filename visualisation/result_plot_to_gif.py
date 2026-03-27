@@ -40,6 +40,8 @@ from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 from matplotlib.ticker import MaxNLocator
+import time as _time
+from matplotlib.animation import PillowWriter
 
 if TYPE_CHECKING:
     from controller.dso_controller import DSOControllerConfig
@@ -705,13 +707,33 @@ def result_plot_to_gif(
         f"(est. {est_sec/60:.0f}–{est_sec*2/60:.0f} min) ..."
     )
 
+    class LoopAwarePillowWriter(PillowWriter):
+        def __init__(self, *args, gif_loop=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._gif_loop = gif_loop
+
+        def finish(self):
+            save_kwargs = dict(
+                save_all=True,
+                append_images=self._frames[1:],
+                duration=int(1000 / self.fps),
+            )
+
+            # Pillow GIF behavior:
+            # - omit loop / None => play once, no looping
+            # - 0 => loop forever
+            # - positive int => finite loop count
+            if self._gif_loop is not None:
+                save_kwargs["loop"] = self._gif_loop
+
+            self._frames[0].save(self.outfile, **save_kwargs)
+
     # We drive the writer manually instead of using FuncAnimation.save()
     # so we can print progress.
-    meta = {"loop": loop} if loop != 1 else {}
-    writer = PillowWriter(fps=fps, metadata=meta)
+    gif_loop = None if loop == 1 else loop
+    writer = LoopAwarePillowWriter(fps=fps, gif_loop=gif_loop)
     writer.setup(fig, output_path, dpi=dpi)
 
-    import time as _time
     t0 = _time.perf_counter()
 
     for i in range(n_frames):
@@ -724,7 +746,7 @@ def result_plot_to_gif(
             elapsed = _time.perf_counter() - t0
             eta = elapsed / (i + 1) * (n_frames - i - 1)
             print(
-                f"  [{pct:5.1f}%]  frame {i+1}/{n_frames}  "
+                f"  [{pct:5.1f}%]  frame {i + 1}/{n_frames}  "
                 f"(t={frame_minutes[i]} min)  "
                 f"elapsed {elapsed:.0f}s  ETA {eta:.0f}s"
             )
@@ -789,7 +811,7 @@ def main() -> None:
     parser.add_argument(
         "run_dir",
         nargs="?",
-        default=r'Z:\Python_Projekte\qOFO_GH\results\048_20260323_155808',
+        default=r'Z:\Python_Projekte\qOFO_GH\results\051_20260324_165159',
         help=(
             "Path to a specific run directory.  "
             "If omitted, the latest run in results/ is used."
@@ -812,7 +834,7 @@ def main() -> None:
         help="Output GIF path.  Default: <run_dir>/cascade_result.gif",
     )
     parser.add_argument(
-        "--start-minute", type=float, default=0.5,
+        "--start-minute", type=float, default=1,
         help="First animated frame in minutes. History before this is shown statically.",
     )
     parser.add_argument(

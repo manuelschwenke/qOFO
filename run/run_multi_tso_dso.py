@@ -219,6 +219,9 @@ class MultiTSOConfig:
     verbose:        int   = 1
     result_dir:     str   = "results"
 
+    # ── Live plot ─────────────────────────────────────────────────────────────
+    live_plot:      bool  = False  # show real-time plot windows during simulation
+
 
 # =============================================================================
 #  Per-step result record
@@ -1016,6 +1019,21 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
     log: List[MultiTSOIterationRecord] = []
 
+    # ── Optionally create live plot windows ───────────────────────────────────
+    _live_plotter = None
+    if config.live_plot:
+        from visualisation.plot_multi_tso import MultiTSOLivePlotter
+        _live_plotter = MultiTSOLivePlotter(
+            zone_ids=sorted(zone_defs.keys()),
+            dso_ids=dso_ids,
+            v_setpoint_pu=config.v_setpoint_pu,
+            v_min_pu=0.95,
+            v_max_pu=1.05,
+            sub_minute=False,
+            update_every=1,
+            tso_update_every=1,
+        )
+
     def _is_period_hit(time_s: float, period_s: float) -> bool:
         """True if time_s is a multiple of period_s (within 1 s tolerance)."""
         rem = time_s % period_s
@@ -1078,6 +1096,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 for msg in ctrl.generate_setpoint_messages():
                     if msg.target_controller_id in dso_controllers:
                         dso_controllers[msg.target_controller_id].receive_setpoint(msg)
+                        # Record the Q setpoint the TSO sent
+                        if hasattr(msg, "q_setpoint_mvar"):
+                            rec.dso_q_set_mvar[msg.target_controller_id] = float(
+                                msg.q_setpoint_mvar
+                            )
 
         # ── DSO step (Zone 2 only) ────────────────────────────────────────────
         if run_dso:
@@ -1136,6 +1159,9 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                     lhs = rec.zone_contraction_lhs.get(z, float("nan"))
                     print(f"    Zone {z}: contraction_lhs={lhs:.3f}  "
                           f"obj={rec.zone_tso_objective.get(z, float('nan')):.4e}")
+
+        if _live_plotter is not None:
+            _live_plotter.update(rec)
 
         log.append(rec)
 

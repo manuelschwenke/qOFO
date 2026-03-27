@@ -975,3 +975,456 @@ def recommend_gw_min_per_type(
         col += count
 
     return results
+
+
+# =============================================================================
+#  Multi-Zone (Multi-TSO) Stability Analysis
+# =============================================================================
+#
+# Extension of the single-zone analysis above to an N-zone system.
+#
+# Theory reference: Schwenke / CIGRE 2026 — "Multi-TSO-DSO OFO"
+#
+# For N independent TSO zones, each with its own OFO iteration, the overall
+# system converges if the full block system matrix M_sys satisfies:
+#
+#   ρ(I − α_eff M_sys) < 1
+#
+# A sufficient (conservative) condition based on diagonal dominance is:
+#
+#   ∀ i:   0 < α_i · (λ_max(M_TSO,ii) + Σ_{j≠i} ||M_TSO,ij||₂)  < 2
+#
+# The global eigenvalue condition ρ(M_sys) is also computed, giving a tighter
+# (necessary and sufficient) stability bound.
+#
+# See MultiTSOCoordinator.check_contraction() for runtime diagnostics during
+# the simulation.  This module provides an offline, post-hoc analysis from
+# precomputed H blocks.
+
+
+@dataclass
+class ZoneStabilityResult:
+    """
+    Stability analysis result for one zone in a multi-zone system.
+
+    Attributes
+    ----------
+    zone_id : int
+        Integer zone label.
+    n_controls : int
+        Number of control variables in this zone.
+    n_outputs : int
+        Number of output variables (rows in H_ii).
+    sigma_max_Hii : float
+        Largest singular value of the local sensitivity matrix H_ii.
+    lambda_max_Mii : float
+        Largest eigenvalue of the local preconditioned curvature M_TSO,ii.
+    alpha_max_local : float
+        Single-zone stability bound: 2 / λ_max(M_ii).
+        This is the SAME as the existing α_max in ControllerStabilityResult.
+    coupling_norms : Dict[int, float]
+        ||M_TSO,ij||₂ for each coupling zone j ≠ i.
+    coupling_sum : float
+        Σ_{j≠i} ||M_TSO,ij||₂.  If large relative to λ_max(M_ii), the
+        inter-zone coupling dominates and the system may diverge even if each
+        zone is locally stable.
+    contraction_lhs : float
+        α_i · (λ_max(M_ii) + coupling_sum).  Must lie in (0, 2) for stability.
+    alpha_max_coupled : float
+        2 / (λ_max(M_ii) + coupling_sum) — tighter bound than alpha_max_local.
+    diagonally_dominant : bool
+        True iff contraction_lhs ∈ (0, 2).
+    warnings : List[str]
+        Human-readable warnings.
+    """
+    zone_id:            int
+    n_controls:         int
+    n_outputs:          int
+    sigma_max_Hii:      float
+    lambda_max_Mii:     float
+    alpha_max_local:    float
+    coupling_norms:     Dict[int, float]
+    coupling_sum:       float
+    contraction_lhs:    float
+    alpha_max_coupled:  float
+    diagonally_dominant: bool
+    warnings:           list = field(default_factory=list)
+
+
+@dataclass
+class MultiZoneStabilityResult:
+    """
+    Top-level result container for the multi-zone (multi-TSO) stability analysis.
+
+    Attributes
+    ----------
+    zones : List[ZoneStabilityResult]
+        Per-zone results, ordered by zone_id.
+    M_sys : NDArray
+        Full assembled block system matrix of shape (Σ n_u_i, Σ n_u_i).
+        This is the M_sys = [[M_TSO,ij]] block matrix (symmetric if Q_obj_i
+        are symmetric and G_w_i are diagonal).
+    M_sys_eigenvalues : NDArray
+        Real parts of M_sys eigenvalues (M_sys is symmetric PSD → all real).
+    M_sys_lambda_max : float
+        Largest eigenvalue of M_sys.
+    alpha_max_global : float
+        Global stability bound: 2 / λ_max(M_sys).
+        This is the TIGHTEST stability bound — tighter than the per-zone
+        diagonal-dominance bound.
+    globally_stable : bool
+        True iff α_i · λ_max(M_sys) < 2 for all i (here all α_i are used).
+    all_zones_diagonally_dominant : bool
+        True iff every zone satisfies the diagonal-dominance condition.
+    summary : str
+        Human-readable one-paragraph summary.
+    """
+    zones:                      List[ZoneStabilityResult]
+    M_sys:                      NDArray[np.float64]
+    M_sys_eigenvalues:          NDArray[np.float64]
+    M_sys_lambda_max:           float
+    alpha_max_global:           float
+    globally_stable:            bool
+    all_zones_diagonally_dominant: bool
+    summary:                    str = ""
+
+
+def analyse_multi_zone_stability(
+    H_blocks:    Dict[Tuple[int, int], NDArray[np.float64]],
+    Q_obj_list:  List[NDArray[np.float64]],
+    G_w_list:    List[NDArray[np.float64]],
+    alpha_list:  List[float],
+    *,
+    zone_ids:    Optional[List[int]] = None,
+    zone_names:  Optional[List[str]] = None,
+    verbose:     bool = True,
+) -> "MultiZoneStabilityResult":
+    """
+    Offline stability analysis for a multi-zone TSO-DSO OFO system.
+
+    This function takes pre-computed sensitivity blocks H_ij and tuning
+    parameters and produces a full stability assessment including:
+
+    * Per-zone local stability (same analysis as the single-zone case).
+    * Cross-zone coupling norms ||M_TSO,ij||₂.
+    * Per-zone diagonal-dominance check.
+    * Global system-matrix M_sys eigenvalue analysis (necessary & sufficient).
+
+    Mathematical background
+    -----------------------
+    Local curvature (zone i):
+        C_ii = H_ii^T  Q_obj,i  H_ii
+
+    Cross curvature (zone i observing zone j's control effect):
+        C_ij = H_ii^T  Q_obj,i  H_ij          (H_ii^T on the LEFT → i's own Jacobian)
+
+    Preconditioned local block:
+        M_TSO,ii = G_w,i^{-½} C_ii G_w,i^{-½}  ∈ ℝ^{n_u_i × n_u_i}
+
+    Preconditioned coupling block:
+        M_TSO,ij = G_w,i^{-½} C_ij G_w,j^{-½}  ∈ ℝ^{n_u_i × n_u_j}
+
+    Full system matrix:
+        M_sys = [[M_TSO,ij]]                    ∈ ℝ^{Σn_u × Σn_u}
+
+    Sufficient stability condition (diagonal dominance):
+        α_i (λ_max(M_ii) + Σ_{j≠i} ||M_ij||₂) < 2   ∀ i
+
+    Tighter (necessary & sufficient) condition:
+        α_eff λ_max(M_sys) < 2
+    where α_eff = max_i α_i (conservative coupling across zones).
+
+    Parameters
+    ----------
+    H_blocks : Dict[(i, j), NDArray]
+        Sensitivity blocks.  (i, j) → H_ij of shape (n_y_i, n_u_j).
+        Must contain at least all diagonal blocks (i, i).
+    Q_obj_list : List[NDArray]
+        Per-zone Q_obj diagonal vectors (length n_y_i each).
+        Row ordering assumed: [V_bus | I_line] (I rows get weight 0).
+    G_w_list : List[NDArray]
+        Per-zone G_w diagonal vectors (length n_u_i each).
+        Column ordering: [Q_DER | Q_PCC | V_gen | OLTC | shunt].
+    alpha_list : List[float]
+        Per-zone OFO step sizes α_i.
+    zone_ids : List[int], optional
+        Zone IDs in the same order as Q_obj_list and G_w_list.
+        Defaults to [0, 1, 2, …].
+    zone_names : List[str], optional
+        Human-readable zone labels for the report.
+    verbose : bool
+        If True, print a formatted report to stdout.
+
+    Returns
+    -------
+    MultiZoneStabilityResult
+    """
+    n_zones = len(Q_obj_list)
+    if zone_ids is None:
+        zone_ids = list(range(n_zones))
+    if zone_names is None:
+        zone_names = [f"Zone {z}" for z in zone_ids]
+
+    # ── Step 1: Build M blocks ────────────────────────────────────────────────
+    #
+    # For each (i, j) pair: C_ij = H_ii^T Q_obj,i H_ij → M_ij = G_w,i^{-½} C_ij G_w,j^{-½}
+    M_blocks: Dict[Tuple[int, int], NDArray[np.float64]] = {}
+
+    for i_idx, i in enumerate(zone_ids):
+        q_obj_i = Q_obj_list[i_idx]
+        gw_i    = G_w_list[i_idx]
+        gw_i_inv_sqrt = 1.0 / np.sqrt(np.maximum(gw_i, 1e-12))
+
+        H_ii = H_blocks.get((i, i))
+        if H_ii is None:
+            raise ValueError(
+                f"Diagonal block H_({i},{i}) is required but not found in H_blocks."
+            )
+        # Q^{1/2}-weighted H_ii (used for all C_ij in this row i)
+        q_sqrt_i = np.sqrt(np.maximum(q_obj_i, 0.0))
+        QH_ii = q_sqrt_i[:, None] * H_ii    # (n_y_i, n_u_i)
+
+        for j_idx, j in enumerate(zone_ids):
+            gw_j = G_w_list[j_idx]
+            gw_j_inv_sqrt = 1.0 / np.sqrt(np.maximum(gw_j, 1e-12))
+
+            H_ij = H_blocks.get((i, j))
+            if H_ij is None:
+                # Missing off-diagonal block → treat as zero (no coupling)
+                n_u_j = len(gw_j)
+                n_u_i = len(gw_i)
+                M_blocks[(i, j)] = np.zeros((n_u_i, n_u_j))
+                continue
+
+            # C_ij = H_ii^T Q_obj,i H_ij  (efficient via Q^{1/2} H)
+            QH_ij = q_sqrt_i[:, None] * H_ij   # (n_y_i, n_u_j)
+            C_ij = QH_ii.T @ QH_ij             # (n_u_i, n_u_j)
+
+            # M_ij = G_w,i^{-½} C_ij G_w,j^{-½}
+            M_ij = (gw_i_inv_sqrt[:, None] * C_ij) * gw_j_inv_sqrt[None, :]
+            M_blocks[(i, j)] = M_ij
+
+    # ── Step 2: Per-zone local analysis (reusing _analyse_layer logic) ────────
+    zone_results: List[ZoneStabilityResult] = []
+
+    for i_idx, i in enumerate(zone_ids):
+        H_ii  = H_blocks[(i, i)]
+        M_ii  = M_blocks[(i, i)]
+        alpha_i = alpha_list[i_idx]
+        n_y_i, n_u_i = H_ii.shape
+
+        # SVD of raw H_ii
+        sv = np.linalg.svd(H_ii, compute_uv=False)
+        sigma_max_Hii = float(sv[0]) if len(sv) > 0 else 0.0
+
+        # λ_max(M_ii)
+        eig_ii = np.linalg.eigvalsh(M_ii)
+        lambda_max = float(np.maximum(eig_ii[-1], 0.0))
+        alpha_max_local = (2.0 / lambda_max) if lambda_max > 1e-14 else np.inf
+
+        # Coupling norms: ||M_ij||₂ for j ≠ i
+        coupling_norms: Dict[int, float] = {}
+        for j_idx2, j in enumerate(zone_ids):
+            if j == i:
+                continue
+            M_ij = M_blocks.get((i, j), np.zeros((0, 0)))
+            if M_ij.size == 0:
+                coupling_norms[j] = 0.0
+            else:
+                coupling_norms[j] = float(np.linalg.norm(M_ij, ord=2))
+
+        coupling_sum = sum(coupling_norms.values())
+
+        # Diagonal-dominance condition: α_i · (λ_max + Σ||M_ij||₂) ∈ (0, 2)
+        contraction_lhs = alpha_i * (lambda_max + coupling_sum)
+        alpha_max_coupled = (
+            2.0 / (lambda_max + coupling_sum)
+            if (lambda_max + coupling_sum) > 1e-14 else np.inf
+        )
+        diag_dom = (contraction_lhs > 0.0) and (contraction_lhs < 2.0)
+
+        warnings: List[str] = []
+        if contraction_lhs >= 2.0:
+            warnings.append(
+                f"{zone_names[i_idx]}: contraction_lhs = {contraction_lhs:.4f} ≥ 2.0 — "
+                f"diagonal-dominance condition VIOLATED.  "
+                f"Consider reducing α_{i} to < {alpha_max_coupled:.4g}."
+            )
+        elif contraction_lhs > 1.5:
+            warnings.append(
+                f"{zone_names[i_idx]}: contraction_lhs = {contraction_lhs:.4f} — "
+                f"marginal (> 1.5).  Coupling is significant."
+            )
+        if coupling_sum > lambda_max:
+            warnings.append(
+                f"{zone_names[i_idx]}: inter-zone coupling dominates "
+                f"(Σ‖M_ij‖₂ = {coupling_sum:.4f} > λ_max = {lambda_max:.4f}).  "
+                f"Adding DSO-internal DERs to Zone {i} strengthens the diagonal block."
+            )
+
+        zone_results.append(ZoneStabilityResult(
+            zone_id=i,
+            n_controls=n_u_i,
+            n_outputs=n_y_i,
+            sigma_max_Hii=sigma_max_Hii,
+            lambda_max_Mii=lambda_max,
+            alpha_max_local=alpha_max_local,
+            coupling_norms=coupling_norms,
+            coupling_sum=coupling_sum,
+            contraction_lhs=contraction_lhs,
+            alpha_max_coupled=alpha_max_coupled,
+            diagonally_dominant=diag_dom,
+            warnings=warnings,
+        ))
+
+    # ── Step 3: Assemble full M_sys and global eigenvalue analysis ────────────
+    #
+    # M_sys = [[M_TSO,ij]] block matrix.
+    # Row/column ordering: zone 0 block, zone 1 block, …, zone N-1 block.
+    n_per_zone = [len(G_w_list[k]) for k in range(n_zones)]
+    n_total = sum(n_per_zone)
+    M_sys = np.zeros((n_total, n_total), dtype=np.float64)
+
+    row_offset = 0
+    for i_idx, i in enumerate(zone_ids):
+        col_offset = 0
+        for j_idx, j in enumerate(zone_ids):
+            M_ij = M_blocks.get((i, j), np.zeros((n_per_zone[i_idx], n_per_zone[j_idx])))
+            r0 = row_offset
+            r1 = row_offset + n_per_zone[i_idx]
+            c0 = col_offset
+            c1 = col_offset + n_per_zone[j_idx]
+            # Guard against shape mismatch (e.g. from zero-padded blocks)
+            ar = min(M_ij.shape[0], r1 - r0)
+            ac = min(M_ij.shape[1], c1 - c0)
+            M_sys[r0:r0+ar, c0:c0+ac] = M_ij[:ar, :ac]
+            col_offset += n_per_zone[j_idx]
+        row_offset += n_per_zone[i_idx]
+
+    # M_sys eigenvalues (symmetric → all real)
+    sys_eigs = np.linalg.eigvalsh(M_sys)
+    M_sys_lambda_max = float(np.maximum(sys_eigs[-1], 0.0))
+    alpha_max_global = (2.0 / M_sys_lambda_max) if M_sys_lambda_max > 1e-14 else np.inf
+
+    # Global stability: α_eff · λ_max(M_sys) < 2 for α_eff = max(α_i)
+    alpha_eff = max(alpha_list)
+    globally_stable = (alpha_eff * M_sys_lambda_max < 2.0)
+
+    all_diag_dom = all(zr.diagonally_dominant for zr in zone_results)
+
+    # ── Build summary string ──────────────────────────────────────────────────
+    g_status = "STABLE" if globally_stable else "UNSTABLE"
+    d_status = "satisfied" if all_diag_dom else "VIOLATED for some zones"
+    summary = (
+        f"Multi-zone stability: {g_status}.  "
+        f"λ_max(M_sys) = {M_sys_lambda_max:.4g}, α_max_global = {alpha_max_global:.4g}.  "
+        f"Diagonal-dominance condition {d_status}.  "
+        f"N_zones = {n_zones}, N_controls_total = {n_total}."
+    )
+
+    result = MultiZoneStabilityResult(
+        zones=zone_results,
+        M_sys=M_sys,
+        M_sys_eigenvalues=sys_eigs,
+        M_sys_lambda_max=M_sys_lambda_max,
+        alpha_max_global=alpha_max_global,
+        globally_stable=globally_stable,
+        all_zones_diagonally_dominant=all_diag_dom,
+        summary=summary,
+    )
+
+    if verbose:
+        _print_multi_zone_report(result, zone_names, alpha_list)
+
+    return result
+
+
+def _print_multi_zone_report(
+    result: "MultiZoneStabilityResult",
+    zone_names: List[str],
+    alpha_list: List[float],
+) -> None:
+    """Print a formatted multi-zone stability report to stdout."""
+    sep  = "=" * 72
+    thin = "-" * 72
+
+    print(sep)
+    print("  Multi-Zone TSO-DSO OFO Stability Analysis")
+    print("  Condition: α_i · (λ_max(M_ii) + Σ_{j≠i} ‖M_ij‖₂) < 2  (diagonal dominance)")
+    print("  Condition: α_eff · λ_max(M_sys) < 2                      (global eigenvalue)")
+    print(sep)
+    print()
+
+    # ── Per-zone report ───────────────────────────────────────────────────────
+    print(thin)
+    print(f"  {'Zone':<14s} {'λ_max(Mii)':>12s} {'Σ‖Mij‖₂':>10s} "
+          f"{'α·(λ+Σ)':>10s} {'α_max_local':>12s} {'α_max_coupled':>14s} {'Status':>8s}")
+    print(thin)
+
+    for i_idx, zr in enumerate(result.zones):
+        status = "OK" if zr.diagonally_dominant else "VIOLATED"
+        alpha_i = alpha_list[i_idx]
+        print(
+            f"  {zone_names[i_idx]:<14s} "
+            f"{zr.lambda_max_Mii:>12.4g} "
+            f"{zr.coupling_sum:>10.4g} "
+            f"{zr.contraction_lhs:>10.4g} "
+            f"{zr.alpha_max_local:>12.4g} "
+            f"{zr.alpha_max_coupled:>14.4g} "
+            f"{status:>8s}"
+        )
+    print()
+
+    # ── Coupling matrix (spectral norms) ──────────────────────────────────────
+    zone_ids = [zr.zone_id for zr in result.zones]
+    n_zones  = len(zone_ids)
+    if n_zones <= 6:
+        print("  Inter-zone coupling norms ‖M_TSO,ij‖₂:")
+        header = f"  {'':14s}" + "".join(f"  {zone_names[j]:>10s}" for j in range(n_zones))
+        print(header)
+        for i_idx, zr in enumerate(result.zones):
+            row_str = f"  {zone_names[i_idx]:<14s}"
+            for j in zone_ids:
+                if j == zr.zone_id:
+                    row_str += f"  {'(diag)':>10s}"
+                else:
+                    norm = zr.coupling_norms.get(j, 0.0)
+                    row_str += f"  {norm:>10.4g}"
+            print(row_str)
+        print()
+
+    # ── Global eigenvalue analysis ────────────────────────────────────────────
+    print(thin)
+    print("  Global M_sys eigenvalue analysis")
+    print(thin)
+    n_show = min(8, len(result.M_sys_eigenvalues))
+    eigs_desc = result.M_sys_eigenvalues[::-1][:n_show]
+    alpha_eff = max(alpha_list)
+    print(f"  α_eff (max over zones) = {alpha_eff}")
+    print(f"  λ_max(M_sys)           = {result.M_sys_lambda_max:.6g}")
+    print(f"  α_max_global           = 2 / λ_max = {result.alpha_max_global:.6g}")
+    print(f"  α_eff · λ_max(M_sys)   = {alpha_eff * result.M_sys_lambda_max:.6g}  "
+          f"({'< 2 OK' if result.globally_stable else '≥ 2 UNSTABLE'})")
+    print()
+    print(f"  Top {n_show} eigenvalues of M_sys (descending):")
+    for k, lam in enumerate(eigs_desc):
+        contraction = abs(1.0 - alpha_eff * lam)
+        print(f"    λ_{k+1:02d} = {lam:>12.6g}   α·λ = {alpha_eff*lam:>8.4f}   "
+              f"|1 - α·λ| = {contraction:>8.4f}")
+    print()
+
+    # ── Warnings ──────────────────────────────────────────────────────────────
+    all_warnings = []
+    for i_idx, zr in enumerate(result.zones):
+        for w in zr.warnings:
+            all_warnings.append(f"[{zone_names[i_idx]}] {w}")
+    if all_warnings:
+        print("  Warnings:")
+        for w in all_warnings:
+            print(f"    ⚠  {w}")
+        print()
+
+    # ── Overall status ────────────────────────────────────────────────────────
+    print(sep)
+    print(f"  OVERALL: {result.summary}")
+    print(sep)

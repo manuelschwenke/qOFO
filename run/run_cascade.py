@@ -1009,10 +1009,10 @@ def main():
     config = CascadeConfig(
         # Simulation
         v_setpoint_pu=1.05,
-        n_minutes=12 * 60,
+        n_minutes=6 * 60,
         tso_period_min=3,
         dso_period_s=30,
-        start_time=datetime(2016, 5, 1, 8, 0),
+        start_time=datetime(2016, 1, 7, 6, 0),
         use_profiles=True,
         verbose=2,
         live_plot=True,
@@ -1050,38 +1050,39 @@ def main():
         reserve_q_release_mvar=-45.0,
         reserve_cooldown_min=15,
         # Contingencies
-        contingencies = [
-            ContingencyEvent(minute=90, element_type="line", element_index=3),
-            ContingencyEvent(minute=60, element_type="gen", element_index=0),
-            ContingencyEvent(
-                minute=270, element_type="line", element_index=3, action="restore"
-            ),
-            ContingencyEvent(
-                minute=300, element_type="gen", element_index=0, action="restore"
-            ),
-            ContingencyEvent(
-                minute=360,
-                element_type="ext_grid",
-                element_index=0,
-                action="setpoint_change",
-                new_setpoint=1.05,
-            ),
-            # ramp of setpoints from 1.04 to 1.06
-            # *[
-            #     ContingencyEvent(
-            #         minute=start_min + i * step,
-            #         element_type="ext_grid",
-            #         element_index=0,
-            #         action="setpoint_change",
-            #         new_setpoint=start_sp + (i + 1) * delta,
-            #     )
-            #     for i in range(num_steps)
-            # ],
-            ContingencyEvent(minute=420, element_type="line", element_index=11),
-            ContingencyEvent(
-                minute=480, element_type="line", element_index=11, action="restore"
-            ),
-        ],
+        # contingencies = [
+        #     ContingencyEvent(minute=90, element_type="line", element_index=3),
+        #     ContingencyEvent(minute=60, element_type="gen", element_index=0),
+        #     ContingencyEvent(
+        #         minute=270, element_type="line", element_index=3, action="restore"
+        #     ),
+        #     ContingencyEvent(
+        #         minute=300, element_type="gen", element_index=0, action="restore"
+        #     ),
+        #     ContingencyEvent(
+        #         minute=360,
+        #         element_type="ext_grid",
+        #         element_index=0,
+        #         action="setpoint_change",
+        #         new_setpoint=1.05,
+        #     ),
+        #     # ramp of setpoints from 1.04 to 1.06
+        #     # *[
+        #     #     ContingencyEvent(
+        #     #         minute=start_min + i * step,
+        #     #         element_type="ext_grid",
+        #     #         element_index=0,
+        #     #         action="setpoint_change",
+        #     #         new_setpoint=start_sp + (i + 1) * delta,
+        #     #     )
+        #     #     for i in range(num_steps)
+        #     # ],
+        #     ContingencyEvent(minute=420, element_type="line", element_index=11),
+        #     ContingencyEvent(
+        #         minute=480, element_type="line", element_index=11, action="restore"
+        #     ),
+        # ],
+        contingencies=[],
     )
 
     # ── Run ────────────────────────────────────────────────────────────────

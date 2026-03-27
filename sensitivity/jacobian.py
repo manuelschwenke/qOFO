@@ -2593,12 +2593,18 @@ class JacobianSensitivities:
                         )
                     except ValueError:
                         dQtr3w_col[i] = 0.0
-                # Branch current w.r.t. shunt
-                dI_col, _ = self.compute_dI_dQ_shunt(
-                    shunt_bus_idx=shunt_bus,
-                    line_indices=line_indices,
-                    q_step_mvar=q_step,
-                )
+                # Branch current w.r.t. shunt.
+                # compute_dI_dQ_shunt raises ValueError when line_indices is
+                # empty (no lines → der_map empty).  Skip gracefully: the I
+                # rows are zero-length anyway when there are no lines.
+                if line_indices:
+                    dI_col, _ = self.compute_dI_dQ_shunt(
+                        shunt_bus_idx=shunt_bus,
+                        line_indices=line_indices,
+                        q_step_mvar=q_step,
+                    )
+                else:
+                    dI_col = np.zeros(0, dtype=np.float64)
 
                 dV_dshunt_list.append(dV_col)
                 dQtr2w_dshunt_list.append(dQtr2w_col)

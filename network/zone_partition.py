@@ -80,6 +80,93 @@ from numpy.typing import NDArray
 
 
 # ---------------------------------------------------------------------------
+#  Fixed (literature) zone partition for IEEE 39-bus
+# ---------------------------------------------------------------------------
+
+# IEEE 39-bus zone assignment from the standard 3-area partition
+# (see e.g. Kundur, "Power System Stability and Control", or the
+# commonly used New England 3-area decomposition in wide-area control
+# literature).
+#
+# Bus numbers are 0-INDEXED (pandapower convention).
+# 1-indexed label → 0-indexed: Bus N → bus (N-1).
+#
+# Zone 1 (blue/north):  Buses 01,02,25,26,27,28,29,30,37,38,39
+#   Generators: G10 (bus 29), G8 (bus 36), G9 (bus 37), slack (bus 38)
+#
+# Zone 2 (pink/south-west): Buses 03,04,05,06,07,08,09,10,11,12,13,14,31,32
+#   Generators: G2 (bus 30), G3 (bus 31)
+#
+# Zone 3 (green/south-east): Buses 15,16,17,18,19,20,21,22,23,24,33,34,35,36
+#   Generators: G4 (bus 32), G5 (bus 33), G6 (bus 34), G7 (bus 35)
+
+_FIXED_ZONES_IEEE39: Dict[int, List[int]] = {
+    1: [0, 1, 24, 25, 26, 27, 28, 29, 36, 37, 38],
+    2: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 30, 31],
+    3: [14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 32, 33, 34, 35],
+}
+
+
+def fixed_zone_partition_ieee39(
+    net: pp.pandapowerNet,
+    *,
+    verbose: bool = False,
+) -> Tuple[Dict[int, List[int]], Dict[int, int]]:
+    """
+    Return the standard 3-area partition of the IEEE 39-bus network.
+
+    This is the well-known geographic decomposition used in wide-area
+    control literature.  It avoids the non-determinism of spectral
+    clustering while producing electrically coherent zones.
+
+    Only TN (345 kV) buses are included.  Any DN buses (added by
+    ``add_dso_feeders``) are NOT assigned to a zone — they are managed
+    by DSO controllers attached at Zone-2 PCC trafos.
+
+    Parameters
+    ----------
+    net : pandapowerNet
+        IEEE 39-bus network (may include DSO feeders).
+    verbose : bool
+        Print zone assignments.
+
+    Returns
+    -------
+    zone_map : Dict[int, List[int]]
+        zone_id → sorted list of bus indices.
+    bus_zone : Dict[int, int]
+        bus_index → zone_id.
+    """
+    # Validate that expected TN buses exist
+    tn_buses = {int(b) for b in net.bus.index
+                if str(net.bus.at[b, "subnet"]) == "TN"}
+
+    zone_map: Dict[int, List[int]] = {}
+    bus_zone: Dict[int, int] = {}
+
+    for z, buses in _FIXED_ZONES_IEEE39.items():
+        zone_buses = [b for b in buses if b in tn_buses]
+        zone_map[z] = sorted(zone_buses)
+        for b in zone_buses:
+            bus_zone[b] = z
+
+    # Sanity check: every TN bus should be assigned
+    unassigned = tn_buses - set(bus_zone.keys())
+    if unassigned:
+        raise ValueError(
+            f"TN buses not assigned to any zone: {sorted(unassigned)}.  "
+            f"Is this really the IEEE 39-bus network?"
+        )
+
+    if verbose:
+        print("[fixed_zone_partition] IEEE 39-bus 3-area partition:")
+        for z in sorted(zone_map.keys()):
+            print(f"  Zone {z}: {len(zone_map[z])} buses ->{zone_map[z]}")
+
+    return zone_map, bus_zone
+
+
+# ---------------------------------------------------------------------------
 #  Pure-numpy k-means helper
 # ---------------------------------------------------------------------------
 
@@ -351,7 +438,7 @@ def spectral_zone_partition(
     if verbose:
         print(f"[zone_partition] Zone assignment ({n_zones} zones):")
         for z in range(n_zones):
-            print(f"  Zone {z}: {len(zone_map[z])} buses → {zone_map[z]}")
+            print(f"  Zone {z}: {len(zone_map[z])} buses ->{zone_map[z]}")
 
     return zone_map, bus_zone
 

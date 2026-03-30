@@ -181,11 +181,11 @@ class MultiTSOConfig:
     dso_period_s:   float = 60.0 * 1.0  # DSO fires every 1 minute
 
     # ── Voltage setpoint ──────────────────────────────────────────────────────
-    v_setpoint_pu:  float = 1.02     # nominal voltage target for all zones
+    v_setpoint_pu:  float = 1.05     # nominal voltage target for all zones
 
     # ── Objective weights ─────────────────────────────────────────────────────
     g_v:            float = 1.0      # TSO voltage tracking weight
-    g_q:            float = 5.0      # DSO Q-interface tracking weight
+    g_q:            float = 1.0      # DSO Q-interface tracking weight
     dso_g_v:        float = 0.0      # DSO secondary voltage weight (0 = off)
 
     # ── OFO step-size ─────────────────────────────────────────────────────────
@@ -196,13 +196,13 @@ class MultiTSOConfig:
     # With α=1 and Q_DER in [Mvar], the step is clamped by g_w such that
     #   w* ≈ −gradient / (2 · g_w)
     # So g_w=100 limits a single step to ~0.5/g_v Mvar for a 1-pu voltage error.
-    g_w_der:        float = 100.0    # [Mvar]² cost per DER Q step
-    g_w_gen:        float = 5e8      # [p.u.]² cost per AVR step (very cautious)
-    g_w_pcc:        float = 100.0    # [Mvar]² cost per PCC-Q setpoint step
+    g_w_der:        float = 10.0    # [Mvar]² cost per DER Q step
+    g_w_gen:        float = 1e8      # [p.u.]² cost per AVR step (very cautious)
+    g_w_pcc:        float = 5.0    # [Mvar]² cost per PCC-Q setpoint step
 
     # ── G_w regularisation weights (DSO) ─────────────────────────────────────
-    g_w_dso_der:    float = 50.0     # DSO DER Q regularisation
-    g_w_dso_oltc:   float = 200.0    # DSO OLTC tap regularisation (unused for now)
+    g_w_dso_der:    float = 5.0     # DSO DER Q regularisation
+    g_w_dso_oltc:   float = 120.0    # DSO OLTC tap regularisation (unused for now)
 
     # ── DSO parameters ─────────────────────────────────────────────────────────
     n_dso_buses:    int   = 2        # number of Zone-2 buses replaced by DSO feeders
@@ -1197,17 +1197,18 @@ def main() -> None:
         python run/run_multi_tso_dso.py
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 30,      # 30-minute simulation for quick test
+        n_total_s=60.0 * 180,      # 30-minute simulation for quick test
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
-        dso_period_s=60.0 * 1,    # DSO every 1 minute
+        dso_period_s=30.0 * 1,    # DSO every 1 minute
         alpha=1.0,
-        g_v=1.0,
-        g_w_der=100.0,
-        g_w_gen=5e8,
+        g_v=50000.0,
+        g_w_der=10.0,
+        g_w_gen=1e7,
         run_stability_analysis=True,
-        sensitivity_update_interval=3,  # refresh H_ij every 3 TSO steps
+        sensitivity_update_interval=1E6,  # refresh H_ij every 3 TSO steps
         verbose=1,
         n_dso_buses=2,
+        live_plot=True
     )
     log = run_multi_tso_dso(cfg)
     print(f"\nSimulation complete. {len(log)} steps recorded.")

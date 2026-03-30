@@ -15,10 +15,10 @@ Architecture (matches the multi-TSO theory in Schwenke / CIGRE 2026)
 
     ┌──────────────────────────────────────────────────────────┐
     │              IEEE 39-bus network (plant)                 │
-    │  Zone 0        │  Zone 1        │  Zone 2 (w/ DSOs)      │
-    │  TSOCtrl_0     │  TSOCtrl_1     │  TSOCtrl_2             │
-    │                │                │  ├── DSOCtrl_20a        │
-    │                │                │  └── DSOCtrl_20b        │
+    │  Zone 1        │  Zone 2 (w/ DSOs) │  Zone 3             │
+    │  TSOCtrl_1     │  TSOCtrl_2        │  TSOCtrl_3          │
+    │  (4 gen incl.  │  ├── DSOCtrl_2_0  │  (4 gen)            │
+    │   slack)       │  └── DSOCtrl_2_1  │                     │
     └──────────────────────────────────────────────────────────┘
 
 Step sequence (each simulation step dt_s):
@@ -50,7 +50,7 @@ operating point is used.
 Key differences from run_cascade.py
 -------------------------------------
 * Network: IEEE 39-bus (build_ieee39_net) instead of TU-Darmstadt.
-* Zones: spectral_zone_partition defines 3 TSO zones dynamically.
+* Zones: fixed_zone_partition_ieee39 (literature 3-area) or spectral_zone_partition.
 * N TSOControllers instead of 1, coordinated by MultiTSOCoordinator.
 * DSOs: 2-winding interface trafos (net.trafo) instead of 3-winding.
 * No machine OLTCs: generators in case39 have direct AVR control (gen.vm_pu).
@@ -92,6 +92,7 @@ from core.measurement import Measurement
 from core.network_state import NetworkState
 from network.build_ieee39_net import build_ieee39_net, add_dso_feeders, IEEE39NetworkMeta
 from network.zone_partition import (
+    fixed_zone_partition_ieee39,
     spectral_zone_partition,
     relabel_zones_by_generator_count,
     get_zone_lines,
@@ -210,6 +211,10 @@ class MultiTSOConfig:
     der_s_mva:      float = 80.0     # rated MVA per DSO DER
     der_p_mw:       float = 20.0     # fixed active power per DSO DER [MW]
     shunt_q_mvar:   float = 30.0     # switchable shunt step [Mvar]
+
+    # ── Zone partitioning ─────────────────────────────────────────────────────
+    use_fixed_zones:    bool  = True   # True = literature 3-area partition; False = spectral clustering
+    dso_zone:           int   = 2      # zone ID where DSO feeders are attached
 
     # ── Stability analysis ─────────────────────────────────────────────────────
     run_stability_analysis:       bool = True
@@ -593,8 +598,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
     if verbose >= 1:
         print("=" * 72)
+        zone_method = "fixed 3-area" if config.use_fixed_zones else "spectral"
         print("  MULTI-TSO / MULTI-DSO OFO  —  IEEE 39-bus New England")
         print(f"  V_set = {v_set:.3f} p.u.  |  N_zones = 3  |  α = {config.alpha}")
+        print(f"  Zone partition: {zone_method}  |  DSO zone: {config.dso_zone}")
         print("=" * 72)
 
     # =========================================================================
@@ -607,18 +614,24 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
     # =========================================================================
-    # STEP 2: Spectral zone partitioning
+    # STEP 2: Zone partitioning
     # =========================================================================
-    if verbose >= 1:
-        print("[2] Spectral zone partitioning (N=3) ...")
-
-    zone_map, bus_zone = spectral_zone_partition(
-        net, n_zones=3, verbose=(verbose >= 2)
-    )
-    # Relabel: Zone 0 = most generators, Zone 2 = fewest (prime candidate for DSO)
-    zone_map, bus_zone = relabel_zones_by_generator_count(
-        zone_map, bus_zone, list(meta.gen_bus_indices)
-    )
+    if config.use_fixed_zones:
+        if verbose >= 1:
+            print("[2] Fixed 3-area zone partition (literature) ...")
+        zone_map, bus_zone = fixed_zone_partition_ieee39(
+            net, verbose=(verbose >= 2)
+        )
+    else:
+        if verbose >= 1:
+            print("[2] Spectral zone partitioning (N=3) ...")
+        zone_map, bus_zone = spectral_zone_partition(
+            net, n_zones=3, verbose=(verbose >= 2)
+        )
+        # Relabel: Zone 0 = most generators, Zone 2 = fewest (prime candidate for DSO)
+        zone_map, bus_zone = relabel_zones_by_generator_count(
+            zone_map, bus_zone, list(meta.gen_bus_indices)
+        )
 
     if verbose >= 1:
         for z in sorted(zone_map.keys()):
@@ -630,22 +643,23 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                   f"{n_gen_z} generators, {n_load_z} loads")
 
     # =========================================================================
-    # STEP 3: Add DSO feeders at Zone-2 load buses
+    # STEP 3: Add DSO feeders at DSO zone load buses
     # =========================================================================
     #
-    # We pick the load buses in Zone 2 with the highest load (largest P_mw)
-    # as the DSO interface points.  Only config.n_dso_buses are used.
-    zone2_buses   = set(zone_map[2])
-    zone2_load_candidates = [
+    # We pick the load buses in the DSO zone with the highest load (largest
+    # P_mw) as the DSO interface points.  Only config.n_dso_buses are used.
+    dso_zone_id = config.dso_zone
+    dso_zone_buses = set(zone_map[dso_zone_id])
+    dso_zone_load_candidates = [
         (float(net.load.at[li, "p_mw"]), int(net.load.at[li, "bus"]))
         for li in net.load.index
-        if int(net.load.at[li, "bus"]) in zone2_buses
+        if int(net.load.at[li, "bus"]) in dso_zone_buses
     ]
     # Sort descending by load size; take the top n_dso_buses unique buses
-    zone2_load_candidates.sort(reverse=True)
+    dso_zone_load_candidates.sort(reverse=True)
     dso_hv_buses: List[int] = []
     seen = set()
-    for _, bus in zone2_load_candidates:
+    for _, bus in dso_zone_load_candidates:
         if bus not in seen:
             dso_hv_buses.append(bus)
             seen.add(bus)
@@ -653,7 +667,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             break
 
     if verbose >= 1:
-        print(f"[3] Adding DSO feeders at Zone-2 buses: {dso_hv_buses}")
+        print(f"[3] Adding DSO feeders at Zone-{dso_zone_id} buses: {dso_hv_buses}")
 
     meta = add_dso_feeders(
         net, meta, dso_hv_buses,
@@ -692,11 +706,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 zone_der_buses[z].append(s_bus)
                 break
 
-    # ── DSO interface trafos belong to Zone 2 ─────────────────────────────────
+    # ── DSO interface trafos belong to the DSO zone ─────────────────────────
     #
-    # Each DSO feeder is connected at a Zone-2 bus.  The PCC trafo and the
-    # DSO controller ID are assigned to Zone 2's TSOController.
-    dso_ids: List[str] = [f"dso_zone2_{k}" for k in range(len(meta.dso_pcc_trafo_indices))]
+    # Each DSO feeder is connected at a bus in the DSO zone.  The PCC trafo
+    # and the DSO controller ID are assigned to that zone's TSOController.
+    dso_ids: List[str] = [f"dso_zone{dso_zone_id}_{k}" for k in range(len(meta.dso_pcc_trafo_indices))]
 
     # ── Build ZoneDefinition for each zone ────────────────────────────────────
     #
@@ -723,8 +737,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             float(net.line.at[li, "max_i_ka"]) for li in z_lines
         ]
 
-        # PCC trafo and DSO IDs: only for Zone 2
-        if z == 2:
+        # PCC trafo and DSO IDs: only for the DSO zone
+        if z == dso_zone_id:
             pcc_trafos = list(meta.dso_pcc_trafo_indices)
             pcc_dso_ids = dso_ids
         else:
@@ -863,10 +877,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         tso_controllers[z] = ctrl
 
     # =========================================================================
-    # STEP 6: Initialise DSO controllers (Zone 2 only)
+    # STEP 6: Initialise DSO controllers (DSO zone only)
     # =========================================================================
     if verbose >= 1:
-        print("[6] Initialising DSO controllers (Zone 2) ...")
+        print(f"[6] Initialising DSO controllers (Zone {dso_zone_id}) ...")
 
     dso_controllers: Dict[str, DSOController] = {}
     dso_lv_buses_map: Dict[str, int] = {}   # dso_id → LV bus
@@ -1197,18 +1211,20 @@ def main() -> None:
         python run/run_multi_tso_dso.py
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 180,      # 30-minute simulation for quick test
+        n_total_s=60.0 * 180,      # 180-minute simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
-        dso_period_s=30.0 * 1,    # DSO every 1 minute
+        dso_period_s=60.0 * 1,    # DSO every 1 minute
         alpha=1.0,
         g_v=50000.0,
         g_w_der=10.0,
         g_w_gen=1e7,
+        use_fixed_zones=True,      # literature 3-area partition (not spectral)
+        dso_zone=2,                # DSO feeders in Zone 2
         run_stability_analysis=True,
-        sensitivity_update_interval=1E6,  # refresh H_ij every 3 TSO steps
+        sensitivity_update_interval=3,  # refresh H_ij every 3 TSO steps
         verbose=1,
         n_dso_buses=2,
-        live_plot=True
+        live_plot=True,
     )
     log = run_multi_tso_dso(cfg)
     print(f"\nSimulation complete. {len(log)} steps recorded.")

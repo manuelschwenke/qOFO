@@ -1050,6 +1050,34 @@ class ZoneStabilityResult:
     diagonally_dominant: bool
     warnings:           list = field(default_factory=list)
 
+    # ── Lyapunov / small-gain analysis (populated by analyse_multi_zone_stability) ──
+    lambda_min_Mii:     float = 0.0
+    """Smallest eigenvalue of M_ii (positive if M_ii is PD)."""
+
+    kappa_Mii:          float = np.inf
+    """Condition number κ(M_ii) = λ_max / λ_min."""
+
+    rho_i:              float = 1.0
+    """Per-zone contraction rate ρ_i = max_ℓ |1 − α_i λ_ℓ(M_ii)|."""
+
+    rho_i_opt:          float = 1.0
+    """Optimal contraction rate at α_i* = 2 / (λ_min + λ_max): ρ* = (κ−1)/(κ+1)."""
+
+    alpha_i_opt:        float = 0.0
+    """Optimal step size α_i* = 2 / (λ_min(M_ii) + λ_max(M_ii))."""
+
+    sigma_ij:           Dict[int, float] = field(default_factory=dict)
+    """Per-zone cross-coupling gains σ_ij = α_i · ‖M_ij‖₂."""
+
+    sigma_ij_opt:       Dict[int, float] = field(default_factory=dict)
+    """Cross-coupling gains at optimal α_i*: σ*_ij = α_i* · ‖M_ij‖₂."""
+
+    lyapunov_row_sum:   float = 1.0
+    """ρ_i + Σ_{j≠i} σ_ij.  Must be < 1 for N-zone small-gain (uniform weights)."""
+
+    lyapunov_row_sum_opt: float = 1.0
+    """ρ*_i + Σ_{j≠i} σ*_ij at optimal step size."""
+
 
 @dataclass
 class MultiZoneStabilityResult:
@@ -1087,6 +1115,29 @@ class MultiZoneStabilityResult:
     globally_stable:            bool
     all_zones_diagonally_dominant: bool
     summary:                    str = ""
+
+    # ── Lyapunov / small-gain analysis ───────────────────────────────────────
+    small_gain_gamma:           float = np.inf
+    """Contraction rate γ = max_i {ρ_i + Σ_{j≠i} σ_ij} (uniform weights).
+    System converges iff γ < 1."""
+
+    small_gain_gamma_opt:       float = np.inf
+    """Contraction rate γ at optimal per-zone step sizes α_i*."""
+
+    small_gain_stable:          bool = False
+    """True iff γ < 1 with current step sizes."""
+
+    small_gain_stable_opt:      bool = False
+    """True iff γ < 1 would hold at optimal step sizes."""
+
+    pairwise_small_gain:        Dict[Tuple[int, int], bool] = field(default_factory=dict)
+    """For each ordered pair (i,j): True iff σ_ij·σ_ji < (1−ρ_i)(1−ρ_j)."""
+
+    pairwise_small_gain_opt:    Dict[Tuple[int, int], bool] = field(default_factory=dict)
+    """Same check at optimal step sizes."""
+
+    recommendations:            List[str] = field(default_factory=list)
+    """Actionable tuning recommendations."""
 
 
 def analyse_multi_zone_stability(
@@ -1217,10 +1268,19 @@ def analyse_multi_zone_stability(
         sv = np.linalg.svd(H_ii, compute_uv=False)
         sigma_max_Hii = float(sv[0]) if len(sv) > 0 else 0.0
 
-        # λ_max(M_ii)
+        # Eigenvalues of M_ii
         eig_ii = np.linalg.eigvalsh(M_ii)
         lambda_max = float(np.maximum(eig_ii[-1], 0.0))
+        lambda_min = float(np.maximum(eig_ii[0], 0.0))
         alpha_max_local = (2.0 / lambda_max) if lambda_max > 1e-14 else np.inf
+        kappa = (lambda_max / lambda_min) if lambda_min > 1e-14 else np.inf
+
+        # Optimal step size and contraction rate
+        alpha_i_opt = (2.0 / (lambda_min + lambda_max)) if (lambda_min + lambda_max) > 1e-14 else 0.0
+        rho_i_opt = (kappa - 1.0) / (kappa + 1.0) if kappa < np.inf else 1.0
+
+        # Actual contraction rate at current α_i
+        rho_i = max(abs(1.0 - alpha_i * lam) for lam in eig_ii) if len(eig_ii) > 0 else 1.0
 
         # Coupling norms: ||M_ij||₂ for j ≠ i
         coupling_norms: Dict[int, float] = {}
@@ -1235,6 +1295,14 @@ def analyse_multi_zone_stability(
 
         coupling_sum = sum(coupling_norms.values())
 
+        # Cross-coupling gains σ_ij = α_i · ‖M_ij‖₂
+        sigma_ij_current = {j: alpha_i * norm for j, norm in coupling_norms.items()}
+        sigma_ij_optimal = {j: alpha_i_opt * norm for j, norm in coupling_norms.items()}
+
+        # Lyapunov row sums: ρ_i + Σ_{j≠i} σ_ij
+        lyap_row = rho_i + sum(sigma_ij_current.values())
+        lyap_row_opt = rho_i_opt + sum(sigma_ij_optimal.values())
+
         # Diagonal-dominance condition: α_i · (λ_max + Σ||M_ij||₂) ∈ (0, 2)
         contraction_lhs = alpha_i * (lambda_max + coupling_sum)
         alpha_max_coupled = (
@@ -1246,20 +1314,20 @@ def analyse_multi_zone_stability(
         warnings: List[str] = []
         if contraction_lhs >= 2.0:
             warnings.append(
-                f"{zone_names[i_idx]}: contraction_lhs = {contraction_lhs:.4f} ≥ 2.0 — "
+                f"{zone_names[i_idx]}: contraction_lhs = {contraction_lhs:.4f} >= 2.0 -- "
                 f"diagonal-dominance condition VIOLATED.  "
-                f"Consider reducing α_{i} to < {alpha_max_coupled:.4g}."
+                f"Consider reducing alpha_{i} to < {alpha_max_coupled:.4g}."
             )
         elif contraction_lhs > 1.5:
             warnings.append(
-                f"{zone_names[i_idx]}: contraction_lhs = {contraction_lhs:.4f} — "
+                f"{zone_names[i_idx]}: contraction_lhs = {contraction_lhs:.4f} -- "
                 f"marginal (> 1.5).  Coupling is significant."
             )
         if coupling_sum > lambda_max:
             warnings.append(
                 f"{zone_names[i_idx]}: inter-zone coupling dominates "
-                f"(Σ‖M_ij‖₂ = {coupling_sum:.4f} > λ_max = {lambda_max:.4f}).  "
-                f"Adding DSO-internal DERs to Zone {i} strengthens the diagonal block."
+                f"(sum ||M_ij||_2 = {coupling_sum:.4f} > lambda_max = {lambda_max:.4f}).  "
+                f"Adding DERs to Zone {i} strengthens the diagonal block."
             )
 
         zone_results.append(ZoneStabilityResult(
@@ -1275,6 +1343,16 @@ def analyse_multi_zone_stability(
             alpha_max_coupled=alpha_max_coupled,
             diagonally_dominant=diag_dom,
             warnings=warnings,
+            # Lyapunov fields
+            lambda_min_Mii=lambda_min,
+            kappa_Mii=kappa,
+            rho_i=rho_i,
+            rho_i_opt=rho_i_opt,
+            alpha_i_opt=alpha_i_opt,
+            sigma_ij=sigma_ij_current,
+            sigma_ij_opt=sigma_ij_optimal,
+            lyapunov_row_sum=lyap_row,
+            lyapunov_row_sum_opt=lyap_row_opt,
         ))
 
     # ── Step 3: Assemble full M_sys and global eigenvalue analysis ────────────
@@ -1312,13 +1390,115 @@ def analyse_multi_zone_stability(
 
     all_diag_dom = all(zr.diagonally_dominant for zr in zone_results)
 
+    # ── Step 4: Lyapunov / small-gain post-loop analysis ────────────────────
+
+    # N-zone small-gain condition: γ = max_i {ρ_i + Σ_{j≠i} σ_ij} < 1
+    small_gain_gamma = max(zr.lyapunov_row_sum for zr in zone_results)
+    small_gain_gamma_opt = max(zr.lyapunov_row_sum_opt for zr in zone_results)
+    small_gain_stable = small_gain_gamma < 1.0
+    small_gain_stable_opt = small_gain_gamma_opt < 1.0
+
+    # Pairwise small-gain: σ_ij · σ_ji < (1 − ρ_i)(1 − ρ_j)
+    pairwise_sg: Dict[Tuple[int, int], bool] = {}
+    pairwise_sg_opt: Dict[Tuple[int, int], bool] = {}
+    for i_idx, zr_i in enumerate(zone_results):
+        for j_idx, zr_j in enumerate(zone_results):
+            if i_idx >= j_idx:
+                continue
+            zi, zj = zr_i.zone_id, zr_j.zone_id
+            sig_ij = zr_i.sigma_ij.get(zj, 0.0)
+            sig_ji = zr_j.sigma_ij.get(zi, 0.0)
+            margin_i = max(1.0 - zr_i.rho_i, 0.0)
+            margin_j = max(1.0 - zr_j.rho_i, 0.0)
+            pairwise_sg[(zi, zj)] = (sig_ij * sig_ji) < (margin_i * margin_j)
+
+            sig_ij_o = zr_i.sigma_ij_opt.get(zj, 0.0)
+            sig_ji_o = zr_j.sigma_ij_opt.get(zi, 0.0)
+            margin_i_o = max(1.0 - zr_i.rho_i_opt, 0.0)
+            margin_j_o = max(1.0 - zr_j.rho_i_opt, 0.0)
+            pairwise_sg_opt[(zi, zj)] = (sig_ij_o * sig_ji_o) < (margin_i_o * margin_j_o)
+
+    # ── Step 5: Generate actionable tuning recommendations ───────────────
+    recommendations: List[str] = []
+
+    # Find bottleneck zone (highest Lyapunov row sum)
+    worst_idx = int(np.argmax([zr.lyapunov_row_sum for zr in zone_results]))
+    worst = zone_results[worst_idx]
+    wname = zone_names[worst_idx]
+
+    if not small_gain_stable:
+        recommendations.append(
+            f"Small-gain condition VIOLATED (gamma={small_gain_gamma:.4f} >= 1). "
+            f"Bottleneck: {wname} (row sum = {worst.lyapunov_row_sum:.4f})."
+        )
+
+        # Suggest adjusting step size if rho_i is the dominant term
+        if worst.rho_i > 0.5 * worst.lyapunov_row_sum:
+            direction = "Decrease" if alpha_list[worst_idx] > worst.alpha_i_opt else "Increase"
+            recommendations.append(
+                f"  -> {wname}: ρ_i = {worst.rho_i:.4f} dominates. "
+                f"{direction} α_{worst.zone_id} from {alpha_list[worst_idx]:.4g} "
+                f"toward α* = {worst.alpha_i_opt:.4g} (optimal ρ* = {worst.rho_i_opt:.4f})."
+            )
+
+        # Suggest increasing g_w for zones with high condition number
+        for i_idx, zr in enumerate(zone_results):
+            if zr.kappa_Mii > 100:
+                recommendations.append(
+                    f"  -> {zone_names[i_idx]}: κ(M_ii) = {zr.kappa_Mii:.1f} is large. "
+                    f"Increase g_w for weakly-coupled actuators to reduce condition number. "
+                    f"λ_min = {zr.lambda_min_Mii:.4g}, λ_max = {zr.lambda_max_Mii:.4g}."
+                )
+
+        # Suggest decoupling for large cross-coupling
+        for i_idx, zr in enumerate(zone_results):
+            for j, sig in zr.sigma_ij.items():
+                if sig > 0.3:
+                    recommendations.append(
+                        f"  -> σ_{zr.zone_id},{j} = {sig:.4f} is large. "
+                        f"Increase g_w in {zone_names[i_idx]} to reduce ‖M_{zr.zone_id},{j}‖₂, "
+                        f"or reduce α_{zr.zone_id}."
+                    )
+
+    if small_gain_stable and not small_gain_stable_opt:
+        recommendations.append(
+            f"System stable at current α but NOT at optimal α*. "
+            f"Current gamma = {small_gain_gamma:.4f}, optimal gamma = {small_gain_gamma_opt:.4f}. "
+            f"Cross-coupling limits the benefit of faster step sizes."
+        )
+
+    if small_gain_stable_opt and small_gain_stable:
+        recommendations.append(
+            f"Small-gain condition satisfied (gamma = {small_gain_gamma:.4f}). "
+            f"At optimal step sizes: gamma* = {small_gain_gamma_opt:.4f}."
+        )
+        # Suggest moving toward optimal step sizes if there's room
+        for i_idx, zr in enumerate(zone_results):
+            ratio = alpha_list[i_idx] / zr.alpha_i_opt if zr.alpha_i_opt > 1e-14 else 0.0
+            if ratio < 0.7 or ratio > 1.5:
+                recommendations.append(
+                    f"  -> {zone_names[i_idx]}: α_{zr.zone_id} = {alpha_list[i_idx]:.4g}, "
+                    f"α* = {zr.alpha_i_opt:.4g} (ratio {ratio:.2f}). "
+                    f"{'Increase' if ratio < 1 else 'Decrease'} α for faster convergence."
+                )
+
+    # Pairwise violation recommendations
+    for (zi, zj), ok in pairwise_sg.items():
+        if not ok:
+            recommendations.append(
+                f"  -> Pairwise small-gain VIOLATED for zones ({zi}, {zj}). "
+                f"Reduce coupling between these zones."
+            )
+
     # ── Build summary string ──────────────────────────────────────────────────
     g_status = "STABLE" if globally_stable else "UNSTABLE"
     d_status = "satisfied" if all_diag_dom else "VIOLATED for some zones"
+    sg_status = "satisfied" if small_gain_stable else "VIOLATED"
     summary = (
         f"Multi-zone stability: {g_status}.  "
         f"λ_max(M_sys) = {M_sys_lambda_max:.4g}, α_max_global = {alpha_max_global:.4g}.  "
         f"Diagonal-dominance condition {d_status}.  "
+        f"Small-gain condition {sg_status} (γ = {small_gain_gamma:.4f}).  "
         f"N_zones = {n_zones}, N_controls_total = {n_total}."
     )
 
@@ -1331,6 +1511,13 @@ def analyse_multi_zone_stability(
         globally_stable=globally_stable,
         all_zones_diagonally_dominant=all_diag_dom,
         summary=summary,
+        small_gain_gamma=small_gain_gamma,
+        small_gain_gamma_opt=small_gain_gamma_opt,
+        small_gain_stable=small_gain_stable,
+        small_gain_stable_opt=small_gain_stable_opt,
+        pairwise_small_gain=pairwise_sg,
+        pairwise_small_gain_opt=pairwise_sg_opt,
+        recommendations=recommendations,
     )
 
     if verbose:
@@ -1413,6 +1600,87 @@ def _print_multi_zone_report(
               f"|1 - α·λ| = {contraction:>8.4f}")
     print()
 
+    # ── Lyapunov / Small-Gain Analysis ──────────────────────────────────────
+    print(thin)
+    print("  Lyapunov / Small-Gain Stability Analysis")
+    print(thin)
+    print()
+
+    # Per-zone Lyapunov parameters table
+    print(f"  {'Zone':<14s} {'ρ_i':>8s} {'ρ*_i':>8s} {'α_i':>8s} {'α*_i':>8s} "
+          f"{'κ(M_ii)':>10s} {'λ_min':>10s} {'λ_max':>10s} {'row_sum':>10s} {'row*_sum':>10s}")
+    print(f"  {'':─<14s} {'':─>8s} {'':─>8s} {'':─>8s} {'':─>8s} "
+          f"{'':─>10s} {'':─>10s} {'':─>10s} {'':─>10s} {'':─>10s}")
+
+    for i_idx, zr in enumerate(result.zones):
+        kappa_str = f"{zr.kappa_Mii:.1f}" if zr.kappa_Mii < 1e6 else "inf"
+        print(
+            f"  {zone_names[i_idx]:<14s} "
+            f"{zr.rho_i:>8.4f} "
+            f"{zr.rho_i_opt:>8.4f} "
+            f"{alpha_list[i_idx]:>8.4g} "
+            f"{zr.alpha_i_opt:>8.4g} "
+            f"{kappa_str:>10s} "
+            f"{zr.lambda_min_Mii:>10.4g} "
+            f"{zr.lambda_max_Mii:>10.4g} "
+            f"{zr.lyapunov_row_sum:>10.4f} "
+            f"{zr.lyapunov_row_sum_opt:>10.4f}"
+        )
+    print()
+
+    # Cross-coupling gains σ_ij matrix
+    n_zones = len(result.zones)
+    zone_ids = [zr.zone_id for zr in result.zones]
+    if n_zones <= 6:
+        print("  Cross-coupling gains σ_ij = α_i · ‖M_ij‖₂:")
+        header = f"  {'':14s}" + "".join(f"  {zone_names[j]:>10s}" for j in range(n_zones))
+        print(header)
+        for i_idx, zr in enumerate(result.zones):
+            row_str = f"  {zone_names[i_idx]:<14s}"
+            for j_idx, zj in enumerate(zone_ids):
+                if zj == zr.zone_id:
+                    row_str += f"  {'ρ=' + f'{zr.rho_i:.4f}':>10s}"
+                else:
+                    sig = zr.sigma_ij.get(zj, 0.0)
+                    row_str += f"  {sig:>10.4f}"
+            print(row_str)
+        print()
+
+    # N-zone small-gain condition
+    sg_ok = "SATISFIED" if result.small_gain_stable else "VIOLATED"
+    sg_opt_ok = "SATISFIED" if result.small_gain_stable_opt else "VIOLATED"
+    print(f"  N-zone small-gain (γ = max_i row_sum_i < 1):")
+    print(f"    Current:  γ = {result.small_gain_gamma:.4f}  [{sg_ok}]")
+    print(f"    Optimal:  γ* = {result.small_gain_gamma_opt:.4f}  [{sg_opt_ok}]")
+    print()
+
+    # Pairwise small-gain checks
+    if result.pairwise_small_gain:
+        print("  Pairwise small-gain (σ_ij · σ_ji < (1−ρ_i)(1−ρ_j)):")
+        for (zi, zj), ok in sorted(result.pairwise_small_gain.items()):
+            status = "OK" if ok else "VIOLATED"
+            ok_opt = result.pairwise_small_gain_opt.get((zi, zj), False)
+            status_opt = "OK" if ok_opt else "VIOLATED"
+            # Find the relevant zone results
+            zr_i = next(zr for zr in result.zones if zr.zone_id == zi)
+            zr_j = next(zr for zr in result.zones if zr.zone_id == zj)
+            sig_ij = zr_i.sigma_ij.get(zj, 0.0)
+            sig_ji = zr_j.sigma_ij.get(zi, 0.0)
+            product = sig_ij * sig_ji
+            bound = max(1.0 - zr_i.rho_i, 0.0) * max(1.0 - zr_j.rho_i, 0.0)
+            print(f"    Zones ({zi},{zj}): σ·σ = {product:.4g} vs bound = {bound:.4g}  "
+                  f"[{status}]  (optimal: [{status_opt}])")
+        print()
+
+    # ── Tuning Recommendations ────────────────────────────────────────────────
+    if result.recommendations:
+        print(thin)
+        print("  Tuning Recommendations")
+        print(thin)
+        for rec in result.recommendations:
+            print(f"    {rec}")
+        print()
+
     # ── Warnings ──────────────────────────────────────────────────────────────
     all_warnings = []
     for i_idx, zr in enumerate(result.zones):
@@ -1421,7 +1689,7 @@ def _print_multi_zone_report(
     if all_warnings:
         print("  Warnings:")
         for w in all_warnings:
-            print(f"    ⚠  {w}")
+            print(f"    {w}")
         print()
 
     # ── Overall status ────────────────────────────────────────────────────────

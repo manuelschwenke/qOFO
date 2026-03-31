@@ -88,7 +88,7 @@ class OFOParameters:
 
     def __post_init__(self) -> None:
         """Validate parameters after initialisation."""
-        if self.alpha <= 0:
+        if np.any(self.alpha) <= 0:
             raise ValueError(f"alpha must be positive, got {self.alpha}")
         g_w_arr = np.asarray(self.g_w)
         if g_w_arr.ndim <= 1 and np.any(g_w_arr < 0):

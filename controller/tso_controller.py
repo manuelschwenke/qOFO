@@ -43,6 +43,7 @@ Author: Manuel Schwenke
 Date: 2025-02-06
 """
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict
 import numpy as np
@@ -335,17 +336,24 @@ class TSOController(BaseOFOController):
         # PCC setpoint values sit after the DER entries in u
         q_pcc_setpoints = self._u_current[n_der:n_der + n_pcc]
 
-        messages: List[SetpointMessage] = []
+        # Group PCC trafos by DSO ID (each DSO may have multiple PCC trafos)
+        dso_trafos: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
         for i, dso_id in enumerate(self.config.pcc_dso_controller_ids):
+            dso_trafos[dso_id].append((self.config.pcc_trafo_indices[i], i))
+
+        messages: List[SetpointMessage] = []
+        for dso_id, trafo_pairs in dso_trafos.items():
+            trafo_indices = [t for t, _ in trafo_pairs]
+            q_vals = [float(q_pcc_setpoints[idx]) for _, idx in trafo_pairs]
             msg = SetpointMessage(
                 source_controller_id=self.controller_id,
                 target_controller_id=dso_id,
                 iteration=self.iteration,
                 interface_transformer_indices=np.array(
-                    [self.config.pcc_trafo_indices[i]], dtype=np.int64
+                    trafo_indices, dtype=np.int64
                 ),
                 q_setpoints_mvar=np.array(
-                    [q_pcc_setpoints[i]], dtype=np.float64
+                    q_vals, dtype=np.float64
                 ),
             )
             messages.append(msg)

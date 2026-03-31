@@ -668,9 +668,18 @@ class DSOController(BaseOFOController):
             int(net.sgen.at[s, "bus"]) for s in self.config.der_indices
         ]
 
+        # Deduplicate: the sensitivity builder works on unique buses.
+        # After building H we expand columns back to one per DER.
+        unique_buses: List[int] = []
+        der_to_unique: List[int] = []  # maps each DER to its unique-bus column
+        for b in der_bus_indices:
+            if b not in unique_buses:
+                unique_buses.append(b)
+            der_to_unique.append(unique_buses.index(b))
+
         # Build keyword arguments depending on transformer type
         kw = dict(
-            der_bus_indices=der_bus_indices,
+            der_bus_indices=unique_buses,
             observation_bus_indices=self.config.voltage_bus_indices,
             line_indices=self.config.current_line_indices,
             shunt_bus_indices=self.config.shunt_bus_indices,
@@ -687,6 +696,16 @@ class DSOController(BaseOFOController):
             kw["oltc_trafo_indices"] = self.config.oltc_trafo_indices
 
         H, mappings = self.sensitivities.build_sensitivity_matrix_H(**kw)
+
+        # Expand DER columns: duplicate shared-bus columns so H has one
+        # column per DER sgen (the controller indexes by der_indices position).
+        if len(unique_buses) < len(der_bus_indices):
+            n_unique = len(unique_buses)
+            n_other = H.shape[1] - n_unique
+            H_der = H[:, :n_unique][:, der_to_unique]  # expand
+            H_rest = H[:, n_unique:]
+            H = np.hstack([H_der, H_rest])
+            mappings["der_buses"] = der_bus_indices
 
         self._H_cache = H
         self._H_mappings = mappings

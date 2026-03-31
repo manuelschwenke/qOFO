@@ -29,6 +29,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict, List, Optional, Sequence
 
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 
 if TYPE_CHECKING:
@@ -170,25 +171,38 @@ class MultiTSOLivePlotter:
         self._zone_v_mean: Dict[int, List[float]] = {z: [] for z in self._zone_ids}
         self._zone_q_der:  Dict[int, List] = {z: [] for z in self._zone_ids}
         self._zone_v_gen:  Dict[int, List] = {z: [] for z in self._zone_ids}
+        self._zone_q_gen:  Dict[int, List] = {z: [] for z in self._zone_ids}
         self._zone_obj:    Dict[int, List[float]] = {z: [] for z in self._zone_ids}
         self._zone_obj_min: Dict[int, List[float]] = {z: [] for z in self._zone_ids}
         self._zone_contraction: Dict[int, List[float]] = {z: [] for z in self._zone_ids}
 
-        # Per-DSO data (only at DSO-active steps)
+        # Per-DSO / network-group / transformer data (only at DSO-active steps)
         self._dso_min: List[float] = []
-        self._dso_q_der: Dict[str, List] = {d: [] for d in self._dso_ids}
-        self._dso_q_set:    Dict[str, List[float]] = {d: [] for d in self._dso_ids}
-        self._dso_q_actual: Dict[str, List[float]] = {d: [] for d in self._dso_ids}
-        self._dso_q_set_min:    Dict[str, List[float]] = {d: [] for d in self._dso_ids}
-        self._dso_q_actual_min: Dict[str, List[float]] = {d: [] for d in self._dso_ids}
-        self._dso_obj: Dict[str, List[float]] = {d: [] for d in self._dso_ids}
+
+        self._group_ids: List[str] = []
+        self._trafo_ids: List[str] = []
+
+        self._dso_group_q_der: Dict[str, List[float]] = {}
+        self._dso_group_v_min: Dict[str, List[float]] = {}
+        self._dso_group_v_mean: Dict[str, List[float]] = {}
+        self._dso_group_v_max: Dict[str, List[float]] = {}
+
+        self._dso_trafo_group: Dict[str, str] = {}
+        self._dso_trafo_q_set: Dict[str, List[float]] = {}
+        self._dso_trafo_q_actual: Dict[str, List[float]] = {}
+        self._dso_trafo_tap_pos: Dict[str, List[float]] = {}
+
+        self._dso_trafo_q_set_t: Dict[str, List[float]] = {}
+        self._dso_trafo_q_actual_t: Dict[str, List[float]] = {}
+        self._dso_trafo_tap_t: Dict[str, List[float]] = {}
 
         # ── Build TSO figure ──────────────────────────────────────────────────
-        # Rows: voltage bands | DER Q | V_gen | TSO objective
-        _n_tso_rows = 4
+        # * **Figure 1 (TSO)**: Zone voltage bands, DER Q, generator AVR setpoints,
+        #   generator Q injection, and TSO objective per zone.
+        _n_tso_rows = 5
         self._fig_tso, self._axes_tso = plt.subplots(
             _n_tso_rows, 1,
-            figsize=(11, 2.8 * _n_tso_rows),
+            figsize=(11, 2.6 * _n_tso_rows),
             sharex=True,
             constrained_layout=True,
         )
@@ -216,7 +230,13 @@ class MultiTSOLivePlotter:
         ax.grid(True, alpha=0.3)
         self._ax_vgen = ax
 
-        ax = self._axes_tso[3]
+        ax = self._axes_tso[3]  # ← new
+        ax.set_ylabel(r"$Q_\mathrm{gen}$ [Mvar]")
+        ax.set_title("Generator Reactive Power Injection per Zone")
+        ax.grid(True, alpha=0.3)
+        self._ax_qgen = ax
+
+        ax = self._axes_tso[4]  # was [3]
         ax.set_ylabel("Objective")
         ax.set_title("TSO Objective Value per Zone")
         ax.grid(True, alpha=0.3)
@@ -227,8 +247,12 @@ class MultiTSOLivePlotter:
         )
 
         # ── Build DSO / stability figure ─────────────────────────────────────
-        # Rows: interface Q tracking | DSO DER Q | contraction metric
-        _n_dso_rows = 3
+        # Rows:
+        #   1) Interface Q per transformer (set vs actual), grouped by HV group
+        #   2) DSO DER reactive power per HV network group
+        #   3) TSO-DSO transformer tap position per transformer
+        #   4) DSO voltage bands per HV network group
+        _n_dso_rows = 4
         self._fig_dso, self._axes_dso = plt.subplots(
             _n_dso_rows, 1,
             figsize=(11, 2.8 * _n_dso_rows),
@@ -239,22 +263,31 @@ class MultiTSOLivePlotter:
         self._fig_dso.set_constrained_layout_pads(h_pad=0.05, hspace=0.05)
 
         ax = self._axes_dso[0]
-        ax.set_ylabel(r"$Q$ [Mvar]")
-        ax.set_title("TSO-DSO Interface Q  (set vs actual, load convention)")
+        ax.set_ylabel(r"$Q$ / Mvar")
+        ax.set_title("TSO-DSO Interface Q per Transformer (group colour, set vs actual)")
         ax.grid(True, alpha=0.3)
         self._ax_iface = ax
 
         ax = self._axes_dso[1]
-        ax.set_ylabel(r"$Q_\mathrm{DER}$ [Mvar]")
-        ax.set_title("DSO DER Reactive Power per Feeder")
+        ax.set_ylabel(r"$Q_\mathrm{DER}$ / Mvar")
+        ax.set_title("DSO DER Reactive Power per HV Network Group")
         ax.grid(True, alpha=0.3)
         self._ax_dso_qder = ax
 
         ax = self._axes_dso[2]
-        ax.set_ylabel(r"Contraction $\|\cdot\|$")
-        ax.set_title("Per-Zone Coupling Contraction Metric")
+        ax.set_ylabel("Tap position")
+        ax.set_title("TSO-DSO Transformer Tap Position per Transformer")
         ax.grid(True, alpha=0.3)
-        self._ax_contraction = ax
+        self._ax_tap = ax
+
+        ax = self._axes_dso[3]
+        ax.set_ylabel("Voltage / p.u.")
+        ax.set_title("DSO Voltages per HV Network Group (V_min / V_mean / V_max bands)")
+        ax.axhline(self._v_set, color="k", ls="--", lw=1.0, label=f"V_set={self._v_set:.3f}")
+        ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
+        ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
+        ax.grid(True, alpha=0.3)
+        self._ax_dso_v = ax
 
         self._axes_dso[-1].set_xlabel(
             "Time [s]" if sub_minute else "Time [min]"
@@ -311,6 +344,9 @@ class MultiTSOLivePlotter:
                 v_gen = rec.zone_v_gen.get(z)
                 if v_gen is not None:
                     self._zone_v_gen[z].append(v_gen)
+                q_gen = rec.zone_q_gen.get(z)
+                if q_gen is not None:
+                    self._zone_q_gen[z].append(q_gen)
                 obj = rec.zone_tso_objective.get(z)
                 if obj is not None:
                     self._zone_obj[z].append(obj)
@@ -324,21 +360,70 @@ class MultiTSOLivePlotter:
         # ── Accumulate DSO data ──────────────────────────────────────────────
         if rec.dso_active:
             self._dso_min.append(t_val)
-            for d in self._dso_ids:
-                q_der_d = rec.dso_q_der.get(d)
-                if q_der_d is not None:
-                    self._dso_q_der[d].append(q_der_d)
-                q_set = rec.dso_q_set_mvar.get(d) if rec.dso_q_set_mvar else None
-                if q_set is not None:
-                    self._dso_q_set[d].append(q_set)
-                    self._dso_q_set_min[d].append(t_val)
-                q_act = rec.dso_q_actual_mvar.get(d)
-                if q_act is not None:
-                    self._dso_q_actual[d].append(q_act)
-                    self._dso_q_actual_min[d].append(t_val)
-                obj_d = rec.dso_objective.get(d)
-                if obj_d is not None:
-                    self._dso_obj[d].append(obj_d)
+
+            required_group_fields = (
+                rec.dso_group_q_der_mvar,
+                rec.dso_group_v_min_pu,
+                rec.dso_group_v_mean_pu,
+                rec.dso_group_v_max_pu,
+                rec.dso_trafo_q_set_mvar,
+                rec.dso_trafo_q_actual_mvar,
+                rec.dso_trafo_tap_pos,
+                rec.dso_trafo_group,
+            )
+            if any(field is None for field in required_group_fields):
+                raise RuntimeError("DSO grouped plotting fields are missing in record.")
+
+            for group_id in sorted(rec.dso_group_q_der_mvar.keys()):
+                if group_id not in rec.dso_group_v_min_pu:
+                    raise KeyError(f"Missing dso_group_v_min_pu for group '{group_id}'.")
+                if group_id not in rec.dso_group_v_mean_pu:
+                    raise KeyError(f"Missing dso_group_v_mean_pu for group '{group_id}'.")
+                if group_id not in rec.dso_group_v_max_pu:
+                    raise KeyError(f"Missing dso_group_v_max_pu for group '{group_id}'.")
+
+                if group_id not in self._group_ids:
+                    self._group_ids.append(group_id)
+                    self._dso_group_q_der[group_id] = []
+                    self._dso_group_v_min[group_id] = []
+                    self._dso_group_v_mean[group_id] = []
+                    self._dso_group_v_max[group_id] = []
+
+                self._dso_group_q_der[group_id].append(float(rec.dso_group_q_der_mvar[group_id]))
+                self._dso_group_v_min[group_id].append(float(rec.dso_group_v_min_pu[group_id]))
+                self._dso_group_v_mean[group_id].append(float(rec.dso_group_v_mean_pu[group_id]))
+                self._dso_group_v_max[group_id].append(float(rec.dso_group_v_max_pu[group_id]))
+
+            for trafo_id, group_id in rec.dso_trafo_group.items():
+                if trafo_id not in rec.dso_trafo_q_set_mvar:
+                    raise KeyError(f"Missing q-setpoint for transformer '{trafo_id}'.")
+                if trafo_id not in rec.dso_trafo_q_actual_mvar:
+                    raise KeyError(f"Missing q-actual for transformer '{trafo_id}'.")
+                if trafo_id not in rec.dso_trafo_tap_pos:
+                    raise KeyError(f"Missing tap position for transformer '{trafo_id}'.")
+
+                if trafo_id not in self._trafo_ids:
+                    self._trafo_ids.append(trafo_id)
+                    self._dso_trafo_group[trafo_id] = group_id
+                    self._dso_trafo_q_set[trafo_id] = []
+                    self._dso_trafo_q_actual[trafo_id] = []
+                    self._dso_trafo_tap_pos[trafo_id] = []
+                    self._dso_trafo_q_set_t[trafo_id] = []
+                    self._dso_trafo_q_actual_t[trafo_id] = []
+                    self._dso_trafo_tap_t[trafo_id] = []
+                else:
+                    if self._dso_trafo_group[trafo_id] != group_id:
+                        raise ValueError(
+                            f"Transformer '{trafo_id}' changed network group from "
+                            f"'{self._dso_trafo_group[trafo_id]}' to '{group_id}'."
+                        )
+
+                self._dso_trafo_q_set[trafo_id].append(float(rec.dso_trafo_q_set_mvar[trafo_id]))
+                self._dso_trafo_q_actual[trafo_id].append(float(rec.dso_trafo_q_actual_mvar[trafo_id]))
+                self._dso_trafo_tap_pos[trafo_id].append(float(rec.dso_trafo_tap_pos[trafo_id]))
+                self._dso_trafo_q_set_t[trafo_id].append(t_val)
+                self._dso_trafo_q_actual_t[trafo_id].append(t_val)
+                self._dso_trafo_tap_t[trafo_id].append(t_val)
 
         # ── Redraw ───────────────────────────────────────────────────────────
         _redrew = False
@@ -427,6 +512,27 @@ class MultiTSOLivePlotter:
         if any(self._zone_v_gen[z] for z in self._zone_ids):
             ax.legend(fontsize=7, ncol=4, loc="upper left")
 
+        # ── Generator Q injection ────────────────────────────────────────────
+        ax = self._ax_qgen
+        ax.clear()
+        ax.set_ylabel(r"$Q_\mathrm{gen}$ [Mvar]")
+        ax.set_title("Generator Reactive Power Injection per Zone")
+        ax.grid(True, alpha=0.3)
+        _apply_x_fmt(ax, self._sub_minute)
+
+        for zi, z in enumerate(self._zone_ids):
+            qg_list = self._zone_q_gen[z]
+            if not qg_list:
+                continue
+            qg_arr = np.array(qg_list)
+            t_arr = tso_t[: len(qg_arr)]
+            for j in range(qg_arr.shape[1]):
+                lbl = f"Z{z}-Gen{j}" if j == 0 else f"_Z{z}-Gen{j}"
+                ax.plot(t_arr, qg_arr[:, j], lw=0.9,
+                        color=_c(zi * 4 + j), alpha=0.85, label=lbl)
+        if any(self._zone_q_gen[z] for z in self._zone_ids):
+            ax.legend(fontsize=7, ncol=4, loc="upper left")
+
         # ── TSO objective ────────────────────────────────────────────────────
         ax = self._ax_tso_obj
         ax.clear()
@@ -442,7 +548,7 @@ class MultiTSOLivePlotter:
                 continue
             obj_arr = np.array(obj_list)
             t_arr = np.array(self._zone_obj_min[z])
-            ax.plot(t_arr, obj_arr, lw=1.0, color=_c(zi),
+            ax.plot(t_arr, np.abs(obj_arr), lw=1.0, color=_c(zi),   # ToDo: absolute for log representation!
                     marker=".", markersize=3, label=f"Zone {z}")
             has_obj = True
         if has_obj:
@@ -456,80 +562,169 @@ class MultiTSOLivePlotter:
         self._fig_tso.canvas.flush_events()
 
     def _redraw_dso(self) -> None:
-        """Redraw the DSO + stability figure."""
+        """Redraw the DSO / stability figure."""
         dso_t = np.array(self._dso_min)
 
-        # ── Interface Q tracking ─────────────────────────────────────────────
+        # ------------------------------------------------------------------
+        # Row 1: interface Q per transformer, colour by HV network group
+        # ------------------------------------------------------------------
         ax = self._ax_iface
         ax.clear()
         ax.set_ylabel(r"$Q$ [Mvar]")
-        ax.set_title("TSO-DSO Interface Q  (set vs actual, load convention)")
+        ax.set_title("TSO-DSO Interface Q per Transformer (group colour, set vs actual)")
         ax.grid(True, alpha=0.3)
         _apply_x_fmt(ax, self._sub_minute)
 
-        for di, d in enumerate(self._dso_ids):
-            col_set = _c(di * 2)
-            col_act = _c(di * 2 + 1)
-            q_set_list = self._dso_q_set[d]
-            q_act_list = self._dso_q_actual[d]
-            if q_set_list:
-                t_s = np.array(self._dso_q_set_min[d])
-                ax.plot(t_s, np.array(q_set_list), lw=1.2, color=col_set,
-                        ls="--", label=f"{d} set")
-            if q_act_list:
-                t_a = np.array(self._dso_q_actual_min[d])
-                ax.plot(t_a, np.array(q_act_list), lw=1.2, color=col_act,
-                        label=f"{d} actual")
-        if any(self._dso_q_set[d] or self._dso_q_actual[d]
-               for d in self._dso_ids):
-            ax.legend(fontsize=7, ncol=4, loc="upper left")
+        group_colour_index = {g: i for i, g in enumerate(sorted(self._group_ids))}
 
-        # ── DSO DER Q ────────────────────────────────────────────────────────
+        has_iface = False
+        for trafo_id in self._trafo_ids:
+            if trafo_id not in self._dso_trafo_group:
+                raise KeyError(f"Missing group assignment for transformer '{trafo_id}'.")
+
+            group_id = self._dso_trafo_group[trafo_id]
+            col = _c(group_colour_index[group_id])
+
+            q_set = np.array(self._dso_trafo_q_set[trafo_id], dtype=float)
+            q_act = np.array(self._dso_trafo_q_actual[trafo_id], dtype=float)
+            t_set = np.array(self._dso_trafo_q_set_t[trafo_id], dtype=float)
+            t_act = np.array(self._dso_trafo_q_actual_t[trafo_id], dtype=float)
+
+            if q_set.size > 0:
+                ax.plot(
+                    t_set, q_set,
+                    lw=1.1, ls="--", color=col, alpha=0.9,
+                    #label=f"{group_id} | {trafo_id} set",
+                )
+                has_iface = True
+
+            if q_act.size > 0:
+                ax.plot(
+                    t_act, q_act,
+                    lw=1.3, ls="-", color=col, alpha=0.9,
+                    #label=f"{group_id} | {trafo_id} actual",
+                )
+                has_iface = True
+
+        if has_iface:
+            #ax.legend(fontsize=7, ncol=3, loc="upper left")
+            # One colour swatch per HV network group
+            colour_handles = [
+                Line2D([0], [0],
+                       color=_c(group_colour_index[g]), lw=1.8, ls="-",
+                       label=g)
+                for g in sorted(self._group_ids)
+            ]
+            # Two linestyle entries (colour-agnostic) for set vs actual
+            style_handles = [
+                Line2D([0], [0], color="0.35", lw=1.1, ls="--", label="setpoint"),
+                Line2D([0], [0], color="0.35", lw=1.3, ls="-", label="actual"),
+            ]
+            ax.legend(
+                handles=colour_handles + style_handles,
+                fontsize=7, ncol=2, loc="upper left",
+            )
+
+        # ------------------------------------------------------------------
+        # Row 2: DSO DER reactive power per HV network group
+        # ------------------------------------------------------------------
         ax = self._ax_dso_qder
         ax.clear()
-        ax.set_ylabel(r"$Q_\mathrm{DER}$ [Mvar]")
-        ax.set_title("DSO DER Reactive Power per Feeder")
+        ax.set_ylabel(r"$Q_\mathrm{DER}$ / Mvar")
+        ax.set_title("DSO DER Reactive Power per HV Network Group")
         ax.grid(True, alpha=0.3)
         _apply_x_fmt(ax, self._sub_minute)
 
-        for di, d in enumerate(self._dso_ids):
-            q_list = self._dso_q_der[d]
-            if not q_list:
-                continue
-            q_arr = np.array(q_list)
+        has_qder = False
+        for group_id in sorted(self._group_ids):
+            if group_id not in self._dso_group_q_der:
+                raise KeyError(f"Missing grouped DER Q trace for '{group_id}'.")
+
+            q_arr = np.array(self._dso_group_q_der[group_id], dtype=float)
             t_arr = dso_t[:len(q_arr)]
-            for j in range(q_arr.shape[1]):
-                lbl = f"{d}-DER{j}" if j == 0 else f"_{d}-DER{j}"
-                ax.plot(t_arr, q_arr[:, j], lw=0.9,
-                        color=_c(di * 4 + j), alpha=0.85, label=lbl)
-        if any(self._dso_q_der[d] for d in self._dso_ids):
-            ax.legend(fontsize=7, ncol=4, loc="upper left")
+            col = _c(group_colour_index[group_id])
 
-        # ── Contraction metric ───────────────────────────────────────────────
-        ax = self._ax_contraction
+            if q_arr.size > 0:
+                ax.plot(
+                    t_arr, q_arr,
+                    lw=1.3, color=col,
+                    label=f"{group_id}",
+                )
+                has_qder = True
+
+        if has_qder:
+            ax.legend(fontsize=7, ncol=3, loc="upper left")
+
+        # ------------------------------------------------------------------
+        # Row 3: transformer tap positions, colour by HV network group
+        # ------------------------------------------------------------------
+        ax = self._ax_tap
         ax.clear()
-        ax.set_ylabel(r"Contraction LHS")
-        ax.set_title("Per-Zone Coupling Contraction Metric")
+        ax.set_ylabel("Tap position")
+        ax.set_title("TSO-DSO Transformer Tap Position per Transformer")
         ax.grid(True, alpha=0.3)
         _apply_x_fmt(ax, self._sub_minute)
 
-        tso_t = np.array(self._tso_min)
-        has_contraction = False
-        for zi, z in enumerate(self._zone_ids):
-            c_list = self._zone_contraction[z]
-            if not c_list:
-                continue
-            c_arr = np.array(c_list)
-            t_arr = tso_t[:len(c_arr)]
-            ax.plot(t_arr, c_arr, lw=1.0, color=_c(zi),
-                    marker=".", markersize=3, label=f"Zone {z}")
-            has_contraction = True
-        if has_contraction:
-            ax.legend(fontsize=7, ncol=3, loc="upper right")
+        has_tap = False
+        for trafo_id in self._trafo_ids:
+            group_id = self._dso_trafo_group[trafo_id]
+            col = _c(group_colour_index[group_id])
 
-        self._axes_dso[-1].set_xlabel(
-            "Time [s]" if self._sub_minute else "Time [min]"
-        )
+            tap_arr = np.array(self._dso_trafo_tap_pos[trafo_id], dtype=float)
+            t_arr = np.array(self._dso_trafo_tap_t[trafo_id], dtype=float)
+
+            if tap_arr.size > 0:
+                ax.step(
+                    t_arr, tap_arr,
+                    where="post",
+                    lw=1.2, color=col,
+                    label=f"{group_id} | {trafo_id}",
+                )
+                has_tap = True
+
+        if has_tap:
+            ax.legend(fontsize=7, ncol=3, loc="upper left")
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+        # ------------------------------------------------------------------
+        # Row 4: DSO voltage min/mean/max per HV network group
+        # ------------------------------------------------------------------
+        ax = self._ax_dso_v
+        ax.clear()
+        ax.set_ylabel("Voltage [p.u.]")
+        ax.set_title("DSO Voltages per HV Network Group (V_min / V_mean / V_max bands)")
+        ax.axhline(self._v_set, color="k", ls="--", lw=1.0, label=f"V_set={self._v_set:.3f}")
+        ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
+        ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
+        ax.grid(True, alpha=0.3)
+        _apply_x_fmt(ax, self._sub_minute)
+
+        has_v = False
+        for group_id in sorted(self._group_ids):
+            if group_id not in self._dso_group_v_min:
+                raise KeyError(f"Missing grouped V_min trace for '{group_id}'.")
+            if group_id not in self._dso_group_v_mean:
+                raise KeyError(f"Missing grouped V_mean trace for '{group_id}'.")
+            if group_id not in self._dso_group_v_max:
+                raise KeyError(f"Missing grouped V_max trace for '{group_id}'.")
+
+            v_min = np.array(self._dso_group_v_min[group_id], dtype=float)
+            v_mean = np.array(self._dso_group_v_mean[group_id], dtype=float)
+            v_max = np.array(self._dso_group_v_max[group_id], dtype=float)
+            t_arr = dso_t[:len(v_mean)]
+            col = _c(group_colour_index[group_id])
+
+            if v_mean.size > 0:
+                ax.fill_between(t_arr, v_min, v_max, alpha=0.15, color=col, linewidth=0.0)
+                ax.plot(t_arr, v_mean, lw=1.2, color=col, label=f"{group_id} V_mean")
+                ax.plot(t_arr, v_min, lw=0.6, color=col, ls="--", alpha=0.6)
+                ax.plot(t_arr, v_max, lw=0.6, color=col, ls="--", alpha=0.6)
+                has_v = True
+
+        if has_v:
+            ax.legend(fontsize=7, ncol=3, loc="upper left")
+
+        self._axes_dso[-1].set_xlabel("Time [s]" if self._sub_minute else "Time [min]")
         self._fig_dso.canvas.draw_idle()
         self._fig_dso.canvas.flush_events()
 

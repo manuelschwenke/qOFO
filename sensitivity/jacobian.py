@@ -328,7 +328,8 @@ class JacobianSensitivities:
                 der_bus_mapping.append(bus_idx)
         
         if not der_jacobian_cols:
-            raise ValueError("No valid DER buses found (all may be PV or slack).")
+            n_obs = len(obs_jacobian_rows) if obs_jacobian_rows else len(observation_bus_indices)
+            return np.zeros((n_obs, 0)), obs_bus_mapping, []
         
         # Extract submatrix from reduced Jacobian
         #            column

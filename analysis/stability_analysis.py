@@ -1051,8 +1051,14 @@ class ZoneStabilityResult:
     warnings:           list = field(default_factory=list)
 
     # ── Lyapunov / small-gain analysis (populated by analyse_multi_zone_stability) ──
+    n_effective:        int = 0
+    """Number of effective (non-null) eigenvalues of M_ii."""
+
+    n_null:             int = 0
+    """Number of null-space eigenvalues (co-located DERs, inactive actuators)."""
+
     lambda_min_Mii:     float = 0.0
-    """Smallest eigenvalue of M_ii (positive if M_ii is PD)."""
+    """Smallest *effective* eigenvalue of M_ii (after null-space filtering)."""
 
     kappa_Mii:          float = np.inf
     """Condition number κ(M_ii) = λ_max / λ_min."""
@@ -1148,6 +1154,7 @@ def analyse_multi_zone_stability(
     *,
     zone_ids:    Optional[List[int]] = None,
     zone_names:  Optional[List[str]] = None,
+    actuator_counts: Optional[List[Dict[str, int]]] = None,
     verbose:     bool = True,
 ) -> "MultiZoneStabilityResult":
     """
@@ -1269,18 +1276,38 @@ def analyse_multi_zone_stability(
         sigma_max_Hii = float(sv[0]) if len(sv) > 0 else 0.0
 
         # Eigenvalues of M_ii
-        eig_ii = np.linalg.eigvalsh(M_ii)
-        lambda_max = float(np.maximum(eig_ii[-1], 0.0))
-        lambda_min = float(np.maximum(eig_ii[0], 0.0))
-        alpha_max_local = (2.0 / lambda_max) if lambda_max > 1e-14 else np.inf
-        kappa = (lambda_max / lambda_min) if lambda_min > 1e-14 else np.inf
+        eig_ii_all = np.linalg.eigvalsh(M_ii)
+        lambda_max_all = float(np.maximum(eig_ii_all[-1], 0.0))
 
-        # Optimal step size and contraction rate
-        alpha_i_opt = (2.0 / (lambda_min + lambda_max)) if (lambda_min + lambda_max) > 1e-14 else 0.0
-        rho_i_opt = (kappa - 1.0) / (kappa + 1.0) if kappa < np.inf else 1.0
+        # Filter near-zero eigenvalues (null-space of H^T Q H from co-located
+        # DERs or inactive actuators).  These directions are neutrally stable
+        # (σ* = 0) and must not dominate the contraction rate.
+        eig_tol = 1e-10 * max(lambda_max_all, 1e-14)
+        eig_ii = eig_ii_all[eig_ii_all > eig_tol]
+        n_effective = len(eig_ii)
+        n_null = len(eig_ii_all) - n_effective
 
-        # Actual contraction rate at current α_i
-        rho_i = max(abs(1.0 - alpha_i * lam) for lam in eig_ii) if len(eig_ii) > 0 else 1.0
+        if n_effective == 0:
+            # Degenerate: all eigenvalues are zero (H_ii is zero).
+            lambda_max = 0.0
+            lambda_min = 0.0
+            kappa = 1.0
+            alpha_max_local = np.inf
+            alpha_i_opt = 0.0
+            rho_i_opt = 0.0
+            rho_i = 0.0
+        else:
+            lambda_max = float(eig_ii[-1])
+            lambda_min = float(eig_ii[0])
+            alpha_max_local = 2.0 / lambda_max if lambda_max > 1e-14 else np.inf
+            kappa = lambda_max / lambda_min if lambda_min > 1e-14 else np.inf
+
+            # Optimal step size and contraction rate (effective subspace only)
+            alpha_i_opt = 2.0 / (lambda_min + lambda_max) if (lambda_min + lambda_max) > 1e-14 else 0.0
+            rho_i_opt = (kappa - 1.0) / (kappa + 1.0) if kappa < np.inf else 1.0
+
+            # Actual contraction rate at current α_i (effective eigenvalues only)
+            rho_i = max(abs(1.0 - alpha_i * lam) for lam in eig_ii)
 
         # Coupling norms: ||M_ij||₂ for j ≠ i
         coupling_norms: Dict[int, float] = {}
@@ -1344,6 +1371,8 @@ def analyse_multi_zone_stability(
             diagonally_dominant=diag_dom,
             warnings=warnings,
             # Lyapunov fields
+            n_effective=n_effective,
+            n_null=n_null,
             lambda_min_Mii=lambda_min,
             kappa_Mii=kappa,
             rho_i=rho_i,
@@ -1379,9 +1408,12 @@ def analyse_multi_zone_stability(
             col_offset += n_per_zone[j_idx]
         row_offset += n_per_zone[i_idx]
 
-    # M_sys eigenvalues (symmetric → all real)
-    sys_eigs = np.linalg.eigvalsh(M_sys)
-    M_sys_lambda_max = float(np.maximum(sys_eigs[-1], 0.0))
+    # M_sys eigenvalues (symmetric → all real).
+    # Filter near-zero eigenvalues (null-space directions) as for per-zone analysis.
+    sys_eigs_all = np.linalg.eigvalsh(M_sys)
+    sys_eig_tol = 1e-10 * max(float(np.maximum(sys_eigs_all[-1], 0.0)), 1e-14)
+    sys_eigs = sys_eigs_all[sys_eigs_all > sys_eig_tol]
+    M_sys_lambda_max = float(sys_eigs[-1]) if len(sys_eigs) > 0 else 0.0
     alpha_max_global = (2.0 / M_sys_lambda_max) if M_sys_lambda_max > 1e-14 else np.inf
 
     # Global stability: α_eff · λ_max(M_sys) < 2 for α_eff = max(α_i)
@@ -1521,7 +1553,9 @@ def analyse_multi_zone_stability(
     )
 
     if verbose:
-        _print_multi_zone_report(result, zone_names, alpha_list)
+        _print_multi_zone_report(result, zone_names, alpha_list,
+                                 H_blocks, Q_obj_list, G_w_list,
+                                 actuator_counts)
 
     return result
 
@@ -1530,6 +1564,10 @@ def _print_multi_zone_report(
     result: "MultiZoneStabilityResult",
     zone_names: List[str],
     alpha_list: List[float],
+    H_blocks: Optional[Dict[Tuple[int, int], NDArray[np.float64]]] = None,
+    Q_obj_list: Optional[List[NDArray[np.float64]]] = None,
+    G_w_list: Optional[List[NDArray[np.float64]]] = None,
+    actuator_counts: Optional[List[Dict[str, int]]] = None,
 ) -> None:
     """Print a formatted multi-zone stability report to stdout."""
     sep  = "=" * 72
@@ -1562,9 +1600,61 @@ def _print_multi_zone_report(
         )
     print()
 
-    # ── Coupling matrix (spectral norms) ──────────────────────────────────────
+    # ── Per-actuator-type contribution to M_ii ──────────────────────────────
     zone_ids = [zr.zone_id for zr in result.zones]
     n_zones  = len(zone_ids)
+    if (actuator_counts is not None
+            and H_blocks is not None
+            and Q_obj_list is not None
+            and G_w_list is not None):
+        print("  Per-actuator-type contribution to M_ii diagonal:")
+        print(f"    {'Zone':<14s} {'Type':<10s} {'n':>4s} {'||H_cols||_F':>12s} "
+              f"{'g_w':>10s} {'trace(M_sub)':>12s} {'% of tr(M)':>10s}")
+        print(f"    {'':─<14s} {'':─<10s} {'':─>4s} {'':─>12s} "
+              f"{'':─>10s} {'':─>12s} {'':─>10s}")
+        for i_idx, zr in enumerate(result.zones):
+            zi = zr.zone_id
+            H_ii = H_blocks.get((zi, zi))
+            q_obj = Q_obj_list[i_idx]
+            gw = G_w_list[i_idx]
+            ac = actuator_counts[i_idx]
+            if H_ii is None:
+                continue
+            q_sqrt = np.sqrt(np.maximum(q_obj, 0.0))
+            gw_inv_sqrt = 1.0 / np.sqrt(np.maximum(gw, 1e-12))
+            # Total trace of M_ii
+            QH = q_sqrt[:, None] * H_ii
+            C_ii = QH.T @ QH
+            M_ii_diag = (gw_inv_sqrt ** 2) * np.diag(C_ii)
+            total_trace = float(np.sum(M_ii_diag))
+
+            col_offset = 0
+            type_order = [('Q_DER', 'n_der'), ('Q_PCC', 'n_pcc'),
+                          ('V_gen', 'n_gen'), ('OLTC', 'n_oltc'),
+                          ('Shunt', 'n_shunt')]
+            first = True
+            for type_name, count_key in type_order:
+                n_k = ac.get(count_key, 0)
+                if n_k == 0:
+                    col_offset += 0
+                    continue
+                cols = H_ii[:, col_offset:col_offset + n_k]
+                gw_k = gw[col_offset:col_offset + n_k]
+                h_norm = float(np.linalg.norm(cols))
+                gw_repr = float(gw_k[0]) if np.all(gw_k == gw_k[0]) else float(np.mean(gw_k))
+                # Per-type trace contribution
+                sub_diag = M_ii_diag[col_offset:col_offset + n_k]
+                sub_trace = float(np.sum(sub_diag))
+                pct = 100.0 * sub_trace / total_trace if total_trace > 1e-14 else 0.0
+                zname = zone_names[i_idx] if first else ""
+                first = False
+                print(f"    {zname:<14s} {type_name:<10s} {n_k:>4d} "
+                      f"{h_norm:>12.4f} {gw_repr:>10.1f} "
+                      f"{sub_trace:>12.4f} {pct:>9.1f}%")
+                col_offset += n_k
+        print()
+
+    # ── Coupling matrix (spectral norms) ──────────────────────────────────────
     if n_zones <= 6:
         print("  Inter-zone coupling norms ‖M_TSO,ij‖₂:")
         header = f"  {'':14s}" + "".join(f"  {zone_names[j]:>10s}" for j in range(n_zones))
@@ -1608,12 +1698,15 @@ def _print_multi_zone_report(
 
     # Per-zone Lyapunov parameters table
     print(f"  {'Zone':<14s} {'ρ_i':>8s} {'ρ*_i':>8s} {'α_i':>8s} {'α*_i':>8s} "
-          f"{'κ(M_ii)':>10s} {'λ_min':>10s} {'λ_max':>10s} {'row_sum':>10s} {'row*_sum':>10s}")
+          f"{'κ(M_ii)':>10s} {'λ_min':>10s} {'λ_max':>10s} "
+          f"{'rank':>6s} {'row_sum':>10s} {'row*_sum':>10s}")
     print(f"  {'':─<14s} {'':─>8s} {'':─>8s} {'':─>8s} {'':─>8s} "
-          f"{'':─>10s} {'':─>10s} {'':─>10s} {'':─>10s} {'':─>10s}")
+          f"{'':─>10s} {'':─>10s} {'':─>10s} "
+          f"{'':─>6s} {'':─>10s} {'':─>10s}")
 
     for i_idx, zr in enumerate(result.zones):
         kappa_str = f"{zr.kappa_Mii:.1f}" if zr.kappa_Mii < 1e6 else "inf"
+        rank_str = f"{zr.n_effective}/{zr.n_effective + zr.n_null}"
         print(
             f"  {zone_names[i_idx]:<14s} "
             f"{zr.rho_i:>8.4f} "
@@ -1623,6 +1716,7 @@ def _print_multi_zone_report(
             f"{kappa_str:>10s} "
             f"{zr.lambda_min_Mii:>10.4g} "
             f"{zr.lambda_max_Mii:>10.4g} "
+            f"{rank_str:>6s} "
             f"{zr.lyapunov_row_sum:>10.4f} "
             f"{zr.lyapunov_row_sum_opt:>10.4f}"
         )

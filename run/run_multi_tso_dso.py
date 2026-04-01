@@ -99,7 +99,8 @@ from core.profiles import (
     load_profiles,
     snapshot_base_values,
 )
-from network.build_ieee39_net import build_ieee39_net, add_hv_networks, HVNetworkInfo, IEEE39NetworkMeta
+from network.build_ieee39_net import (build_ieee39_net, add_hv_networks, HVNetworkInfo,
+                                      IEEE39NetworkMeta, remove_generators)
 from network.zone_partition import (
     fixed_zone_partition_ieee39,
     spectral_zone_partition,
@@ -157,6 +158,8 @@ class MultiTSOConfig:
         Regularisation on generator AVR setpoint changes (very cautious by default).
     g_w_pcc : float
         Regularisation on PCC Q setpoint changes (Zone 2 → DSO).
+    g_w_tso_oltc : float
+        Regularisation on machine-transformer OLTC tap changes.
     g_w_dso_der : float
         Regularisation on DSO DER Q changes.
 
@@ -207,10 +210,17 @@ class MultiTSOConfig:
     g_w_der:        float = 20.0    # [Mvar]² cost per DER Q step
     g_w_gen:        float = 1e7      # [p.u.]² cost per AVR step (very cautious)
     g_w_pcc:        float = 10.0    # [Mvar]² cost per PCC-Q setpoint step
+    g_w_tso_oltc:   float = 10.0   # [tap²] cost per machine-trafo OLTC tap step
+    g_w_tso_oltc:   float = 50.0
 
     # ── G_w regularisation weights (DSO) ─────────────────────────────────────
     g_w_dso_der:    float = 10.0     # DSO DER Q regularisation
-    g_w_dso_oltc:   float = 40.0    # DSO OLTC tap regularisation (unused for now)
+    g_w_dso_oltc:   float = 40.0    # DSO OLTC tap regularisation
+
+    # ── DSO OLTC initialisation ──────────────────────────────────────────────
+    dso_oltc_init_tol_pu: float = 0.01
+    """Voltage deadband half-width for the initial DiscreteTapControl run
+    that sets coupling-transformer tap positions before OFO starts."""
 
     # ── Zone partitioning ─────────────────────────────────────────────────────
     use_fixed_zones:    bool  = True   # True = literature 3-area partition; False = spectral clustering
@@ -368,18 +378,17 @@ def _measure_for_zone_tso(
         dtype=np.float64,
     ) if zone_def.line_indices else np.array([], dtype=np.float64)
 
-    # ── PCC interface Q (2W trafo, HV side, load convention) ─────────────────
+    # ── PCC interface Q (3W trafo, HV side, load convention) ─────────────────
     #
-    # For 2-winding trafos: net.res_trafo.q_hv_mvar gives Q at the HV port
+    # For 3-winding trafos: net.res_trafo3w.q_hv_mvar gives Q at the HV port
     # with LOAD CONVENTION (positive = power flows INTO the HV bus from the
     # external grid side).
     #
     # TSOController expects "interface_q_hv_side_mvar" in the same convention.
     q_iface = np.zeros(len(zone_def.pcc_trafo_indices), dtype=np.float64)
     for k, t in enumerate(zone_def.pcc_trafo_indices):
-        if t in net.res_trafo.index:
-            q_iface[k] = float(net.res_trafo.at[t, "q_hv_mvar"])
-        # (trafo3w fallback omitted — IEEE 39-bus uses only 2W)
+        if t in net.res_trafo3w.index:
+            q_iface[k] = float(net.res_trafo3w.at[t, "q_hv_mvar"])
 
     # ── TSO DER sgens ─────────────────────────────────────────────────────────
     der_q = np.array(
@@ -442,7 +451,7 @@ def _measure_for_dso(
     """
     Build a Measurement for one DSO HV sub-network from the plant network.
 
-    Reads interface Q from all coupling transformers (2-winding, 345/110 kV),
+    Reads interface Q from all coupling transformers (3-winding, 345/110/20 kV),
     voltages at all HV buses, and currents on all HV lines.
 
     Parameters
@@ -467,9 +476,10 @@ def _measure_for_dso(
         dtype=np.float64,
     ) if dso_cfg.current_line_indices else np.array([], dtype=np.float64)
 
-    # Interface Q at all coupling trafos (HV side, load convention)
+    # Interface Q at all coupling trafos (HV side, load convention).
+    # 3W trafos: q_hv_mvar is in res_trafo3w.
     q_iface = np.array(
-        [float(net.res_trafo.at[t, "q_hv_mvar"]) for t in dso_cfg.interface_trafo_indices],
+        [float(net.res_trafo3w.at[t, "q_hv_mvar"]) for t in dso_cfg.interface_trafo_indices],
         dtype=np.float64,
     )
 
@@ -483,9 +493,9 @@ def _measure_for_dso(
         dtype=np.float64,
     )
 
-    # OLTC taps (coupling trafos)
+    # OLTC taps (3W coupling trafos)
     oltc_taps = np.array(
-        [int(net.trafo.at[t, "tap_pos"]) for t in dso_cfg.oltc_trafo_indices],
+        [int(net.trafo3w.at[t, "tap_pos"]) for t in dso_cfg.oltc_trafo_indices],
         dtype=np.int64,
     ) if dso_cfg.oltc_trafo_indices else np.array([], dtype=np.int64)
 
@@ -558,13 +568,13 @@ def _record_dso_group_and_transformer_data(
             elif q_set_vec is not None:
                 rec.dso_trafo_q_set_mvar[trafo_key] = float(q_set_vec[0])
 
-            if trafo_idx in net.res_trafo.index:
+            if trafo_idx in net.res_trafo3w.index:
                 rec.dso_trafo_q_actual_mvar[trafo_key] = float(
-                    net.res_trafo.at[trafo_idx, "q_hv_mvar"]
+                    net.res_trafo3w.at[trafo_idx, "q_hv_mvar"]
                 )
-            if trafo_idx in net.trafo.index:
+            if trafo_idx in net.trafo3w.index:
                 rec.dso_trafo_tap_pos[trafo_key] = int(
-                    net.trafo.at[trafo_idx, "tap_pos"]
+                    net.trafo3w.at[trafo_idx, "tap_pos"]
                 )
 
         # DER and voltage group data
@@ -663,10 +673,9 @@ def _apply_dso_controls(
         net.sgen.at[s_idx, "q_mvar"] = float(u[off + k])
     off += n_der
 
-    # DSO OLTC tap positions (2W trafo)
+    # DSO OLTC tap positions (3W trafo)
     for k, t_idx in enumerate(dso_cfg.oltc_trafo_indices):
-        net.trafo.at[t_idx, "tap_pos"] = int(round(u[off + k]))
-        print(f'Trafo {t_idx} tap-pos.: {net.trafo.at[t_idx, "tap_pos"]}')
+        net.trafo3w.at[t_idx, "tap_pos"] = int(round(u[off + k]))
     off += n_oltc
 
     # Shunt switching (skipped in base config — shunts initialised separately)
@@ -711,7 +720,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         ext_grid_vm_pu=v_set,
         add_der_at_gen_buses=config.add_tso_ders,
     )
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+
+    # Remove generators
+    #meta = remove_generators(net, meta, gen_indices_to_remove=[2])
+
+    #pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
     # =========================================================================
     # STEP 2: Zone partitioning
@@ -729,13 +742,15 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             net, n_zones=3, verbose=(verbose >= 2)
         )
         # Relabel: Zone 0 = most generators, Zone 2 = fewest (prime candidate for DSO)
+        _gen_grid = list(meta.gen_grid_bus_indices or meta.gen_bus_indices)
         zone_map, bus_zone = relabel_zones_by_generator_count(
-            zone_map, bus_zone, list(meta.gen_bus_indices)
+            zone_map, bus_zone, _gen_grid
         )
 
     if verbose >= 1:
+        _gen_grid_set = set(meta.gen_grid_bus_indices or meta.gen_bus_indices)
         for z in sorted(zone_map.keys()):
-            n_gen_z = sum(1 for b in zone_map[z] if b in set(meta.gen_bus_indices))
+            n_gen_z = sum(1 for b in zone_map[z] if b in _gen_grid_set)
             n_load_z = sum(
                 1 for li in net.load.index if int(net.load.at[li, "bus"]) in zone_map[z]
             )
@@ -756,10 +771,6 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     for z in zone_map:
         zone_map[z] = [b for b in zone_map[z] if b in existing_buses]
 
-    # Re-converge power flow (add_hv_networks already runs PF internally,
-    # but re-run to be safe after any zone_map expansion below).
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
-
     # =========================================================================
     # STEP 4: Build ZoneDefinitions and TSOControllerConfigs
     # =========================================================================
@@ -767,13 +778,17 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         print("[4] Building zone definitions and controller configs ...")
 
     # ── Partition generator indices per zone ──────────────────────────────────
+    # Use gen_grid_bus_indices (original 345 kV bus) for zone assignment,
+    # but store gen_bus_indices (terminal bus, possibly 10.5 kV) for
+    # sensitivity computation.
     zone_gen_indices: Dict[int, List[int]] = {z: [] for z in zone_map}
     zone_gen_buses:   Dict[int, List[int]] = {z: [] for z in zone_map}
-    for g, g_bus in zip(meta.gen_indices, meta.gen_bus_indices):
+    gen_grid_buses = meta.gen_grid_bus_indices if meta.gen_grid_bus_indices else meta.gen_bus_indices
+    for g, g_bus, g_grid_bus in zip(meta.gen_indices, meta.gen_bus_indices, gen_grid_buses):
         for z, buses in zone_map.items():
-            if g_bus in set(buses):
+            if g_grid_bus in set(buses):
                 zone_gen_indices[z].append(g)
-                zone_gen_buses[z].append(g_bus)
+                zone_gen_buses[z].append(g_bus)  # terminal bus for sensitivity
                 break
 
     # ── Partition TSO DER indices per zone ────────────────────────────────────
@@ -784,6 +799,16 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             if s_bus in set(buses):
                 zone_der_indices[z].append(s_idx)
                 zone_der_buses[z].append(s_bus)
+                break
+
+    # ── Partition machine-transformer OLTCs per zone ───────────────────────────
+    zone_oltc_trafos: Dict[int, List[int]] = {z: [] for z in zone_map}
+    for t_idx, g_idx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+        # Machine trafo's grid bus = hv_bus of the 2W transformer
+        grid_bus = int(net.trafo.at[t_idx, "hv_bus"])
+        for z, buses in zone_map.items():
+            if grid_bus in set(buses):
+                zone_oltc_trafos[z].append(t_idx)
                 break
 
     # ── Group HV sub-networks by zone ────────────────────────────────────────
@@ -861,18 +886,21 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             line_max_i_ka=z_line_max_i_ka,
             pcc_trafo_indices=zone_pcc_trafos[z],
             pcc_dso_ids=zone_pcc_dso_ids[z],
+            oltc_trafo_indices=zone_oltc_trafos[z],
             v_setpoint_pu=v_set,
             alpha=config.alpha[z],
             g_v=config.g_v,
             g_w_der=config.g_w_der,
             g_w_gen=config.g_w_gen,
             g_w_pcc=config.g_w_pcc,
+            g_w_oltc=config.g_w_tso_oltc,
         )
 
     if verbose >= 1:
         for z, zd in zone_defs.items():
             hv_names = [hv.net_id for hv in zone_hv_networks.get(z, [])]
             print(f"  Zone {z}: {len(zd.gen_indices)} gen, {len(zd.tso_der_indices)} DER, "
+                  f"{len(zd.oltc_trafo_indices)} OLTC, "
                   f"{len(zd.line_indices)} lines, {len(zd.pcc_trafo_indices)} PCC trafos  "
                   f"DSOs: {hv_names}")
 
@@ -909,7 +937,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             der_indices=zd.tso_der_indices,
             pcc_trafo_indices=zd.pcc_trafo_indices,
             pcc_dso_controller_ids=zd.pcc_dso_ids,
-            oltc_trafo_indices=[],          # no machine OLTCs in case39
+            oltc_trafo_indices=zd.oltc_trafo_indices,
             shunt_bus_indices=zd.shunt_bus_indices,
             shunt_q_steps_mvar=zd.shunt_q_steps_mvar,
             voltage_bus_indices=zd.v_bus_indices,
@@ -953,9 +981,15 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             der_indices=np.array(zd.tso_der_indices, dtype=np.int64),
             der_s_rated_mva=s_rated,
             der_p_max_mw=p_max,
-            oltc_indices=np.array([], dtype=np.int64),
-            oltc_tap_min=np.array([], dtype=np.int64),
-            oltc_tap_max=np.array([], dtype=np.int64),
+            oltc_indices=np.array(zd.oltc_trafo_indices, dtype=np.int64),
+            oltc_tap_min=np.array(
+                [int(net.trafo.at[t, "tap_min"]) for t in zd.oltc_trafo_indices],
+                dtype=np.int64,
+            ),
+            oltc_tap_max=np.array(
+                [int(net.trafo.at[t, "tap_max"]) for t in zd.oltc_trafo_indices],
+                dtype=np.int64,
+            ),
             shunt_indices=np.array(zd.shunt_bus_indices, dtype=np.int64),
             shunt_q_mvar=np.array(zd.shunt_q_steps_mvar, dtype=np.float64),
             gen_params=gen_params,
@@ -1034,11 +1068,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             der_p_max_mw=dso_p_max,
             oltc_indices=np.array(interface_trafos, dtype=np.int64),
             oltc_tap_min=np.array(
-                [int(net.trafo.at[t, "tap_min"]) for t in interface_trafos],
+                [int(net.trafo3w.at[t, "tap_min"]) for t in interface_trafos],
                 dtype=np.int64,
             ),
             oltc_tap_max=np.array(
-                [int(net.trafo.at[t, "tap_max"]) for t in interface_trafos],
+                [int(net.trafo3w.at[t, "tap_max"]) for t in interface_trafos],
                 dtype=np.int64,
             ),
             shunt_indices=np.array([], dtype=np.int64),
@@ -1071,6 +1105,13 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             print(f"  {dso_id} (zone {hv.zone}): {len(der_indices)} DER, "
                   f"{n_iface} PCC trafos, {n_v} V-buses, {n_i} lines")
 
+    # Map each DSO controller ID to the ID of its supervising TSO controller.
+    # TSO controller IDs follow the pattern "tso_zone_{z}" (see TSOController init above).
+    dso_to_tso_id: Dict[str, str] = {
+        hv.net_id: f"tso_zone_{hv.zone}"
+        for hv in meta.hv_networks
+    }
+
     # DSO group map (trivial: each DSO = its own group)
     dso_group_map: Dict[str, str] = {hv.net_id: hv.net_id for hv in meta.hv_networks}
     last_dso_q_set_mvar: Dict[str, Optional[NDArray]] = {
@@ -1091,34 +1132,6 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     for z, ctrl in tso_controllers.items():
         coordinator.register_tso_controller(z, ctrl)
 
-    # Initial cross-sensitivity and stability analysis
-    coordinator.compute_cross_sensitivities()
-    coordinator.compute_M_blocks()
-    contraction_info = coordinator.check_contraction()
-
-    if config.run_stability_analysis:
-        if verbose >= 1:
-            print("[7b] Running multi-zone stability analysis at t=0 ...")
-        # Collect H blocks and G_w / Q_obj for stability analysis
-        zone_ids_sorted = sorted(zone_defs.keys())
-        H_blocks_stab = {k: coordinator.get_H_block(*k)
-                         for k in coordinator._H_blocks}
-        Q_obj_list = [zone_defs[z].q_obj_diagonal() for z in zone_ids_sorted]
-        G_w_list   = [zone_defs[z].gw_diagonal()    for z in zone_ids_sorted]
-        alpha_list  = [zone_defs[z].alpha            for z in zone_ids_sorted]
-
-        stab_result = analyse_multi_zone_stability(
-            H_blocks=H_blocks_stab,
-            Q_obj_list=Q_obj_list,
-            G_w_list=G_w_list,
-            alpha_list=alpha_list,
-            zone_ids=zone_ids_sorted,
-            zone_names=[f"Zone {z}" for z in zone_ids_sorted],
-            verbose=True,
-        )
-    else:
-        stab_result = None
-
     # =========================================================================
     # STEP 7b: Load profiles and compute zonal generator dispatch
     # =========================================================================
@@ -1138,6 +1151,12 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         profiles = load_profiles(profiles_csv, timestep_s=config.dt_s)
         snapshot_base_values(net)
 
+        # Clip profile DataFrame to the simulation window only.
+        # Without this, compute_zonal_gen_dispatch iterates the full profile
+        # horizon (up to 525 600 rows at 60 s resolution) unnecessarily.
+        t_end = start_time + timedelta(seconds=config.n_total_s)
+        profiles = profiles.loc[:t_end]  # keep only rows up to simulation end
+
         # Apply initial profiles
         apply_profiles(net, profiles, start_time)
 
@@ -1147,8 +1166,94 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             )
             apply_gen_dispatch(net, gen_dispatch, start_time)
 
+        # --- BEGIN DIAGNOSTIC (remove after fix) ---
+        print(f"[DEBUG] net.gen buses: {list(net.gen['bus'])}")
+        print(f"[DEBUG] TN zone_map bus samples: {list(zone_map[1])[:5]}")
+        p_gen = net.gen.loc[net.gen['in_service'], 'p_mw'].sum()
+        p_sgen = net.sgen.loc[net.sgen['in_service'], 'p_mw'].sum()
+        p_load = net.load.loc[net.load['in_service'], 'p_mw'].sum()
+        print(f"[DEBUG] P_gen={p_gen:.0f} MW  P_sgen={p_sgen:.0f} MW  P_load={p_load:.0f} MW")
+        print(f"[DEBUG] Net imbalance (excl. slack): {p_gen + p_sgen - p_load:.0f} MW")
+        # --- END DIAGNOSTIC ---
+
         # Re-converge after profile application
-        pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+        pp.runpp(net, max_iteration=50, run_control=False, calculate_voltage_angles=True, init='auto')
+
+    # ── Initialise 3W OLTC tap positions via DiscreteTapControl ────────────
+    # Run AFTER profiles/dispatch so taps are found for the actual operating point.
+    from pandapower.control import DiscreteTapControl
+
+    tol_pu = config.dso_oltc_init_tol_pu
+    for hv in meta.hv_networks:
+        for t3w in hv.coupling_trafo_indices:
+            DiscreteTapControl(
+                net,
+                element_index=t3w,
+                vm_lower_pu=v_set - tol_pu,
+                vm_upper_pu=v_set + tol_pu,
+                side="mv",
+                element="trafo3w",
+            )
+    pp.runpp(net, run_control=True, calculate_voltage_angles=True)
+    if verbose >= 1:
+        print("[7c] OLTC tap initialisation (DiscreteTapControl):")
+        for hv in meta.hv_networks:
+            for t3w in hv.coupling_trafo_indices:
+                tap = int(net.trafo3w.at[t3w, "tap_pos"])
+                mv_bus = int(net.trafo3w.at[t3w, "mv_bus"])
+                vm = float(net.res_bus.at[mv_bus, "vm_pu"])
+                print(f"  {hv.net_id} trafo3w {t3w}: tap_pos={tap:+d}, "
+                      f"V_mv={vm:.4f} p.u.")
+    # Remove pandapower controllers so they don't interfere with OFO
+    if hasattr(net, "controller") and len(net.controller) > 0:
+        net.controller.drop(net.controller.index, inplace=True)
+    # Re-converge with found tap positions (no control)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+
+    # Re-initialise all controllers so _u_current reflects the updated
+    # operating point (profiles + correct tap positions).
+    for z, ctrl in tso_controllers.items():
+        ctrl.initialise(_measure_for_zone_tso(net, zone_defs[z], 0))
+    for dso_id, dso_ctrl in dso_controllers.items():
+        dso_ctrl.initialise(_measure_for_dso(net, dso_ctrl.config, 0))
+
+    # ── Cross-sensitivity & stability analysis at the final operating point ──
+    # Recompute H_ij and M_ij from the current Jacobian (after profiles + taps).
+    coordinator.compute_cross_sensitivities()
+    coordinator.compute_M_blocks()
+    contraction_info = coordinator.check_contraction()
+
+    if config.run_stability_analysis:
+        if verbose >= 1:
+            print("[7d] Running multi-zone stability analysis at t=0 ...")
+        zone_ids_sorted = sorted(zone_defs.keys())
+        H_blocks_stab = {k: coordinator.get_H_block(*k)
+                         for k in coordinator._H_blocks}
+        Q_obj_list = [zone_defs[z].q_obj_diagonal() for z in zone_ids_sorted]
+        G_w_list   = [zone_defs[z].gw_diagonal()    for z in zone_ids_sorted]
+        alpha_list  = [zone_defs[z].alpha            for z in zone_ids_sorted]
+
+        actuator_counts = [
+            {
+                'n_der':  len(zone_defs[z].tso_der_indices),
+                'n_pcc':  len(zone_defs[z].pcc_trafo_indices),
+                'n_gen':  len(zone_defs[z].gen_indices),
+                'n_oltc': len(zone_defs[z].oltc_trafo_indices),
+            }
+            for z in zone_ids_sorted
+        ]
+        stab_result = analyse_multi_zone_stability(
+            H_blocks=H_blocks_stab,
+            Q_obj_list=Q_obj_list,
+            G_w_list=G_w_list,
+            alpha_list=alpha_list,
+            zone_ids=zone_ids_sorted,
+            zone_names=[f"Zone {z}" for z in zone_ids_sorted],
+            actuator_counts=actuator_counts,
+            verbose=True,
+        )
+    else:
+        stab_result = None
 
     if contingencies and verbose >= 1:
         print(f"  Scheduled contingencies ({len(contingencies)}):")
@@ -1261,10 +1366,6 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 rec.zone_q_der[z]         = u[:n_der].copy()
                 rec.zone_q_pcc_set[z]     = u[n_der:n_der+n_pcc].copy()
                 rec.zone_v_gen[z]         = u[n_der+n_pcc:n_der+n_pcc+n_gen].copy()
-                rec.zone_q_gen[z] = np.array(
-                    [net.res_gen.at[idx, "q_mvar"] for idx in zone_defs[z].gen_indices],
-                    dtype=np.float64,
-                )
                 rec.zone_tso_objective[z] = tso_out.objective_value
                 rec.zone_tso_status[z]    = tso_out.solver_status
                 rec.zone_tso_solve_s[z]   = tso_out.solve_time_s
@@ -1289,32 +1390,27 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         # ── DSO step (all zones) ──────────────────────────────────────────────
         if run_dso:
             for dso_id, dso_ctrl in dso_controllers.items():
+                # meas_dso reflects the current operating point BEFORE this DSO step.
+                # This is the correct basis for the capability message: it tells the TSO
+                # what the DSO can still do from its present dispatch, not what it just did.
                 meas_dso = _measure_for_dso(net, dso_ctrl.config, step)
+
+                # --- Capability message: DSO → TSO (must precede TSO solve) ----------
+                tso_id = dso_to_tso_id[dso_id]
+                cap_msg = dso_ctrl.generate_capability_message(
+                    target_controller_id=tso_id,
+                    measurement=meas_dso,
+                )
+                # Deliver to the responsible TSO controller.
+                target_tso = next(
+                    ctrl for ctrl in tso_controllers.values()
+                    if ctrl.controller_id == tso_id
+                )
+                target_tso.receive_capability(cap_msg)
+
+                # --- DSO optimisation step -------------------------------------------
                 dso_out = dso_ctrl.step(meas_dso)
                 _apply_dso_controls(net, dso_ctrl.config, dso_out)
-
-                # Record DSO outputs
-                n_dso_der = len(dso_ctrl.config.der_indices)
-                rec.dso_q_der[dso_id]     = dso_out.u_new[:n_dso_der].copy()
-                rec.dso_objective[dso_id] = dso_out.objective_value
-                rec.dso_status[dso_id]    = dso_out.solver_status
-
-                # Actual Q at PCC (sum over all interface trafos)
-                q_actual_sum = sum(
-                    float(net.res_trafo.at[t, "q_hv_mvar"])
-                    for t in dso_ctrl.config.interface_trafo_indices
-                    if t in net.res_trafo.index
-                )
-                rec.dso_q_actual_mvar[dso_id] = q_actual_sum
-
-                _record_dso_group_and_transformer_data(
-                    rec=rec,
-                    net=net,
-                    dso_ids=dso_ids,
-                    dsocontrollers=dso_controllers,
-                    dso_group_map=dso_group_map,
-                    last_dso_q_set_mvar=last_dso_q_set_mvar,
-                )
 
         # ── Power flow ────────────────────────────────────────────────────────
         try:
@@ -1323,6 +1419,26 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             print(f"  [Step {step}] Power flow failed: {e}")
             log.append(rec)
             continue
+
+        # ── Record post-PF observables (require converged res_* tables) ──────
+        if run_dso:
+            for dso_id, dso_ctrl in dso_controllers.items():
+                # Actual Q at PCC (sum over all 3W interface trafos)
+                q_actual_sum = sum(
+                    float(net.res_trafo3w.at[t, "q_hv_mvar"])
+                    for t in dso_ctrl.config.interface_trafo_indices
+                    if t in net.res_trafo3w.index
+                )
+                rec.dso_q_actual_mvar[dso_id] = q_actual_sum
+
+            _record_dso_group_and_transformer_data(
+                rec=rec,
+                net=net,
+                dso_ids=dso_ids,
+                dsocontrollers=dso_controllers,
+                dso_group_map=dso_group_map,
+                last_dso_q_set_mvar=last_dso_q_set_mvar,
+            )
 
         # ── Record plant voltages per zone ────────────────────────────────────
         for z, zd in zone_defs.items():
@@ -1335,6 +1451,13 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 rec.zone_v_min[z]  = float(vm_zone.min())
                 rec.zone_v_max[z]  = float(vm_zone.max())
                 rec.zone_v_mean[z] = float(vm_zone.mean())
+
+            # Generator Q from converged power flow
+            if run_tso and zd.gen_indices:
+                rec.zone_q_gen[z] = np.array(
+                    [net.res_gen.at[idx, "q_mvar"] for idx in zd.gen_indices],
+                    dtype=np.float64,
+                )
 
         # ── Print progress ────────────────────────────────────────────────────
         if verbose >= 1 and run_tso:
@@ -1390,15 +1513,17 @@ def main() -> None:
     cfg = MultiTSOConfig(
         n_total_s=60.0 * 720,      # 720-minute simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
-        dso_period_s=30.0 * 1,    # DSO every 30 seconds
-        alpha={1: 0.1, 2: 0.01, 3: 0.1},
-        g_v=150000.0,
+        dso_period_s=20.0 * 1,    # DSO every 30 seconds
+        alpha={1: 0.01, 2: 0.01, 3: 0.01},
+        dso_alpha=0.1,
+        g_v=200000.0,
         g_q=1,
-        dso_g_v=1000.0,
-        g_w_der=20.0,
-        g_w_gen=4e6,
-        g_w_dso_der = 30.0,     # DSO DER Q regularisation
-        g_w_dso_oltc = 30.0,    # DSO OLTC tap regularisation
+        dso_g_v=500.0,
+        g_w_der=10,
+        g_w_gen=1e6,
+        g_w_pcc=1,
+        g_w_dso_der = 0.1,     # DSO DER Q regularisation
+        g_w_dso_oltc = 1.0,    # DSO OLTC tap regularisation
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -1411,10 +1536,10 @@ def main() -> None:
         use_zonal_gen_dispatch=True,
         contingencies=[
             # Example: trip line 0 at t=30 min, restore at t=60 min
-            ContingencyEvent(minute=30, element_type="gen", element_index=4, action="trip"),
-            ContingencyEvent(minute=60, element_type="gen", element_index=4, action="restore"),
-            ContingencyEvent(minute=120, element_type="gen", element_index=5, action="trip"),
-            ContingencyEvent(minute=180, element_type="gen", element_index=5, action="restore"),
+            # ContingencyEvent(minute=90, element_type="gen", element_index=4, action="trip"),
+            # ContingencyEvent(minute=120, element_type="gen", element_index=4, action="restore"),
+            # ContingencyEvent(minute=180, element_type="gen", element_index=5, action="trip"),
+            # ContingencyEvent(minute=240, element_type="gen", element_index=5, action="restore"),
         ],
     )
     log = run_multi_tso_dso(cfg)

@@ -124,7 +124,7 @@ class TSOControllerConfig:
     gen_indices: List[int] = field(default_factory=list)
     gen_bus_indices: List[int] = field(default_factory=list)
     gen_vm_min_pu: float = 0.95
-    gen_vm_max_pu: float = 1.10
+    gen_vm_max_pu: float = 1.05
 
     k_t_avt: float = 1.0
     """Achieved-Value Tracking factor for PCC-Q reset.
@@ -252,8 +252,8 @@ class TSOController(BaseOFOController):
         # Initialise PCC capability bounds to large symmetric range
         # until DSO controllers report actual capabilities
         n_pcc = len(config.pcc_trafo_indices)
-        self.pcc_capability_min_mvar = np.full(n_pcc, -1E6)
-        self.pcc_capability_max_mvar = np.full(n_pcc, +1E6)
+        self.pcc_capability_min_mvar = np.full(n_pcc, -0)
+        self.pcc_capability_max_mvar = np.full(n_pcc, +0)
 
         # Cache for the sensitivity matrix
         self._H_cache: Optional[NDArray[np.float64]] = None
@@ -597,8 +597,8 @@ class TSOController(BaseOFOController):
         u_upper[n_der:n_der + n_pcc] = tso_dso_interface_q_current + self.pcc_capability_max_mvar
 
         # DEBUG
-        #print(f'ppc capability min: {u_lower[n_der:n_der + n_pcc]}')
-        #print(f'pcc capability max: {u_upper[n_der:n_der + n_pcc]}')
+        print(f'ppc capability min: {u_lower[n_der:n_der + n_pcc]}')
+        print(f'pcc capability max: {u_upper[n_der:n_der + n_pcc]}')
 
         # --- AVR setpoint bounds ---
         avr_start = n_der + n_pcc
@@ -843,30 +843,41 @@ class TSOController(BaseOFOController):
         elif pcc_in_trafo3w:
             kw["trafo3w_indices"] = self.config.pcc_trafo_indices
 
-        H_physical, mappings = self.sensitivities.build_sensitivity_matrix_H(
-            **kw,
+        # build_sensitivity_matrix_H requires at least one physical input
+        # (DER / OLTC / shunt).  When all are absent (e.g. add_tso_ders=False
+        # and no machine OLTCs), skip the call — H_physical is all-zero.
+        has_physical_inputs = (
+            len(der_bus_indices) > 0
+            or len(self.config.oltc_trafo_indices) > 0
+            or len(self.config.shunt_bus_indices) > 0
         )
+        mappings: dict = {}
 
-        # H_physical columns: [DER (n_der), OLTC (n_oltc), shunt (n_shunt)]
-        # H_physical rows (when PCC trafos present):
-        #   [Q_trafo (n_pcc), V_bus (n_v), I_line (n_i)]
-        # H_physical rows (when no PCC trafos):
-        #   [V_bus (n_v), I_line (n_i)]
-        #
-        # Target H rows:      [V_bus (n_v), I_line (n_i)]
-        # Target H columns:   [DER (n_der), PCC_set (n_pcc), V_gen (n_gen),
-        #                       OLTC (n_oltc), shunt (n_shunt)]
+        if has_physical_inputs:
+            H_physical, mappings = self.sensitivities.build_sensitivity_matrix_H(
+                **kw,
+            )
 
-        has_pcc_rows = pcc_in_trafo or pcc_in_trafo3w
-        n_q_phys = n_pcc if has_pcc_rows else 0
+            # H_physical columns: [DER (n_der), OLTC (n_oltc), shunt (n_shunt)]
+            # H_physical rows (when PCC trafos present):
+            #   [Q_trafo (n_pcc), V_bus (n_v), I_line (n_i)]
+            # H_physical rows (when no PCC trafos):
+            #   [V_bus (n_v), I_line (n_i)]
+            #
+            # Target H rows:      [V_bus (n_v), I_line (n_i)]
+            # Target H columns:   [DER (n_der), PCC_set (n_pcc), V_gen (n_gen),
+            #                       OLTC (n_oltc), shunt (n_shunt)]
 
-        # H_physical row ranges (skip Q_trafo rows):
-        #   V_bus   : n_q_phys       .. n_q_phys + n_v - 1
-        #   I_line  : n_q_phys + n_v .. end
+            has_pcc_rows = pcc_in_trafo or pcc_in_trafo3w
+            n_q_phys = n_pcc if has_pcc_rows else 0
 
-        # DER columns → target column 0..n_der-1
-        H[:n_v, :n_der] = H_physical[n_q_phys:n_q_phys + n_v, :n_der]
-        H[n_v:, :n_der] = H_physical[n_q_phys + n_v:, :n_der]
+            # H_physical row ranges (skip Q_trafo rows):
+            #   V_bus   : n_q_phys       .. n_q_phys + n_v - 1
+            #   I_line  : n_q_phys + n_v .. end
+
+            # DER columns → target column 0..n_der-1
+            H[:n_v, :n_der] = H_physical[n_q_phys:n_q_phys + n_v, :n_der]
+            H[n_v:, :n_der] = H_physical[n_q_phys + n_v:, :n_der]
 
         # --- Q_PCC rows removed from H ---
         # Previously, Q_PCC occupied rows H[n_v:n_v+n_pcc, :].
@@ -917,25 +928,26 @@ class TSOController(BaseOFOController):
                         for i_line in range(len(line_map)):
                             H[n_v + i_line, col] = -dI_dQ_pcc[i_line, j_jac]
 
-        # OLTC columns → target column n_der+n_pcc+n_gen..n_der+n_pcc+n_gen+n_oltc-1
-        col_oltc_phys = slice(n_der, n_der + n_oltc)
-        col_oltc_target = slice(n_der + n_pcc + n_gen, n_der + n_pcc + n_gen + n_oltc)
-        H[:n_v, col_oltc_target] = H_physical[
-            n_q_phys:n_q_phys + n_v, col_oltc_phys
-        ]
-        H[n_v:, col_oltc_target] = H_physical[
-            n_q_phys + n_v:, col_oltc_phys
-        ]
+        if has_physical_inputs:
+            # OLTC columns → target column n_der+n_pcc+n_gen..n_der+n_pcc+n_gen+n_oltc-1
+            col_oltc_phys = slice(n_der, n_der + n_oltc)
+            col_oltc_target = slice(n_der + n_pcc + n_gen, n_der + n_pcc + n_gen + n_oltc)
+            H[:n_v, col_oltc_target] = H_physical[
+                n_q_phys:n_q_phys + n_v, col_oltc_phys
+            ]
+            H[n_v:, col_oltc_target] = H_physical[
+                n_q_phys + n_v:, col_oltc_phys
+            ]
 
-        # Shunt columns → target column n_der+n_pcc+n_gen+n_oltc..end
-        col_sh_phys = slice(n_der + n_oltc, n_der + n_oltc + n_shunt)
-        col_sh_target = slice(n_der + n_pcc + n_gen + n_oltc, n_controls)
-        H[:n_v, col_sh_target] = H_physical[
-            n_q_phys:n_q_phys + n_v, col_sh_phys
-        ]
-        H[n_v:, col_sh_target] = H_physical[
-            n_q_phys + n_v:, col_sh_phys
-        ]
+            # Shunt columns → target column n_der+n_pcc+n_gen+n_oltc..end
+            col_sh_phys = slice(n_der + n_oltc, n_der + n_oltc + n_shunt)
+            col_sh_target = slice(n_der + n_pcc + n_gen + n_oltc, n_controls)
+            H[:n_v, col_sh_target] = H_physical[
+                n_q_phys:n_q_phys + n_v, col_sh_phys
+            ]
+            H[n_v:, col_sh_target] = H_physical[
+                n_q_phys + n_v:, col_sh_phys
+            ]
 
         # --- AVR columns: ∂V_obs / ∂V_gen from Jacobian-based sensitivity ---
         avr_start = n_der + n_pcc

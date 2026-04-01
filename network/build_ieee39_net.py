@@ -95,7 +95,8 @@ class IEEE39NetworkMeta:
     """
 
     gen_bus_indices: Tuple[int, ...]
-    """Bus index of each generator (terminal bus = 345 kV bus directly)."""
+    """Bus index of each generator (terminal bus — may be 10.5 kV if machine
+    trafos are present, or 345 kV if directly connected)."""
 
     # ── TSO-level DER sgens ───────────────────────────────────────────────────
     tso_der_indices: Tuple[int, ...]
@@ -105,6 +106,20 @@ class IEEE39NetworkMeta:
 
     tso_der_buses: Tuple[int, ...]
     """Bus indices of the TSO DER sgens (same order as tso_der_indices)."""
+
+    # ── Generators: grid buses and machine transformers (optional) ─────────────
+    gen_grid_bus_indices: Tuple[int, ...] = field(default_factory=tuple)
+    """Original 345 kV grid bus of each generator (before machine trafo
+    insertion).  Used for zone partitioning.  Same as gen_bus_indices when
+    no machine transformers exist."""
+
+    machine_trafo_indices: Tuple[int, ...] = field(default_factory=tuple)
+    """Indices in ``net.trafo`` of 2W machine transformers connecting
+    generator terminals to the grid.  OLTC actuators in the TSO OFO."""
+
+    machine_trafo_gen_map: Tuple[int, ...] = field(default_factory=tuple)
+    """For each machine trafo, the ``net.gen`` index of its generator
+    (same order as machine_trafo_indices)."""
 
     # ── DSO feeders (populated by add_dso_feeders) ────────────────────────────
     dso_pcc_trafo_indices: Tuple[int, ...] = field(default_factory=tuple)
@@ -178,7 +193,7 @@ def build_ieee39_net(
     # pandapower.networks.case39() returns the standard New England test system.
     # All buses are at 345 kV; generators at buses 30, 31, …, 38, 39 (1-indexed).
     net = pn.case39()
-    net.gen["vm_pu"] = 1.05
+    #net.gen["vm_pu"] = 1.05
 
     # Adjust slack voltage
     net.ext_grid.at[net.ext_grid.index[0], "vm_pu"] = ext_grid_vm_pu
@@ -208,6 +223,56 @@ def build_ieee39_net(
                                   if str(net.bus.at[b, "subnet"]) == "TN")
     tn_lines: List[int] = sorted(int(li) for li in net.line.index
                                   if str(net.line.at[li, "subnet"]) == "TN")
+
+    # Save original grid buses before machine trafo insertion
+    gen_grid_bus_indices: List[int] = list(gen_bus_indices)
+
+    # ── Add machine transformers (gen step-up trafos with OLTC) ─────────────
+    #
+    # Each generator is moved from its 345 kV grid bus to a new 10.5 kV
+    # terminal bus, connected via a 2W step-up transformer with OLTC.
+    # This mirrors the TUDA approach (_add_machine_transformers) and gives
+    # the TSO OFO additional discrete actuators for reactive power control.
+    machine_trafo_indices: List[int] = []
+    machine_trafo_gen_map: List[int] = []
+
+    for g in gen_indices:
+        grid_bus = int(net.gen.at[g, "bus"])
+        grid_vn = float(net.bus.at[grid_bus, "vn_kv"])
+        gen_terminal_kv = 10.5
+        # Rated MVA: use generator P as proxy (case39 has sn_mva=NaN)
+        p_mw = float(net.gen.at[g, "p_mw"])
+        sn_mva = max(p_mw * 1.2, 100.0)  # 120% of P_rated, min 100 MVA
+
+        # Create generator terminal bus
+        term_bus = pp.create_bus(
+            net, vn_kv=gen_terminal_kv,
+            name=f"GEN_TERM|gen{g}_bus{grid_bus}",
+            type="b", subnet="GEN_TERM",
+        )
+        # Move generator to terminal bus
+        net.gen.at[g, "bus"] = term_bus
+
+        # Create 2W machine transformer
+        tidx = pp.create_transformer_from_parameters(
+            net,
+            hv_bus=grid_bus, lv_bus=int(term_bus),
+            sn_mva=sn_mva,
+            vn_hv_kv=grid_vn, vn_lv_kv=gen_terminal_kv,
+            vk_percent=10.0, vkr_percent=0.03,
+            pfe_kw=0.0, i0_percent=0.0,
+            tap_side="hv", tap_neutral=0,
+            tap_min=-9, tap_max=9,
+            tap_pos=0, tap_step_percent=1.25,
+            shift_degree=0.0,
+            tap_changer_type="Ratio",
+            name=f"MachineTrf|gen{g}_bus{grid_bus}",
+        )
+        machine_trafo_indices.append(int(tidx))
+        machine_trafo_gen_map.append(g)
+
+    # Update gen_bus_indices to reflect the new terminal buses
+    gen_bus_indices = [int(net.gen.at[g, "bus"]) for g in gen_indices]
 
     # ── Add TSO DER sgens at PQ load buses ───────────────────────────────────
     #
@@ -241,7 +306,7 @@ def build_ieee39_net(
             # Default DER rating: 50 MVA (representative for a large transmission
             # network shunt compensator).  Scale with p_mw fraction for a small
             # active component (solar / BESS).
-            sn_mva = 150.0
+            sn_mva = 200.0
             p_mw   = sn_mva * der_p_mw_fraction
             idx = pp.create_sgen(
                 net,
@@ -262,203 +327,14 @@ def build_ieee39_net(
         tn_line_indices  = tuple(tn_lines),
         gen_indices      = tuple(gen_indices),
         gen_bus_indices  = tuple(gen_bus_indices),
+        gen_grid_bus_indices = tuple(gen_grid_bus_indices),
+        machine_trafo_indices = tuple(machine_trafo_indices),
+        machine_trafo_gen_map = tuple(machine_trafo_gen_map),
         tso_der_indices  = tuple(tso_der_indices),
         tso_der_buses    = tuple(tso_der_buses),
         # DSO fields are empty until add_dso_feeders() is called
     )
     return net, meta
-
-
-# ---------------------------------------------------------------------------
-#  DSO feeder attachment
-# ---------------------------------------------------------------------------
-
-def add_dso_feeders(
-    net: pp.pandapowerNet,
-    meta: IEEE39NetworkMeta,
-    dso_load_buses: List[int],
-    *,
-    n_der_per_feeder: int = 3,
-    der_s_mva: float = 50.0,
-    der_p_mw: float = 15.0,
-    shunt_q_mvar: float = 30.0,
-    mv_kv: float = 20.0,
-    trafo_sn_mva: float = 400.0,
-) -> IEEE39NetworkMeta:
-    """
-    Attach synthetic DSO feeders at the specified Zone-2 load buses.
-
-    For each bus in ``dso_load_buses`` this function:
-
-    1. Adds a new MV bus at ``mv_kv`` (default 20 kV) tagged ``subnet = "DN"``.
-    2. Adds a 2-winding PCC transformer (345 kV / mv_kv).
-       * HV side  = original load bus (345 kV).
-       * LV side  = the new 20 kV bus.
-    3. Moves the original load to the LV bus (so the 345 kV bus becomes lightly
-       loaded — the TSO sees the DSO as a PQ load through the PCC trafo).
-    4. Adds ``n_der_per_feeder`` DER sgens at the LV bus (Q = 0 initially).
-    5. Adds one switchable shunt at the LV bus for reactive-power reserve.
-
-    The resulting structure is:
-
-        TN bus X (345 kV)
-            │  PCC trafo  (2W, 345/20 kV)
-        DN bus Y (20 kV)
-            ├── Load (original P + Q)
-            ├── DER sgen 0   (DSO Q control)
-            ├── DER sgen 1
-            └── Shunt        (optional switchable Q reserve)
-
-    Why 2-winding instead of 3-winding?
-    ------------------------------------
-    The TU-Darmstadt benchmark uses 3-winding (380/110/20 kV) couplers because
-    it models an intermediate 110 kV distribution level.  The IEEE 39-bus has
-    only 345 kV; a 2-winding trafo is the natural single-step interface.
-    TSOController already handles ``pcc_trafo_indices`` for both 2W and 3W
-    transformers (detected automatically via ``net.trafo`` vs ``net.trafo3w``).
-
-    Parameters
-    ----------
-    net : pp.pandapowerNet
-        The network returned by ``build_ieee39_net()`` (modified in-place).
-    meta : IEEE39NetworkMeta
-        Existing metadata (will be replaced with an updated copy).
-    dso_load_buses : List[int]
-        Pandapower bus indices at which feeders should be attached.
-        These should be load buses inside Zone 2 (determined by zone_partition).
-    n_der_per_feeder : int
-        Number of DER sgens per feeder (default 3).
-    der_s_mva : float
-        Rated MVA of each DSO DER sgen.
-    der_p_mw : float
-        Fixed active power of each DSO DER [MW] (Q controlled by DSO OFO).
-    shunt_q_mvar : float
-        Reactive power step of the switchable shunt [Mvar].  Positive = capacitive.
-    mv_kv : float
-        MV voltage level [kV] of the new distribution bus.
-    trafo_sn_mva : float
-        Rated MVA of each 2-winding PCC transformer.
-
-    Returns
-    -------
-    meta : IEEE39NetworkMeta
-        Updated metadata with all DSO feeder index lists populated.
-    """
-    # Accumulators for the new DSO elements
-    pcc_trafo_indices: List[int]  = []
-    pcc_hv_buses:     List[int]  = []
-    lv_buses:         List[int]  = []
-    dso_der_idx:      List[int]  = []
-    dso_der_bus:      List[int]  = []
-    dso_shunt_idx:    List[int]  = []
-    dso_shunt_bus:    List[int]  = []
-
-    for hv_bus in dso_load_buses:
-        # ── 1. Add 20 kV distribution bus ────────────────────────────────────
-        lv_bus = pp.create_bus(
-            net,
-            vn_kv=mv_kv,
-            name=f"DN|Bus_HV{hv_bus}",
-        )
-        net.bus.at[lv_bus, "subnet"] = "DN"
-
-        # ── 2. Add 2-winding PCC transformer ─────────────────────────────────
-        #
-        # Standard parameters for a 345/20 kV power transformer.
-        # vk_percent = 10 % short-circuit impedance is typical for large units.
-        # vkr_percent = 0.5 % resistance (low loss for transmission-level trafo).
-        # No OLTC taps by default; a DiscreteTapControl can be added later.
-        trafo_idx = pp.create_transformer_from_parameters(
-            net,
-            hv_bus=hv_bus,
-            lv_bus=lv_bus,
-            sn_mva=trafo_sn_mva,
-            vn_hv_kv=float(net.bus.at[hv_bus, "vn_kv"]),
-            vn_lv_kv=mv_kv,
-            vkr_percent=0.5,
-            vk_percent=10.0,
-            pfe_kw=0.0,
-            i0_percent=0.0,
-            name=f"DSO_PCC|HV{hv_bus}",
-            tap_neutral=0,
-            tap_min=-5,
-            tap_max=5,
-            tap_step_percent=2.0,
-            tap_pos=0,
-        )
-        pcc_trafo_indices.append(int(trafo_idx))
-        pcc_hv_buses.append(int(hv_bus))
-        lv_buses.append(int(lv_bus))
-
-        # ── 3. Move existing load to LV bus ──────────────────────────────────
-        #
-        # Loads at the HV bus are transferred to the LV bus so the 345 kV bus
-        # becomes the TSO-side PCC (lightly loaded; load is "behind the trafo").
-        load_mask = net.load["bus"] == hv_bus
-        for load_idx in net.load.index[load_mask]:
-            net.load.at[load_idx, "bus"] = lv_bus
-
-        # ── 4. Add DSO DER sgens at the LV bus ───────────────────────────────
-        #
-        # These are the DSO's controllable reactive-power actuators.
-        # DSOController will dispatch Q_DER to track the TSO's Q_PCC setpoint.
-        for k in range(n_der_per_feeder):
-            sgen_idx = pp.create_sgen(
-                net,
-                bus=lv_bus,
-                p_mw=der_p_mw,
-                q_mvar=0.0,
-                sn_mva=der_s_mva,
-                name=f"DN_DER|HV{hv_bus}_k{k}",
-            )
-            dso_der_idx.append(int(sgen_idx))
-            dso_der_bus.append(int(lv_bus))
-
-        # ── 5. Add switchable shunt ───────────────────────────────────────────
-        #
-        # One shunt per feeder acts as a "last resort" reactive-power reserve.
-        # In the current implementation the shunt is monitored by the DSO
-        # controller but not actively switched (shunt_bus_indices=[] in config).
-        # Enable it by passing the shunt index to DSOControllerConfig.
-        shunt_idx = pp.create_shunt(
-            net,
-            bus=lv_bus,
-            q_mvar=-shunt_q_mvar,   # negative = capacitive (generates Q)
-            p_mw=0.0,
-            name=f"DN_Shunt|HV{hv_bus}",
-            step=0,                  # initially off
-            max_step=1,
-        )
-        dso_shunt_idx.append(int(shunt_idx))
-        dso_shunt_bus.append(int(lv_bus))
-
-    # ── Run power flow to converge with DSO feeders ───────────────────────────
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
-
-    # ── Assemble updated metadata ─────────────────────────────────────────────
-    dn_buses = sorted(
-        int(b) for b in net.bus.index if str(net.bus.at[b, "subnet"]) == "DN"
-    )
-
-    return IEEE39NetworkMeta(
-        # Carry over TN fields unchanged
-        tn_bus_indices   = meta.tn_bus_indices,
-        tn_line_indices  = meta.tn_line_indices,
-        gen_indices      = meta.gen_indices,
-        gen_bus_indices  = meta.gen_bus_indices,
-        tso_der_indices  = meta.tso_der_indices,
-        tso_der_buses    = meta.tso_der_buses,
-        # New DSO fields
-        dso_pcc_trafo_indices = tuple(pcc_trafo_indices),
-        dso_pcc_hv_buses      = tuple(pcc_hv_buses),
-        dso_lv_buses          = tuple(lv_buses),
-        dso_der_indices       = tuple(dso_der_idx),
-        dso_der_buses         = tuple(dso_der_bus),
-        dso_shunt_indices     = tuple(dso_shunt_idx),
-        dso_shunt_buses       = tuple(dso_shunt_bus),
-        dn_bus_indices        = tuple(dn_buses),
-        dn_line_indices       = (),   # no 20 kV lines in radial feeders
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +347,7 @@ class HVNetworkInfo:
 
     Each HV sub-network replicates the TUDA 110 kV distribution topology
     (10 buses, 11 lines) and is coupled to the IEEE 39-bus 345 kV
-    transmission network via 2-winding 345/110 kV transformers at three
+    transmission network via 3-winding 345/110/20 kV transformers at three
     coupling points.
     """
     net_id: str
@@ -490,7 +366,8 @@ class HVNetworkInfo:
     """Load indices (HV/MV substations, 10 loads)."""
 
     coupling_trafo_indices: Tuple[int, ...]
-    """2-winding transformer indices coupling 345 kV TN to 110 kV HV."""
+    """3-winding transformer indices (``net.trafo3w``) coupling
+    345 kV TN to 110 kV HV with a 20 kV tertiary winding."""
 
     coupling_ieee_buses: Tuple[int, ...]
     """IEEE 39-bus TN bus (0-indexed) at the HV side of each coupling trafo."""
@@ -649,31 +526,52 @@ def _create_hv_subnetwork(
         )
         line_indices.append(int(li))
 
-    # ── 3. Create coupling transformers (2W, 345/110 kV, 300 MVA) ────────────
+    # ── 3. Create coupling transformers (3W, 345/110/20 kV, 300 MVA) ──────────
     coupling_trafo_indices: List[int] = []
     coupling_ieee_buses: List[int] = []
     coupling_hv_bus_indices: List[int] = []
 
     for ieee_bus, hv_no in coupling_map:
         hv_bus = bus_map[hv_no]
-        tidx = pp.create_transformer_from_parameters(
+
+        # Create tertiary (LV) bus at 20 kV — star point for the 3W model
+        lv_bus = pp.create_bus(
+            net,
+            vn_kv=20.0,
+            name=f"{net_id}|Tertiary_TN{ieee_bus}_HV{hv_no}",
+            subnet="DN",
+        )
+
+        vn_hv = float(net.bus.at[ieee_bus, "vn_kv"])  # 345 kV
+        tidx = pp.create_transformer3w_from_parameters(
             net,
             hv_bus=ieee_bus,
-            lv_bus=hv_bus,
-            sn_mva=300.0,
-            vn_hv_kv=float(net.bus.at[ieee_bus, "vn_kv"]),
-            vn_lv_kv=110.0,
-            vkr_percent=0.3,
-            vk_percent=12.0,
+            mv_bus=hv_bus,
+            lv_bus=int(lv_bus),
+            sn_hv_mva=300.0,
+            sn_mv_mva=300.0,
+            sn_lv_mva=75.0,
+            vn_hv_kv=vn_hv,
+            vn_mv_kv=110.0,
+            vn_lv_kv=20.0,
+            vk_hv_percent=12.0,
+            vk_mv_percent=8.0,
+            vk_lv_percent=10.0,
+            vkr_hv_percent=0.30,
+            vkr_mv_percent=0.20,
+            vkr_lv_percent=0.25,
             pfe_kw=80.0,
             i0_percent=0.04,
+            shift_mv_degree=0.0,
+            shift_lv_degree=150.0,
             tap_side="hv",
             tap_neutral=0,
-            tap_min=-9,
-            tap_max=9,
+            tap_min=-13,
+            tap_max=13,
             tap_pos=0,
             tap_step_percent=1.25,
-            name=f"{net_id}|Coupler_TN{ieee_bus}_HV{hv_no}",
+            tap_changer_type="Ratio",
+            name=f"{net_id}|Coupler3W_TN{ieee_bus}_HV{hv_no}",
         )
         coupling_trafo_indices.append(int(tidx))
         coupling_ieee_buses.append(ieee_bus)
@@ -916,7 +814,7 @@ def _print_hv_summary(
             hv.coupling_ieee_buses,
             hv.coupling_hv_bus_indices,
         ):
-            tname = str(net.trafo.at[tidx, "name"])
+            tname = str(net.trafo3w.at[tidx, "name"])
             hv_name = str(net.bus.at[hv_b, "name"])
             print(f"    {tname:<35s}  TN bus {ieee_b} (345 kV)"
                   f"  <->  {hv_name} (110 kV)")
@@ -1125,7 +1023,15 @@ def add_hv_networks(
     # =====================================================================
     # 6. Power flow
     # =====================================================================
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    # Check for isolated buses (in-service buses with no connected in-service element)
+    import pandapower.topology as top
+    mg = top.create_nxgraph(net, respect_switches=True)
+    isolated = top.unsupplied_buses(net, mg)
+    print("Isolated buses:", isolated)
+
+    # Verify no stale trafo references
+    print(net.trafo[["hv_bus", "lv_bus", "vn_hv_kv", "vn_lv_kv"]])
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, init='auto', max_iteration=50)
 
     # =====================================================================
     # 7. Debug output
@@ -1165,4 +1071,125 @@ def add_hv_networks(
         dn_line_indices=tuple(all_dn_lines),
         # HV sub-network tracking
         hv_networks=tuple(hv_nets),
+    )
+
+
+def remove_generators(
+    net: pp.pandapowerNet,
+    meta: IEEE39NetworkMeta,
+    gen_indices_to_remove: List[int],
+) -> IEEE39NetworkMeta:
+    """
+    Remove synchronous generators (net.gen) by pandapower index.
+
+    When machine transformers are present, also removes the associated 2W
+    machine trafo and the 10.5 kV terminal bus from the network. Failing to
+    do so would leave a floating PQ bus (P=0, Q=0) connected to a stiff
+    transformer, which degrades Newton-Raphson conditioning.
+
+    Parameters
+    ----------
+    net : pp.pandapowerNet
+        The network to modify in-place.
+    meta : IEEE39NetworkMeta
+        Current metadata catalogue.
+    gen_indices_to_remove : List[int]
+        Pandapower net.gen row indices to delete. Every entry must exist
+        in net.gen.index; missing indices raise KeyError immediately.
+
+    Returns
+    -------
+    meta : IEEE39NetworkMeta
+        Updated metadata with all gen-related fields pruned consistently.
+
+    Raises
+    ------
+    KeyError
+        If any index in gen_indices_to_remove is not present in net.gen.
+    ValueError
+        If gen_indices_to_remove is empty.
+    """
+    if not gen_indices_to_remove:
+        raise ValueError("gen_indices_to_remove must contain at least one index.")
+
+    existing  = set(int(i) for i in net.gen.index)
+    requested = set(int(i) for i in gen_indices_to_remove)
+    missing   = requested - existing
+    if missing:
+        raise KeyError(
+            f"The following gen indices do not exist in net.gen: {sorted(missing)}"
+        )
+
+    # -- Remove associated machine trafos and terminal buses (if present) ----
+    #
+    # With machine trafos, each generator sits on a 10.5 kV terminal bus
+    # connected to the grid via a 2W transformer. Simply removing net.gen[g]
+    # without removing the terminal bus leaves a floating PQ bus (P=0, Q=0)
+    # at the transformer's LV side. This causes ill-conditioning of the NR
+    # Jacobian and must be avoided.
+    machine_trafos_to_remove: List[int] = []
+    terminal_buses_to_remove: List[int] = []
+
+    for t_idx, g_idx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+        if g_idx in requested:
+            machine_trafos_to_remove.append(int(t_idx))
+            terminal_buses_to_remove.append(int(net.trafo.at[t_idx, "lv_bus"]))
+
+    if machine_trafos_to_remove:
+        net.trafo.drop(index=machine_trafos_to_remove, inplace=True)
+    if terminal_buses_to_remove:
+        net.bus.drop(index=terminal_buses_to_remove, inplace=True)
+
+    # -- Drop the generator rows from net.gen ---------------------------------
+    net.gen.drop(index=sorted(requested), inplace=True)
+
+    # -- Rebuild all gen-related meta fields ----------------------------------
+    #
+    # All four fields (gen_indices, gen_bus_indices, gen_grid_bus_indices,
+    # machine_trafo_*) must be pruned in parallel so they remain consistent.
+    # Passing only gen_indices + gen_bus_indices (the old bug) left the other
+    # three fields at their dataclass defaults of (), causing the zone-lookup
+    # fallback in run_multi_tso_dso to use 10.5 kV terminal buses and assign
+    # zero generators to every zone.
+    new_gen_indices = [
+        g for g in meta.gen_indices if g not in requested
+    ]
+    new_gen_bus_indices = [
+        b for g, b in zip(meta.gen_indices, meta.gen_bus_indices)
+        if g not in requested
+    ]
+    new_gen_grid_bus_indices = [
+        b for g, b in zip(meta.gen_indices, meta.gen_grid_bus_indices)
+        if g not in requested
+    ] if meta.gen_grid_bus_indices else []
+
+    new_machine_trafo_indices = [
+        t for t, g in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map)
+        if g not in requested
+    ]
+    new_machine_trafo_gen_map = [
+        g for g in meta.machine_trafo_gen_map
+        if g not in requested
+    ]
+
+    return IEEE39NetworkMeta(
+        tn_bus_indices        = meta.tn_bus_indices,
+        tn_line_indices       = meta.tn_line_indices,
+        gen_indices           = tuple(new_gen_indices),
+        gen_bus_indices       = tuple(new_gen_bus_indices),
+        gen_grid_bus_indices  = tuple(new_gen_grid_bus_indices),   # ← was missing
+        machine_trafo_indices = tuple(new_machine_trafo_indices),  # ← was missing
+        machine_trafo_gen_map = tuple(new_machine_trafo_gen_map),  # ← was missing
+        tso_der_indices       = meta.tso_der_indices,
+        tso_der_buses         = meta.tso_der_buses,
+        dso_pcc_trafo_indices = meta.dso_pcc_trafo_indices,
+        dso_pcc_hv_buses      = meta.dso_pcc_hv_buses,
+        dso_lv_buses          = meta.dso_lv_buses,
+        dso_der_indices       = meta.dso_der_indices,
+        dso_der_buses         = meta.dso_der_buses,
+        dso_shunt_indices     = meta.dso_shunt_indices,
+        dso_shunt_buses       = meta.dso_shunt_buses,
+        dn_bus_indices        = meta.dn_bus_indices,
+        dn_line_indices       = meta.dn_line_indices,
+        hv_networks           = meta.hv_networks,
     )

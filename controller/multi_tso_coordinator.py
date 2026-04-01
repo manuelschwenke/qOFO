@@ -163,6 +163,12 @@ class ZoneDefinition:
 
     g_w_pcc : float
         Regularisation penalty on PCC setpoint changes (Zone 2 only).
+
+    oltc_trafo_indices : List[int]
+        Machine-transformer OLTC indices in ``net.trafo`` for this zone.
+
+    g_w_oltc : float
+        Regularisation penalty on machine-transformer OLTC tap changes.
     """
     zone_id:            int
     bus_indices:        List[int]
@@ -177,6 +183,7 @@ class ZoneDefinition:
     pcc_dso_ids:        List[str]   = field(default_factory=list)
     shunt_bus_indices:  List[int]   = field(default_factory=list)
     shunt_q_steps_mvar: List[float] = field(default_factory=list)
+    oltc_trafo_indices: List[int]   = field(default_factory=list)
     v_setpoint_pu:      float = 1.02
     v_min_pu:           float = 0.95
     v_max_pu:           float = 1.05
@@ -185,14 +192,15 @@ class ZoneDefinition:
     g_w_der:            float = 100.0
     g_w_gen:            float = 5e8
     g_w_pcc:            float = 100.0
+    g_w_oltc:           float = 10.0
 
     def n_controls(self) -> int:
         """Total number of control variables for this zone."""
         return (
-            len(self.tso_der_indices)   # Q_DER
-            + len(self.pcc_trafo_indices)  # Q_PCC_set
-            + len(self.gen_indices)        # V_gen
-            # OLTC and shunt omitted for IEEE 39-bus (no machine trafos)
+            len(self.tso_der_indices)      # Q_DER
+            + len(self.pcc_trafo_indices)   # Q_PCC_set
+            + len(self.gen_indices)         # V_gen
+            + len(self.oltc_trafo_indices)  # s_OLTC (machine trafos)
         )
 
     def n_outputs(self) -> int:
@@ -218,15 +226,17 @@ class ZoneDefinition:
         """
         Regularisation weight vector G_w (diagonal of G_w matrix) for this zone.
 
-        Column ordering: [Q_DER | Q_PCC_set | V_gen].
+        Column ordering: [Q_DER | Q_PCC_set | V_gen | s_OLTC].
         """
         n_der = len(self.tso_der_indices)
         n_pcc = len(self.pcc_trafo_indices)
         n_gen = len(self.gen_indices)
+        n_oltc = len(self.oltc_trafo_indices)
         return np.concatenate([
             np.full(n_der, self.g_w_der),
             np.full(n_pcc, self.g_w_pcc),
             np.full(n_gen, self.g_w_gen),
+            np.full(n_oltc, self.g_w_oltc),
         ])
 
 
@@ -362,7 +372,7 @@ class MultiTSOCoordinator:
             * If i ≠ j: H_ij (off-diagonal coupling block)
 
         H_ij has shape (n_outputs_i, n_controls_j) with the column ordering:
-            [Q_DER_j | Q_PCC_j | V_gen_j]
+            [Q_DER_j | Q_PCC_j | V_gen_j | s_OLTC_j]
 
         Row ordering (same for all zones): [V_bus_i | I_line_i].
 
@@ -383,10 +393,11 @@ class MultiTSOCoordinator:
 
             for j in zone_ids:
                 zj = self.zones[j]
-                n_der_j = len(zj.tso_der_indices)
-                n_pcc_j = len(zj.pcc_trafo_indices)
-                n_gen_j = len(zj.gen_indices)
-                n_col   = n_der_j + n_pcc_j + n_gen_j
+                n_der_j  = len(zj.tso_der_indices)
+                n_pcc_j  = len(zj.pcc_trafo_indices)
+                n_gen_j  = len(zj.gen_indices)
+                n_oltc_j = len(zj.oltc_trafo_indices)
+                n_col    = n_der_j + n_pcc_j + n_gen_j + n_oltc_j
 
                 # Output shape of this block
                 H_ij = np.zeros((n_v_i + n_li, n_col), dtype=np.float64)
@@ -493,6 +504,36 @@ class MultiTSOCoordinator:
                                         col = n_der_j + n_pcc_j + gen_terminal_buses_j.index(gen_bus)
                                         H_ij[row, col] = dI_dVgen[k_line, k_gen]
 
+                # ── Machine-trafo OLTC columns: ∂V_i / ∂s_OLTC_j ────────────
+                if n_oltc_j > 0:
+                    oltc_indices_j = list(zj.oltc_trafo_indices)
+                    dV_ds, obs_map_s, trafo_map_s = jac.compute_dV_ds_2w_matrix(
+                        trafo_indices=oltc_indices_j,
+                        observation_bus_indices=zi.v_bus_indices,
+                    )
+                    col_offset = n_der_j + n_pcc_j + n_gen_j
+                    for k_obs, obs_bus in enumerate(obs_map_s):
+                        if obs_bus in zi.v_bus_indices:
+                            row = zi.v_bus_indices.index(obs_bus)
+                            for k_t, t_idx in enumerate(trafo_map_s):
+                                if t_idx in oltc_indices_j:
+                                    col = col_offset + oltc_indices_j.index(t_idx)
+                                    H_ij[row, col] = dV_ds[k_obs, k_t]
+
+                    if n_li > 0:
+                        dI_ds, line_map_s, trafo_map_si = \
+                            jac.compute_dI_ds_2w_matrix(
+                                line_indices=zi.line_indices,
+                                trafo_indices=oltc_indices_j,
+                            )
+                        for k_line, line_idx in enumerate(line_map_s):
+                            if line_idx in zi.line_indices:
+                                row = n_v_i + zi.line_indices.index(line_idx)
+                                for k_t, t_idx in enumerate(trafo_map_si):
+                                    if t_idx in oltc_indices_j:
+                                        col = col_offset + oltc_indices_j.index(t_idx)
+                                        H_ij[row, col] = dI_ds[k_line, k_t]
+
                 self._H_blocks[(i, j)] = H_ij
 
         if self.verbose >= 2:
@@ -588,8 +629,12 @@ class MultiTSOCoordinator:
                 continue
 
             # ── Local: λ_max(M_ii) ────────────────────────────────────────────
-            eig_ii = np.linalg.eigvalsh(M_ii)
-            lambda_max = float(np.maximum(eig_ii[-1], 0.0))
+            eig_ii_all = np.linalg.eigvalsh(M_ii)
+            lambda_max_all = float(np.maximum(eig_ii_all[-1], 0.0))
+            # Filter near-zero eigenvalues (null-space from co-located DERs)
+            eig_tol = 1e-10 * max(lambda_max_all, 1e-14)
+            eig_ii = eig_ii_all[eig_ii_all > eig_tol]
+            lambda_max = float(eig_ii[-1]) if len(eig_ii) > 0 else 0.0
             alpha_max_local = (2.0 / lambda_max) if lambda_max > 1e-14 else np.inf
 
             # ── Coupling sum: Σ_{j≠i} ||M_ij||₂ ─────────────────────────────

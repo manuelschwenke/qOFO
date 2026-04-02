@@ -660,26 +660,26 @@ class MultiTSOCoordinator:
             warnings: List[str] = []
             if contraction_lhs >= 2.0:
                 warnings.append(
-                    f"Zone {i}: contraction_lhs = {contraction_lhs:.4f} ≥ 2.0 — "
-                    f"INSTABILITY RISK.  Reduce α_i or increase g_w_i."
+                    f"Zone {i}: contraction_lhs = {contraction_lhs:.4f} >= 2.0 -- "
+                    f"INSTABILITY RISK.  Reduce alpha_i or increase g_w_i."
                 )
             elif contraction_lhs > 1.5:
                 warnings.append(
-                    f"Zone {i}: contraction_lhs = {contraction_lhs:.4f} — "
-                    f"marginal stability (> 1.5), consider reducing α_i."
+                    f"Zone {i}: contraction_lhs = {contraction_lhs:.4f} -- "
+                    f"marginal stability (> 1.5), consider reducing alpha_i."
                 )
             if coupling_sum > lambda_max:
                 warnings.append(
                     f"Zone {i}: coupling_sum ({coupling_sum:.4f}) > "
-                    f"λ_max_Mii ({lambda_max:.4f}) — off-diagonal dominates; "
+                    f"lam_max_Mii ({lambda_max:.4f}) -- off-diagonal dominates; "
                     f"DSO cascade can improve diagonal dominance."
                 )
 
             if self.verbose >= 1:
                 print(
-                    f"[MultiTSO] Zone {i}: λ_max(M_ii)={lambda_max:.4f}  "
-                    f"Σ‖M_ij‖₂={coupling_sum:.4f}  "
-                    f"α·(λ+Σ)={contraction_lhs:.4f}  "
+                    f"[MultiTSO] Zone {i}: lam_max(M_ii)={lambda_max:.4f}  "
+                    f"sum||M_ij||={coupling_sum:.4f}  "
+                    f"alpha*(lam+sum)={contraction_lhs:.4f}  "
                     f"{'OK' if stable else 'UNSTABLE'}"
                 )
             for w in warnings:

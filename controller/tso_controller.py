@@ -126,7 +126,7 @@ class TSOControllerConfig:
     gen_vm_min_pu: float = 0.95
     gen_vm_max_pu: float = 1.05
 
-    k_t_avt: float = 1.0
+    k_t_avt: float = 0.0
     """Achieved-Value Tracking factor for PCC-Q reset.
     0.0 = no reset (current behaviour), 1.0 = full reset (recommended).
     Blends: u_pcc <- (1 - k_t) * u_cmd + k_t * q_measured."""
@@ -597,8 +597,8 @@ class TSOController(BaseOFOController):
         u_upper[n_der:n_der + n_pcc] = tso_dso_interface_q_current + self.pcc_capability_max_mvar
 
         # DEBUG
-        print(f'ppc capability min: {u_lower[n_der:n_der + n_pcc]}')
-        print(f'pcc capability max: {u_upper[n_der:n_der + n_pcc]}')
+        # print(f'ppc capability min: {u_lower[n_der:n_der + n_pcc]}')
+        # print(f'pcc capability max: {u_upper[n_der:n_der + n_pcc]}')
 
         # --- AVR setpoint bounds ---
         avr_start = n_der + n_pcc
@@ -875,9 +875,12 @@ class TSOController(BaseOFOController):
             #   V_bus   : n_q_phys       .. n_q_phys + n_v - 1
             #   I_line  : n_q_phys + n_v .. end
 
-            # DER columns → target column 0..n_der-1
+            # DER columns -> target column 0..n_der-1
+            n_i_phys = H_physical.shape[0] - n_q_phys - n_v
+            n_i_copy = min(n_i, n_i_phys)
             H[:n_v, :n_der] = H_physical[n_q_phys:n_q_phys + n_v, :n_der]
-            H[n_v:, :n_der] = H_physical[n_q_phys + n_v:, :n_der]
+            if n_i_copy > 0:
+                H[n_v:n_v + n_i_copy, :n_der] = H_physical[n_q_phys + n_v:n_q_phys + n_v + n_i_copy, :n_der]
 
         # --- Q_PCC rows removed from H ---
         # Previously, Q_PCC occupied rows H[n_v:n_v+n_pcc, :].
@@ -935,19 +938,21 @@ class TSOController(BaseOFOController):
             H[:n_v, col_oltc_target] = H_physical[
                 n_q_phys:n_q_phys + n_v, col_oltc_phys
             ]
-            H[n_v:, col_oltc_target] = H_physical[
-                n_q_phys + n_v:, col_oltc_phys
-            ]
+            if n_i_copy > 0:
+                H[n_v:n_v + n_i_copy, col_oltc_target] = H_physical[
+                    n_q_phys + n_v:n_q_phys + n_v + n_i_copy, col_oltc_phys
+                ]
 
-            # Shunt columns → target column n_der+n_pcc+n_gen+n_oltc..end
+            # Shunt columns -> target column n_der+n_pcc+n_gen+n_oltc..end
             col_sh_phys = slice(n_der + n_oltc, n_der + n_oltc + n_shunt)
             col_sh_target = slice(n_der + n_pcc + n_gen + n_oltc, n_controls)
             H[:n_v, col_sh_target] = H_physical[
                 n_q_phys:n_q_phys + n_v, col_sh_phys
             ]
-            H[n_v:, col_sh_target] = H_physical[
-                n_q_phys + n_v:, col_sh_phys
-            ]
+            if n_i_copy > 0:
+                H[n_v:n_v + n_i_copy, col_sh_target] = H_physical[
+                    n_q_phys + n_v:n_q_phys + n_v + n_i_copy, col_sh_phys
+                ]
 
         # --- AVR columns: ∂V_obs / ∂V_gen from Jacobian-based sensitivity ---
         avr_start = n_der + n_pcc

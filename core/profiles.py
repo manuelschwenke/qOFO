@@ -184,7 +184,7 @@ def compute_zonal_gen_dispatch(
 
     for si in net.sgen.index:
         name = str(net.sgen.at[si, "name"])
-        if name.startswith("BOUND_") or name.startswith("TN_DER"):
+        if name.startswith("BOUND_"):
             continue
         bus = int(net.sgen.at[si, "bus"])
         z = bus_zone.get(bus)

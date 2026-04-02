@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 import pandapower as pp
 import pandapower.networks as pn
 
@@ -224,61 +225,144 @@ def build_ieee39_net(
     tn_lines: List[int] = sorted(int(li) for li in net.line.index
                                   if str(net.line.at[li, "subnet"]) == "TN")
 
-    # Save original grid buses before machine trafo insertion
-    gen_grid_bus_indices: List[int] = list(gen_bus_indices)
-
-    # ── Add machine transformers (gen step-up trafos with OLTC) ─────────────
+    # ── Update original machine transformers (gen step-up trafos) ───────────
     #
-    # Each generator is moved from its 345 kV grid bus to a new 10.5 kV
-    # terminal bus, connected via a 2W step-up transformer with OLTC.
-    # This mirrors the TUDA approach (_add_machine_transformers) and gives
-    # the TSO OFO additional discrete actuators for reactive power control.
+    # Strategy: keep existing case39 trafos that connect generator buses to the
+    # 345 kV grid, but change their LV winding to 10.5 kV (generator terminal
+    # voltage) and add OLTC tap parameters (±9, 1.25 % step, HV side).
+    #
+    # Special case — bus 20 (0-idx 19):  Gen 3 at bus 34 (0-idx 33) is connected
+    # via TWO series trafos:  bus 19 (0-idx 18) → bus 20 (0-idx 19) → bus 34
+    # (0-idx 33).  We replace both with a single trafo from bus 19 (0-idx 18)
+    # directly to bus 34 (0-idx 33).
     machine_trafo_indices: List[int] = []
     machine_trafo_gen_map: List[int] = []
+    gen_grid_bus_indices: List[int] = []
+
+    # Identify all generator buses (for two-trafo chain detection)
+    gen_bus_set_initial = set(gen_bus_indices)
 
     for g in gen_indices:
-        grid_bus = int(net.gen.at[g, "bus"])
-        grid_vn = float(net.bus.at[grid_bus, "vn_kv"])
-        gen_terminal_kv = 10.5
-        # Rated MVA: use generator P as proxy (case39 has sn_mva=NaN)
-        p_mw = float(net.gen.at[g, "p_mw"])
-        sn_mva = max(p_mw * 1.2, 100.0)  # 120% of P_rated, min 100 MVA
+        gen_bus = int(net.gen.at[g, "bus"])
 
-        # Create generator terminal bus
-        term_bus = pp.create_bus(
-            net, vn_kv=gen_terminal_kv,
-            name=f"GEN_TERM|gen{g}_bus{grid_bus}",
-            type="b", subnet="GEN_TERM",
-        )
-        # Move generator to terminal bus
-        net.gen.at[g, "bus"] = term_bus
+        # Find transformers directly connected to this generator bus
+        mask = (net.trafo["lv_bus"] == gen_bus) | (net.trafo["hv_bus"] == gen_bus)
+        trafo_idx = net.trafo.index[mask].tolist()
 
-        # Create 2W machine transformer
-        tidx = pp.create_transformer_from_parameters(
-            net,
-            hv_bus=grid_bus, lv_bus=int(term_bus),
-            sn_mva=sn_mva,
-            vn_hv_kv=grid_vn, vn_lv_kv=gen_terminal_kv,
-            vk_percent=10.0, vkr_percent=0.03,
-            pfe_kw=0.0, i0_percent=0.0,
-            tap_side="hv", tap_neutral=0,
-            tap_min=-9, tap_max=9,
-            tap_pos=0, tap_step_percent=1.25,
-            shift_degree=0.0,
-            tap_changer_type="Ratio",
-            name=f"MachineTrf|gen{g}_bus{grid_bus}",
-        )
+        if not trafo_idx:
+            # Generator is directly connected to the 345 kV grid (no step-up trafo).
+            # Create a new machine transformer: grid_bus (345 kV) -> new terminal bus (10.5 kV).
+            grid_bus = gen_bus
+            gen_grid_bus_indices.append(grid_bus)
+            grid_vn = float(net.bus.at[grid_bus, "vn_kv"])
+            gen_terminal_kv = 10.5
+            p_mw = float(net.gen.at[g, "p_mw"])
+            sn_mva = max(p_mw * 1.2, 100.0)
+
+            # Create terminal bus
+            term_bus = pp.create_bus(
+                net, vn_kv=gen_terminal_kv,
+                name=f"GEN_TERM|gen{g}_bus{grid_bus}",
+                type="b", subnet="GEN_TERM",
+            )
+            # Move generator to terminal bus
+            net.gen.at[g, "bus"] = int(term_bus)
+
+            # Create 2W machine transformer
+            tidx = pp.create_transformer_from_parameters(
+                net,
+                hv_bus=grid_bus, lv_bus=int(term_bus),
+                sn_mva=sn_mva,
+                vn_hv_kv=grid_vn, vn_lv_kv=gen_terminal_kv,
+                vk_percent=12.0, vkr_percent=0.3,
+                pfe_kw=0.0, i0_percent=0.0,
+                tap_side="hv", tap_neutral=0,
+                tap_min=-9, tap_max=9, tap_pos=0,
+                tap_step_percent=1.25, shift_degree=0.0,
+                tap_changer_type="Ratio",
+                name=f"MachineTrf|gen{g}_bus{grid_bus}",
+            )
+            machine_trafo_indices.append(int(tidx))
+            machine_trafo_gen_map.append(g)
+            continue
+
+        # Pick the trafo whose OTHER side is the grid bus
+        tidx = trafo_idx[0]
+        if int(net.trafo.at[tidx, "lv_bus"]) == gen_bus:
+            grid_bus = int(net.trafo.at[tidx, "hv_bus"])
+        else:
+            grid_bus = int(net.trafo.at[tidx, "lv_bus"])
+
+        # ── Two-trafo chain detection ────────────────────────────────────
+        # If the "grid bus" itself is connected to the backbone only via
+        # another trafo (no lines), we have a two-trafo chain.
+        # Replace both trafos with a single one from the true grid bus to
+        # the generator bus.  Any load at the intermediate bus is moved
+        # to the true grid bus.
+        #
+        # Example in case39: bus 19 (0-idx 18) --trafo5--> bus 20 (0-idx 19)
+        #   --trafo7--> bus 34 (0-idx 33, gen).  Replace with single trafo
+        #   from bus 18 to bus 33.
+        mask2 = ((net.trafo["lv_bus"] == grid_bus) | (net.trafo["hv_bus"] == grid_bus))
+        trafos_at_grid_bus = net.trafo.index[mask2].tolist()
+        trafos_at_grid_bus = [t for t in trafos_at_grid_bus if t != tidx]
+        has_lines = ((net.line["from_bus"] == grid_bus) | (net.line["to_bus"] == grid_bus)).any()
+        has_other_gen = grid_bus in (gen_bus_set_initial - {gen_bus})
+
+        if len(trafos_at_grid_bus) == 1 and not has_lines and not has_other_gen:
+            # Two-trafo chain: intermediate bus = grid_bus
+            # The second trafo connects grid_bus to the true backbone bus
+            t2 = trafos_at_grid_bus[0]
+            if int(net.trafo.at[t2, "lv_bus"]) == grid_bus:
+                true_grid_bus = int(net.trafo.at[t2, "hv_bus"])
+            else:
+                true_grid_bus = int(net.trafo.at[t2, "lv_bus"])
+
+            # Remove the second (intermediate) trafo
+            net.trafo.drop(t2, inplace=True)
+
+            # Rewire the gen-side trafo: true_grid_bus -> gen_bus
+            if int(net.trafo.at[tidx, "hv_bus"]) == grid_bus:
+                net.trafo.at[tidx, "hv_bus"] = true_grid_bus
+            else:
+                net.trafo.at[tidx, "lv_bus"] = true_grid_bus
+
+            # Move any loads from the intermediate bus to the true grid bus
+            for li in net.load.index:
+                if int(net.load.at[li, "bus"]) == grid_bus:
+                    net.load.at[li, "bus"] = true_grid_bus
+
+            # Mark intermediate bus as out of service
+            net.bus.at[grid_bus, "in_service"] = False
+
+            grid_bus = true_grid_bus
+
+        gen_grid_bus_indices.append(grid_bus)
+
+        # ── Set secondary side to 10.5 kV (generator terminal) ──────────
+        lv_bus = int(net.trafo.at[tidx, "lv_bus"])
+        net.trafo.at[tidx, "vn_lv_kv"] = 10.5
+        net.bus.at[lv_bus, "vn_kv"] = 10.5
+
+        # ── Set OLTC tap parameters ─────────────────────────────────────
+        net.trafo.at[tidx, "tap_min"] = -9
+        net.trafo.at[tidx, "tap_max"] = 9
+        net.trafo.at[tidx, "tap_step_percent"] = 1.25
+        net.trafo.at[tidx, "tap_pos"] = 0
+        net.trafo.at[tidx, "tap_side"] = "hv"
+        net.trafo.at[tidx, "tap_neutral"] = 0
+
         machine_trafo_indices.append(int(tidx))
         machine_trafo_gen_map.append(g)
 
-    # Update gen_bus_indices to reflect the new terminal buses
+    # Refresh gen_bus_indices after potential bus reassignments
     gen_bus_indices = [int(net.gen.at[g, "bus"]) for g in gen_indices]
 
     # ── Add TSO DER sgens at PQ load buses ───────────────────────────────────
     #
     # TSO DERs must sit at PQ (load) buses so that the Q sensitivity
-    # ∂V/∂Q_DER can be computed via the reduced Jacobian.  Generator buses
-    # are PV buses — their voltage is fixed by the AVR and ∂V/∂Q_DER = 0
+    # dV/dQ_DER can be computed via the reduced Jacobian.  Generator buses
+    # are PV buses -- their voltage is fixed by the AVR and dV/dQ_DER = 0
     # in the linearised model (the generator absorbs the injected Q).
     #
     # Strategy: place one DER sgen at each unique PQ bus that carries a load.
@@ -297,17 +381,23 @@ def build_ieee39_net(
     pv_and_slack_buses = gen_bus_set | ext_grid_buses
 
     if add_der_at_gen_buses:
+        # Profiles for TN-DER units (analogous to HV network DERs)
+        tn_der_profiles = ["WP10", "WP7", "PV3"]
+        
         # Collect unique PQ load buses (not PV or slack)
         load_buses_pq: List[int] = sorted(
             {int(net.load.at[li, "bus"]) for li in net.load.index
              if int(net.load.at[li, "bus"]) not in pv_and_slack_buses}
         )
-        for bus in load_buses_pq:
-            # Default DER rating: 50 MVA (representative for a large transmission
-            # network shunt compensator).  Scale with p_mw fraction for a small
-            # active component (solar / BESS).
+        for i, bus in enumerate(load_buses_pq):
+            # Default DER rating: 200 MVA. Scale with p_mw fraction (default 0.3)
+            # for a small active component (solar / wind).
             sn_mva = 200.0
             p_mw   = sn_mva * der_p_mw_fraction
+            
+            # Select profile from rotation
+            prof = tn_der_profiles[i % len(tn_der_profiles)]
+            
             idx = pp.create_sgen(
                 net,
                 bus=bus,
@@ -316,6 +406,8 @@ def build_ieee39_net(
                 sn_mva=sn_mva,
                 name=f"TN_DER|load_bus{bus}",
             )
+            net.sgen.at[idx, "profile"] = prof
+            
             tso_der_indices.append(int(idx))
             tso_der_buses.append(bus)
 
@@ -987,6 +1079,19 @@ def add_hv_networks(
     for b in all_coupling_buses_0idx:
         _delete_loads_at_bus(net, b)
 
+    # Also remove TN-DER sgens at coupling buses (they were placed before
+    # HV sub-networks replaced the loads).
+    sgens_to_remove = net.sgen.index[net.sgen["bus"].isin(all_coupling_buses_0idx)].tolist()
+    if sgens_to_remove:
+        net.sgen.drop(index=sgens_to_remove, inplace=True)
+        # Update meta to remove these sgens from tso_der lists
+        removed_set = set(sgens_to_remove)
+        tso_der_indices_updated = [s for s in tso_der_indices_updated if s not in removed_set]
+        tso_der_buses_updated = [
+            b for s, b in zip(meta.tso_der_indices, meta.tso_der_buses)
+            if s not in removed_set and b != bus_rm
+        ]
+
     # =====================================================================
     # 4. Create 5 HV sub-networks
     # =====================================================================
@@ -1056,6 +1161,9 @@ def add_hv_networks(
         tn_line_indices=tn_lines_updated,
         gen_indices=meta.gen_indices,
         gen_bus_indices=meta.gen_bus_indices,
+        gen_grid_bus_indices=meta.gen_grid_bus_indices,
+        machine_trafo_indices=meta.machine_trafo_indices,
+        machine_trafo_gen_map=meta.machine_trafo_gen_map,
         tso_der_indices=tuple(tso_der_indices_updated),
         tso_der_buses=tuple(tso_der_buses_updated),
         # DSO fields carried over

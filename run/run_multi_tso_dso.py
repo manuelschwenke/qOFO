@@ -65,8 +65,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
-import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
@@ -75,6 +73,15 @@ import numpy as np
 import pandas as pd
 import pandapower as pp
 from numpy.typing import NDArray
+
+# Show every column
+pd.set_option('display.max_columns', None)
+# Show every row
+pd.set_option('display.max_rows', None)
+# Ensure the width is wide enough to prevent wrapping
+pd.set_option('display.width', None)
+# Show full content within a cell (don't truncate long strings)
+pd.set_option('display.max_colwidth', None)
 
 # ── Ensure project root is on sys.path ────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -737,7 +744,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     )
 
     # Remove generators
-    meta = remove_generators(net, meta, gen_indices_to_remove=[2])
+    #meta = remove_generators(net, meta, gen_indices_to_remove=[2])
 
     #pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
@@ -987,7 +994,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             p_mw = float(net.gen.at[g, "p_mw"])
             sn = net.gen.at[g, "sn_mva"]
             if pd.isna(sn) or sn <= 0:
-                sn = max(p_mw * 1.2, 100.0)
+                sn = p_mw * 1.2
             gen_params.append(
                 GeneratorParameters(
                     s_rated_mva=float(sn),
@@ -1029,6 +1036,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         meas_init = _measure_for_zone_tso(net, zd, 0)
         ctrl.initialise(meas_init)
         tso_controllers[z] = ctrl
+
 
     # =========================================================================
     # STEP 6: Initialise DSO controllers (one per HV sub-network, all zones)
@@ -1193,7 +1201,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         # Re-converge after profile application
         pp.runpp(net, max_iteration=50, run_control=False, calculate_voltage_angles=True, init='auto')
 
-    # ── Initialise 3W OLTC tap positions via DiscreteTapControl ────────────
+    # ── Initialise 2W and 3W OLTC tap positions via DiscreteTapControl ────────────
     # Run AFTER profiles/dispatch so taps are found for the actual operating point.
     from pandapower.control import DiscreteTapControl
 
@@ -1208,22 +1216,6 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 side="mv",
                 element="trafo3w",
             )
-    pp.runpp(net, run_control=True, calculate_voltage_angles=True)
-    if verbose >= 1:
-        print("[7c] OLTC tap initialisation (DiscreteTapControl):")
-        for hv in meta.hv_networks:
-            for t3w in hv.coupling_trafo_indices:
-                tap = int(net.trafo3w.at[t3w, "tap_pos"])
-                mv_bus = int(net.trafo3w.at[t3w, "mv_bus"])
-                vm = float(net.res_bus.at[mv_bus, "vm_pu"])
-                print(f"  {hv.net_id} trafo3w {t3w}: tap_pos={tap:+d}, "
-                      f"V_mv={vm:.4f} p.u.")
-    # Remove pandapower controllers so they don't interfere with OFO
-    if hasattr(net, "controller") and len(net.controller) > 0:
-        net.controller.drop(net.controller.index, inplace=True)
-
-    # ── Initialise machine-transformer (2W) OLTC taps via DiscreteTapControl ──
-    # Target: ~1.05 p.u. on the 345 kV HV (primary) side of each machine trafo.
     if meta.machine_trafo_indices:
         mt_tol_pu = config.dso_oltc_init_tol_pu
         for tidx in meta.machine_trafo_indices:
@@ -1235,18 +1227,26 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 side="hv",
                 element="trafo",
             )
-        pp.runpp(net, run_control=True, calculate_voltage_angles=True)
-        if verbose >= 1:
-            print("  Machine transformer tap initialisation:")
-            for tidx, gidx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
-                tap = int(net.trafo.at[tidx, "tap_pos"])
-                hv_bus = int(net.trafo.at[tidx, "hv_bus"])
-                vm = float(net.res_bus.at[hv_bus, "vm_pu"])
-                print(f"    trafo {tidx} (gen {gidx}): tap_pos={tap:+d}, "
-                      f"V_hv={vm:.4f} p.u.")
-        # Remove controllers again
-        if hasattr(net, "controller") and len(net.controller) > 0:
-            net.controller.drop(net.controller.index, inplace=True)
+    pp.runpp(net, run_control=True, calculate_voltage_angles=True)
+    if verbose >= 2:
+        print("[7c] OLTC tap initialisation (DiscreteTapControl):")
+        for hv in meta.hv_networks:
+            for t3w in hv.coupling_trafo_indices:
+                tap = int(net.trafo3w.at[t3w, "tap_pos"])
+                mv_bus = int(net.trafo3w.at[t3w, "mv_bus"])
+                vm = float(net.res_bus.at[mv_bus, "vm_pu"])
+                print(f"  {hv.net_id} trafo3w {t3w}: tap_pos={tap:+d}, "
+                      f"V_mv={vm:.4f} p.u.")
+        print("  Machine transformer tap initialisation:")
+        for tidx, gidx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+            tap = int(net.trafo.at[tidx, "tap_pos"])
+            hv_bus = int(net.trafo.at[tidx, "hv_bus"])
+            vm = float(net.res_bus.at[hv_bus, "vm_pu"])
+            print(f"    trafo {tidx} (gen {gidx}): tap_pos={tap:+d}, "
+                  f"V_hv={vm:.4f} p.u.")
+    # Remove pandapower controllers so they don't interfere with OFO
+    if hasattr(net, "controller") and len(net.controller) > 0:
+        net.controller.drop(net.controller.index, inplace=True)
 
     # Re-converge with found tap positions (no control)
     pp.runpp(net, run_control=False, calculate_voltage_angles=True)
@@ -1301,6 +1301,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         for ev in contingencies:
             t_label = f"t={ev.effective_time_s:.0f}s" if ev.time_s is not None else f"min {ev.minute}"
             print(f"    {t_label}: {ev.action} {ev.element_type}[{ev.element_index}]")
+
 
     # =========================================================================
     # STEP 8: Main simulation loop
@@ -1560,33 +1561,33 @@ def main() -> None:
         n_total_s=60.0 * 720,      # 720-minute simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0 * 1,    # DSO every 30 seconds
-        alpha={1: 0.01, 2: 0.01, 3: 0.01},
+        alpha={1: 0.02, 2: 0.02, 3: 0.02},
         dso_alpha=0.1,
         g_v=250000.0,
-        g_q=1,
+        g_q=2,
         dso_g_v=100.0,
         g_w_der=1.0,
         g_w_gen=1e6,
-        g_w_pcc=0.1,
+        g_w_pcc=0.5,
         g_w_tso_oltc=80,
-        g_w_dso_der = 2.0,     # DSO DER Q regularisation
+        g_w_dso_der = 1.0,     # DSO DER Q regularisation
         g_w_dso_oltc = 5.0,    # DSO OLTC tap regularisation
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
         verbose=1,
         live_plot=True,
-        add_tso_ders=True,
+        add_tso_ders=False,
         # ── Profile & contingency settings ───────────────────────────────
         start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
             # Example: trip line 0 at t=30 min, restore at t=60 min
-            # ContingencyEvent(minute=90, element_type="gen", element_index=4, action="trip"),
-            # ContingencyEvent(minute=120, element_type="gen", element_index=4, action="restore"),
-            # ContingencyEvent(minute=180, element_type="gen", element_index=5, action="trip"),
-            # ContingencyEvent(minute=240, element_type="gen", element_index=5, action="restore"),
+            ContingencyEvent(minute=90, element_type="gen", element_index=1, action="trip"),
+            ContingencyEvent(minute=120, element_type="gen", element_index=1, action="restore"),
+            ContingencyEvent(minute=180, element_type="gen", element_index=2, action="trip"),
+            ContingencyEvent(minute=240, element_type="gen", element_index=2, action="restore"),
         ],
     )
     log = run_multi_tso_dso(cfg)

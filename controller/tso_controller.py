@@ -252,8 +252,8 @@ class TSOController(BaseOFOController):
         # Initialise PCC capability bounds to large symmetric range
         # until DSO controllers report actual capabilities
         n_pcc = len(config.pcc_trafo_indices)
-        self.pcc_capability_min_mvar = np.full(n_pcc, -0)
-        self.pcc_capability_max_mvar = np.full(n_pcc, +0)
+        self.pcc_capability_min_mvar = np.full(n_pcc, -1E-6)
+        self.pcc_capability_max_mvar = np.full(n_pcc, +1E-6)
 
         # Cache for the sensitivity matrix
         self._H_cache: Optional[NDArray[np.float64]] = None
@@ -870,6 +870,7 @@ class TSOController(BaseOFOController):
 
             has_pcc_rows = pcc_in_trafo or pcc_in_trafo3w
             n_q_phys = n_pcc if has_pcc_rows else 0
+            n_i_copy = 0
 
             # H_physical row ranges (skip Q_trafo rows):
             #   V_bus   : n_q_phys       .. n_q_phys + n_v - 1
@@ -990,6 +991,15 @@ class TSOController(BaseOFOController):
         # Q_PCC rows have been removed entirely. The sensitivity method
         # compute_dQtrafo3w_hv_dVgen_matrix() is available if Q_PCC
         # rows are re-enabled in the future.
+
+        if not np.all(np.isfinite(H)):
+            nan_rows, nan_cols = np.where(~np.isfinite(H))
+            raise ValueError(
+                f"[TSOController {self.controller_id}] Non-finite entries in "
+                f"sensitivity matrix H at (row, col): "
+                f"{list(zip(nan_rows.tolist(), nan_cols.tolist()))}. "
+                f"Check Jacobian computation for buses/lines in the config."
+            )
 
         self._H_cache = H
         self._H_mappings = mappings

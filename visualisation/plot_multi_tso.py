@@ -214,8 +214,8 @@ class MultiTSOLivePlotter:
         ax.set_ylabel("Voltage [p.u.]")
         ax.set_title("Zone Bus Voltages (V_min / V_mean / V_max bands)")
         ax.axhline(self._v_set, color="k", ls="--", lw=1.0, label=f"V_set={self._v_set:.3f}")
-        ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
-        ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
+        #ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
+        #ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
         ax.grid(True, alpha=0.3)
         self._ax_v = ax
 
@@ -288,8 +288,8 @@ class MultiTSOLivePlotter:
         ax.set_ylabel("Voltage / p.u.")
         ax.set_title("DSO Voltages per HV Network Group (V_min / V_mean / V_max bands)")
         ax.axhline(self._v_set, color="k", ls="--", lw=1.0, label=f"V_set={self._v_set:.3f}")
-        ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
-        ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
+        #ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
+        #ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
         ax.grid(True, alpha=0.3)
         self._ax_dso_v = ax
 
@@ -456,8 +456,8 @@ class MultiTSOLivePlotter:
         ax.set_title("Zone Bus Voltages (V_min / V_mean / V_max bands)", pad=20)
         ax.axhline(self._v_set, color="k", ls="--", lw=1.0,
                    label=f"V_set={self._v_set:.3f}")
-        ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
-        ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
+        #ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
+        #ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
         ax.grid(True, alpha=0.3)
         _apply_x_fmt(ax, self._sub_minute)
 
@@ -726,8 +726,8 @@ class MultiTSOLivePlotter:
         ax.set_ylabel("Voltage [p.u.]")
         ax.set_title("DSO Voltages per HV Network Group (V_min / V_mean / V_max bands)")
         ax.axhline(self._v_set, color="k", ls="--", lw=1.0, label=f"V_set={self._v_set:.3f}")
-        ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
-        ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
+        #ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
+        #ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
         ax.grid(True, alpha=0.3)
         _apply_x_fmt(ax, self._sub_minute)
 

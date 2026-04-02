@@ -332,8 +332,8 @@ def build_ieee39_net(
                 if int(net.load.at[li, "bus"]) == grid_bus:
                     net.load.at[li, "bus"] = true_grid_bus
 
-            # Mark intermediate bus as out of service
-            net.bus.at[grid_bus, "in_service"] = False
+            # Remove the intermediate bus
+            net.bus.drop(index=[grid_bus], inplace=True)
 
             grid_bus = true_grid_bus
 
@@ -405,6 +405,8 @@ def build_ieee39_net(
                 q_mvar=0.0,
                 sn_mva=sn_mva,
                 name=f"TN_DER|load_bus{bus}",
+                subnet='TN',
+                op_diagram='VDE-AR-N-4120-v2',
             )
             net.sgen.at[idx, "profile"] = prof
             
@@ -1128,11 +1130,6 @@ def add_hv_networks(
     # =====================================================================
     # 6. Power flow
     # =====================================================================
-    # Check for isolated buses (in-service buses with no connected in-service element)
-    import pandapower.topology as top
-    mg = top.create_nxgraph(net, respect_switches=True)
-    isolated = top.unsupplied_buses(net, mg)
-    print("Isolated buses:", isolated)
 
     # Verify no stale trafo references
     print(net.trafo[["hv_bus", "lv_bus", "vn_hv_kv", "vn_lv_kv"]])

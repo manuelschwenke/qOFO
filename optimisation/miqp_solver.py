@@ -469,6 +469,8 @@ class MIQPSolver:
         MIQPResult
             The solution result.
         """
+        _assert_finite_problem_data(problem, solver_name or 'MIQP')
+
         n_continuous = problem.n_continuous
         n_integer = problem.n_integer
         n_total = problem.n_total
@@ -588,6 +590,34 @@ class MIQPSolver:
             status=cvxpy_problem.status,
             solve_time_s=solve_time,
         )
+
+
+def _assert_finite_problem_data(problem: "MIQPProblem", solver_label: str) -> None:
+    """Assert that all numerical arrays in the MIQP problem are finite.
+    Raises ValueError with the offending field name and first non-finite
+    index if any NaN or Inf is found. This check runs before CVXPY sees
+    the data so that the error is traceable."""
+    fields = {
+        'Gw':       problem.G_w,
+        'Gz':       problem.G_z,
+        'gradf':    problem.grad_f,
+        'Htilde':   problem.H_tilde,
+        'ucurrent': problem.u_current,
+        'ulower':   problem.u_lower,
+        'uupper':   problem.u_upper,
+        'ycurrent': problem.y_current,
+        'ylower':   problem.y_lower,
+        'yupper':   problem.y_upper,
+    }
+    for name, arr in fields.items():
+        arr_np = np.asarray(arr, dtype=np.float64)
+        if not np.isfinite(arr_np).all():
+            bad = np.argwhere(~np.isfinite(arr_np))
+            raise ValueError(
+                f"[{solver_label}] NaN or Inf in MIQP problem field '{name}' "
+                f"at indices {bad[:5].tolist()} "
+                f"(showing first 5 of {len(bad)})."
+            )
 
 
 def build_miqp_problem(

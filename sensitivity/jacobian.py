@@ -375,8 +375,12 @@ class JacobianSensitivities:
         bus_data = self.net._ppc['bus']
         Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
 
-        n_bus = bus_data.shape[0]
-        V_complex = bus_data[:, 7] * np.exp(1j * np.deg2rad(bus_data[:, 8]))
+        # Use the smaller of bus_data and Ybus dimensions.  Pandapower may
+        # create extra PPC buses (e.g. 3W trafo star points) that are in the
+        # bus array but not yet in Ybus if they were added after the Ybus was
+        # built.  Using Ybus.shape ensures we stay in bounds.
+        n_bus = min(bus_data.shape[0], Ybus.shape[0])
+        V_complex = bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
 
         k = gen_bus_ppc
         V_k = V_complex[k]
@@ -1426,8 +1430,8 @@ class JacobianSensitivities:
         # --- 1. Compute dx/dVk for the generator ---
         bus_data = self.net._ppc['bus']
         Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
-        n_bus = bus_data.shape[0]
-        V_complex = bus_data[:, 7] * np.exp(1j * np.deg2rad(bus_data[:, 8]))
+        n_bus = min(bus_data.shape[0], Ybus.shape[0])
+        V_complex = bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
 
         k = gen_bus_ppc
         Vm = np.abs(V_complex)
@@ -2225,8 +2229,8 @@ class JacobianSensitivities:
         # Run full sensitivity computation for this generator
         bus_data = self.net._ppc['bus']
         Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
-        n_bus = bus_data.shape[0]
-        V_complex = bus_data[:, 7] * np.exp(1j * np.deg2rad(bus_data[:, 8]))
+        n_bus = min(bus_data.shape[0], Ybus.shape[0])
+        V_complex = bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
 
         k = gen_bus_ppc
         V_k = V_complex[k]

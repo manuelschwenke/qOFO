@@ -172,6 +172,7 @@ class MultiTSOLivePlotter:
         self._zone_q_der:  Dict[int, List] = {z: [] for z in self._zone_ids}
         self._zone_v_gen:  Dict[int, List] = {z: [] for z in self._zone_ids}
         self._zone_q_gen:  Dict[int, List] = {z: [] for z in self._zone_ids}
+        self._zone_oltc_taps: Dict[int, List] = {z: [] for z in self._zone_ids}
         self._zone_obj:    Dict[int, List[float]] = {z: [] for z in self._zone_ids}
         self._zone_obj_min: Dict[int, List[float]] = {z: [] for z in self._zone_ids}
         self._zone_contraction: Dict[int, List[float]] = {z: [] for z in self._zone_ids}
@@ -198,7 +199,7 @@ class MultiTSOLivePlotter:
 
         # ── Build TSO figure ──────────────────────────────────────────────────
         # * **Figure 1 (TSO)**: Zone voltage bands, DER Q, generator AVR setpoints,
-        #   generator Q injection, and TSO objective per zone.
+        #   generator Q injection, and machine transformer tap positions.
         _n_tso_rows = 5
         self._fig_tso, self._axes_tso = plt.subplots(
             _n_tso_rows, 1,
@@ -230,18 +231,21 @@ class MultiTSOLivePlotter:
         ax.grid(True, alpha=0.3)
         self._ax_vgen = ax
 
-        ax = self._axes_tso[3]  # ← new
+        ax = self._axes_tso[3]
         ax.set_ylabel(r"$Q_\mathrm{gen}$ [Mvar]")
         ax.set_title("Generator Reactive Power Injection per Zone")
         ax.grid(True, alpha=0.3)
         self._ax_qgen = ax
 
-        ax = self._axes_tso[4]  # was [3]
-        ax.set_ylabel("Objective")
-        ax.set_title("TSO Objective Value per Zone")
+        ax = self._axes_tso[4]
+        ax.set_ylabel("Tap pos.")
+        ax.set_title("TSO Machine Transformer Tap Positions")
         ax.grid(True, alpha=0.3)
-        self._ax_tso_obj = ax
+        self._ax_tso_oltc = ax
 
+        # Preserved but inactive for now:
+        self._ax_tso_obj = None # Use this if we want to toggle back
+        
         self._axes_tso[-1].set_xlabel(
             "Time [s]" if sub_minute else "Time [min]"
         )
@@ -347,6 +351,9 @@ class MultiTSOLivePlotter:
                 q_gen = rec.zone_q_gen.get(z)
                 if q_gen is not None:
                     self._zone_q_gen[z].append(q_gen)
+                oltc_taps = rec.zone_oltc_taps.get(z)
+                if oltc_taps is not None:
+                    self._zone_oltc_taps[z].append(oltc_taps)
                 obj = rec.zone_tso_objective.get(z)
                 if obj is not None:
                     self._zone_obj[z].append(obj)
@@ -533,30 +540,55 @@ class MultiTSOLivePlotter:
         if any(self._zone_q_gen[z] for z in self._zone_ids):
             ax.legend(fontsize=7, ncol=4, loc="upper left")
 
-        # ── TSO objective ────────────────────────────────────────────────────
-        ax = self._ax_tso_obj
+        # ── TSO machine transformer taps ─────────────────────────────────────
+        ax = self._ax_tso_oltc
         ax.clear()
-        ax.set_ylabel("Objective")
-        ax.set_title("TSO Objective Value per Zone")
+        ax.set_ylabel("Tap pos.")
+        ax.set_title("TSO Machine Transformer Tap Positions")
         ax.grid(True, alpha=0.3)
         _apply_x_fmt(ax, self._sub_minute)
 
-        has_obj = False
         for zi, z in enumerate(self._zone_ids):
-            obj_list = self._zone_obj[z]
-            if not obj_list:
+            tap_list = self._zone_oltc_taps[z]
+            if not tap_list:
                 continue
-            obj_arr = np.array(obj_list)
-            t_arr = np.array(self._zone_obj_min[z])
-            ax.plot(t_arr, np.abs(obj_arr), lw=1.0, color=_c(zi),   # ToDo: absolute for log representation!
-                    marker=".", markersize=3, label=f"Zone {z}")
-            has_obj = True
-        if has_obj:
-            try:
-                ax.set_yscale("log")
-            except Exception:
-                pass
-            ax.legend(fontsize=7, ncol=3, loc="upper right")
+            tap_arr = np.array(tap_list)
+            t_arr = tso_t[:len(tap_arr)]
+            for j in range(tap_arr.shape[1]):
+                lbl = f"Z{z}-Tap{j}" if j == 0 else f"_Z{z}-Tap{j}"
+                ax.step(t_arr, tap_arr[:, j], where="post", lw=1.0,
+                        color=_c(zi * 4 + j), alpha=0.85, label=lbl)
+        if any(self._zone_oltc_taps[z] for z in self._zone_ids):
+            ax.legend(fontsize=7, ncol=4, loc="upper left")
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+        # ── TSO objective (Preserved but commented out for now) ──────────────
+        """
+        ax = self._ax_tso_obj
+        if ax is not None:
+            ax.clear()
+            ax.set_ylabel("Objective")
+            ax.set_title("TSO Objective Value per Zone")
+            ax.grid(True, alpha=0.3)
+            _apply_x_fmt(ax, self._sub_minute)
+
+            has_obj = False
+            for zi, z in enumerate(self._zone_ids):
+                obj_list = self._zone_obj[z]
+                if not obj_list:
+                    continue
+                obj_arr = np.array(obj_list)
+                t_arr = np.array(self._zone_obj_min[z])
+                ax.plot(t_arr, np.abs(obj_arr), lw=1.0, color=_c(zi),
+                        marker=".", markersize=3, label=f"Zone {z}")
+                has_obj = True
+            if has_obj:
+                try:
+                    ax.set_yscale("log")
+                except Exception:
+                    pass
+                ax.legend(fontsize=7, ncol=3, loc="upper right")
+        """
 
         self._fig_tso.canvas.draw_idle()
         self._fig_tso.canvas.flush_events()

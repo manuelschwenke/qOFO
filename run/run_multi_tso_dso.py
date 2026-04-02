@@ -72,10 +72,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
+import pandas as pd
 import pandapower as pp
 from numpy.typing import NDArray
-
-warnings.filterwarnings("ignore", category=UserWarning, module=r"mosek")
 
 # ── Ensure project root is on sys.path ────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -210,12 +209,15 @@ class MultiTSOConfig:
     g_w_der:        float = 20.0    # [Mvar]² cost per DER Q step
     g_w_gen:        float = 1e7      # [p.u.]² cost per AVR step (very cautious)
     g_w_pcc:        float = 10.0    # [Mvar]² cost per PCC-Q setpoint step
-    g_w_tso_oltc:   float = 10.0   # [tap²] cost per machine-trafo OLTC tap step
-    g_w_tso_oltc:   float = 50.0
+    g_w_tso_oltc:   float = 1.0   # [tap²] cost per machine-trafo OLTC tap step
 
     # ── G_w regularisation weights (DSO) ─────────────────────────────────────
     g_w_dso_der:    float = 10.0     # DSO DER Q regularisation
     g_w_dso_oltc:   float = 40.0    # DSO OLTC tap regularisation
+
+    # ── Integer switching logic ──────────────────────────────────────────────
+    int_max_step:   int = 1         # max tap/shunt change per iteration
+    int_cooldown:   int = 1         # iterations to lock after switching
 
     # ── DSO OLTC initialisation ──────────────────────────────────────────────
     dso_oltc_init_tol_pu: float = 0.01
@@ -279,6 +281,7 @@ class MultiTSOIterationRecord:
     zone_q_pcc_set:     Dict[int, NDArray] = field(default_factory=dict)
     zone_v_gen:         Dict[int, NDArray] = field(default_factory=dict)
     zone_q_gen:         Dict[int, Any] = field(default_factory=dict)
+    zone_oltc_taps:     Dict[int, NDArray] = field(default_factory=dict)
     zone_tso_objective: Dict[int, Optional[float]] = field(default_factory=dict)
     zone_tso_status:    Dict[int, Optional[str]]  = field(default_factory=dict)
     zone_tso_solve_s:   Dict[int, Optional[float]] = field(default_factory=dict)
@@ -421,6 +424,12 @@ def _measure_for_zone_tso(
         dtype=np.float64,
     ) if zone_def.gen_indices else np.array([], dtype=np.float64)
 
+    # ── OLTC taps (Machine transformers) ──────────────────────────────────────
+    oltc_taps = np.array(
+        [int(net.trafo.at[t, "tap_pos"]) for t in zone_def.oltc_trafo_indices],
+        dtype=np.int64,
+    ) if zone_def.oltc_trafo_indices else np.array([], dtype=np.int64)
+
     return Measurement(
         iteration=it,
         bus_indices=all_bus,
@@ -432,8 +441,8 @@ def _measure_for_zone_tso(
         der_indices=np.array(zone_def.tso_der_indices, dtype=np.int64),
         der_q_mvar=der_q,
         der_p_mw=der_p,
-        oltc_indices=np.array([], dtype=np.int64),        # no machine OLTCs in IEEE 39-bus
-        oltc_tap_positions=np.array([], dtype=np.int64),
+        oltc_indices=np.array(zone_def.oltc_trafo_indices, dtype=np.int64),
+        oltc_tap_positions=oltc_taps,
         shunt_indices=np.array(zone_def.shunt_bus_indices, dtype=np.int64),
         shunt_states=shunt_states,
         gen_indices=np.array(zone_def.gen_indices, dtype=np.int64),
@@ -644,7 +653,13 @@ def _apply_zone_tso_controls(
         net.gen.at[g_idx, "vm_pu"] = new_vm
     off += n_gen
 
-    # OLTC and shunt application omitted (not used in base IEEE 39-bus setup)
+    # ── OLTC tap positions (Machine transformers) ──────────────────────────────
+    n_oltc = len(zone_def.oltc_trafo_indices)
+    for k, t_idx in enumerate(zone_def.oltc_trafo_indices):
+        net.trafo.at[t_idx, "tap_pos"] = int(round(u[off + k]))
+    off += n_oltc
+
+    # shunt application omitted (not used in base IEEE 39-bus setup)
 
 
 def _apply_dso_controls(
@@ -705,8 +720,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     if verbose >= 1:
         print("=" * 72)
         zone_method = "fixed 3-area" if config.use_fixed_zones else "spectral"
-        print("  MULTI-TSO / MULTI-DSO OFO  —  IEEE 39-bus New England")
-        print(f"  V_set = {v_set:.3f} p.u.  |  N_zones = 3  |  α = {config.alpha}")
+        print("  MULTI-TSO / MULTI-DSO OFO -- IEEE 39-bus New England")
+        print(f"  V_set = {v_set:.3f} p.u.  |  N_zones = 3  |  alpha = {config.alpha}")
         print(f"  Zone partition: {zone_method}  |  5 HV sub-networks (DSO_1..DSO_5)")
         print("=" * 72)
 
@@ -722,7 +737,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     )
 
     # Remove generators
-    #meta = remove_generators(net, meta, gen_indices_to_remove=[2])
+    meta = remove_generators(net, meta, gen_indices_to_remove=[2])
 
     #pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
@@ -930,6 +945,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             g_w=gw_diag,    # 1-D vector → no OLTC cross-coupling
             g_z=gz_diag,
             g_u=np.zeros_like(gw_diag),  # no level penalty for now
+            int_max_step=config.int_max_step,
+            int_cooldown=config.int_cooldown,
         )
 
         # TSOControllerConfig: pass zone-specific index sets
@@ -963,19 +980,24 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             s_rated = np.array([], dtype=np.float64)
             p_max   = np.array([], dtype=np.float64)
 
-        # Generator capability parameters for this zone
-        gen_params = [
-            GeneratorParameters(
-                s_rated_mva=float(net.gen.at[g, "sn_mva"]),
-                p_max_mw=float(net.gen.at[g, "p_mw"]),
-                # Default IEEE parameters (no detailed xd data in case39)
-                xd_pu=1.0,
-                i_f_max_pu=2.0,
-                beta=0.1,
-                q0_pu=0.1,
+        # Generator capability parameters for this zone.
+        # case39 generators may have NaN for sn_mva; use 1.2 * p_mw as fallback.
+        gen_params = []
+        for g in zd.gen_indices:
+            p_mw = float(net.gen.at[g, "p_mw"])
+            sn = net.gen.at[g, "sn_mva"]
+            if pd.isna(sn) or sn <= 0:
+                sn = max(p_mw * 1.2, 100.0)
+            gen_params.append(
+                GeneratorParameters(
+                    s_rated_mva=float(sn),
+                    p_max_mw=p_mw,
+                    xd_pu=1.0,
+                    i_f_max_pu=2.0,
+                    beta=0.1,
+                    q0_pu=0.1,
+                )
             )
-            for g in zd.gen_indices
-        ]
 
         bounds = ActuatorBounds(
             der_indices=np.array(zd.tso_der_indices, dtype=np.int64),
@@ -1087,6 +1109,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             g_w=dso_gw_diag,
             g_z=np.zeros(n_iface + n_v + n_i),
             g_u=np.zeros_like(dso_gw_diag),
+            int_max_step=config.int_max_step,
+            int_cooldown=config.int_cooldown,
         )
 
         dso_ctrl = DSOController(
@@ -1166,16 +1190,6 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             )
             apply_gen_dispatch(net, gen_dispatch, start_time)
 
-        # --- BEGIN DIAGNOSTIC (remove after fix) ---
-        print(f"[DEBUG] net.gen buses: {list(net.gen['bus'])}")
-        print(f"[DEBUG] TN zone_map bus samples: {list(zone_map[1])[:5]}")
-        p_gen = net.gen.loc[net.gen['in_service'], 'p_mw'].sum()
-        p_sgen = net.sgen.loc[net.sgen['in_service'], 'p_mw'].sum()
-        p_load = net.load.loc[net.load['in_service'], 'p_mw'].sum()
-        print(f"[DEBUG] P_gen={p_gen:.0f} MW  P_sgen={p_sgen:.0f} MW  P_load={p_load:.0f} MW")
-        print(f"[DEBUG] Net imbalance (excl. slack): {p_gen + p_sgen - p_load:.0f} MW")
-        # --- END DIAGNOSTIC ---
-
         # Re-converge after profile application
         pp.runpp(net, max_iteration=50, run_control=False, calculate_voltage_angles=True, init='auto')
 
@@ -1207,6 +1221,33 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # Remove pandapower controllers so they don't interfere with OFO
     if hasattr(net, "controller") and len(net.controller) > 0:
         net.controller.drop(net.controller.index, inplace=True)
+
+    # ── Initialise machine-transformer (2W) OLTC taps via DiscreteTapControl ──
+    # Target: ~1.05 p.u. on the 345 kV HV (primary) side of each machine trafo.
+    if meta.machine_trafo_indices:
+        mt_tol_pu = config.dso_oltc_init_tol_pu
+        for tidx in meta.machine_trafo_indices:
+            DiscreteTapControl(
+                net,
+                element_index=tidx,
+                vm_lower_pu=v_set - mt_tol_pu,
+                vm_upper_pu=v_set + mt_tol_pu,
+                side="hv",
+                element="trafo",
+            )
+        pp.runpp(net, run_control=True, calculate_voltage_angles=True)
+        if verbose >= 1:
+            print("  Machine transformer tap initialisation:")
+            for tidx, gidx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+                tap = int(net.trafo.at[tidx, "tap_pos"])
+                hv_bus = int(net.trafo.at[tidx, "hv_bus"])
+                vm = float(net.res_bus.at[hv_bus, "vm_pu"])
+                print(f"    trafo {tidx} (gen {gidx}): tap_pos={tap:+d}, "
+                      f"V_hv={vm:.4f} p.u.")
+        # Remove controllers again
+        if hasattr(net, "controller") and len(net.controller) > 0:
+            net.controller.drop(net.controller.index, inplace=True)
+
     # Re-converge with found tap positions (no control)
     pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
@@ -1312,6 +1353,9 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             apply_profiles(net, profiles, t_now)
             if gen_dispatch is not None:
                 apply_gen_dispatch(net, gen_dispatch, t_now)
+            # Converge PF so that measurements (q_pcc, voltages) reflect the
+            # new profiles/dispatch BEFORE controllers read them.
+            pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
         # ── Apply contingency events ──────────────────────────────────────────
         if contingencies:
@@ -1363,9 +1407,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 n_der = len(zone_defs[z].tso_der_indices)
                 n_pcc = len(zone_defs[z].pcc_trafo_indices)
                 n_gen = len(zone_defs[z].gen_indices)
+                n_oltc = len(zone_defs[z].oltc_trafo_indices)
                 rec.zone_q_der[z]         = u[:n_der].copy()
                 rec.zone_q_pcc_set[z]     = u[n_der:n_der+n_pcc].copy()
                 rec.zone_v_gen[z]         = u[n_der+n_pcc:n_der+n_pcc+n_gen].copy()
+                rec.zone_oltc_taps[z]     = u[n_der+n_pcc+n_gen:n_der+n_pcc+n_gen+n_oltc].copy()
                 rec.zone_tso_objective[z] = tso_out.objective_value
                 rec.zone_tso_status[z]    = tso_out.solver_status
                 rec.zone_tso_solve_s[z]   = tso_out.solve_time_s
@@ -1516,14 +1562,15 @@ def main() -> None:
         dso_period_s=20.0 * 1,    # DSO every 30 seconds
         alpha={1: 0.01, 2: 0.01, 3: 0.01},
         dso_alpha=0.1,
-        g_v=200000.0,
+        g_v=250000.0,
         g_q=1,
-        dso_g_v=500.0,
-        g_w_der=10,
+        dso_g_v=100.0,
+        g_w_der=1.0,
         g_w_gen=1e6,
-        g_w_pcc=1,
-        g_w_dso_der = 0.1,     # DSO DER Q regularisation
-        g_w_dso_oltc = 1.0,    # DSO OLTC tap regularisation
+        g_w_pcc=0.1,
+        g_w_tso_oltc=80,
+        g_w_dso_der = 2.0,     # DSO DER Q regularisation
+        g_w_dso_oltc = 5.0,    # DSO OLTC tap regularisation
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps

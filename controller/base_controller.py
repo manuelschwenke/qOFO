@@ -85,6 +85,8 @@ class OFOParameters:
     g_u: Union[float, NDArray[np.float64]] = 0.0
     max_iter_per_step: int = 100
     solver_verbose: bool = False
+    int_max_step: int = 1
+    int_cooldown: int = 6
 
     def __post_init__(self) -> None:
         """Validate parameters after initialisation."""
@@ -309,12 +311,9 @@ class BaseOFOController(ABC):
         self._n_continuous, self._n_integer, self._integer_indices = \
             self._get_control_structure()
 
-        # Integer switching cooldown: after an integer variable switches,
-        # lock it for _int_cooldown iterations to prevent chattering.
-        # Large discrete steps (e.g. 50 Mvar shunts) need enough time for
-        # the continuous DERs to absorb the transient before the next
-        # switching decision is made.
-        self._int_cooldown = 6  # number of iterations to lock after switching
+        # Integer switching logic
+        self._int_cooldown = self.params.int_cooldown
+        self._int_max_step = self.params.int_max_step
         self._int_lock_until: dict[int, int] = {}   # idx -> iteration when lock expires
     
     def step(self, measurement: Measurement) -> ControllerOutput:
@@ -360,11 +359,12 @@ class BaseOFOController(ABC):
         # Step 3: Compute input bounds (operating-point-dependent)
         u_lower, u_upper = self._compute_input_bounds(tso_dso_interface_q_current, der_p_current)
 
-        # Step 3b: Integer variables may change by at most ±1 per iteration.
+        # Step 3b: Integer variables may change by at most ±N per iteration.
         # This prevents multi-step jumps (e.g. OLTC jumping 5 taps at once).
+        # Standard value is 1, but can be increased via params.int_max_step.
         for idx in self._integer_indices:
-            u_lower[idx] = max(u_lower[idx], self._u_current[idx] - 1)
-            u_upper[idx] = min(u_upper[idx], self._u_current[idx] + 1)
+            u_lower[idx] = max(u_lower[idx], self._u_current[idx] - self._int_max_step)
+            u_upper[idx] = min(u_upper[idx], self._u_current[idx] + self._int_max_step)
 
         # Step 3c: Enforce integer cooldown — lock recently-switched integers
         for idx in self._integer_indices:

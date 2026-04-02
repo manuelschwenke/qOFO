@@ -362,8 +362,8 @@ def _analyse_layer(
     # ── Step-size check ───────────────────────────────────────────────────────────
     if alpha > alpha_max:
         warnings.append(
-            f'{layer_name}: α = {alpha:.4g} exceeds α_max = {alpha_max:.4g} '
-            f'(λ_max(M) = {M_max:.4g}).  Instability likely.'
+            f'{layer_name}: alpha = {alpha:.4g} exceeds alpha_max = {alpha_max:.4g} '
+            f'(lam_max(M) = {M_max:.4g}).  Instability likely.'
         )
 
     # ── Per-actuator warnings ─────────────────────────────────────────────────────
@@ -384,9 +384,9 @@ def _analyse_layer(
     # ── Condition number warning ──────────────────────────────────────────────────
     if condition_number > 1e6:
         warnings.append(
-            f'{layer_name}: raw H is ill-conditioned (κ = {condition_number:.3e}). '
-            f'Common cause: co-located DERs (same bus → near-identical columns). '
-            f'Benign for stability (G_w regularises), but raw σ_min is meaningless.'
+            f'{layer_name}: raw H is ill-conditioned (kappa = {condition_number:.3e}). '
+            f'Common cause: co-located DERs (same bus -> near-identical columns). '
+            f'Benign for stability (G_w regularises), but raw sigma_min is meaningless.'
         )
 
     # ── DSO cascade convergence rate ──────────────────────────────────────────────
@@ -425,22 +425,22 @@ def _analyse_layer(
                 )))
                 warnings.append(
                     f'{layer_name}: {n_inactive} near-degenerate modes filtered '
-                    f'(λ < {rel_threshold:.2e}).  '
-                    f'ρ_D (active modes only) = {rho:.4f},  '
-                    f'ρ_D (all modes, incl. degenerate) = {rho_raw:.4f}.  '
+                    f'(lam < {rel_threshold:.2e}).  '
+                    f'rho_D (active modes only) = {rho:.4f},  '
+                    f'rho_D (all modes, incl. degenerate) = {rho_raw:.4f}.  '
                     f'Degenerate modes are benign (co-located DERs / rank-deficient H).'
                 )
 
         if rho >= 1.0:
             warnings.append(
-                f'{layer_name}: spectral radius ρ_D = {rho:.4f} ≥ 1.0 '
-                f'(DSO diverges in active modes).  α exceeds stability bound.'
+                f'{layer_name}: spectral radius rho_D = {rho:.4f} >= 1.0 '
+                f'(DSO diverges in active modes).  alpha exceeds stability bound.'
             )
         elif dso_cascade_margin <= 0.0:
             warnings.append(
                 f'{layer_name}: DSO may NOT converge within {ratio:.0f} iterations '
-                f'(ρ_D = {rho:.4f}, ρ_D^{ratio:.0f} = {rho**ratio:.4f}). '
-                f'Increase α or reduce g_w to ensure quasi-steady-state.'
+                f'(rho_D = {rho:.4f}, rho_D^{ratio:.0f} = {rho**ratio:.4f}). '
+                f'Increase alpha or reduce g_w to ensure quasi-steady-state.'
             )
 
     # ── Augmented PI analysis (integral Q-tracking) ─────────────────────────────
@@ -505,13 +505,13 @@ def _analyse_layer(
 
         if augmented_rho >= 1.0:
             warnings.append(
-                f'{layer_name}: augmented PI spectral radius ρ_aug = {augmented_rho:.4f} ≥ 1.0. '
+                f'{layer_name}: augmented PI spectral radius rho_aug = {augmented_rho:.4f} >= 1.0. '
                 f'Integral Q-tracking destabilises the DSO.  '
-                f'Reduce g_qi ({g_qi}) or λ_qi ({lambda_qi}).'
+                f'Reduce g_qi ({g_qi}) or lam_qi ({lambda_qi}).'
             )
         elif augmented_rho > 0.95:
             warnings.append(
-                f'{layer_name}: augmented PI spectral radius ρ_aug = {augmented_rho:.4f} '
+                f'{layer_name}: augmented PI spectral radius rho_aug = {augmented_rho:.4f} '
                 f'(near boundary).  Integral Q-tracking slows convergence.'
             )
 
@@ -709,21 +709,21 @@ def analyse_stability(
         status = 'MARGINAL'
     summary = (
         f'Cascade stability: {status}.  '
-        f'TSO α_max = {tso_result.alpha_max:.3g} '
+        f'TSO alpha_max = {tso_result.alpha_max:.3g} '
         f'(L_eff = {tso_result.L_eff:.3g}),  '
-        f'DSO α_max = {dso_result.alpha_max:.3g} '
+        f'DSO alpha_max = {dso_result.alpha_max:.3g} '
         f'(L_eff = {dso_result.L_eff:.3g}).  '
-        f'Current α = {config.alpha:.3g}.'
+        f'Current alpha = {config.alpha:.3g}.'
     )
     if dso_result.dso_cascade_margin is not None:
         ratio = tso_period_s / dso_period_s
         ratio_int = int(ratio)
         summary += (
-            f'  DSO ρ_D = {dso_result.dso_convergence_rate:.4f}, '
+            f'  DSO rho_D = {dso_result.dso_convergence_rate:.4f}, '
             f'cascade margin = {dso_result.dso_cascade_margin:.4f}.'
         )
     if dso_result.augmented_rho is not None:
-        summary += f'  ρ_aug(PI) = {dso_result.augmented_rho:.4f}.'
+        summary += f'  rho_aug(PI) = {dso_result.augmented_rho:.4f}.'
 
     result = CascadeStabilityResult(
         tso=tso_result,
@@ -751,13 +751,13 @@ def _print_report(
     thin = '-' * 72
     print(sep)
     print('  Cascaded OFO Stability Analysis Report')
-    print('  (Hauswirth contraction condition,  α λ_max(M) < 2)')
+    print('  (Hauswirth contraction condition,  alpha lam_max(M) < 2)')
     print(sep)
     tso_s = config.effective_tso_period_s
     dso_s = config.effective_dso_period_s
     def _fmt(s: float) -> str:
         return f'{int(s // 60)} min' if s >= 60 and s % 60 == 0 else f'{s:.1f} s'
-    print(f'  α = {config.alpha}   T_TSO = {_fmt(tso_s)}   '
+    print(f'  alpha = {config.alpha}   T_TSO = {_fmt(tso_s)}   '
           f'T_DSO = {_fmt(dso_s)}')
     print()
 
@@ -775,20 +775,20 @@ def _print_report(
               f'(Q_obj: {n_active}/{n_total} active rows, weights: {w_str})')
         print(thin)
 
-        print(f'  Raw SVD of H     : σ_max = {r.sigma_max:.4g}, '
-              f'σ_min = {r.sigma_min:.4g}, κ = {r.condition_number:.3e}')
-        print(f'  Curvature        : L_eff = λ_max(H^T Q H) = {r.L_eff:.4g}')
-        print(f'  α_max            : 2/λ_max(M) = {r.alpha_max:.4g}  '
-              f'(M = G_w^{{-½}} C G_w^{{-½}})')
+        print(f'  Raw SVD of H     : sigma_max = {r.sigma_max:.4g}, '
+              f'sigma_min = {r.sigma_min:.4g}, kappa = {r.condition_number:.3e}')
+        print(f'  Curvature        : L_eff = lam_max(H^T Q H) = {r.L_eff:.4g}')
+        print(f'  alpha_max        : 2/lam_max(M) = {r.alpha_max:.4g}  '
+              f'(M = G_w^{{-1/2}} C G_w^{{-1/2}})')
         alpha_margin = r.alpha_max - config.alpha
-        print(f'  α margin         : {alpha_margin:.4g}  '
+        print(f'  alpha margin     : {alpha_margin:.4g}  '
               f'({"OK" if config.alpha <= r.alpha_max else "EXCEEDED"})')
         print()
 
-        print(f'  Per-actuator margins  (condition: g_w > α C_ii / 2):')
+        print(f'  Per-actuator margins  (condition: g_w > alpha C_ii / 2):')
         for name, margin in r.actuator_margins.items():
             threshold = r.actuator_thresholds[name]
-            flag = '✓' if margin >= 0 else '✗'
+            flag = 'OK' if margin >= 0 else 'X'
             print(f'    {flag}  {name:<22s}  threshold = {threshold:>8.4g}  '
                   f'margin = {margin:+.4g}')
         print()
@@ -810,13 +810,13 @@ def _print_report(
                 parts_str = '  '.join(
                     f'{name}: {100*w:.0f}%' for name, w in parts if w >= 0.01
                 )
-                flag = ' ◄ slow' if contraction >= 0.95 else (
-                    ' ◄ OVER' if alpha_lam > 2.0 else '')
+                flag = ' << slow' if contraction >= 0.95 else (
+                    ' << OVER' if alpha_lam > 2.0 else '')
                 print(f'  {k_label:>6s}   {lam:>10.4g}   {alpha_lam:>8.4g}   '
                       f'{contraction:>8.4f}   {parts_str}{flag}')
 
-            print(f'  Eigenvalue diagnostics  (M = G_w^{{-½}} C G_w^{{-½}}):')
-            print(f'  {"mode":>6s}   {"λ(M)":>10s}   {"α·λ":>8s}   {"|1−α·λ|":>8s}   '
+            print(f'  Eigenvalue diagnostics  (M = G_w^{{-1/2}} C G_w^{{-1/2}}):')
+            print(f'  {"mode":>6s}   {"lam(M)":>10s}   {"alpha*lam":>8s}   {"|1-a*l|":>8s}   '
                   f'actuator-type participation')
 
             for k, mode in enumerate(top_modes):
@@ -831,19 +831,19 @@ def _print_report(
 
         if r.dso_convergence_rate is not None:
             ratio = int(tso_s / dso_s)
-            print(f'  Spectral contraction rate  ρ_D       = {r.dso_convergence_rate:.4f}  '
+            print(f'  Spectral contraction rate  rho_D     = {r.dso_convergence_rate:.4f}  '
                   f'(memoryless, active modes only)')
-            print(f'  Cascade margin        1 − ρ_D^{ratio}   = {r.dso_cascade_margin:.4f}  '
+            print(f'  Cascade margin        1 - rho_D^{ratio}  = {r.dso_cascade_margin:.4f}  '
                   f'({"OK" if r.dso_cascade_margin > 0 else "INSUFFICIENT"})')
 
             if r.augmented_rho is not None:
                 print()
                 print(f'  Augmented PI analysis  (g_qi = {config.g_qi}, '
-                      f'λ_qi = {config.lambda_qi}):')
-                print(f'    ρ_aug (u + q_int dynamics) = {r.augmented_rho:.4f}  '
-                      f'({"< 1 OK" if r.augmented_rho < 1.0 else "≥ 1 UNSTABLE"})')
+                      f'lam_qi = {config.lambda_qi}):')
+                print(f'    rho_aug (u + q_int dynamics) = {r.augmented_rho:.4f}  '
+                      f'({"< 1 OK" if r.augmented_rho < 1.0 else ">= 1 UNSTABLE"})')
                 if r.augmented_cascade_margin is not None:
-                    print(f'    Cascade margin   1 − ρ_aug^{ratio} = '
+                    print(f'    Cascade margin   1 - rho_aug^{ratio} = '
                           f'{r.augmented_cascade_margin:.4f}  '
                           f'({"OK" if r.augmented_cascade_margin > 0 else "INSUFFICIENT"})')
             print()
@@ -851,13 +851,13 @@ def _print_report(
         if r.warnings:
             print(f'  Warnings:')
             for w in r.warnings:
-                print(f'    ⚠  {w}')
+                print(f'    WARNING: {w}')
             print()
 
         status = 'STABLE' if r.stable else 'UNSTABLE'
         if r.stable and r.marginal:
             status = 'MARGINAL'
-        print(f'  → {layer_name} status: {status}')
+        print(f'  -> {layer_name} status: {status}')
         print()
 
     print(sep)
@@ -1468,18 +1468,18 @@ def analyse_multi_zone_stability(
         if worst.rho_i > 0.5 * worst.lyapunov_row_sum:
             direction = "Decrease" if alpha_list[worst_idx] > worst.alpha_i_opt else "Increase"
             recommendations.append(
-                f"  -> {wname}: ρ_i = {worst.rho_i:.4f} dominates. "
-                f"{direction} α_{worst.zone_id} from {alpha_list[worst_idx]:.4g} "
-                f"toward α* = {worst.alpha_i_opt:.4g} (optimal ρ* = {worst.rho_i_opt:.4f})."
+                f"  -> {wname}: rho_i = {worst.rho_i:.4f} dominates. "
+                f"{direction} alpha_{worst.zone_id} from {alpha_list[worst_idx]:.4g} "
+                f"toward alpha* = {worst.alpha_i_opt:.4g} (optimal rho* = {worst.rho_i_opt:.4f})."
             )
 
         # Suggest increasing g_w for zones with high condition number
         for i_idx, zr in enumerate(zone_results):
             if zr.kappa_Mii > 100:
                 recommendations.append(
-                    f"  -> {zone_names[i_idx]}: κ(M_ii) = {zr.kappa_Mii:.1f} is large. "
+                    f"  -> {zone_names[i_idx]}: kappa(M_ii) = {zr.kappa_Mii:.1f} is large. "
                     f"Increase g_w for weakly-coupled actuators to reduce condition number. "
-                    f"λ_min = {zr.lambda_min_Mii:.4g}, λ_max = {zr.lambda_max_Mii:.4g}."
+                    f"lam_min = {zr.lambda_min_Mii:.4g}, lam_max = {zr.lambda_max_Mii:.4g}."
                 )
 
         # Suggest decoupling for large cross-coupling
@@ -1487,14 +1487,14 @@ def analyse_multi_zone_stability(
             for j, sig in zr.sigma_ij.items():
                 if sig > 0.3:
                     recommendations.append(
-                        f"  -> σ_{zr.zone_id},{j} = {sig:.4f} is large. "
-                        f"Increase g_w in {zone_names[i_idx]} to reduce ‖M_{zr.zone_id},{j}‖₂, "
-                        f"or reduce α_{zr.zone_id}."
+                        f"  -> sigma_{zr.zone_id},{j} = {sig:.4f} is large. "
+                        f"Increase g_w in {zone_names[i_idx]} to reduce ||M_{zr.zone_id},{j}||_2, "
+                        f"or reduce alpha_{zr.zone_id}."
                     )
 
     if small_gain_stable and not small_gain_stable_opt:
         recommendations.append(
-            f"System stable at current α but NOT at optimal α*. "
+            f"System stable at current alpha but NOT at optimal alpha*. "
             f"Current gamma = {small_gain_gamma:.4f}, optimal gamma = {small_gain_gamma_opt:.4f}. "
             f"Cross-coupling limits the benefit of faster step sizes."
         )
@@ -1509,9 +1509,9 @@ def analyse_multi_zone_stability(
             ratio = alpha_list[i_idx] / zr.alpha_i_opt if zr.alpha_i_opt > 1e-14 else 0.0
             if ratio < 0.7 or ratio > 1.5:
                 recommendations.append(
-                    f"  -> {zone_names[i_idx]}: α_{zr.zone_id} = {alpha_list[i_idx]:.4g}, "
-                    f"α* = {zr.alpha_i_opt:.4g} (ratio {ratio:.2f}). "
-                    f"{'Increase' if ratio < 1 else 'Decrease'} α for faster convergence."
+                    f"  -> {zone_names[i_idx]}: alpha_{zr.zone_id} = {alpha_list[i_idx]:.4g}, "
+                    f"alpha* = {zr.alpha_i_opt:.4g} (ratio {ratio:.2f}). "
+                    f"{'Increase' if ratio < 1 else 'Decrease'} alpha for faster convergence."
                 )
 
     # Pairwise violation recommendations
@@ -1528,9 +1528,9 @@ def analyse_multi_zone_stability(
     sg_status = "satisfied" if small_gain_stable else "VIOLATED"
     summary = (
         f"Multi-zone stability: {g_status}.  "
-        f"λ_max(M_sys) = {M_sys_lambda_max:.4g}, α_max_global = {alpha_max_global:.4g}.  "
+        f"lam_max(M_sys) = {M_sys_lambda_max:.4g}, alpha_max_global = {alpha_max_global:.4g}.  "
         f"Diagonal-dominance condition {d_status}.  "
-        f"Small-gain condition {sg_status} (γ = {small_gain_gamma:.4f}).  "
+        f"Small-gain condition {sg_status} (gamma = {small_gain_gamma:.4f}).  "
         f"N_zones = {n_zones}, N_controls_total = {n_total}."
     )
 
@@ -1575,15 +1575,15 @@ def _print_multi_zone_report(
 
     print(sep)
     print("  Multi-Zone TSO-DSO OFO Stability Analysis")
-    print("  Condition: α_i · (λ_max(M_ii) + Σ_{j≠i} ‖M_ij‖₂) < 2  (diagonal dominance)")
-    print("  Condition: α_eff · λ_max(M_sys) < 2                      (global eigenvalue)")
+    print("  Condition: alpha_i * (lam_max(M_ii) + Sum_{j!=i} ||M_ij||_2) < 2  (diagonal dominance)")
+    print("  Condition: alpha_eff * lam_max(M_sys) < 2                      (global eigenvalue)")
     print(sep)
     print()
 
     # ── Per-zone report ───────────────────────────────────────────────────────
     print(thin)
-    print(f"  {'Zone':<14s} {'λ_max(Mii)':>12s} {'Σ‖Mij‖₂':>10s} "
-          f"{'α·(λ+Σ)':>10s} {'α_max_local':>12s} {'α_max_coupled':>14s} {'Status':>8s}")
+    print(f"  {'Zone':<14s} {'lam_max(Mii)':>12s} {'Sum||Mij||':>10s} "
+          f"{'a*(l+S)':>10s} {'a_max_local':>12s} {'a_max_coupled':>14s} {'Status':>8s}")
     print(thin)
 
     for i_idx, zr in enumerate(result.zones):
@@ -1610,8 +1610,8 @@ def _print_multi_zone_report(
         print("  Per-actuator-type contribution to M_ii diagonal:")
         print(f"    {'Zone':<14s} {'Type':<10s} {'n':>4s} {'||H_cols||_F':>12s} "
               f"{'g_w':>10s} {'trace(M_sub)':>12s} {'% of tr(M)':>10s}")
-        print(f"    {'':─<14s} {'':─<10s} {'':─>4s} {'':─>12s} "
-              f"{'':─>10s} {'':─>12s} {'':─>10s}")
+        print(f"    {'-'*14} {'-'*10} {'-'*4} {'-'*12} "
+              f"{'-'*10} {'-'*12} {'-'*10}")
         for i_idx, zr in enumerate(result.zones):
             zi = zr.zone_id
             H_ii = H_blocks.get((zi, zi))
@@ -1656,7 +1656,7 @@ def _print_multi_zone_report(
 
     # ── Coupling matrix (spectral norms) ──────────────────────────────────────
     if n_zones <= 6:
-        print("  Inter-zone coupling norms ‖M_TSO,ij‖₂:")
+        print("  Inter-zone coupling norms ||M_TSO,ij||_2:")
         header = f"  {'':14s}" + "".join(f"  {zone_names[j]:>10s}" for j in range(n_zones))
         print(header)
         for i_idx, zr in enumerate(result.zones):
@@ -1677,17 +1677,17 @@ def _print_multi_zone_report(
     n_show = min(8, len(result.M_sys_eigenvalues))
     eigs_desc = result.M_sys_eigenvalues[::-1][:n_show]
     alpha_eff = max(alpha_list)
-    print(f"  α_eff (max over zones) = {alpha_eff}")
-    print(f"  λ_max(M_sys)           = {result.M_sys_lambda_max:.6g}")
-    print(f"  α_max_global           = 2 / λ_max = {result.alpha_max_global:.6g}")
-    print(f"  α_eff · λ_max(M_sys)   = {alpha_eff * result.M_sys_lambda_max:.6g}  "
-          f"({'< 2 OK' if result.globally_stable else '≥ 2 UNSTABLE'})")
+    print(f"  alpha_eff (max over zones) = {alpha_eff}")
+    print(f"  lam_max(M_sys)             = {result.M_sys_lambda_max:.6g}")
+    print(f"  alpha_max_global           = 2 / lam_max = {result.alpha_max_global:.6g}")
+    print(f"  alpha_eff * lam_max(M_sys) = {alpha_eff * result.M_sys_lambda_max:.6g}  "
+          f"({'< 2 OK' if result.globally_stable else '>= 2 UNSTABLE'})")
     print()
     print(f"  Top {n_show} eigenvalues of M_sys (descending):")
     for k, lam in enumerate(eigs_desc):
         contraction = abs(1.0 - alpha_eff * lam)
-        print(f"    λ_{k+1:02d} = {lam:>12.6g}   α·λ = {alpha_eff*lam:>8.4f}   "
-              f"|1 - α·λ| = {contraction:>8.4f}")
+        print(f"    lam_{k+1:02d} = {lam:>12.6g}   alpha*lam = {alpha_eff*lam:>8.4f}   "
+              f"|1 - a*l| = {contraction:>8.4f}")
     print()
 
     # ── Lyapunov / Small-Gain Analysis ──────────────────────────────────────
@@ -1697,12 +1697,12 @@ def _print_multi_zone_report(
     print()
 
     # Per-zone Lyapunov parameters table
-    print(f"  {'Zone':<14s} {'ρ_i':>8s} {'ρ*_i':>8s} {'α_i':>8s} {'α*_i':>8s} "
-          f"{'κ(M_ii)':>10s} {'λ_min':>10s} {'λ_max':>10s} "
+    print(f"  {'Zone':<14s} {'rho_i':>8s} {'rho*_i':>8s} {'alpha_i':>8s} {'a*_i':>8s} "
+          f"{'kappa(Mii)':>10s} {'lam_min':>10s} {'lam_max':>10s} "
           f"{'rank':>6s} {'row_sum':>10s} {'row*_sum':>10s}")
-    print(f"  {'':─<14s} {'':─>8s} {'':─>8s} {'':─>8s} {'':─>8s} "
-          f"{'':─>10s} {'':─>10s} {'':─>10s} "
-          f"{'':─>6s} {'':─>10s} {'':─>10s}")
+    print(f"  {'-'*14} {'-'*8} {'-'*8} {'-'*8} {'-'*8} "
+          f"{'-'*10} {'-'*10} {'-'*10} "
+          f"{'-'*6} {'-'*10} {'-'*10}")
 
     for i_idx, zr in enumerate(result.zones):
         kappa_str = f"{zr.kappa_Mii:.1f}" if zr.kappa_Mii < 1e6 else "inf"
@@ -1726,14 +1726,14 @@ def _print_multi_zone_report(
     n_zones = len(result.zones)
     zone_ids = [zr.zone_id for zr in result.zones]
     if n_zones <= 6:
-        print("  Cross-coupling gains σ_ij = α_i · ‖M_ij‖₂:")
+        print("  Cross-coupling gains sigma_ij = alpha_i * ||M_ij||_2:")
         header = f"  {'':14s}" + "".join(f"  {zone_names[j]:>10s}" for j in range(n_zones))
         print(header)
         for i_idx, zr in enumerate(result.zones):
             row_str = f"  {zone_names[i_idx]:<14s}"
             for j_idx, zj in enumerate(zone_ids):
                 if zj == zr.zone_id:
-                    row_str += f"  {'ρ=' + f'{zr.rho_i:.4f}':>10s}"
+                    row_str += f"  {'rho=' + f'{zr.rho_i:.4f}':>10s}"
                 else:
                     sig = zr.sigma_ij.get(zj, 0.0)
                     row_str += f"  {sig:>10.4f}"
@@ -1743,14 +1743,14 @@ def _print_multi_zone_report(
     # N-zone small-gain condition
     sg_ok = "SATISFIED" if result.small_gain_stable else "VIOLATED"
     sg_opt_ok = "SATISFIED" if result.small_gain_stable_opt else "VIOLATED"
-    print(f"  N-zone small-gain (γ = max_i row_sum_i < 1):")
-    print(f"    Current:  γ = {result.small_gain_gamma:.4f}  [{sg_ok}]")
-    print(f"    Optimal:  γ* = {result.small_gain_gamma_opt:.4f}  [{sg_opt_ok}]")
+    print(f"  N-zone small-gain (gamma = max_i row_sum_i < 1):")
+    print(f"    Current:  gamma = {result.small_gain_gamma:.4f}  [{sg_ok}]")
+    print(f"    Optimal:  gamma* = {result.small_gain_gamma_opt:.4f}  [{sg_opt_ok}]")
     print()
 
     # Pairwise small-gain checks
     if result.pairwise_small_gain:
-        print("  Pairwise small-gain (σ_ij · σ_ji < (1−ρ_i)(1−ρ_j)):")
+        print("  Pairwise small-gain (sigma_ij * sigma_ji < (1-rho_i)(1-rho_j)):")
         for (zi, zj), ok in sorted(result.pairwise_small_gain.items()):
             status = "OK" if ok else "VIOLATED"
             ok_opt = result.pairwise_small_gain_opt.get((zi, zj), False)
@@ -1762,7 +1762,7 @@ def _print_multi_zone_report(
             sig_ji = zr_j.sigma_ij.get(zi, 0.0)
             product = sig_ij * sig_ji
             bound = max(1.0 - zr_i.rho_i, 0.0) * max(1.0 - zr_j.rho_i, 0.0)
-            print(f"    Zones ({zi},{zj}): σ·σ = {product:.4g} vs bound = {bound:.4g}  "
+            print(f"    Zones ({zi},{zj}): sigma*sigma = {product:.4g} vs bound = {bound:.4g}  "
                   f"[{status}]  (optimal: [{status_opt}])")
         print()
 

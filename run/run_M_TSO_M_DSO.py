@@ -67,7 +67,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
@@ -97,6 +97,7 @@ from controller.multi_tso_coordinator import MultiTSOCoordinator, ZoneDefinition
 from controller.tso_controller import TSOController, TSOControllerConfig
 from core.actuator_bounds import ActuatorBounds, GeneratorParameters
 from core.measurement import Measurement
+from core.network_state import NetworkState
 from core.profiles import (
     DEFAULT_PROFILES_CSV,
     apply_gen_dispatch,
@@ -105,12 +106,14 @@ from core.profiles import (
     load_profiles,
     snapshot_base_values,
 )
-from network.build_ieee39_net import (build_ieee39_net, add_hv_networks, HVNetworkInfo)
+from network.build_ieee39_net import (build_ieee39_net, add_hv_networks, HVNetworkInfo,
+                                      IEEE39NetworkMeta, remove_generators)
 from network.zone_partition import (
     fixed_zone_partition_ieee39,
     spectral_zone_partition,
     relabel_zones_by_generator_count,
     get_zone_lines,
+    get_tie_lines,
 )
 from run.contingency import _apply_contingency
 from run.helpers import _network_state
@@ -236,7 +239,7 @@ class MultiTSOConfig:
     add_tso_ders: bool = True  # False → controller uses only gen AVR (V_gen)
 
     # ── Auto-tune g_w based on local curvature ────────────────────────────────
-    auto_tune_gw: bool = True  # If True, calculates per-actuator g_w at t=0
+    auto_tune_gw: bool = False  # If True, calculates per-actuator g_w at t=0
 
     # ── Stability analysis ─────────────────────────────────────────────────────
     run_stability_analysis:       bool = True
@@ -1264,14 +1267,16 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     coordinator.compute_M_blocks()
     contraction_info = coordinator.check_contraction()
 
-    # ── Optional: Auto-tune g_w + alpha via multi-zone small-gain ────────────
+    # ── Optional: Auto-tune g_w + alpha via multi-zone joint optimisation ──
     if config.auto_tune_gw:
         if verbose >= 1:
             print("[7.1] Auto-tuning per-actuator g_w weights (multi-zone) ...")
 
         zone_ids_sorted = sorted(zone_defs.keys())
 
-        # Gather all H blocks (diagonal + off-diagonal) from coordinator
+        # Gather all H blocks (diagonal + off-diagonal) from coordinator.
+        # tune_multi_zone needs the cross blocks to evaluate M_sys and the
+        # column-zone boost direction.
         H_blocks_tune = {k: coordinator.get_H_block(*k)
                          for k in coordinator._H_blocks}
 
@@ -1294,8 +1299,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             alpha_init=config.alpha,
             zone_ids=zone_ids_sorted,
             gen_gw=config.g_w_gen,
+            objective="spectral",
+            spectral_target=1.8,
             gamma_target=0.8,
-            max_iterations=20,
+            max_iterations=30,
             verbose=(verbose >= 1),
         )
 
@@ -1311,12 +1318,15 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         if verbose >= 1:
             status = "CONVERGED" if tune_result.converged else "NOT CONVERGED"
             print(f"\n  Tuning {status} after {tune_result.iterations} iterations "
-                  f"(gamma = {tune_result.small_gain_gamma:.4f})")
+                  f"(objective={tune_result.objective}, "
+                  f"alpha_eff*lam_sys={tune_result.spectral_metric:.4f}, "
+                  f"gamma={tune_result.small_gain_gamma:.4f})")
             for ztr in tune_result.zones:
                 z = ztr.zone_id
                 zd = zone_defs[z]
                 gw_vec = ztr.g_w
-                print(f"\n  Zone {z} Tuned Weights (g_w)  [alpha={ztr.alpha:.6g}]:")
+                print(f"\n  Zone {z} Tuned Weights (g_w)  "
+                      f"[alpha={ztr.alpha:.6g}]:")
                 print(f"    {'Type':<8s} {'Name':<20s} {'Bus':>5s} {'Weight':>12s}")
                 print(f"    {'-'*48}")
 
@@ -1350,15 +1360,15 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 off += len(zd.oltc_trafo_indices)
                 print()
 
-    if config.run_stability_analysis and not config.auto_tune_gw:
-        # Only run standalone stability analysis if tuning didn't already do it
+    if config.run_stability_analysis:
         if verbose >= 1:
             print("[7d] Running multi-zone stability analysis at t=0 ...")
         zone_ids_sorted = sorted(zone_defs.keys())
         H_blocks_stab = {k: coordinator.get_H_block(*k)
                          for k in coordinator._H_blocks}
         Q_obj_list = [zone_defs[z].q_obj_diagonal() for z in zone_ids_sorted]
-
+        
+        # USE THE ACTUAL WEIGHTS FROM CONTROLLERS (may be tuned)
         G_w_list = [tso_controllers[z].params.g_w for z in zone_ids_sorted]
         alpha_list  = [zone_defs[z].alpha            for z in zone_ids_sorted]
 
@@ -1371,7 +1381,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             }
             for z in zone_ids_sorted
         ]
-        analyse_multi_zone_stability(
+        stab_result = analyse_multi_zone_stability(
             H_blocks=H_blocks_stab,
             Q_obj_list=Q_obj_list,
             G_w_list=G_w_list,
@@ -1381,6 +1391,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             actuator_counts=actuator_counts,
             verbose=True,
         )
+    else:
+        stab_result = None
 
     if contingencies and verbose >= 1:
         print(f"  Scheduled contingencies ({len(contingencies)}):")
@@ -1397,7 +1409,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         dur_str = f"start={start_time:%d.%m.%Y %H:%M}  " if use_profiles else ""
         print(f"[8] Starting simulation: {n_steps} steps  "
               f"({dur_str}dt={config.dt_s:.0f}s, TSO/{config.tso_period_s/60:.0f}min, "
-              f"DSO/{config.dso_period_s:.0f}s)")
+              f"DSO/{config.dso_period_s/60:.0f}min)")
         print()
 
     log: List[MultiTSOIterationRecord] = []
@@ -1647,20 +1659,18 @@ def main() -> None:
         n_total_s=60.0 * 720,      # 720-minute simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0 * 1,    # DSO every 20 seconds
-        dt_s=20,
         alpha={1: 0.01, 2: 0.01, 3: 0.01},
         dso_alpha=0.1,
         g_v=150000.0,
-        g_q=2,
+        g_q=5,
         dso_g_v=1000.0,
         g_w_der=10.0,
         g_w_gen=1e4,
         g_w_pcc=1.0,
         g_w_tso_oltc=50,
         g_w_dso_der = 2.0,     # DSO DER Q regularisation
-        g_w_dso_oltc = 5.0,    # DSO OLTC tap regularisation
+        g_w_dso_oltc = 10.0,    # DSO OLTC tap regularisation
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
-        auto_tune_gw=True,
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
         verbose=1,

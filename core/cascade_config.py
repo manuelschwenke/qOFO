@@ -39,11 +39,11 @@ from controller.reserve_observer import ReserveObserverConfig
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  ContingencyEvent (re-exported for convenience — canonical definition
-#  remains in run_cascade.py so we avoid circular imports)
+#  remains in run_S_TSO_M_DSO.py so we avoid circular imports)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # We import ContingencyEvent lazily inside to_dict / from_dict to avoid
-# circular dependency with run_cascade.py.
+# circular dependency with run_S_TSO_M_DSO.py.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -181,6 +181,19 @@ class CascadeConfig:
     gw_oltc_cross_dso: float = 0.0
     """OLTC cross-coupling weight for DSO.  0 = disabled."""
 
+    # ── Per-actuator overrides (optional vectors) ─────────────────────────
+    gw_tso_override: Optional[NDArray[np.float64]] = None
+    """Complete g_w vector for TSO. If set, overrides build_gw_tso_diag()."""
+
+    gw_dso_override: Optional[NDArray[np.float64]] = None
+    """Complete g_w vector for DSO. If set, overrides build_gw_dso_diag()."""
+
+    gu_tso_override: Optional[NDArray[np.float64]] = None
+    """Complete g_u vector for TSO."""
+
+    gu_dso_override: Optional[NDArray[np.float64]] = None
+    """Complete g_u vector for DSO."""
+
     # ── g_u usage penalties (per-actuator absolute level) ─────────────────
     gu_tso_q_der: float = 0.0
     """TSO DER Q usage regularisation (penalises |Q| level, not change)."""
@@ -289,6 +302,8 @@ class CascadeConfig:
         self, n_der: int, n_pcc: int, n_gen: int, n_oltc: int, n_shunt: int,
     ) -> NDArray[np.float64]:
         """Build the TSO g_w diagonal vector: [Q_DER | Q_PCC | V_gen | s_OLTC | s_shunt]."""
+        if self.gw_tso_override is not None:
+            return self.gw_tso_override
         return np.concatenate([
             np.full(n_der,   self.gw_tso_q_der),
             np.full(n_pcc,   self.gw_tso_q_pcc),
@@ -301,6 +316,8 @@ class CascadeConfig:
         self, n_der: int, n_oltc: int, n_shunt: int,
     ) -> NDArray[np.float64]:
         """Build the DSO g_w diagonal vector: [Q_DER | s_OLTC | s_shunt]."""
+        if self.gw_dso_override is not None:
+            return self.gw_dso_override
         return np.concatenate([
             np.full(n_der,   self.gw_dso_q_der),
             np.full(n_oltc,  self.gw_dso_oltc),
@@ -311,6 +328,8 @@ class CascadeConfig:
         self, n_der: int, n_pcc: int, n_gen: int, n_oltc: int, n_shunt: int,
     ) -> NDArray[np.float64]:
         """Build the TSO g_u vector (usage/level penalties)."""
+        if self.gu_tso_override is not None:
+            return self.gu_tso_override
         return np.concatenate([
             np.full(n_der,   self.gu_tso_q_der),
             np.full(n_pcc,   self.gu_tso_q_pcc),
@@ -323,6 +342,8 @@ class CascadeConfig:
         self, n_der: int, n_oltc: int, n_shunt: int,
     ) -> NDArray[np.float64]:
         """Build the DSO g_u vector (usage/level penalties)."""
+        if self.gu_dso_override is not None:
+            return self.gu_dso_override
         return np.concatenate([
             np.full(n_der,   self.gu_dso_q_der),
             np.full(n_oltc,  self.gu_dso_oltc),

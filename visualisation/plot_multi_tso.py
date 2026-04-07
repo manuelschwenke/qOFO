@@ -3,7 +3,7 @@ Multi-TSO/DSO Simulation Plotting
 ===================================
 
 Live and post-run plotting for multi-zone TSO-DSO OFO results
-(``run/run_multi_tso_dso.py``).
+(``run/run_M_TSO_M_DSO.py``).
 
 Produces two figures:
 
@@ -33,7 +33,7 @@ from matplotlib.lines import Line2D
 import numpy as np
 
 if TYPE_CHECKING:
-    from run.run_multi_tso_dso import MultiTSOIterationRecord
+    from run.run_M_TSO_M_DSO import MultiTSOIterationRecord
 
 import os
 

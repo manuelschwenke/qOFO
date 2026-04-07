@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-run/run_multi_tso_dso.py
+run/run_M_TSO_M_DSO.py
 ========================
 Multi-TSO / Multi-DSO OFO simulation loop on the IEEE 39-bus network.
 
-This script is the multi-zone analogue of ``run/run_cascade.py``.  It uses
+This script is the multi-zone analogue of ``run/run_S_TSO_M_DSO.py``.  It uses
 the same OFO controller infrastructure (TSOController, DSOController) but
 orchestrates N=3 independent TSO zones via the MultiTSOCoordinator.  Each
 zone has its own TSO controller and underlying DSO controllers, one per HV
@@ -49,7 +49,7 @@ Each controller's JacobianSensitivities caches the Jacobian at the current
 operating point.  On each TSO step the cache is invalidated so the new
 operating point is used.
 
-Key differences from run_cascade.py
+Key differences from run_S_TSO_M_DSO.py
 -------------------------------------
 * Network: IEEE 39-bus + 5 HV sub-networks (build_ieee39_net + add_hv_networks).
 * Zones: fixed_zone_partition_ieee39 (literature 3-area) or spectral_zone_partition.
@@ -90,6 +90,7 @@ from analysis.stability_analysis import (
     analyse_multi_zone_stability,
     MultiZoneStabilityResult,
 )
+from tune_ofo_params import compute_optimal_gw
 from controller.base_controller import OFOParameters
 from controller.dso_controller import DSOController, DSOControllerConfig
 from controller.multi_tso_coordinator import MultiTSOCoordinator, ZoneDefinition
@@ -237,9 +238,12 @@ class MultiTSOConfig:
     # ── TSO DER actuators (sgens at PQ load buses) ─────────────────────────
     add_tso_ders: bool = True  # False → controller uses only gen AVR (V_gen)
 
+    # ── Auto-tune g_w based on local curvature ────────────────────────────────
+    auto_tune_gw: bool = False  # If True, calculates per-actuator g_w at t=0
+
     # ── Stability analysis ─────────────────────────────────────────────────────
     run_stability_analysis:       bool = True
-    sensitivity_update_interval:  int  = 5  # recompute H_ij every N TSO steps
+    sensitivity_update_interval:  int  = 1E6  # recompute H_ij every N TSO steps
 
     # ── Output ────────────────────────────────────────────────────────────────
     verbose:        int   = 1
@@ -1258,6 +1262,91 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     for dso_id, dso_ctrl in dso_controllers.items():
         dso_ctrl.initialise(_measure_for_dso(net, dso_ctrl.config, 0))
 
+    # ── Optional: Auto-tune g_w based on local curvature ──────────────────────
+    if config.auto_tune_gw:
+        if verbose >= 1:
+            print("[7.1] Auto-tuning per-actuator g_w weights (preconditioning) ...")
+        
+        # 1. Gather required data for tuning
+        zone_ids_sorted = sorted(zone_defs.keys())
+        
+        # Ensure TSO controllers have fresh sensitivities from the current PF
+        H_blocks_tune = {}
+        for z in zone_ids_sorted:
+            ctrl = tso_controllers[z]
+            ctrl.invalidate_sensitivity_cache() # Force recompute for current state
+            H_blocks_tune[(z, z)] = ctrl._build_sensitivity_matrix()
+            
+        Q_obj_list = [zone_defs[z].q_obj_diagonal() for z in zone_ids_sorted]
+        
+        actuator_counts = [
+            {
+                'n_der':  len(zone_defs[z].tso_der_indices),
+                'n_pcc':  len(zone_defs[z].pcc_trafo_indices),
+                'n_gen':  len(zone_defs[z].gen_indices),
+                'n_oltc': len(zone_defs[z].oltc_trafo_indices),
+            }
+            for z in zone_ids_sorted
+        ]
+
+        # 2. Compute vectors
+        # Create a temporary CascadeConfig for the tuner since it expects one
+        from core.cascade_config import CascadeConfig
+        dummy_cfg = CascadeConfig(alpha=max(config.alpha.values()), 
+                                 gw_tso_v_gen=config.g_w_gen)
+        
+        gw_vectors = compute_optimal_gw(
+            dummy_cfg, H_blocks_tune, Q_obj_list, actuator_counts,
+            safety_factor=2, min_gw=0.01, min_gw_discrete=40
+        )
+
+        # 3. Apply overrides
+        import dataclasses
+        for idx, z in enumerate(zone_ids_sorted):
+            gw_vec = gw_vectors[idx]
+            tso_controllers[z].params = dataclasses.replace(tso_controllers[z].params, g_w=gw_vec)
+            
+            if verbose >= 1:
+                zd = zone_defs[z]
+                print(f"\n  Zone {z} Tuned Weights (g_w):")
+                print(f"    {'Type':<8s} {'Name':<20s} {'Bus':>5s} {'Weight':>12s}")
+                print(f"    {'-'*48}")
+                
+                off = 0
+                # DERs
+                for k, s_idx in enumerate(zd.tso_der_indices):
+                    name = net.sgen.at[s_idx, 'name'] or f"SGen_{s_idx}"
+                    bus = net.sgen.at[s_idx, 'bus']
+                    print(f"    {'Q_DER':<8s} {str(name):<20.20s} {int(bus):>5d} {gw_vec[off+k]:>12.4f}")
+                off += len(zd.tso_der_indices)
+                
+                # PCCs
+                for k, t_idx in enumerate(zd.pcc_trafo_indices):
+                    # Check trafo or trafo3w
+                    if t_idx in net.trafo.index:
+                        name = net.trafo.at[t_idx, 'name'] or f"T2W_{t_idx}"
+                        bus = net.trafo.at[t_idx, 'hv_bus']
+                    else:
+                        name = net.trafo3w.at[t_idx, 'name'] or f"T3W_{t_idx}"
+                        bus = net.trafo3w.at[t_idx, 'hv_bus']
+                    print(f"    {'Q_PCC':<8s} {str(name):<20.20s} {int(bus):>5d} {gw_vec[off+k]:>12.4f}")
+                off += len(zd.pcc_trafo_indices)
+                
+                # V_gen
+                for k, g_idx in enumerate(zd.gen_indices):
+                    name = net.gen.at[g_idx, 'name'] or f"Gen_{g_idx}"
+                    bus = net.gen.at[g_idx, 'bus']
+                    print(f"    {'V_gen':<8s} {str(name):<20.20s} {int(bus):>5d} {gw_vec[off+k]:>12.4e}")
+                off += len(zd.gen_indices)
+                
+                # OLTCs
+                for k, t_idx in enumerate(zd.oltc_trafo_indices):
+                    name = net.trafo.at[t_idx, 'name'] or f"T2W_{t_idx}"
+                    bus = net.trafo.at[t_idx, 'hv_bus']
+                    print(f"    {'OLTC':<8s} {str(name):<20.20s} {int(bus):>5d} {gw_vec[off+k]:>12.4f}")
+                off += len(zd.oltc_trafo_indices)
+                print()
+
     # ── Cross-sensitivity & stability analysis at the final operating point ──
     # Recompute H_ij and M_ij from the current Jacobian (after profiles + taps).
     coordinator.compute_cross_sensitivities()
@@ -1271,7 +1360,9 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         H_blocks_stab = {k: coordinator.get_H_block(*k)
                          for k in coordinator._H_blocks}
         Q_obj_list = [zone_defs[z].q_obj_diagonal() for z in zone_ids_sorted]
-        G_w_list   = [zone_defs[z].gw_diagonal()    for z in zone_ids_sorted]
+        
+        # USE THE ACTUAL WEIGHTS FROM CONTROLLERS (may be tuned)
+        G_w_list = [tso_controllers[z].params.g_w for z in zone_ids_sorted]
         alpha_list  = [zone_defs[z].alpha            for z in zone_ids_sorted]
 
         actuator_counts = [
@@ -1555,37 +1646,37 @@ def main() -> None:
     Run the multi-TSO-DSO simulation with default settings and print results.
 
     Invoke from the project root:
-        python run/run_multi_tso_dso.py
+        python run/run_M_TSO_M_DSO.py
     """
     cfg = MultiTSOConfig(
         n_total_s=60.0 * 720,      # 720-minute simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0 * 1,    # DSO every 30 seconds
-        alpha={1: 0.02, 2: 0.02, 3: 0.02},
+        alpha={1: 0.01, 2: 0.01, 3: 0.01},
         dso_alpha=0.1,
-        g_v=250000.0,
-        g_q=2,
-        dso_g_v=100.0,
-        g_w_der=1.0,
-        g_w_gen=1e6,
-        g_w_pcc=0.5,
-        g_w_tso_oltc=80,
-        g_w_dso_der = 1.0,     # DSO DER Q regularisation
-        g_w_dso_oltc = 5.0,    # DSO OLTC tap regularisation
+        g_v=150000.0,
+        g_q=5,
+        dso_g_v=1000.0,
+        g_w_der=10.0,
+        g_w_gen=1e4,
+        g_w_pcc=1.0,
+        g_w_tso_oltc=50,
+        g_w_dso_der = 2.0,     # DSO DER Q regularisation
+        g_w_dso_oltc = 10.0,    # DSO OLTC tap regularisation
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
         verbose=1,
         live_plot=True,
-        add_tso_ders=False,
+        add_tso_ders=True,
         # ── Profile & contingency settings ───────────────────────────────
         start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
             # Example: trip line 0 at t=30 min, restore at t=60 min
-            ContingencyEvent(minute=90, element_type="gen", element_index=1, action="trip"),
-            ContingencyEvent(minute=120, element_type="gen", element_index=1, action="restore"),
+            ContingencyEvent(minute=90, element_type="gen", element_index=3, action="trip"),
+            ContingencyEvent(minute=120, element_type="gen", element_index=3, action="restore"),
             ContingencyEvent(minute=180, element_type="gen", element_index=2, action="trip"),
             ContingencyEvent(minute=240, element_type="gen", element_index=2, action="restore"),
         ],

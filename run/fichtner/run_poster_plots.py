@@ -33,7 +33,7 @@ from run.records import (
     CascadeResult,
 )
 
-from run.run_cascade import run_cascade
+from run.run_S_TSO_M_DSO import run_cascade
 
 
 from core.cascade_config import CascadeConfig

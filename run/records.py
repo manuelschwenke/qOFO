@@ -4,7 +4,7 @@ run/records.py
 ==============
 Data-classes and helper lambdas shared across the cascade simulation.
 
-Moved here from the root ``run_cascade.py`` as part of the ``run/`` package
+Moved here from the root ``run_S_TSO_M_DSO.py`` as part of the ``run/`` package
 refactor.
 """
 from __future__ import annotations

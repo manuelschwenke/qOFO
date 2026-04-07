@@ -2,708 +2,566 @@
 # -*- coding: utf-8 -*-
 """
 TSO-Only OFO Voltage Controller
-===============================
+================================
 
-This script runs a *single-layer* Online Feedback Optimisation (OFO)
-controller on the **transmission system only**.  It does *not* include
-any DSO controllers and it does *not* control reactive power at the
-TSO–DSO interfaces (PCCs).
+Runs the TSO layer of the cascaded OFO on the **combined** network, but
+**without** a DSO controller.  Key differences from ``run_cascade``:
 
-Network Architecture
---------------------
-1. **Combined network** (TN + DN): The "real plant"
-   - Controls are applied here
-   - Measurements are taken from here
-   - Power flow is executed here
-   
-2. **TN network model**: Used for sensitivity calculations
-   - Network states are created from this
-   - Jacobian sensitivities are computed from this
-   - Not used for actual control or measurement
+1. **No DSO controller** — Q_PCC is removed from TSO optimisation variables.
+2. **DN DER Q = 0** — distribution-connected DERs inject zero reactive power.
+3. **Coupling-transformer OLTCs** are operated by pandapower
+   ``DiscreteTapControl`` (local AVR) regulating the 110 kV side to the
+   DSO voltage setpoint.  These controllers remain active during the
+   simulation loop (``run_control=True``).
 
-Control objective
------------------
-Track a *uniform* voltage setpoint of 1.05 p.u. at all monitored
-380 kV buses by actuating:
-
-    - Reactive power of transmission-connected DER (TN sgens)
-    - OLTC tap positions of synchronous machine transformers
-    - States of transmission-level switchable shunts (MSC / MSR)
-    - AVR setpoints of synchronous generators
-
-The controller is executed in closed loop with pandapower as the
-plant model, using Jacobian-based sensitivities as in the PSCC 2026
-and CIGRÉ 2026 formulations.
+Everything else (network, profiles, sensitivities, TSO config/weights,
+contingencies, timing) matches ``run_cascade`` exactly.
 
 Author: Manuel Schwenke
-Date: 2026-02-10
 """
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Tuple, Union
+import os
+import sys
+import time as _time
+import warnings
+from datetime import datetime, timedelta
+from typing import List
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
 
 import numpy as np
-from numpy.typing import NDArray
 import pandapower as pp
+from pandapower.control import DiscreteTapControl
 
-# -- qOFO imports --------------------------------------------------------------
-from network.build_tuda_net import build_tuda_net, NetworkMetadata
-from network.split_tn_dn_net import split_network, SplitResult
-from core.network_state import NetworkState
-from core.measurement import Measurement
-from core.actuator_bounds import ActuatorBounds
-from controller.base_controller import OFOParameters, ControllerOutput
+warnings.filterwarnings("ignore", category=UserWarning, module=r"mosek")
+
+from controller.base_controller import OFOParameters
+from controller.dso_controller import DSOControllerConfig
 from controller.tso_controller import TSOController, TSOControllerConfig
+from core.actuator_bounds import ActuatorBounds, GeneratorParameters
+from core.cascade_config import CascadeConfig
+from core.measurement import measure_tso as _measure_tso
+from core.profiles import (
+    DEFAULT_PROFILES_CSV,
+    apply_profiles,
+    load_profiles,
+    snapshot_base_values,
+)
+from network.build_tuda_net import build_tuda_net
+from run.contingency import _apply_contingency
+from run.helpers import _build_Gw, _network_state, print_summary
+from run.plant_io import _apply_tso
+from run.records import A2S, A3S, CascadeResult, ContingencyEvent, IterationRecord
 from sensitivity.jacobian import JacobianSensitivities
-from sensitivity.numerical import NumericalSensitivities
-
-# Type alias for sensitivity calculator
-SensitivityCalculator = Union[JacobianSensitivities, NumericalSensitivities]
-
-
-# ==============================================================================
-#  HELPER: Build NetworkState from a converged pandapower network
-# ==============================================================================
-
-def network_state_from_net(
-    net: pp.pandapowerNet,
-    trafo_indices: NDArray[np.int64],
-    source_case: str = "TN",
-    iteration: int = 0,
-) -> NetworkState:
-    """
-    Create a NetworkState snapshot from a converged pandapower network.
-
-    This mirrors the helper in run_cascade.py but is restricted to the
-    transmission system use case.
-    """
-    bus_indices = np.array(net.bus.index, dtype=np.int64)
-
-    vm = net.res_bus.loc[bus_indices, "vm_pu"].values.astype(np.float64)
-    va = np.deg2rad(
-        net.res_bus.loc[bus_indices, "va_degree"].values.astype(np.float64)
-    )
-
-    # Slack bus (ext_grid) index
-    if net.ext_grid.empty:
-        raise RuntimeError("No external grid defined in TN network.")
-    slack_bus = int(net.ext_grid.at[net.ext_grid.index[0], "bus"])
-
-    # PV buses: synchronous generators (gen) with vm_pu set and in service
-    pv_buses = np.array(
-        [
-            int(net.gen.at[g, "bus"])
-            for g in net.gen.index
-            if bool(net.gen.at[g, "in_service"])
-        ],
-        dtype=np.int64,
-    )
-
-    # PQ buses = remaining buses
-    all_special = set([slack_bus]) | set(pv_buses.tolist())
-    pq_buses = np.array(
-        [int(b) for b in bus_indices if int(b) not in all_special],
-        dtype=np.int64,
-    )
-
-    # Tap positions for specified transformers
-    tap_pos = np.array(
-        [float(net.trafo.at[t, "tap_pos"]) for t in trafo_indices],
-        dtype=np.float64,
-    )
-
-    return NetworkState(
-        bus_indices=bus_indices,
-        voltage_magnitudes_pu=vm,
-        voltage_angles_rad=va,
-        slack_bus_index=slack_bus,
-        pv_bus_indices=pv_buses,
-        pq_bus_indices=pq_buses,
-        transformer_indices=trafo_indices,
-        tap_positions=tap_pos,
-        source_case=source_case,
-        timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
-        cached_at_iteration=iteration,
-    )
-
-
-# ==============================================================================
-#  HELPER: Extract Measurement from COMBINED network (real plant)
-# ==============================================================================
-
-def measurement_from_combined(
-    combined_net: pp.pandapowerNet,
-    split: SplitResult,
-    tso_config: TSOControllerConfig,
-    iteration: int,
-) -> Measurement:
-    """
-    Build a TSO Measurement from the converged COMBINED network (real plant).
-
-    PCC reactive power is *not* included as an output or control
-    variable in this TSO-only test.  The corresponding fields in
-    Measurement are returned as empty arrays.
-    
-    This represents taking measurements from the real, physical system.
-    """
-    # All TN bus indices from combined network (exclude DN-only buses)
-    tn_bus_indices = [
-        b for b in combined_net.bus.index
-        if b not in split.dn_only_bus_indices
-    ]
-    all_bus = np.array(sorted(tn_bus_indices), dtype=np.int64)
-    vm = combined_net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
-
-    # Branch currents: monitored TN lines from combined network
-    line_idx = np.array(tso_config.current_line_indices, dtype=np.int64)
-    i_ka = np.zeros(len(line_idx), dtype=np.float64)
-    for k, li in enumerate(line_idx):
-        if li not in combined_net.res_line.index:
-            raise ValueError(f"Line {li} not found in combined_net.res_line.")
-        i_ka[k] = float(combined_net.res_line.at[li, "i_from_ka"])
-
-    # Interface transformers (PCC) are intentionally *ignored* here.
-    iface_trafo = np.zeros(0, dtype=np.int64)
-    q_iface = np.zeros(0, dtype=np.float64)
-
-    # DER Q (transmission-connected sgens, exclude boundary sgens)
-    der_bus = np.array(tso_config.der_indices, dtype=np.int64)
-    der_q = np.zeros(len(der_bus), dtype=np.float64)
-    for k, bus in enumerate(der_bus):
-        # Find sgen at this bus that is NOT a boundary sgen
-        sgen_mask = (
-            (combined_net.sgen["bus"] == bus) &
-            ~combined_net.sgen["name"].astype(str).str.startswith("BoundarySgen|")
-        )
-        if not sgen_mask.any():
-            raise ValueError(
-                f"DER sgen at bus {bus} not found in combined_net.sgen."
-            )
-        # Sum all valid sgens at this bus
-        for sidx in combined_net.sgen.index[sgen_mask]:
-            der_q[k] += float(combined_net.res_sgen.at[sidx, "q_mvar"])
-
-    # OLTC tap positions (machine transformers)
-    oltc_idx = np.array(tso_config.oltc_trafo_indices, dtype=np.int64)
-    oltc_taps = np.zeros(len(oltc_idx), dtype=np.int64)
-    for k, tidx in enumerate(oltc_idx):
-        if tidx not in combined_net.trafo.index:
-            raise ValueError(
-                f"Machine transformer {tidx} not found in combined_net.trafo."
-            )
-        oltc_taps[k] = int(combined_net.trafo.at[tidx, "tap_pos"])
-
-    # Shunt states at TN shunt buses
-    shunt_bus = np.array(tso_config.shunt_bus_indices, dtype=np.int64)
-    shunt_states = np.zeros(len(shunt_bus), dtype=np.int64)
-    for k, sb in enumerate(shunt_bus):
-        mask = combined_net.shunt["bus"] == sb
-        if not mask.any():
-            raise ValueError(
-                f"TN shunt at bus {sb} not found in combined_net.shunt."
-            )
-        sidx = combined_net.shunt.index[mask][0]
-        shunt_states[k] = int(combined_net.shunt.at[sidx, "step"])
-
-    # generator AVR setpoints
-    gen_idx = np.array(tso_config.gen_indices, dtype=np.int64)
-    gen_vm = np.zeros(len(gen_idx), dtype=np.float64)
-    for k, g in enumerate(gen_idx):
-        if g not in combined_net.gen.index:
-            raise ValueError(f"Generator index {g} not found in combined_net.gen.")
-        gen_vm[k] = float(combined_net.gen.at[g, "vm_pu"])
-
-    return Measurement(
-        iteration=iteration,
-        bus_indices=all_bus,
-        voltage_magnitudes_pu=vm,
-        branch_indices=line_idx,
-        current_magnitudes_ka=i_ka,
-        interface_transformer_indices=iface_trafo,
-        interface_q_hv_side_mvar=q_iface,
-        der_indices=der_bus,
-        der_q_mvar=der_q,
-        oltc_indices=oltc_idx,
-        oltc_tap_positions=oltc_taps,
-        shunt_indices=shunt_bus,
-        shunt_states=shunt_states,
-        gen_indices=gen_idx,
-        gen_vm_pu=gen_vm,
-    )
-
-
-# ==============================================================================
-#  HELPER: Apply TSO controls to COMBINED network (real plant)
-# ==============================================================================
-
-def apply_tso_controls(
-    combined_net: pp.pandapowerNet,
-    tso_output: ControllerOutput,
-    tso_config: TSOControllerConfig,
-) -> None:
-    """
-    Apply TSO control outputs to the COMBINED pandapower network (real plant).
-
-    This implementation *does not* write any PCC setpoints, in line
-    with the TSO-only test setup.
-    """
-    u = tso_output.u_new
-
-    n_der = len(tso_config.der_indices)
-    n_pcc = len(tso_config.pcc_trafo_indices)  # will be zero here
-    n_gen = len(tso_config.gen_indices)
-    n_oltc = len(tso_config.oltc_trafo_indices)
-
-    # 1) Transmission-connected DER Q setpoints
-    for k, sidx in enumerate(tso_config.der_indices):
-        combined_net.sgen.at[sidx, "q_mvar"] = float(u[k])
-
-    # 2) PCC Q setpoints are intentionally omitted (n_pcc = 0).
-
-    # 3) Generator AVR setpoints
-    avr_start = n_der + n_pcc
-    avr_end = avr_start + n_gen
-    avr_values = tso_output.u_new[avr_start:avr_end]
-    for g_idx, vm in zip(tso_config.gen_indices, avr_values):
-        if g_idx not in combined_net.gen.index:
-            raise ValueError(f"Generator index {g_idx} not found in combined_net.gen.")
-        combined_net.gen.at[g_idx, "vm_pu"] = float(vm)
-
-    # 4) Machine transformer OLTC tap positions
-    oltc_start = n_der + n_pcc + n_gen
-    for k, trafo_idx in enumerate(tso_config.oltc_trafo_indices):
-        if trafo_idx not in combined_net.trafo.index:
-            raise ValueError(
-                f"Machine transformer {trafo_idx} not found in combined_net.trafo."
-            )
-        tap_val = int(np.round(u[oltc_start + k]))
-        combined_net.trafo.at[trafo_idx, "tap_pos"] = tap_val
-
-    # 5) Shunt states
-    shunt_start = oltc_start + n_oltc
-    n_shunt = len(tso_config.shunt_bus_indices)
-    for k, shunt_bus in enumerate(tso_config.shunt_bus_indices):
-        mask = combined_net.shunt["bus"] == shunt_bus
-        if not mask.any():
-            raise ValueError(
-                f"TN shunt at bus {shunt_bus} not found in combined_net.shunt."
-            )
-        sidx = combined_net.shunt.index[mask][0]
-        step_val = int(np.round(u[shunt_start + k]))
-        combined_net.shunt.at[sidx, "step"] = step_val
-
-
-# ==============================================================================
-#  ITERATION LOG
-# ==============================================================================
-
-@dataclass
-class TSOIterationRecord:
-    """
-    Record of one TSO-only OFO iteration.
-    """
-    iteration: int
-
-    # Controller outputs
-    tso_voltages_pu: Optional[NDArray[np.float64]] = None
-    tso_q_der_mvar: Optional[NDArray[np.float64]] = None
-    tso_gen_avr_setpoints_pu: Optional[NDArray[np.float64]] = None
-    tso_oltc_taps: Optional[NDArray[np.int64]] = None
-    tso_shunt_states: Optional[NDArray[np.int64]] = None
-    tso_objective: Optional[float] = None
-    tso_solver_status: Optional[str] = None
-    tso_solve_time_s: Optional[float] = None
-    tso_slack: Optional[NDArray[np.float64]] = None
-
-    # Plant measurements after power flow
-    plant_tn_voltages_pu: Optional[NDArray[np.float64]] = None
-    plant_gen_q_mvar: Optional[NDArray[np.float64]] = None
 
 
 # ==============================================================================
 #  MAIN TSO-ONLY RUNNER
 # ==============================================================================
 
-def run_tso_voltage_control(
-    v_setpoint_pu: float = 1.05,
-    n_iterations: int = 60,
-    alpha: float = 0.01,
-    use_numerical_sensitivities: bool = False,
-    verbose: bool = True,
-) -> List[TSOIterationRecord]:
+def run_tso_only(
+    config: CascadeConfig,
+    *,
+    live_plotter=None,
+) -> CascadeResult:
     """
-    Run a TSO-only OFO voltage controller loop.
-    
-    Architecture:
-    - Combined network (TN+DN): Real plant (apply controls, measure, run PF)
-    - TN network model: Used only for sensitivity calculations
+    Run a TSO-only OFO voltage controller on the combined network.
+
+    Uses the same combined-network architecture as ``run_cascade``:
+    - Controls applied to combined network
+    - Measurements taken from combined network
+    - Sensitivities computed from combined network
+
+    Coupling-transformer OLTCs are regulated by pandapower
+    ``DiscreteTapControl`` (local AVR, 110 kV side).
 
     Parameters
     ----------
-    v_setpoint_pu : float
-        Uniform voltage setpoint for all monitored 380 kV buses [p.u.].
-    n_iterations : int
-        Number of OFO iterations to simulate.
-    alpha : float
-        OFO step size (gain).
-    use_numerical_sensitivities : bool, optional
-        If True, use numerical finite-difference sensitivities instead of
-        analytical Jacobian-based sensitivities (default: False).
-    verbose : bool
-        If True, print per-iteration summary.
+    config : CascadeConfig
+        Central configuration (same object as for ``run_cascade``).
+    live_plotter : optional
+        Object with ``update(rec)`` / ``finish()`` methods, e.g.
+        :class:`visualisation.plot_cascade.LivePlotter`.
 
     Returns
     -------
-    log : list[TSOIterationRecord]
-        One record per OFO iteration.
+    result : CascadeResult
+        Simulation result containing the iteration log and controller configs.
     """
-    sens_method = "NUMERICAL" if use_numerical_sensitivities else "ANALYTICAL"
-    
-    if verbose:
+    v_setpoint_pu = config.v_setpoint_pu
+    dso_v_setpoint_pu = config.effective_dso_v_setpoint_pu
+    n_minutes = config.n_minutes
+    tso_period_min = config.tso_period_min
+    start_time = config.start_time
+    profiles_csv = config.profiles_csv
+    verbose = config.verbose
+    live_plot = config.live_plot
+    use_profiles = config.use_profiles
+    contingencies = list(config.contingencies) if config.contingencies else []
+
+    if verbose > 0:
         print("=" * 72)
-        print(f"  TSO-ONLY OFO SIMULATION -- V_setpoint = {v_setpoint_pu:.3f} p.u.")
-        print("=" * 72)
-        print(f"  Sensitivity method: {sens_method}")
-        print("=" * 72)
-        print("[1/6] Building combined 380/110/20 kV network (real plant) ...")
-
-    # 1) Build combined network - this is the REAL PLANT
-    combined_net, meta = build_tuda_net(ext_grid_vm_pu=1.06, pv_nodes=True)
-
-    if verbose:
-        print("[2/6] Running converged power flow on combined network ...")
-
-    # Ensure base-case power flow is converged
-    pp.runpp(combined_net, run_control=True, calculate_voltage_angles=True)
-
-    if verbose:
-        print("[3/6] Splitting network to create TN model (for sensitivities) ...")
-
-    # 2) Split to create TN network MODEL (for sensitivities only)
-    split_result = split_network(
-        combined_net,
-        meta,
-        dn_slack_coupler_index=0,
-    )
-
-    tn_net_model = split_result.tn_net  # This is the MODEL, not the plant!
-
-    if verbose:
-        print("[4/6] Identifying TSO actuators and monitored quantities ...")
-
-    # -- Transmission-connected DER: individual sgen indices (not DN, not boundary)
-    tso_der_indices = [
-        int(s) for s in combined_net.sgen.index
-        if int(combined_net.sgen.at[s, "bus"]) not in split_result.dn_only_bus_indices
-        and not str(combined_net.sgen.at[s, "name"]).startswith("BoundarySgen|")
-    ]
-    tso_der_buses = [int(combined_net.sgen.at[s, "bus"]) for s in tso_der_indices]
-
-    # Monitored voltages: all 380 kV buses (EHV) in TN
-    tso_v_buses: List[int] = sorted(
-        int(b)
-        for b in combined_net.bus.index
-        if float(combined_net.bus.at[b, "vn_kv"]) >= 300.0
-        and b not in split_result.dn_only_bus_indices
-    )
-
-    if len(tso_v_buses) == 0:
-        raise RuntimeError("No 380 kV buses found for TSO voltage monitoring.")
-
-    # Monitored currents: all TN lines
-    tso_lines: List[int] = sorted(
-        int(li)
-        for li in combined_net.line.index
-        if li in tn_net_model.line.index
-    )
-
-    # Machine transformers (OLTCs) from metadata
-    tso_oltc_candidates = list(meta.machine_trafo_indices)
-
-    # TN shunts (MSC/MSR) from metadata
-    tso_shunt_bus_candidates: List[int] = []
-    tso_shunt_q_candidates: List[float] = []
-    for sidx in meta.tn_shunt_indices:
-        if sidx not in combined_net.shunt.index:
-            raise RuntimeError(
-                f"TN shunt index {sidx} from metadata not found in combined_net.shunt."
-            )
-        tso_shunt_bus_candidates.append(int(combined_net.shunt.at[sidx, "bus"]))
-        tso_shunt_q_candidates.append(float(combined_net.shunt.at[sidx, "q_mvar"]))
-
-    # synchronous generators and their associated grid-side buses
-    tso_gen_indices: List[int] = []
-    tso_gen_bus_indices: List[int] = []
-    for g in combined_net.gen.index:
-        tso_gen_indices.append(int(g))
-        gen_lv_bus = int(combined_net.gen.at[g, "bus"])
-        # Find the machine transformer that connects this LV bus to the grid
-        mt_mask = (
-            (combined_net.trafo["lv_bus"] == gen_lv_bus)
-            & combined_net.trafo["name"].astype(str).str.startswith("MachineTrf|")
+        print(f"  TSO-ONLY OFO  --  V_set = {v_setpoint_pu:.3f} p.u.")
+        print(f"  Coupling OLTCs: local AVR -> {dso_v_setpoint_pu:.3f} p.u. (110 kV)")
+        print(f"  DN DER Q: forced to 0 Mvar")
+        print(
+            f"  Profiles: {os.path.basename(profiles_csv)}  "
+            f"start={start_time:%d.%m.%Y %H:%M}  {n_minutes} min"
         )
-        if not mt_mask.any():
-            raise RuntimeError(
-                f"No machine transformer found for generator {g} "
-                f"(bus {gen_lv_bus})."
-            )
-        mt_idx = int(combined_net.trafo.index[mt_mask][0])
-        hv_bus = int(combined_net.trafo.at[mt_idx, "hv_bus"])
-        tso_gen_bus_indices.append(hv_bus)
+        print("=" * 72)
+        if contingencies:
+            print(f"  Scheduled contingencies ({len(contingencies)}):")
+            for ev in contingencies:
+                print(
+                    f"    min {ev.minute:4d}: {ev.action.upper()} "
+                    f"{ev.element_type} {ev.element_index}"
+                )
 
-    if verbose:
-        print("[5/6] Computing sensitivities from TN model ...")
+    # 1) Build combined network
+    net, meta = build_tuda_net(ext_grid_vm_pu=v_setpoint_pu, pv_nodes=True)
+    pp.runpp(net, run_control=True, calculate_voltage_angles=True)
+    if hasattr(net, "controller") and len(net.controller) > 0:
+        net.controller.drop(net.controller.index, inplace=True)
 
-    # Probe sensitivities from TN MODEL (not combined plant)
-    if use_numerical_sensitivities:
-        probe_sens: SensitivityCalculator = NumericalSensitivities(tn_net_model)
-    else:
-        probe_sens = JacobianSensitivities(tn_net_model)
-    
-    H_probe, m_probe = probe_sens.build_sensitivity_matrix_H(
-        der_indices=tso_der_buses,
+    # Load time-series profiles and snapshot base load/gen values
+    profiles = load_profiles(profiles_csv, timestep_min=1)
+    snapshot_base_values(net)
+
+    # Apply profiles at t=0 and re-run PF
+    if use_profiles:
+        apply_profiles(net, profiles, start_time)
+        pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+
+    # 2) Identify elements
+    dn_buses = {int(b) for b in net.bus.index if str(net.bus.at[b, "subnet"]) == "DN"}
+
+    # -- TSO DER: individual sgen indices (not DN, not boundary)
+    tso_der_indices = [
+        int(s)
+        for s in net.sgen.index
+        if int(net.sgen.at[s, "bus"]) not in dn_buses
+        and not str(net.sgen.at[s, "name"]).startswith("BOUND_")
+    ]
+    tso_der_buses = [int(net.sgen.at[s, "bus"]) for s in tso_der_indices]
+
+    # -- TSO monitored: 380 kV buses, TN lines
+    tso_v_buses = sorted(
+        int(b) for b in net.bus.index if float(net.bus.at[b, "vn_kv"]) >= 300.0
+    )
+    tso_lines = sorted(
+        int(li) for li in net.line.index if str(net.line.at[li, "subnet"]) == "TN"
+    )
+
+    # -- TSO generators + machine trafos
+    tso_gen_indices, tso_gen_bus_indices = [], []
+    for g in net.gen.index:
+        tso_gen_indices.append(int(g))
+        lv = int(net.gen.at[g, "bus"])
+        mt = net.trafo.index[
+            (net.trafo["lv_bus"] == lv)
+            & net.trafo["name"].astype(str).str.startswith("MachineTrf|")
+        ]
+        if mt.empty:
+            raise RuntimeError(f"No machine trafo for gen {g} bus {lv}")
+        tso_gen_bus_indices.append(int(net.trafo.at[mt[0], "hv_bus"]))
+
+    # -- TSO 380 kV shunts
+    tso_shunt_buses_cand = [
+        int(net.shunt.at[s, "bus"])
+        for s in meta.tn_shunt_indices
+        if s in net.shunt.index
+    ]
+    tso_shunt_q_cand = [
+        float(net.shunt.at[s, "q_mvar"])
+        for s in meta.tn_shunt_indices
+        if s in net.shunt.index
+    ]
+
+    # -- DSO DER: individual sgen indices in DN (for recording, not controlled)
+    dso_der_indices = [
+        int(s)
+        for s in net.sgen.index
+        if int(net.sgen.at[s, "bus"]) in dn_buses
+        and not str(net.sgen.at[s, "name"]).startswith("BOUND_")
+    ]
+
+    # -- DSO monitored: 110 kV DN buses, DN lines (for live plot)
+    dso_v_buses = sorted(
+        int(b)
+        for b in net.bus.index
+        if 100.0 <= float(net.bus.at[b, "vn_kv"]) < 200.0 and int(b) in dn_buses
+    )
+    dso_lines = sorted(
+        int(li) for li in net.line.index if str(net.line.at[li, "subnet"]) == "DN"
+    )
+
+    # -- DSO tertiary shunts (for live plot recording)
+    dso_shunt_buses_cand = [
+        int(net.shunt.at[s, "bus"])
+        for s in meta.tertiary_shunt_indices
+        if s in net.shunt.index
+    ]
+    dso_shunt_q_cand = [
+        float(net.shunt.at[s, "q_mvar"])
+        for s in meta.tertiary_shunt_indices
+        if s in net.shunt.index
+    ]
+
+    # -- No PCC control in TSO-only mode
+    pcc_trafos: List[int] = []
+    coupler_3w_indices = list(meta.coupler_trafo3w_indices)
+
+    # 3) Sensitivities from combined network
+    if verbose > 1:
+        print("Computing sensitivities from combined network ...")
+
+    tso_sens = JacobianSensitivities(net)
+    _, m_tso = tso_sens.build_sensitivity_matrix_H(
+        der_bus_indices=tso_der_buses,
         observation_bus_indices=tso_v_buses,
         line_indices=tso_lines,
-        oltc_trafo_indices=tso_oltc_candidates,
-        shunt_bus_indices=tso_shunt_bus_candidates,
-        shunt_q_steps_mvar=tso_shunt_q_candidates,
+        oltc_trafo_indices=list(meta.machine_trafo_indices),
+        shunt_bus_indices=tso_shunt_buses_cand,
+        shunt_q_steps_mvar=tso_shunt_q_cand,
     )
-
-    # Select only elements that produced valid sensitivities
-    tso_oltc = list(m_probe.get("oltc_trafos", []))
-    tso_v_buses = list(m_probe.get("obs_buses", tso_v_buses))
-    tso_shunt_buses = list(m_probe.get("shunt_buses", []))
-    tso_shunt_q_steps = [
-        tso_shunt_q_candidates[tso_shunt_bus_candidates.index(b)]
-        for b in tso_shunt_buses
+    tso_oltc = list(m_tso.get("oltc_trafos", []))
+    tso_v_buses = list(m_tso.get("obs_buses", tso_v_buses))
+    tso_shunt_buses = list(m_tso.get("shunt_buses", []))
+    tso_shunt_q = [
+        tso_shunt_q_cand[tso_shunt_buses_cand.index(b)] for b in tso_shunt_buses
     ]
 
-    # No PCC control in this TSO-only test
-    pcc_trafo_indices: List[int] = []
-    pcc_dso_ids: List[str] = []
-
-    # Voltage setpoints: uniform schedule at all monitored buses
-    v_setpoints = np.full(len(tso_v_buses), v_setpoint_pu, dtype=np.float64)
+    # 4) Controller config — same as run_cascade but pcc_trafo_indices = []
+    v_setpoints = np.full(len(tso_v_buses), v_setpoint_pu)
+    tso_line_max_i_ka = [float(net.line.at[li, "max_i_ka"]) for li in tso_lines]
+    dso_line_max_i_ka = [float(net.line.at[li, "max_i_ka"]) for li in dso_lines]
 
     tso_config = TSOControllerConfig(
-        der_indices=tso_der_buses,
-        pcc_trafo_indices=pcc_trafo_indices,
-        pcc_dso_controller_ids=pcc_dso_ids,
+        der_indices=tso_der_indices,
+        pcc_trafo_indices=pcc_trafos,
+        pcc_dso_controller_ids=[],
         oltc_trafo_indices=tso_oltc,
         shunt_bus_indices=tso_shunt_buses,
-        shunt_q_steps_mvar=tso_shunt_q_steps,
+        shunt_q_steps_mvar=tso_shunt_q,
         voltage_bus_indices=tso_v_buses,
         current_line_indices=tso_lines,
+        current_line_max_i_ka=tso_line_max_i_ka,
         v_setpoints_pu=v_setpoints,
+        g_v=config.g_v,
         gen_indices=tso_gen_indices,
         gen_bus_indices=tso_gen_bus_indices,
-        gen_vm_min_pu=0.95,
-        gen_vm_max_pu=1.10,
+        k_t_avt=config.k_t_avt,
     )
 
-    if verbose:
-        print("[6/6] Creating TSO controller ...")
-
-    # OFO tuning for TSO (same structure as in run_cascade.py)
-    ofo_params_tso = OFOParameters(
-        alpha=alpha,
-        g_w=0.00001,
-        g_z=1_000_000.0,
-        g_u=0.0001,
+    # DSO config — not used for control, only to drive LivePlotter axes
+    dso_v_setpoints = np.full(len(dso_v_buses), dso_v_setpoint_pu)
+    dso_config = DSOControllerConfig(
+        der_indices=dso_der_indices,
+        oltc_trafo_indices=coupler_3w_indices,
+        shunt_bus_indices=dso_shunt_buses_cand,
+        shunt_q_steps_mvar=dso_shunt_q_cand,
+        interface_trafo_indices=coupler_3w_indices,
+        voltage_bus_indices=dso_v_buses,
+        current_line_indices=dso_lines,
+        current_line_max_i_ka=dso_line_max_i_ka,
+        g_q=config.g_q,
+        v_setpoints_pu=dso_v_setpoints,
+        g_v=config.dso_g_v,
     )
 
-    # Network state from TN MODEL (for sensitivities)
-    tso_trafo_idx = np.array(tso_oltc, dtype=np.int64)
-    tso_ns = network_state_from_net(tn_net_model, tso_trafo_idx, source_case="TN")
+    # -- Live plotter
+    if live_plot and live_plotter is None:
+        from visualisation.plot_cascade import LivePlotter
 
-    # Sensitivities from TN MODEL
-    if use_numerical_sensitivities:
-        tso_sens: SensitivityCalculator = NumericalSensitivities(tn_net_model)
-    else:
-        tso_sens = JacobianSensitivities(tn_net_model)
-
-    # Actuator bounds from combined network (real plant ratings)
-    der_indices_arr = np.array(tso_der_buses, dtype=np.int64)
-    der_s_rated = []
-    der_p_max = []
-    for sidx in combined_net.sgen.index:
-        bus = int(combined_net.sgen.at[sidx, "bus"])
-        if bus not in tso_der_buses:
-            continue
-        if combined_net.sgen.at[sidx, "name"].startswith("BoundarySgen|"):
-            continue
-        der_s_rated.append(float(combined_net.sgen.at[sidx, "sn_mva"]))
-        der_p_max.append(float(combined_net.sgen.at[sidx, "p_mw"]))
-
-    if len(der_s_rated) != len(tso_der_buses):
-        raise RuntimeError(
-            "Mismatch between DER buses and DER rating list length."
+        live_plotter = LivePlotter(
+            tso_config,
+            dso_config,
+            tso_line_max_i_ka=np.array(tso_line_max_i_ka, dtype=np.float64)
+            * tso_config.i_max_pu,
+            dso_line_max_i_ka=np.array(dso_line_max_i_ka, dtype=np.float64)
+            * dso_config.i_max_pu,
         )
+
+    # 5) Actuator bounds (from combined network)
+    tso_s = np.array(
+        [float(net.sgen.at[s, "sn_mva"]) for s in tso_der_indices], dtype=np.float64
+    )
+    tso_p = np.array(
+        [float(net.sgen.at[s, "p_mw"]) for s in tso_der_indices], dtype=np.float64
+    )
+
+    tso_gen_params = [
+        GeneratorParameters(
+            s_rated_mva=float(net.gen.at[g, "sn_mva"]),
+            p_max_mw=float(net.gen.at[g, "p_mw"]),
+            xd_pu=config.gen_xd_pu,
+            i_f_max_pu=config.gen_i_f_max_pu,
+            beta=config.gen_beta,
+            q0_pu=config.gen_q0_pu,
+        )
+        for g in tso_gen_indices
+    ]
 
     tso_bounds = ActuatorBounds(
-        der_indices=der_indices_arr,
-        der_s_rated_mva=np.array(der_s_rated, dtype=np.float64),
-        der_p_max_mw=np.array(der_p_max, dtype=np.float64),
+        der_indices=np.array(tso_der_indices, dtype=np.int64),
+        der_s_rated_mva=tso_s,
+        der_p_max_mw=tso_p,
         oltc_indices=np.array(tso_oltc, dtype=np.int64),
         oltc_tap_min=np.array(
-            [int(combined_net.trafo.at[t, "tap_min"]) for t in tso_oltc],
-            dtype=np.int64,
+            [int(net.trafo.at[t, "tap_min"]) for t in tso_oltc], dtype=np.int64
         ),
         oltc_tap_max=np.array(
-            [int(combined_net.trafo.at[t, "tap_max"]) for t in tso_oltc],
-            dtype=np.int64,
+            [int(net.trafo.at[t, "tap_max"]) for t in tso_oltc], dtype=np.int64
         ),
         shunt_indices=np.array(tso_shunt_buses, dtype=np.int64),
-        shunt_q_mvar=np.array(tso_shunt_q_steps, dtype=np.float64),
+        shunt_q_mvar=np.array(tso_shunt_q, dtype=np.float64),
+        gen_params=tso_gen_params,
     )
+
+    # 6) Create TSO controller with same g_w / g_u / g_z as run_cascade
+    gw_tso_diag = config.build_gw_tso_diag(
+        n_der=len(tso_der_buses),
+        n_pcc=0,  # no PCC
+        n_gen=len(tso_gen_indices),
+        n_oltc=len(tso_oltc),
+        n_shunt=len(tso_shunt_buses),
+    )
+    n_pre_oltc_tso = len(tso_der_buses) + 0 + len(tso_gen_indices)
+    gw_tso = _build_Gw(gw_tso_diag, n_pre_oltc_tso, len(tso_oltc), config.gw_oltc_cross_tso)
+
+    gu_tso = config.build_gu_tso(
+        n_der=len(tso_der_buses),
+        n_pcc=0,
+        n_gen=len(tso_gen_indices),
+        n_oltc=len(tso_oltc),
+        n_shunt=len(tso_shunt_buses),
+    )
+    gz_tso = config.build_gz_tso(n_v=len(tso_v_buses), n_i=len(tso_lines))
+    ofo_tso = OFOParameters(alpha=config.alpha, g_w=gw_tso, g_z=gz_tso, g_u=gu_tso)
+
+    ns = _network_state(net)
 
     tso = TSOController(
-        controller_id="tso_main",
-        params=ofo_params_tso,
-        config=tso_config,
-        network_state=tso_ns,
-        actuator_bounds=tso_bounds,
-        sensitivities=tso_sens,
+        "tso_main", ofo_tso, tso_config, ns, tso_bounds, JacobianSensitivities(net)
     )
+    tso._avt_verbose = verbose
 
-    if verbose:
-        print("Initialising TSO controller from combined network ...")
+    # 7) Initialise actuators to neutral operating point
+    #    - All DER Q = 0 (both TN and DN)
+    #    - TSO OLTC = 0, shunts = 0
+    #    - Generator AVR setpoints = v_setpoint_pu
+    for s in net.sgen.index:
+        if not str(net.sgen.at[s, "name"]).startswith("BOUND_"):
+            net.sgen.at[s, "q_mvar"] = 0.0
+    for t in tso_oltc:
+        net.trafo.at[t, "tap_pos"] = 0
+    for g in tso_gen_indices:
+        net.gen.at[g, "vm_pu"] = v_setpoint_pu
+    for sb in tso_shunt_buses:
+        mask = net.shunt["bus"] == sb
+        if mask.any():
+            net.shunt.at[net.shunt.index[mask][0], "step"] = 0
+    # Tertiary shunts to 0 as well
+    for sb in dso_shunt_buses_cand:
+        mask = net.shunt["bus"] == sb
+        if mask.any():
+            net.shunt.at[net.shunt.index[mask][0], "step"] = 0
 
-    # Initial TSO measurement from COMBINED network (real plant)
-    tso_meas0 = measurement_from_combined(combined_net, split_result, tso_config, iteration=0)
-    tso.initialise(tso_meas0)
-
-    if verbose:
-        print()
-        print(
-            f"Running TSO-only OFO for {n_iterations} iterations "
-            f"(alpha = {alpha:.4f}) ..."
+    # 8) Coupling-transformer OLTCs: local AVR via pandapower DiscreteTapControl
+    #    Regulate 110 kV (MV) side to dso_v_setpoint_pu.
+    #    These controllers stay active throughout the simulation (run_control=True).
+    tol_pu = config.dso_oltc_init_tol_pu
+    for t3w in coupler_3w_indices:
+        DiscreteTapControl(
+            net,
+            element_index=t3w,
+            vm_lower_pu=dso_v_setpoint_pu - tol_pu,
+            vm_upper_pu=dso_v_setpoint_pu + tol_pu,
+            side="mv",
+            element="trafo3w",
         )
-        print("  • Controls applied to: COMBINED network (real plant)")
-        print("  • Measurements from: COMBINED network (real plant)")
-        print("  • Sensitivities from: TN model")
+    pp.runpp(net, run_control=True, calculate_voltage_angles=True)
+
+    if verbose > 1:
+        for t3w in coupler_3w_indices:
+            tap = int(net.trafo3w.at[t3w, "tap_pos"])
+            print(f"  Coupler OLTC trafo3w {t3w}: initial tap_pos = {tap}")
+
+    # NOTE: We do NOT remove the pandapower controllers here.
+    # They act as local AVR for the coupling transformers throughout
+    # the simulation, since there is no DSO OFO to control them.
+
+    # Re-run PF with initial timestep and neutral actuators
+    if use_profiles:
+        apply_profiles(net, profiles, start_time)
+    pp.runpp(net, run_control=True, calculate_voltage_angles=True)
+
+    # Initialise TSO controller from converged PF
+    tso.initialise(_measure_tso(net, tso_config, 0))
+
+    if verbose > 0:
+        print(
+            f"Running TSO-only: {n_minutes} min  (TSO every {tso_period_min} min)"
+        )
+        print(
+            f"  TSO: {len(tso_der_buses)} DER, {len(tso_oltc)} OLTC, "
+            f"{len(tso_gen_indices)} gen, {len(tso_shunt_buses)} shunt"
+        )
+        print(
+            f"  Coupler OLTCs: {len(coupler_3w_indices)} (local AVR, "
+            f"target {dso_v_setpoint_pu:.3f} p.u. on 110 kV)"
+        )
+        print(
+            f"  DSO DER: {len(dso_der_indices)} (Q=0, not controlled)"
+        )
         print()
 
-    log: List[TSOIterationRecord] = []
+    # Reusable zero arrays for DSO DER Q (not controlled)
+    _zero_dso_q = np.zeros(len(dso_der_indices), dtype=np.float64)
 
-    for it in range(1, n_iterations + 1):
-        rec = TSOIterationRecord(iteration=it)
+    # 9) Simulation loop
+    log: List[IterationRecord] = []
 
-        # New measurement from COMBINED network (real plant)
-        meas = measurement_from_combined(combined_net, split_result, tso_config, iteration=it)
+    for minute in range(1, n_minutes + 1):
+        run_tso = (minute == 1) or (minute % tso_period_min == 0)
+        # Mark dso_active=True so LivePlotter records coupler OLTC / DN voltages
+        rec = IterationRecord(minute=minute, tso_active=run_tso, dso_active=True)
 
-        # OFO step
-        try:
-            tso_output = tso.step(meas)
-        except RuntimeError as e:
-            # Explicit failure is desired in this scientific context
-            raise RuntimeError(f"TSO OFO step failed at iteration {it}: {e}")
+        # Apply time-series profiles
+        if use_profiles:
+            t_now = start_time + timedelta(minutes=minute)
+            apply_profiles(net, profiles, t_now)
 
-        # Extract control variables
-        n_der_t = len(tso_config.der_indices)
-        n_pcc_t = len(tso_config.pcc_trafo_indices)  # zero here
-        n_gen_t = len(tso_config.gen_indices)
-        n_oltc_t = len(tso_config.oltc_trafo_indices)
+        # Apply contingency events
+        if contingencies:
+            fired = [ev for ev in contingencies if ev.minute == minute]
+            if fired:
+                events = []
+                for ev in fired:
+                    desc, short_label = _apply_contingency(net, ev, verbose)
+                    events.append((desc, short_label))
+                rec.contingency_events = events
 
-        rec.tso_q_der_mvar = tso_output.u_new[:n_der_t].copy()
-        
-        # Extract generator AVR setpoints
-        avr_start = n_der_t + n_pcc_t
-        avr_end = avr_start + n_gen_t
-        rec.tso_gen_avr_setpoints_pu = tso_output.u_new[avr_start:avr_end].copy()
-        
-        # Extract OLTC taps
-        oltc_start = avr_end
-        oltc_end = oltc_start + n_oltc_t
-        rec.tso_oltc_taps = np.round(
-            tso_output.u_new[oltc_start:oltc_end]
-        ).astype(np.int64)
-        
-        # Extract shunt states
-        rec.tso_shunt_states = np.round(
-            tso_output.u_new[oltc_end:]
-        ).astype(np.int64)
-        
-        rec.tso_objective = tso_output.objective_value
-        rec.tso_solver_status = tso_output.solver_status
-        rec.tso_solve_time_s = tso_output.solve_time_s
-        rec.tso_slack = tso_output.z_slack.copy()
+                # Re-converge PF with new topology
+                pp.runpp(net, run_control=True, calculate_voltage_angles=True)
 
-        # Predicted voltages (first n_v outputs)
-        n_v = len(tso_config.voltage_bus_indices)
-        rec.tso_voltages_pu = tso_output.y_predicted[:n_v].copy()
+                # Refresh sensitivity matrices
+                tso.sensitivities = JacobianSensitivities(net)
+                tso.invalidate_sensitivity_cache()
 
-        # Apply controls to COMBINED network (real plant)
-        apply_tso_controls(combined_net, tso_output, tso_config)
+        # TSO step
+        if run_tso:
+            try:
+                tso_out = tso.step(_measure_tso(net, tso_config, minute))
+                u = tso_out.u_new
+                n_d = len(tso_config.der_indices)
+                n_p = len(tso_config.pcc_trafo_indices)  # 0
+                n_g = len(tso_config.gen_indices)
+                n_o = len(tso_config.oltc_trafo_indices)
+                n_s = len(tso_config.shunt_bus_indices)
+                off = 0
+                rec.tso_q_der_mvar = u[off : off + n_d].copy()
+                off += n_d
+                rec.tso_q_pcc_set_mvar = u[off : off + n_p].copy()
+                off += n_p
+                rec.tso_v_gen_pu = u[off : off + n_g].copy()
+                off += n_g
+                rec.tso_oltc_taps = np.round(u[off : off + n_o]).astype(np.int64)
+                off += n_o
+                rec.tso_shunt_states = np.round(u[off : off + n_s]).astype(np.int64)
+                rec.tso_objective = tso_out.objective_value
+                rec.tso_solver_status = tso_out.solver_status
+                rec.tso_solve_time_s = tso_out.solve_time_s
 
-        # Re-run power flow on COMBINED network (real plant)
-        try:
-            pp.runpp(combined_net, run_control=False, calculate_voltage_angles=True)
-        except Exception as e:
-            raise RuntimeError(
-                f"Combined network power flow failed at iteration {it}: {e}"
-            )
+                _apply_tso(net, tso_out, tso_config)
+            except RuntimeError as e:
+                if verbose > 0:
+                    print(f"  [min {minute:3d}] TSO FAILED: {e}")
 
-        # Record plant voltages from COMBINED network at monitored EHV buses
-        rec.plant_tn_voltages_pu = combined_net.res_bus.loc[
-            tso_v_buses, "vm_pu"
-        ].values.astype(np.float64).copy()
-        
-        # Record generator reactive power outputs from power flow results
-        rec.plant_gen_q_mvar = np.zeros(len(tso_config.gen_indices), dtype=np.float64)
-        for k, g in enumerate(tso_config.gen_indices):
-            if g not in combined_net.res_gen.index:
-                raise ValueError(f"Generator {g} not found in combined_net.res_gen.")
-            rec.plant_gen_q_mvar[k] = float(combined_net.res_gen.at[g, "q_mvar"])
+        # Power flow with run_control=True so coupling AVRs stay active
+        pp.runpp(net, run_control=True, calculate_voltage_angles=True)
+
+        # ── Record plant measurements (TN) ──
+        rec.plant_tn_voltages_pu = net.res_bus.loc[tso_v_buses, "vm_pu"].values.copy()
+        rec.plant_tn_currents_ka = np.array(
+            [float(net.res_line.at[li, "i_from_ka"]) for li in tso_lines],
+            dtype=np.float64,
+        )
+        rec.tso_q_gen_mvar = np.array(
+            [float(net.res_gen.at[g, "q_mvar"]) for g in tso_gen_indices],
+            dtype=np.float64,
+        )
+
+        # ── Record plant measurements (DN) — for LivePlotter DSO figure ──
+        rec.plant_dn_voltages_pu = net.res_bus.loc[dso_v_buses, "vm_pu"].values.copy()
+        rec.plant_dn_currents_ka = np.array(
+            [float(net.res_line.at[li, "i_from_ka"]) for li in dso_lines],
+            dtype=np.float64,
+        )
+
+        # DSO "control" record: DER Q = 0, coupler OLTC from AVR, shunt states
+        rec.dso_q_der_mvar = _zero_dso_q.copy()
+        rec.dso_oltc_taps = np.array(
+            [int(net.trafo3w.at[t3w, "tap_pos"]) for t3w in coupler_3w_indices],
+            dtype=np.int64,
+        )
+        rec.dso_shunt_states = np.array(
+            [
+                int(net.shunt.at[net.shunt.index[net.shunt["bus"] == sb][0], "step"])
+                for sb in dso_shunt_buses_cand
+            ],
+            dtype=np.int64,
+        ) if dso_shunt_buses_cand else np.array([], dtype=np.int64)
+
+        # Actual interface Q (for plotting)
+        rec.dso_q_actual_mvar = np.array(
+            [float(net.res_trafo3w.at[t, "q_hv_mvar"]) for t in coupler_3w_indices],
+            dtype=np.float64,
+        )
+        # No TSO setpoint in TSO-only — show zero line
+        rec.dso_q_setpoint_mvar = np.zeros(len(coupler_3w_indices), dtype=np.float64)
+
+        # Penalty from plant measurements
+        if tso_config.v_setpoints_pu is not None:
+            v_err = rec.plant_tn_voltages_pu - tso_config.v_setpoints_pu
+            rec.tso_v_penalty = float(tso_config.g_v * np.sum(v_err**2))
 
         log.append(rec)
 
-        # Verbose summary
-        if verbose:
-            v = rec.plant_tn_voltages_pu
-            v_min = float(np.min(v))
-            v_mean = float(np.mean(v))
-            v_max = float(np.max(v))
-            err_max = float(np.max(np.abs(v - v_setpoint_pu)))
+        if live_plotter is not None:
+            live_plotter.update(rec)
 
+        if verbose > 0 and run_tso:
+            v_tn = rec.plant_tn_voltages_pu
+            v_dn = rec.plant_dn_voltages_pu
+            print(f"  [min {minute:3d}] TSO")
             print(
-                f"[it {it:3d}] TN V: min={v_min:.4f}  mean={v_mean:.4f}  "
-                f"max={v_max:.4f} p.u.  (target={v_setpoint_pu:.3f}, "
-                f"|err|_max={err_max:.4f})"
+                f"    TN V: min={np.min(v_tn):.4f} mean={np.mean(v_tn):.4f} max={np.max(v_tn):.4f}"
             )
             print(
-                f"          obj={rec.tso_objective:.4e}  "
-                f"status={rec.tso_solver_status}  "
-                f"t_solve={rec.tso_solve_time_s:.3f}s"
+                f"    DN V: min={np.min(v_dn):.4f} mean={np.mean(v_dn):.4f} max={np.max(v_dn):.4f}"
             )
             if rec.tso_q_der_mvar is not None:
                 print(
-                    "          Q_DER = "
-                    f"{np.array2string(rec.tso_q_der_mvar, precision=2, suppress_small=True)} "
-                    "Mvar"
+                    f"    TSO  obj={rec.tso_objective:.4e}  {rec.tso_solver_status}  "
+                    f"t={rec.tso_solve_time_s:.3f}s"
                 )
-            if rec.tso_gen_avr_setpoints_pu is not None:
-                print(
-                    "          Gen AVR setpoints = "
-                    f"{np.array2string(rec.tso_gen_avr_setpoints_pu, precision=4, suppress_small=True)} "
-                    "p.u."
-                )
-            if rec.plant_gen_q_mvar is not None:
-                print(
-                    "          Gen Q output = "
-                    f"{np.array2string(rec.plant_gen_q_mvar, precision=2, suppress_small=True)} "
-                    "Mvar"
-                )
-            if rec.tso_oltc_taps is not None:
-                print(f"          OLTC taps = {rec.tso_oltc_taps}")
-            if rec.tso_shunt_states is not None:
-                print(f"          Shunt states = {rec.tso_shunt_states}")
+                print(f"      Q_DER   = {A2S(rec.tso_q_der_mvar)} Mvar")
+                print(f"      V_gen   = {A3S(rec.tso_v_gen_pu)} pu")
+                if len(rec.tso_oltc_taps) > 0:
+                    print(f"      OLTC    = {rec.tso_oltc_taps}")
+                if len(rec.tso_shunt_states) > 0:
+                    print(f"      Shunt   = {rec.tso_shunt_states}")
+                print(f"      Coupler OLTC = {rec.dso_oltc_taps.tolist()} (AVR)")
             print()
 
-    return log
+    if live_plotter is not None:
+        live_plotter.finish()
+
+    return CascadeResult(log=log, tso_config=tso_config, dso_config=dso_config)
 
 
 # ==============================================================================
@@ -711,48 +569,114 @@ def run_tso_voltage_control(
 # ==============================================================================
 
 def main() -> None:
-    """
-    Run a single TSO-only voltage control scenario with V_set = 1.05 p.u.
-    """
-    v_set = 1.05
-    n_it = 120
-    use_numerical = False  # Toggle: True for numerical, False for analytical
+    from core.cascade_config import CascadeConfig
+    from core.results_storage import save_results
+    from run.records import ContingencyEvent
 
-    print()
-    print("#" * 72)
-    print(f"#  TSO-ONLY SCENARIO: V_setpoint = {v_set:.2f} p.u.")
-    print("#" * 72)
-    print()
+    start_min = 390
+    duration = 120
+    step = 1
+    start_sp = 1.05
+    end_sp = 1.07
 
-    log = run_tso_voltage_control(
-        v_setpoint_pu=v_set,
-        n_iterations=n_it,
-        alpha=0.01,
-        use_numerical_sensitivities=use_numerical,
-        verbose=True,
+    num_steps = duration // step
+    delta = (end_sp - start_sp) / num_steps
+
+    # Use exactly the same config as run_cascade main()
+    config = CascadeConfig(
+        # Simulation
+        v_setpoint_pu=1.05,
+        n_minutes=12 * 60,
+        tso_period_min=3,
+        dso_period_s=30,
+        start_time=datetime(2016, 5, 1, 8, 0),
+        use_profiles=True,
+        verbose=1,
+        live_plot=True,
+        # Objective weights
+        g_v=250000,
+        g_q=1,
+        dso_g_v=100000,
+        # OFO
+        alpha=1.0,
+        g_z=1e12,
+        # TSO g_w
+        gw_tso_q_der=0.1,
+        gw_tso_q_pcc=0.1,
+        gw_tso_v_gen=2e6,
+        gw_tso_oltc=40.0,
+        gw_tso_shunt=4000.0,
+        gw_oltc_cross_tso=0,
+        # DSO g_w
+        gw_dso_q_der=10,
+        gw_dso_oltc=150.0,
+        gw_dso_shunt=5000.0,
+        gw_oltc_cross_dso=0,
+        # DSO integral Q-tracking
+        g_qi=0.15,
+        lambda_qi=0.9,
+        q_integral_max_mvar=50.0,
+        # Generator capability
+        gen_xd_pu=1.2,
+        gen_i_f_max_pu=2.65,
+        gen_beta=0.15,
+        gen_q0_pu=0.4,
+        # Reserve Observer
+        enable_reserve_observer=False,
+        reserve_q_threshold_mvar=45.0,
+        reserve_q_release_mvar=-45.0,
+        reserve_cooldown_min=15,
+        # Contingencies
+        contingencies = [
+            ContingencyEvent(minute=90, element_type="line", element_index=3),
+            ContingencyEvent(minute=60, element_type="gen", element_index=0),
+            ContingencyEvent(
+                minute=270, element_type="line", element_index=3, action="restore"
+            ),
+            ContingencyEvent(
+                minute=300, element_type="gen", element_index=0, action="restore"
+            ),
+            ContingencyEvent(
+                minute=360,
+                element_type="ext_grid",
+                element_index=0,
+                action="setpoint_change",
+                new_setpoint=1.05,
+            ),
+            # ramp of setpoints from 1.04 to 1.06
+            # *[
+            #     ContingencyEvent(
+            #         minute=start_min + i * step,
+            #         element_type="ext_grid",
+            #         element_index=0,
+            #         action="setpoint_change",
+            #         new_setpoint=start_sp + (i + 1) * delta,
+            #     )
+            #     for i in range(num_steps)
+            # ],
+            ContingencyEvent(minute=420, element_type="line", element_index=11),
+            ContingencyEvent(
+                minute=480, element_type="line", element_index=11, action="restore"
+            ),
+        ],
     )
 
-    final = log[-1]
-    if final.plant_tn_voltages_pu is not None:
-        v = final.plant_tn_voltages_pu
-        v_min = float(np.min(v))
-        v_mean = float(np.mean(v))
-        v_max = float(np.max(v))
-        err_max = float(np.max(np.abs(v - v_set)))
+    print()
+    print("#" * 72)
+    print(f"#  TSO-ONLY SCENARIO: V_setpoint = {config.v_setpoint_pu:.2f} p.u.")
+    print(f"#  DN DER Q = 0, Coupling OLTCs = local AVR")
+    print("#" * 72)
+    print()
 
-        print()
-        print("=" * 72)
-        print("  FINAL TSO-ONLY VOLTAGE SUMMARY")
-        print("=" * 72)
-        print(
-            f"  V_set = {v_set:.3f} p.u.,  "
-            f"V_min = {v_min:.4f} p.u.,  "
-            f"V_mean = {v_mean:.4f} p.u.,  "
-            f"V_max = {v_max:.4f} p.u."
-        )
-        print(f"  Max |V - V_set| = {err_max:.4f} p.u.")
-        print("=" * 72)
-        print()
+    t0 = _time.perf_counter()
+    result = run_tso_only(config)
+    wall_time = _time.perf_counter() - t0
+
+    print_summary(config.v_setpoint_pu, result.log)
+
+    # ── Save results ─────────────────────────────────────────────────────
+    run_dir = save_results(result, config, wall_time_s=wall_time)
+    print(f"\nResults saved to: {run_dir}")
 
 
 if __name__ == "__main__":

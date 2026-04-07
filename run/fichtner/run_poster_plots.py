@@ -27,12 +27,15 @@ import matplotlib.ticker as mticker
 import numpy as np
 from numpy.typing import NDArray
 
-from run_cascade import (
+from run.records import (
     ContingencyEvent,
     IterationRecord,
     CascadeResult,
-    run_cascade,
 )
+
+from run.run_S_TSO_M_DSO import run_cascade
+
+
 from core.cascade_config import CascadeConfig
 
 # ─── Style ────────────────────────────────────────────────────────────────
@@ -253,8 +256,8 @@ def plot_voltage_comparison(d_mit: dict, d_ohne: dict, v_set: float, event_min: 
                 fontsize=30, color="grey", va="top")
 
     # Labels and layout
-    ax.set_xlabel("Zeit [min]")
-    ax.set_ylabel("Spannung [p.u.]")
+    ax.set_xlabel(r"Zeit $k$ / min")
+    ax.set_ylabel("Spannung / p.u.")
     ax.set_title("Spannungsband im Übertragungsnetz (380 kV)")
 
     # Adjusted legend for compact layout
@@ -297,8 +300,8 @@ def plot_actuator_detail(d: dict, event_min: int):
     ax.plot(mins, d["der_q_sum"], color=COLORS["der"], label="ΣQ EZA (VN)")
     ax.axhline(0, color="grey", lw=1.0)
     ax.axvline(event_min, color="grey", ls="-.", lw=2.0, alpha=0.5)
-    ax.set_ylabel("Q [Mvar]")
-    ax.set_title("(a) Blindleistungseinsatz EZA im Verteilnetz")
+    ax.set_ylabel(r"$Q$ / Mvar")
+    ax.set_title("Blindleistungseinsatz EZA im Verteilnetz")
     ax.legend(loc="best", framealpha=0.2)
     ax.set_xlim(d["mins"][0], d["mins"][-1])
     ax.grid(True, alpha=0.3)
@@ -310,7 +313,7 @@ def plot_actuator_detail(d: dict, event_min: int):
         ax.step(mins, d["oltc_dso"][:, k], where="post", label=coupler_labels[k], color=COLORS['stufen'][k])
     ax.axvline(event_min, color="grey", ls="-.", lw=2.0, alpha=0.5)
     ax.set_ylabel("Stufenposition")
-    ax.set_title("(b) Stufensteller der Kuppeltransformatoren (110 kV)")
+    ax.set_title("Stufensteller der Kuppeltransformatoren (110 kV)")
     ax.legend(loc="best", ncol=n_oltc, framealpha=0.2)
     ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
     ax.set_xlim(d["mins"][0], d["mins"][-1])
@@ -323,7 +326,7 @@ def plot_actuator_detail(d: dict, event_min: int):
         ax.step(mins, d["shunt_dso"][:, k], where="post", label=shunt_labels[k])
     ax.axvline(event_min, color="grey", ls="-.", lw=2.0, alpha=0.5)
     ax.set_ylabel("Schaltzustand")
-    ax.set_title("(c) Tertiär-Shunts (20 kV)")
+    ax.set_title("Tertiär-Shunts (20 kV)")
     ax.set_yticks([0, 1])
     ax.set_yticklabels(["Aus", "Ein"])
     ax.legend(loc="best", ncol=n_shunt, framealpha=0.2)
@@ -338,9 +341,9 @@ def plot_actuator_detail(d: dict, event_min: int):
     ax.plot(mins, q_ist_sum, color=COLORS["q_ist"], ls="--", label=r"$Q_\mathrm{VN,ist}^{k}$ (ÜNB→VNB)")
     ax.axhline(0, color="grey", lw=1.0)
     ax.axvline(event_min, color="grey", ls="-.", lw=2.0, alpha=0.5)
-    ax.set_xlabel("Zeit [min]")
-    ax.set_ylabel("Q [Mvar]")
-    ax.set_title("(d) Blindleistung an den Kuppelstellen (Summe)")
+    ax.set_xlabel(r"Zeit $k$ / min")
+    ax.set_ylabel(r"$Q$ / Mvar")
+    ax.set_title("Blindleistung an den Kuppelstellen (Summe)")
     ax.legend(loc="best", framealpha=0.2)
     ax.set_xlim(d["mins"][0], d["mins"][-1])
     ax.grid(True, alpha=0.3)
@@ -369,7 +372,7 @@ def plot_generator_detail(d: dict, event_min: int):
     ax.axhline(0, color="grey", lw=1.0)
     ax.axvline(event_min, color="grey", ls="-.", lw=2.0, alpha=0.5)
     ax.set_ylabel("Q / Mvar")
-    ax.set_title("(a) Blindleistung Synchrongenerator")
+    ax.set_title("Blindleistung Synchrongenerator")
     ax.legend(loc="best", framealpha=0.2)
     ax.set_xlim(d["mins"][0], d["mins"][-1])
     ax.grid(True, alpha=0.3)
@@ -380,8 +383,8 @@ def plot_generator_detail(d: dict, event_min: int):
         ax.plot(mins, d["gen_v"][:, g], color=COLORS["gen_v"],
                 label=f"Gen {g+1}" if n_gen > 1 else "Generator")
     ax.axvline(event_min, color="grey", ls="-.", lw=2.0, alpha=0.5)
-    ax.set_ylabel("Spannung [p.u.]")
-    ax.set_title("(b) AVR-Sollspannung Generator")
+    ax.set_ylabel("Spannung / p.u.")
+    ax.set_title("AVR-Sollspannung Generator")
     ax.legend(loc="best", framealpha=0.2)
     ax.set_xlim(d["mins"][0], d["mins"][-1])
     ax.grid(True, alpha=0.3)
@@ -393,9 +396,9 @@ def plot_generator_detail(d: dict, event_min: int):
         ax.step(mins, d["oltc_mt"][:, k], where="post", color=COLORS["oltc"],
                 label=f"MT {k+1}" if n_mt > 1 else "Maschinentrafo")
     ax.axvline(event_min, color="grey", ls="-.", lw=2.0, alpha=0.5)
-    ax.set_xlabel("Zeit [min]")
+    ax.set_xlabel(r"Zeit $k$ / min")
     ax.set_ylabel("Stufenposition")
-    ax.set_title("(c) Stufensteller Maschinentransformator")
+    ax.set_title("Stufensteller Maschinentransformator")
     ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
     ax.legend(loc="best", framealpha=0.2)
     ax.set_xlim(d["mins"][0], d["mins"][-1])
@@ -426,7 +429,7 @@ def _base_config(*, enable_dso: bool) -> CascadeConfig:
         # Objective weights
         g_v=250000,
         g_q=1 if enable_dso else 0,
-        dso_g_v=50000.0 if enable_dso else 0.0,
+        dso_g_v=100000.0 if enable_dso else 0.0,
 
         # OFO
         alpha=1.0,
@@ -436,17 +439,17 @@ def _base_config(*, enable_dso: bool) -> CascadeConfig:
         gw_tso_q_der=0.2,
         gw_tso_q_pcc=0.1,
         gw_tso_v_gen=5e6,
-        gw_tso_oltc=40.0,
+        gw_tso_oltc=10.0,
         gw_tso_shunt=2000.0,
 
         # DSO g_w
         gw_dso_q_der=10.0 if enable_dso else 1e12,
-        gw_dso_oltc=120.0 if enable_dso else 1e12,
+        gw_dso_oltc=100.0 if enable_dso else 1e12,
         gw_dso_shunt=4000.0 if enable_dso else 1e12,
 
         # DSO integral Q-tracking (PI-like)
-        g_qi=0.1 if enable_dso else 0,
-        lambda_qi=0.9,
+        g_qi=0.15 if enable_dso else 0,
+        lambda_qi=0.95,
         q_integral_max_mvar=50.0,
 
         # Generator capability
@@ -461,15 +464,16 @@ def _base_config(*, enable_dso: bool) -> CascadeConfig:
         reserve_q_release_mvar=-50.0,
         reserve_cooldown_min=15,
 
+        # Achievable Value Tracking
+        k_t_avt=1.0,
+
         # Contingency: generator trip at minute 30
         # contingencies=[
         #     ContingencyEvent(minute=30, element_type="gen", element_index=0),
         # ],
         # Contingencies
         contingencies=[
-
             ContingencyEvent(minute=30, element_type="gen", element_index=0),
-
         ],
 
     )

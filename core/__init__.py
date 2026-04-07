@@ -16,12 +16,16 @@ CapabilityMessage
     Message from DSO to TSO containing reactive power capability bounds.
 ActuatorBounds
     Calculator for operating-point-dependent actuator bounds.
+DERMapping
+    Maps individual DERs (sgens) to their bus locations for per-DER
+    modelling with full-rank sensitivity factorisation.
 """
 
 from core.network_state import NetworkState
 from core.measurement import Measurement
 from core.message import SetpointMessage, CapabilityMessage
 from core.actuator_bounds import ActuatorBounds
+from core.der_mapping import DERMapping
 
 __all__ = [
     "NetworkState",
@@ -29,4 +33,5 @@ __all__ = [
     "SetpointMessage",
     "CapabilityMessage",
     "ActuatorBounds",
+    "DERMapping",
 ]

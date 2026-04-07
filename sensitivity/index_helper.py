@@ -81,16 +81,24 @@ def get_ppc_trafo_index(net: pp.pandapowerNet, trafo_idx: int) -> Optional[int]:
     if hasattr(net, '_pd2ppc_lookups') and net._pd2ppc_lookups is not None:
         try:
             trafo_start = net._pd2ppc_lookups['branch']['trafo'][0]
-            ppc_idx = trafo_start + trafo_idx
+            # Use positional index within the DataFrame, not the raw trafo_idx,
+            # because the DataFrame may have non-contiguous indices after element
+            # removal (e.g. add_hv_networks removes bus 12 and its trafos).
+            pos = list(net.trafo.index).index(trafo_idx)
+            ppc_idx = trafo_start + pos
             if ppc_idx >= len(net._ppc['branch']):
                 return None
             return ppc_idx
-        except (KeyError, IndexError, TypeError):
+        except (KeyError, IndexError, TypeError, ValueError):
             pass
 
-    # Fallback: In ppc['branch'] transformers follow lines in branch array -> take n_lines from net.line
+    # Fallback: positional index within net.trafo
+    try:
+        pos = list(net.trafo.index).index(trafo_idx)
+    except ValueError:
+        return None
     n_lines = len(net.line) if 'line' in net else 0
-    ppc_idx = n_lines + trafo_idx
+    ppc_idx = n_lines + pos
     if ppc_idx >= len(net._ppc['branch']):
         return None
     return ppc_idx

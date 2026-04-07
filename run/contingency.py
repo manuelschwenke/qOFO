@@ -6,6 +6,10 @@ run/contingency.py
 Contingency application helper for the cascaded TSO-DSO OFO simulation.
 """
 
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from .records import ContingencyEvent
 
 
@@ -50,7 +54,11 @@ def _apply_contingency(
         )
 
     if verbose > 0:
+        if ev.time_s is not None:
+            t_label = f"t={ev.time_s:.0f}s"
+        else:
+            t_label = f"min {ev.minute}"
         print(f"\n  {'=' * 60}")
-        print(f"  *** CONTINGENCY min {ev.minute}: {desc}")
+        print(f"  *** CONTINGENCY {t_label}: {desc}")
         print(f"  {'=' * 60}\n")
     return desc, short_label

@@ -10,7 +10,7 @@ work via the backward-compatibility shim at the project root.
 """
 
 from .contingency import _apply_contingency
-from .helpers import _build_Gw, _network_state, _sgen_at_bus, print_summary
+from .helpers import _build_Gw, _network_state, _sgen_at_bus, build_der_mapping, print_summary
 from .plant_io import _apply_dso, _apply_tso
 from .records import (
     A2S,
@@ -19,7 +19,7 @@ from .records import (
     ContingencyEvent,
     IterationRecord,
 )
-from .run_cascade import main, run_cascade
+from .run_S_TSO_M_DSO import main, run_cascade
 
 __all__ = [
     # lambdas
@@ -38,6 +38,7 @@ __all__ = [
     "_network_state",
     "_sgen_at_bus",
     "_build_Gw",
+    "build_der_mapping",
     # summary / entry-point
     "print_summary",
     "run_cascade",

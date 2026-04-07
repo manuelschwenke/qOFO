@@ -213,9 +213,15 @@ def _write_summary(
     a(f"  Date:         {datetime.now():%Y-%m-%d %H:%M:%S}")
     a(f"  V setpoint TSO: {config.v_setpoint_pu:.3f} p.u.")
     a(f"  V setpoint DSO: {config.effective_dso_v_setpoint_pu:.3f} p.u.")
-    a(f"  Duration:     {config.n_minutes} min  ({config.n_minutes/60:.1f} h)")
-    a(f"  TSO period:   {config.tso_period_min} min")
-    a(f"  DSO period:   {config.dso_period_min} min")
+    total_s = config.effective_n_seconds
+    if config.uses_sub_minute_timing:
+        a(f"  Duration:     {total_s} s  ({total_s/60:.1f} min)")
+        a(f"  TSO period:   {config.effective_tso_period_s} s")
+        a(f"  DSO period:   {config.effective_dso_period_s} s")
+    else:
+        a(f"  Duration:     {total_s // 60} min  ({total_s/3600:.1f} h)")
+        a(f"  TSO period:   {config.tso_period_min} min")
+        a(f"  DSO period:   {config.dso_period_min} min")
     a(f"  Profiles:     {'ON' if config.use_profiles else 'OFF'}"
       f"  ({os.path.basename(config.profiles_csv)})")
     a(f"  Start time:   {config.start_time:%Y-%m-%d %H:%M}")
@@ -267,15 +273,20 @@ def _write_summary(
     a(f"  Enabled:     {config.enable_reserve_observer}")
     a(f"  Threshold:   {config.reserve_q_threshold_mvar} Mvar")
     a(f"  Release:     {config.reserve_q_release_mvar} Mvar")
-    a(f"  Cooldown:    {config.reserve_cooldown_min} min")
+    a(f"  Cooldown:    {config.effective_reserve_cooldown_s:.0f} s  ({config.reserve_cooldown_min} min)")
     a("")
 
     # Contingencies
     if config.contingencies:
         a("  ── Contingencies ──")
         for c in config.contingencies:
-            a(f"  min {c.minute:4d}: {c.action.upper()} "
-              f"{c.element_type} {c.element_index}")
+            t = c.effective_time_s
+            if t % 60 == 0:
+                a(f"  min {int(t // 60):4d}: {c.action.upper()} "
+                  f"{c.element_type} {c.element_index}")
+            else:
+                a(f"  t={t:.0f}s: {c.action.upper()} "
+                  f"{c.element_type} {c.element_index}")
         a("")
 
     # Final state

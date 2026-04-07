@@ -1651,7 +1651,7 @@ def main() -> None:
     cfg = MultiTSOConfig(
         n_total_s=60.0 * 720,      # 720-minute simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
-        dso_period_s=20.0 * 1,    # DSO every 30 seconds
+        dso_period_s=20.0 * 1,    # DSO every 20 seconds
         alpha={1: 0.01, 2: 0.01, 3: 0.01},
         dso_alpha=0.1,
         g_v=150000.0,

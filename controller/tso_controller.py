@@ -43,6 +43,7 @@ Author: Manuel Schwenke
 Date: 2025-02-06
 """
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict
 import numpy as np
@@ -56,6 +57,7 @@ from controller.base_controller import (
 from core.network_state import NetworkState
 from core.measurement import Measurement
 from core.actuator_bounds import ActuatorBounds
+from core.der_mapping import DERMapping
 from core.message import SetpointMessage, CapabilityMessage
 from sensitivity.jacobian import JacobianSensitivities
 from sensitivity.sensitivity_updater import SensitivityUpdater
@@ -123,15 +125,27 @@ class TSOControllerConfig:
     gen_indices: List[int] = field(default_factory=list)
     gen_bus_indices: List[int] = field(default_factory=list)
     gen_vm_min_pu: float = 0.95
-    gen_vm_max_pu: float = 1.10
+    gen_vm_max_pu: float = 1.05
 
-    k_t_avt: float = 1.0
+    k_t_avt: float = 0.0
     """Achieved-Value Tracking factor for PCC-Q reset.
     0.0 = no reset (current behaviour), 1.0 = full reset (recommended).
     Blends: u_pcc <- (1 - k_t) * u_cmd + k_t * q_measured."""
 
+    der_mapping: Optional[DERMapping] = None
+    """Per-DER mapping for individual sgen-level control.  When
+    provided, enables per-DER decision variables in the MIQP
+    and factorises the sensitivity matrix as H_der = H_bus @ E.
+    If None, the controller uses the legacy sgen-index-based control."""
+
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
+        # When a DER mapping is provided, derive der_indices from it
+        if self.der_mapping is not None:
+            object.__setattr__(
+                self, "der_indices",
+                list(self.der_mapping.sgen_indices),
+            )
         if len(self.pcc_trafo_indices) != len(self.pcc_dso_controller_ids):
             raise ValueError(
                 f"pcc_trafo_indices length ({len(self.pcc_trafo_indices)}) "
@@ -251,8 +265,8 @@ class TSOController(BaseOFOController):
         # Initialise PCC capability bounds to large symmetric range
         # until DSO controllers report actual capabilities
         n_pcc = len(config.pcc_trafo_indices)
-        self.pcc_capability_min_mvar = np.full(n_pcc, -1E6)
-        self.pcc_capability_max_mvar = np.full(n_pcc, +1E6)
+        self.pcc_capability_min_mvar = np.full(n_pcc, -1E-6)
+        self.pcc_capability_max_mvar = np.full(n_pcc, +1E-6)
 
         # Cache for the sensitivity matrix
         self._H_cache: Optional[NDArray[np.float64]] = None
@@ -329,23 +343,34 @@ class TSOController(BaseOFOController):
                 "Controller not initialised. Call initialise() first."
             )
 
-        n_der = len(self.config.der_indices)
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
 
         # PCC setpoint values sit after the DER entries in u
         q_pcc_setpoints = self._u_current[n_der:n_der + n_pcc]
 
-        messages: List[SetpointMessage] = []
+        # Group PCC trafos by DSO ID (each DSO may have multiple PCC trafos)
+        dso_trafos: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
         for i, dso_id in enumerate(self.config.pcc_dso_controller_ids):
+            dso_trafos[dso_id].append((self.config.pcc_trafo_indices[i], i))
+
+        messages: List[SetpointMessage] = []
+        for dso_id, trafo_pairs in dso_trafos.items():
+            trafo_indices = [t for t, _ in trafo_pairs]
+            q_vals = [float(q_pcc_setpoints[idx]) for _, idx in trafo_pairs]
             msg = SetpointMessage(
                 source_controller_id=self.controller_id,
                 target_controller_id=dso_id,
                 iteration=self.iteration,
                 interface_transformer_indices=np.array(
-                    [self.config.pcc_trafo_indices[i]], dtype=np.int64
+                    trafo_indices, dtype=np.int64
                 ),
                 q_setpoints_mvar=np.array(
-                    [q_pcc_setpoints[i]], dtype=np.float64
+                    q_vals, dtype=np.float64
                 ),
             )
             messages.append(msg)
@@ -380,13 +405,28 @@ class TSOController(BaseOFOController):
     # Implementation of abstract methods
     # =========================================================================
 
+    def _get_der_mapping(self) -> Optional[DERMapping]:
+        """Return the DER mapping from config."""
+        return self.config.der_mapping
+
+    def _get_n_der_bus(self) -> int:
+        """Number of unique DER bus columns in H_bus."""
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            return mapping.n_unique_bus
+        return len(self.config.der_indices)
+
     def _get_control_structure(self) -> Tuple[int, int, List[int]]:
         """
         Define the control variable structure.
 
         Ordering: [ Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt ]
         """
-        n_der = len(self.config.der_indices)
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -404,7 +444,11 @@ class TSOController(BaseOFOController):
         measurement: Measurement,
     ) -> NDArray[np.float64]:
         """Extract current control values from measurements."""
-        n_der = len(self.config.der_indices)
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -415,14 +459,24 @@ class TSOController(BaseOFOController):
         idx = 0
 
         # --- Transmission-connected DER Q setpoints ---
-        for der_idx in self.config.der_indices:
-            meas_idx = np.where(measurement.der_indices == der_idx)[0]
-            if len(meas_idx) == 0:
-                raise ValueError(
-                    f"DER {der_idx} not found in measurement.der_indices"
-                )
-            u[idx] = float(measurement.der_q_mvar[meas_idx[0]])
-            idx += 1
+        if mapping is not None:
+            for sgen_idx in mapping.sgen_indices:
+                meas_idx = np.where(measurement.der_indices == sgen_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(
+                        f"DER sgen {sgen_idx} not found in measurement"
+                    )
+                u[idx] = float(measurement.der_q_mvar[meas_idx[0]])
+                idx += 1
+        else:
+            for der_idx in self.config.der_indices:
+                meas_idx = np.where(measurement.der_indices == der_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(
+                        f"DER {der_idx} not found in measurement.der_indices"
+                    )
+                u[idx] = float(measurement.der_q_mvar[meas_idx[0]])
+                idx += 1
 
         # --- PCC reactive power as initial setpoints ---
         for trafo_idx in self.config.pcc_trafo_indices:
@@ -537,8 +591,19 @@ class TSOController(BaseOFOController):
 
         return p_current
 
+    def _extract_trafo_reactive_power(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """
+        Extract current trafo ractive power flow for capability calculation.
+        """
+        q_current = measurement.interface_q_hv_side_mvar.copy()
+        return q_current
+
     def _compute_input_bounds(
         self,
+        tso_dso_interface_q_current: NDArray[np.float64],
         der_p_current: NDArray[np.float64],
     ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
         """
@@ -557,7 +622,11 @@ class TSOController(BaseOFOController):
         Similarly, if Q_gen is near Q_min (underexcitation / stator limit),
         the lower V_gen bound is clamped to prevent further voltage decrease.
         """
-        n_der = len(self.config.der_indices)
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -574,8 +643,12 @@ class TSOController(BaseOFOController):
         u_upper[:n_der] = q_max
 
         # --- PCC setpoint bounds (from DSO capability messages) ---
-        u_lower[n_der:n_der + n_pcc] = self.pcc_capability_min_mvar
-        u_upper[n_der:n_der + n_pcc] = self.pcc_capability_max_mvar
+        u_lower[n_der:n_der + n_pcc] = tso_dso_interface_q_current + self.pcc_capability_min_mvar
+        u_upper[n_der:n_der + n_pcc] = tso_dso_interface_q_current + self.pcc_capability_max_mvar
+
+        # DEBUG
+        # print(f'ppc capability min: {u_lower[n_der:n_der + n_pcc]}')
+        # print(f'pcc capability max: {u_upper[n_der:n_der + n_pcc]}')
 
         # --- AVR setpoint bounds ---
         avr_start = n_der + n_pcc
@@ -715,13 +788,11 @@ class TSOController(BaseOFOController):
         n_total = self.n_controls
         grad_f = np.zeros(n_total)
 
-        n_der = len(self.config.der_indices)
-        n_pcc = len(self.config.pcc_trafo_indices)
         n_v = len(self.config.voltage_bus_indices)
 
         # --- Component 1: DER usage regularisation ---
         # Handled implicitly by g_u in build_miqp_problem; no explicit
-        # gradient needed here (build_miqp_problem adds 2·α·g_u·u_current).
+        # gradient needed here (build_miqp_problem adds 2*alpha*g_u*u_current).
 
         # --- Component 2: Voltage-schedule tracking ---
         if self.config.v_setpoints_pu is not None:
@@ -738,11 +809,13 @@ class TSOController(BaseOFOController):
             v_error = v_current - self.config.v_setpoints_pu
 
             # Map voltage error to control space via sensitivities
-            H = self._build_sensitivity_matrix()
+            # Use expanded H (per-DER) for correct gradient dimensions
+            H_bus = self._build_sensitivity_matrix()
+            H = self._expand_H_to_der_level(H_bus)
             # Voltage outputs are the first n_v rows of H
             dV_du = H[:n_v, :]
 
-            # ∇f contribution: 2 · g_v · (V - V_set)^T · ∂V/∂u
+            # grad_f contribution: 2 * g_v * (V - V_set)^T * dV/du
             grad_f += 2.0 * self.config.g_v * (v_error @ dV_du)
 
         return grad_f
@@ -771,7 +844,14 @@ class TSOController(BaseOFOController):
         if self._H_cache is not None:
             return self._H_cache
 
-        n_der = len(self.config.der_indices)
+        # When a DER mapping is active, the H matrix is built at bus-level
+        # (one column per unique DER bus).  The base class _expand_H_to_der_level
+        # will expand to per-DER via the E matrix.
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der_bus = mapping.n_unique_bus
+        else:
+            n_der_bus = len(self.config.der_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_gen = len(self.config.gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
@@ -779,7 +859,7 @@ class TSOController(BaseOFOController):
         n_v = len(self.config.voltage_bus_indices)
         n_i = len(self.config.current_line_indices)
 
-        n_controls = n_der + n_pcc + n_gen + n_oltc + n_shunt
+        n_controls = n_der_bus + n_pcc + n_gen + n_oltc + n_shunt
         n_outputs = n_v + n_i  # Q_PCC rows removed
 
         H = np.zeros((n_outputs, n_controls), dtype=np.float64)
@@ -787,9 +867,13 @@ class TSOController(BaseOFOController):
         # --- Physical sensitivities for DER / OLTC / shunt columns ---
         net = self.sensitivities.net
 
-        der_bus_indices = [
-            int(net.sgen.at[s, 'bus']) for s in self.config.der_indices
-        ]
+        if mapping is not None:
+            der_bus_indices = mapping.unique_bus_indices
+        else:
+            der_bus_indices = [
+                int(net.sgen.at[s, 'bus']) for s in self.config.der_indices
+            ]
+        n_der = len(der_bus_indices)  # alias for column indexing below
 
         pcc_in_trafo = all(
             t in net.trafo.index for t in self.config.pcc_trafo_indices
@@ -820,30 +904,45 @@ class TSOController(BaseOFOController):
         elif pcc_in_trafo3w:
             kw["trafo3w_indices"] = self.config.pcc_trafo_indices
 
-        H_physical, mappings = self.sensitivities.build_sensitivity_matrix_H(
-            **kw,
+        # build_sensitivity_matrix_H requires at least one physical input
+        # (DER / OLTC / shunt).  When all are absent (e.g. add_tso_ders=False
+        # and no machine OLTCs), skip the call — H_physical is all-zero.
+        has_physical_inputs = (
+            len(der_bus_indices) > 0
+            or len(self.config.oltc_trafo_indices) > 0
+            or len(self.config.shunt_bus_indices) > 0
         )
+        mappings: dict = {}
 
-        # H_physical columns: [DER (n_der), OLTC (n_oltc), shunt (n_shunt)]
-        # H_physical rows (when PCC trafos present):
-        #   [Q_trafo (n_pcc), V_bus (n_v), I_line (n_i)]
-        # H_physical rows (when no PCC trafos):
-        #   [V_bus (n_v), I_line (n_i)]
-        #
-        # Target H rows:      [V_bus (n_v), I_line (n_i)]
-        # Target H columns:   [DER (n_der), PCC_set (n_pcc), V_gen (n_gen),
-        #                       OLTC (n_oltc), shunt (n_shunt)]
+        if has_physical_inputs:
+            H_physical, mappings = self.sensitivities.build_sensitivity_matrix_H(
+                **kw,
+            )
 
-        has_pcc_rows = pcc_in_trafo or pcc_in_trafo3w
-        n_q_phys = n_pcc if has_pcc_rows else 0
+            # H_physical columns: [DER (n_der), OLTC (n_oltc), shunt (n_shunt)]
+            # H_physical rows (when PCC trafos present):
+            #   [Q_trafo (n_pcc), V_bus (n_v), I_line (n_i)]
+            # H_physical rows (when no PCC trafos):
+            #   [V_bus (n_v), I_line (n_i)]
+            #
+            # Target H rows:      [V_bus (n_v), I_line (n_i)]
+            # Target H columns:   [DER (n_der), PCC_set (n_pcc), V_gen (n_gen),
+            #                       OLTC (n_oltc), shunt (n_shunt)]
 
-        # H_physical row ranges (skip Q_trafo rows):
-        #   V_bus   : n_q_phys       .. n_q_phys + n_v - 1
-        #   I_line  : n_q_phys + n_v .. end
+            has_pcc_rows = pcc_in_trafo or pcc_in_trafo3w
+            n_q_phys = n_pcc if has_pcc_rows else 0
+            n_i_copy = 0
 
-        # DER columns → target column 0..n_der-1
-        H[:n_v, :n_der] = H_physical[n_q_phys:n_q_phys + n_v, :n_der]
-        H[n_v:, :n_der] = H_physical[n_q_phys + n_v:, :n_der]
+            # H_physical row ranges (skip Q_trafo rows):
+            #   V_bus   : n_q_phys       .. n_q_phys + n_v - 1
+            #   I_line  : n_q_phys + n_v .. end
+
+            # DER columns -> target column 0..n_der-1
+            n_i_phys = H_physical.shape[0] - n_q_phys - n_v
+            n_i_copy = min(n_i, n_i_phys)
+            H[:n_v, :n_der] = H_physical[n_q_phys:n_q_phys + n_v, :n_der]
+            if n_i_copy > 0:
+                H[n_v:n_v + n_i_copy, :n_der] = H_physical[n_q_phys + n_v:n_q_phys + n_v + n_i_copy, :n_der]
 
         # --- Q_PCC rows removed from H ---
         # Previously, Q_PCC occupied rows H[n_v:n_v+n_pcc, :].
@@ -894,25 +993,28 @@ class TSOController(BaseOFOController):
                         for i_line in range(len(line_map)):
                             H[n_v + i_line, col] = -dI_dQ_pcc[i_line, j_jac]
 
-        # OLTC columns → target column n_der+n_pcc+n_gen..n_der+n_pcc+n_gen+n_oltc-1
-        col_oltc_phys = slice(n_der, n_der + n_oltc)
-        col_oltc_target = slice(n_der + n_pcc + n_gen, n_der + n_pcc + n_gen + n_oltc)
-        H[:n_v, col_oltc_target] = H_physical[
-            n_q_phys:n_q_phys + n_v, col_oltc_phys
-        ]
-        H[n_v:, col_oltc_target] = H_physical[
-            n_q_phys + n_v:, col_oltc_phys
-        ]
+        if has_physical_inputs:
+            # OLTC columns → target column n_der+n_pcc+n_gen..n_der+n_pcc+n_gen+n_oltc-1
+            col_oltc_phys = slice(n_der, n_der + n_oltc)
+            col_oltc_target = slice(n_der + n_pcc + n_gen, n_der + n_pcc + n_gen + n_oltc)
+            H[:n_v, col_oltc_target] = H_physical[
+                n_q_phys:n_q_phys + n_v, col_oltc_phys
+            ]
+            if n_i_copy > 0:
+                H[n_v:n_v + n_i_copy, col_oltc_target] = H_physical[
+                    n_q_phys + n_v:n_q_phys + n_v + n_i_copy, col_oltc_phys
+                ]
 
-        # Shunt columns → target column n_der+n_pcc+n_gen+n_oltc..end
-        col_sh_phys = slice(n_der + n_oltc, n_der + n_oltc + n_shunt)
-        col_sh_target = slice(n_der + n_pcc + n_gen + n_oltc, n_controls)
-        H[:n_v, col_sh_target] = H_physical[
-            n_q_phys:n_q_phys + n_v, col_sh_phys
-        ]
-        H[n_v:, col_sh_target] = H_physical[
-            n_q_phys + n_v:, col_sh_phys
-        ]
+            # Shunt columns -> target column n_der+n_pcc+n_gen+n_oltc..end
+            col_sh_phys = slice(n_der + n_oltc, n_der + n_oltc + n_shunt)
+            col_sh_target = slice(n_der + n_pcc + n_gen + n_oltc, n_controls)
+            H[:n_v, col_sh_target] = H_physical[
+                n_q_phys:n_q_phys + n_v, col_sh_phys
+            ]
+            if n_i_copy > 0:
+                H[n_v:n_v + n_i_copy, col_sh_target] = H_physical[
+                    n_q_phys + n_v:n_q_phys + n_v + n_i_copy, col_sh_phys
+                ]
 
         # --- AVR columns: ∂V_obs / ∂V_gen from Jacobian-based sensitivity ---
         avr_start = n_der + n_pcc
@@ -951,6 +1053,15 @@ class TSOController(BaseOFOController):
         # compute_dQtrafo3w_hv_dVgen_matrix() is available if Q_PCC
         # rows are re-enabled in the future.
 
+        if not np.all(np.isfinite(H)):
+            nan_rows, nan_cols = np.where(~np.isfinite(H))
+            raise ValueError(
+                f"[TSOController {self.controller_id}] Non-finite entries in "
+                f"sensitivity matrix H at (row, col): "
+                f"{list(zip(nan_rows.tolist(), nan_cols.tolist()))}. "
+                f"Check Jacobian computation for buses/lines in the config."
+            )
+
         self._H_cache = H
         self._H_mappings = mappings
 
@@ -984,7 +1095,11 @@ class TSOController(BaseOFOController):
         if k_t == 0.0:
             return
 
-        n_der = len(self.config.der_indices)
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
         pcc_slice = slice(n_der, n_der + n_pcc)
 
         # Extract measured Q at each PCC interface

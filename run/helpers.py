@@ -5,11 +5,15 @@ run/helpers.py
 ==============
 Miscellaneous helper functions used by the cascade simulation loop.
 
-Moved here from the root ``run_cascade.py`` as part of the ``run/`` package
-refactor.  The root ``run_cascade.py`` is now a backward-compatibility shim.
+Moved here from the root ``run_S_TSO_M_DSO.py`` as part of the ``run/`` package
+refactor.  The root ``run_S_TSO_M_DSO.py`` is now a backward-compatibility shim.
 """
 
 from __future__ import annotations
+
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import time
 from typing import List
@@ -18,6 +22,7 @@ import numpy as np
 import pandapower as pp
 
 from core.network_state import NetworkState
+from core.der_mapping import DERMapping
 
 from .records import IterationRecord
 
@@ -74,6 +79,52 @@ def _build_Gw(diag_vec, n_pre_oltc, n_oltc, cross_weight):
     # Add g_cross · 𝟏𝟏ᵀ to the OLTC sub-block (all elements)
     G[i0:i1, i0:i1] += cross_weight
     return G
+
+
+def build_der_mapping(
+    net: pp.pandapowerNet,
+    sgen_indices: List[int],
+    weights: np.ndarray | None = None,
+) -> DERMapping | None:
+    """
+    Build a DERMapping from a list of sgen indices and the pandapower network.
+
+    Parameters
+    ----------
+    net : pp.pandapowerNet
+        The pandapower network containing the sgen table.
+    sgen_indices : List[int]
+        Sgen indices to include in the mapping.
+    weights : NDArray or None
+        Per-DER cost weights.  If None, uniform weights (all ones) are used.
+
+    Returns
+    -------
+    DERMapping or None
+        The mapping, or None if sgen_indices is empty.
+    """
+    if not sgen_indices:
+        return None
+
+    bus_indices = [int(net.sgen.at[s, "bus"]) for s in sgen_indices]
+    s_rated = np.array(
+        [float(net.sgen.at[s, "sn_mva"]) for s in sgen_indices],
+        dtype=np.float64,
+    )
+    p_max = np.array(
+        [float(net.sgen.at[s, "p_mw"]) for s in sgen_indices],
+        dtype=np.float64,
+    )
+    if weights is None:
+        weights = np.ones(len(sgen_indices), dtype=np.float64)
+
+    return DERMapping(
+        sgen_indices=tuple(sgen_indices),
+        bus_indices=tuple(bus_indices),
+        s_rated_mva=s_rated,
+        p_max_mw=p_max,
+        weights=weights,
+    )
 
 
 def print_summary(v_set: float, log: List[IterationRecord]):

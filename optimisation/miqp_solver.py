@@ -469,6 +469,8 @@ class MIQPSolver:
         MIQPResult
             The solution result.
         """
+        _assert_finite_problem_data(problem, solver_name or 'MIQP')
+
         n_continuous = problem.n_continuous
         n_integer = problem.n_integer
         n_total = problem.n_total
@@ -590,6 +592,34 @@ class MIQPSolver:
         )
 
 
+def _assert_finite_problem_data(problem: "MIQPProblem", solver_label: str) -> None:
+    """Assert that all numerical arrays in the MIQP problem are finite.
+    Raises ValueError with the offending field name and first non-finite
+    index if any NaN or Inf is found. This check runs before CVXPY sees
+    the data so that the error is traceable."""
+    fields = {
+        'Gw':       problem.G_w,
+        'Gz':       problem.G_z,
+        'gradf':    problem.grad_f,
+        'Htilde':   problem.H_tilde,
+        'ucurrent': problem.u_current,
+        'ulower':   problem.u_lower,
+        'uupper':   problem.u_upper,
+        'ycurrent': problem.y_current,
+        'ylower':   problem.y_lower,
+        'yupper':   problem.y_upper,
+    }
+    for name, arr in fields.items():
+        arr_np = np.asarray(arr, dtype=np.float64)
+        if not np.isfinite(arr_np).all():
+            bad = np.argwhere(~np.isfinite(arr_np))
+            raise ValueError(
+                f"[{solver_label}] NaN or Inf in MIQP problem field '{name}' "
+                f"at indices {bad[:5].tolist()} "
+                f"(showing first 5 of {len(bad)})."
+            )
+
+
 def build_miqp_problem(
     alpha: float,
     u_current: NDArray[np.float64],
@@ -604,6 +634,8 @@ def build_miqp_problem(
     g_u: Union[float, NDArray[np.float64]],
     g_z: Union[float, NDArray[np.float64]],
     integer_indices: Optional[List[int]] = None,
+    g_w_vector: Optional[NDArray[np.float64]] = None,
+    g_u_vector: Optional[NDArray[np.float64]] = None,
 ) -> MIQPProblem:
     """
     Build an MIQP problem from OFO controller data.
@@ -652,6 +684,14 @@ def build_miqp_problem(
     integer_indices : List[int], optional
         Indices of integer variables within u_current. If None, all
         variables are treated as continuous.
+    g_w_vector : NDArray[np.float64], optional
+        Per-variable change weights of length ``n_total``.  When
+        provided, overrides ``g_w`` for constructing the diagonal of
+        ``G_w``.  This enables per-DER cost differentiation.
+    g_u_vector : NDArray[np.float64], optional
+        Per-variable usage (regularisation) weights of length
+        ``n_total``.  When provided, overrides ``g_u`` for the
+        regularisation diagonal.
 
     Returns
     -------
@@ -713,8 +753,30 @@ def build_miqp_problem(
     # Integer variables:     w_i = Δu        (direct state change, no α)
     #   Quadratic: G_w_i = diag(g_w + g_u)   (no α² factor)
     #   Linear:    grad_i = grad_f + 2 · g_u · u  (no α factor)
-    g_w_arr = np.asarray(g_w, dtype=np.float64)
-    g_u_vec = np.broadcast_to(np.asarray(g_u, dtype=np.float64), (n_total,)).copy()
+
+    # --- Per-variable weight overrides (DER mapping) ---
+    # When g_w_vector is provided, it overrides g_w for diagonal construction.
+    # This allows per-DER cost differentiation while remaining compatible
+    # with the existing scalar / array / matrix g_w interface.
+    if g_w_vector is not None:
+        if len(g_w_vector) != n_total:
+            raise ValueError(
+                f"g_w_vector length {len(g_w_vector)} does not match "
+                f"n_total {n_total}"
+            )
+        g_w_arr = np.asarray(g_w_vector, dtype=np.float64)
+    else:
+        g_w_arr = np.asarray(g_w, dtype=np.float64)
+
+    if g_u_vector is not None:
+        if len(g_u_vector) != n_total:
+            raise ValueError(
+                f"g_u_vector length {len(g_u_vector)} does not match "
+                f"n_total {n_total}"
+            )
+        g_u_vec = np.asarray(g_u_vector, dtype=np.float64)
+    else:
+        g_u_vec = np.broadcast_to(np.asarray(g_u, dtype=np.float64), (n_total,)).copy()
 
     continuous_mask = np.ones(n_total, dtype=bool)
     for idx in integer_indices:

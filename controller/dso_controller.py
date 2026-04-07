@@ -37,6 +37,7 @@ from controller.base_controller import (
 from core.network_state import NetworkState
 from core.measurement import Measurement
 from core.actuator_bounds import ActuatorBounds
+from core.der_mapping import DERMapping
 from core.message import SetpointMessage, CapabilityMessage
 from sensitivity.jacobian import JacobianSensitivities
 from sensitivity.sensitivity_updater import SensitivityUpdater
@@ -118,9 +119,20 @@ class DSOControllerConfig:
     buildup when Q-capability limits are hit."""
     v_setpoints_pu: Optional[NDArray[np.float64]] = None
     g_v: float = 1.0
+    der_mapping: Optional[DERMapping] = None
+    """Per-DER mapping for individual sgen-level control.  When
+    provided, enables per-DER decision variables in the MIQP
+    and factorises the sensitivity matrix as H_der = H_bus @ E.
+    If None, the controller uses the legacy sgen-index-based control."""
 
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
+        # When a DER mapping is provided, derive der_indices from it
+        if self.der_mapping is not None:
+            object.__setattr__(
+                self, "der_indices",
+                list(self.der_mapping.sgen_indices),
+            )
         if len(self.shunt_bus_indices) != len(self.shunt_q_steps_mvar):
             raise ValueError(
                 f"shunt_bus_indices length ({len(self.shunt_bus_indices)}) "
@@ -313,13 +325,18 @@ class DSOController(BaseOFOController):
         # Build sensitivity matrix if not cached
         if self._H_cache is None:
             self._build_sensitivity_matrix()
-        
-        # Extract ∂Q_interface/∂Q_DER from H matrix
+
+        # Extract dQ_interface/dQ_DER from H matrix (expanded to per-DER)
         # The first n_interfaces rows of H correspond to Q_interface outputs
         n_interfaces = len(self.config.interface_trafo_indices)
-        n_der = len(self.config.der_indices)
-        
-        dQ_interface_dQ_der = self._H_cache[:n_interfaces, :n_der]
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
+
+        H_expanded = self._expand_H_to_der_level(self._H_cache)
+        dQ_interface_dQ_der = H_expanded[:n_interfaces, :n_der]
         
         # Map DER capability to interface capability
         # Simple approach: sum contributions assuming independence
@@ -371,25 +388,48 @@ class DSOController(BaseOFOController):
 
         Builds the full H matrix on first call if not yet cached. Subsequent
         calls return the cached result without recomputation.
+
+        When a DER mapping is active, the returned matrix has per-DER
+        columns (expanded via H_bus @ E).
         """
         if self._H_cache is None:
             self._build_sensitivity_matrix()
         n_interfaces = len(self.config.interface_trafo_indices)
-        n_der = len(self.config.der_indices)
-        return self._H_cache[:n_interfaces, :n_der]
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
+        H_expanded = self._expand_H_to_der_level(self._H_cache)
+        return H_expanded[:n_interfaces, :n_der]
+
+    def _get_der_mapping(self) -> Optional[DERMapping]:
+        """Return the DER mapping from config."""
+        return self.config.der_mapping
+
+    def _get_n_der_bus(self) -> int:
+        """Number of unique DER bus columns in H_bus."""
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            return mapping.n_unique_bus
+        return len(self.config.der_indices)
 
     def _get_control_structure(self) -> Tuple[int, int, List[int]]:
         """Define the control variable structure."""
-        n_der = len(self.config.der_indices)
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
-        
+
         n_continuous = n_der
         n_integer = n_oltc + n_shunt
-        
+
         # Integer indices are after the continuous DER variables
         integer_indices = list(range(n_continuous, n_continuous + n_integer))
-        
+
         return n_continuous, n_integer, integer_indices
     
     def _extract_control_values(
@@ -397,35 +437,49 @@ class DSOController(BaseOFOController):
         measurement: Measurement,
     ) -> NDArray[np.float64]:
         """Extract current control values from measurements."""
-        n_der = len(self.config.der_indices)
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
         n_total = n_der + n_oltc + n_shunt
-        
+
         u = np.zeros(n_total)
-        
+
         # DER Q setpoints
-        for i, der_idx in enumerate(self.config.der_indices):
-            # Find DER in measurement by matching indices
-            meas_idx = np.where(measurement.der_indices == der_idx)[0]
-            if len(meas_idx) == 0:
-                raise ValueError(f"DER at bus {der_idx} not found in measurement")
-            u[i] = measurement.der_q_mvar[meas_idx[0]]
-        
+        if mapping is not None:
+            # Per-sgen extraction
+            for i, sgen_idx in enumerate(mapping.sgen_indices):
+                meas_idx = np.where(measurement.der_indices == sgen_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(
+                        f"DER sgen {sgen_idx} not found in measurement"
+                    )
+                u[i] = measurement.der_q_mvar[meas_idx[0]]
+        else:
+            # Legacy sgen-index extraction
+            for i, der_idx in enumerate(self.config.der_indices):
+                meas_idx = np.where(measurement.der_indices == der_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(f"DER {der_idx} not found in measurement")
+                u[i] = measurement.der_q_mvar[meas_idx[0]]
+
         # OLTC tap positions
         for i, oltc_idx in enumerate(self.config.oltc_trafo_indices):
             meas_idx = np.where(measurement.oltc_indices == oltc_idx)[0]
             if len(meas_idx) == 0:
                 raise ValueError(f"OLTC {oltc_idx} not found in measurement")
             u[n_der + i] = float(measurement.oltc_tap_positions[meas_idx[0]])
-        
+
         # Shunt states
         for i, shunt_idx in enumerate(self.config.shunt_bus_indices):
             meas_idx = np.where(measurement.shunt_indices == shunt_idx)[0]
             if len(meas_idx) == 0:
                 raise ValueError(f"Shunt at bus {shunt_idx} not found in measurement")
             u[n_der + n_oltc + i] = float(measurement.shunt_states[meas_idx[0]])
-        
+
         return u
     
     def _extract_outputs(
@@ -477,22 +531,36 @@ class DSOController(BaseOFOController):
     ) -> NDArray[np.float64]:
         """Extract DER active power from measurement for capability calculation."""
         p_current = measurement.der_p_mw.copy()
-
         return p_current
+
+    def _extract_trafo_reactive_power(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """
+        Extract current trafo ractive power flow for capability calculation.
+        """
+        q_current = measurement.interface_q_hv_side_mvar.copy()
+        return q_current
     
     def _compute_input_bounds(
         self,
+        tso_dso_interface_q_current: NDArray[np.float64],
         der_p_current: NDArray[np.float64],
     ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Compute operating-point-dependent input bounds."""
-        n_der = len(self.config.der_indices)
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
         n_total = n_der + n_oltc + n_shunt
-        
+
         u_lower = np.zeros(n_total)
         u_upper = np.zeros(n_total)
-        
+
         # DER Q bounds (P-dependent)
         q_min, q_max = self.actuator_bounds.compute_der_q_bounds(der_p_current)
         u_lower[:n_der] = q_min
@@ -575,8 +643,9 @@ class DSOController(BaseOFOController):
         n_total = self.n_controls
         grad_f = np.zeros(n_total)
 
-        # Get sensitivity matrix (use cache if available)
-        H = self._build_sensitivity_matrix()
+        # Get sensitivity matrix (bus-level) and expand to per-DER
+        H_bus = self._build_sensitivity_matrix()
+        H = self._expand_H_to_der_level(H_bus)
 
         n_interfaces = len(self.config.interface_trafo_indices)
         n_v = len(self.config.voltage_bus_indices)
@@ -658,9 +727,18 @@ class DSOController(BaseOFOController):
             int(net.sgen.at[s, "bus"]) for s in self.config.der_indices
         ]
 
+        # Deduplicate: the sensitivity builder works on unique buses.
+        # After building H we expand columns back to one per DER.
+        unique_buses: List[int] = []
+        der_to_unique: List[int] = []  # maps each DER to its unique-bus column
+        for b in der_bus_indices:
+            if b not in unique_buses:
+                unique_buses.append(b)
+            der_to_unique.append(unique_buses.index(b))
+
         # Build keyword arguments depending on transformer type
         kw = dict(
-            der_bus_indices=der_bus_indices,
+            der_bus_indices=unique_buses,
             observation_bus_indices=self.config.voltage_bus_indices,
             line_indices=self.config.current_line_indices,
             shunt_bus_indices=self.config.shunt_bus_indices,
@@ -677,6 +755,19 @@ class DSOController(BaseOFOController):
             kw["oltc_trafo_indices"] = self.config.oltc_trafo_indices
 
         H, mappings = self.sensitivities.build_sensitivity_matrix_H(**kw)
+
+        # When a DER mapping is active, keep H at bus-level (unique buses).
+        # The base class _expand_H_to_der_level will handle per-DER expansion
+        # via the E matrix.  When no mapping is active, use legacy column
+        # duplication so existing code keeps working.
+        if self.config.der_mapping is None:
+            if len(unique_buses) < len(der_bus_indices):
+                n_unique = len(unique_buses)
+                n_other = H.shape[1] - n_unique
+                H_der = H[:, :n_unique][:, der_to_unique]  # expand
+                H_rest = H[:, n_unique:]
+                H = np.hstack([H_der, H_rest])
+                mappings["der_buses"] = der_bus_indices
 
         self._H_cache = H
         self._H_mappings = mappings

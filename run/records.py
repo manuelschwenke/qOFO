@@ -4,11 +4,14 @@ run/records.py
 ==============
 Data-classes and helper lambdas shared across the cascade simulation.
 
-Moved here from the root ``run_cascade.py`` as part of the ``run/`` package
+Moved here from the root ``run_S_TSO_M_DSO.py`` as part of the ``run/`` package
 refactor.
 """
-
 from __future__ import annotations
+
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataclasses import dataclass
 from typing import List, Optional
@@ -55,13 +58,22 @@ class ContingencyEvent:
     element_index: int
     action: str = "trip"  # "trip" | "restore" | "setpoint_change"
     new_setpoint: float = np.nan
+    time_s: Optional[float] = None
+    """Event time in seconds.  Overrides ``minute`` when set."""
+
+    @property
+    def effective_time_s(self) -> float:
+        """Event time in seconds (``time_s`` if set, else ``minute * 60``)."""
+        return self.time_s if self.time_s is not None else self.minute * 60.0
 
 
 @dataclass
 class IterationRecord:
     minute: int
-    tso_active: bool
-    dso_active: bool
+    time_s: float = 0.0
+    """Simulation time in seconds for this record."""
+    tso_active: bool = False
+    dso_active: bool = False
     # TSO optimisation variables [Q_DER | Q_PCC_set | V_gen | s_OLTC | s_shunt]
     tso_q_der_mvar: Optional[NDArray[np.float64]] = None
     tso_q_pcc_set_mvar: Optional[NDArray[np.float64]] = None

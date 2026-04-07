@@ -328,7 +328,8 @@ class JacobianSensitivities:
                 der_bus_mapping.append(bus_idx)
         
         if not der_jacobian_cols:
-            raise ValueError("No valid DER buses found (all may be PV or slack).")
+            n_obs = len(obs_jacobian_rows) if obs_jacobian_rows else len(observation_bus_indices)
+            return np.zeros((n_obs, 0)), obs_bus_mapping, []
         
         # Extract submatrix from reduced Jacobian
         #            column
@@ -374,8 +375,12 @@ class JacobianSensitivities:
         bus_data = self.net._ppc['bus']
         Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
 
-        n_bus = bus_data.shape[0]
-        V_complex = bus_data[:, 7] * np.exp(1j * np.deg2rad(bus_data[:, 8]))
+        # Use the smaller of bus_data and Ybus dimensions.  Pandapower may
+        # create extra PPC buses (e.g. 3W trafo star points) that are in the
+        # bus array but not yet in Ybus if they were added after the Ybus was
+        # built.  Using Ybus.shape ensures we stay in bounds.
+        n_bus = min(bus_data.shape[0], Ybus.shape[0])
+        V_complex = bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
 
         k = gen_bus_ppc
         V_k = V_complex[k]
@@ -1425,8 +1430,8 @@ class JacobianSensitivities:
         # --- 1. Compute dx/dVk for the generator ---
         bus_data = self.net._ppc['bus']
         Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
-        n_bus = bus_data.shape[0]
-        V_complex = bus_data[:, 7] * np.exp(1j * np.deg2rad(bus_data[:, 8]))
+        n_bus = min(bus_data.shape[0], Ybus.shape[0])
+        V_complex = bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
 
         k = gen_bus_ppc
         Vm = np.abs(V_complex)
@@ -2224,8 +2229,8 @@ class JacobianSensitivities:
         # Run full sensitivity computation for this generator
         bus_data = self.net._ppc['bus']
         Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
-        n_bus = bus_data.shape[0]
-        V_complex = bus_data[:, 7] * np.exp(1j * np.deg2rad(bus_data[:, 8]))
+        n_bus = min(bus_data.shape[0], Ybus.shape[0])
+        V_complex = bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
 
         k = gen_bus_ppc
         V_k = V_complex[k]
@@ -2593,12 +2598,18 @@ class JacobianSensitivities:
                         )
                     except ValueError:
                         dQtr3w_col[i] = 0.0
-                # Branch current w.r.t. shunt
-                dI_col, _ = self.compute_dI_dQ_shunt(
-                    shunt_bus_idx=shunt_bus,
-                    line_indices=line_indices,
-                    q_step_mvar=q_step,
-                )
+                # Branch current w.r.t. shunt.
+                # compute_dI_dQ_shunt raises ValueError when line_indices is
+                # empty (no lines → der_map empty).  Skip gracefully: the I
+                # rows are zero-length anyway when there are no lines.
+                if line_indices:
+                    dI_col, _ = self.compute_dI_dQ_shunt(
+                        shunt_bus_idx=shunt_bus,
+                        line_indices=line_indices,
+                        q_step_mvar=q_step,
+                    )
+                else:
+                    dI_col = np.zeros(0, dtype=np.float64)
 
                 dV_dshunt_list.append(dV_col)
                 dQtr2w_dshunt_list.append(dQtr2w_col)

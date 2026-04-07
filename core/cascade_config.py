@@ -39,11 +39,11 @@ from controller.reserve_observer import ReserveObserverConfig
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  ContingencyEvent (re-exported for convenience — canonical definition
-#  remains in run_cascade.py so we avoid circular imports)
+#  remains in run_S_TSO_M_DSO.py so we avoid circular imports)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # We import ContingencyEvent lazily inside to_dict / from_dict to avoid
-# circular dependency with run_cascade.py.
+# circular dependency with run_S_TSO_M_DSO.py.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -74,13 +74,23 @@ class CascadeConfig:
     both controllers (backward-compatible behaviour)."""
 
     n_minutes: int = 120
-    """Total simulation duration [minutes]."""
+    """Total simulation duration [minutes].  Ignored when ``n_seconds`` is set."""
 
     tso_period_min: int = 3
-    """TSO controller fires every N minutes."""
+    """TSO controller fires every N minutes.  Ignored when ``tso_period_s`` is set."""
 
     dso_period_min: int = 1
-    """DSO controller fires every N minutes."""
+    """DSO controller fires every N minutes.  Ignored when ``dso_period_s`` is set."""
+
+    # ── Seconds-based timing overrides (take precedence over _min fields) ──
+    n_seconds: Optional[int] = None
+    """Total simulation duration [seconds].  Overrides ``n_minutes`` when set."""
+
+    tso_period_s: Optional[float] = None
+    """TSO controller period [seconds].  Overrides ``tso_period_min`` when set."""
+
+    dso_period_s: Optional[float] = None
+    """DSO controller period [seconds].  Overrides ``dso_period_min`` when set."""
 
     start_time: datetime = field(default_factory=lambda: datetime(2016, 6, 10, 0, 0))
     """Simulation start time (for profile lookup)."""
@@ -171,6 +181,19 @@ class CascadeConfig:
     gw_oltc_cross_dso: float = 0.0
     """OLTC cross-coupling weight for DSO.  0 = disabled."""
 
+    # ── Per-actuator overrides (optional vectors) ─────────────────────────
+    gw_tso_override: Optional[NDArray[np.float64]] = None
+    """Complete g_w vector for TSO. If set, overrides build_gw_tso_diag()."""
+
+    gw_dso_override: Optional[NDArray[np.float64]] = None
+    """Complete g_w vector for DSO. If set, overrides build_gw_dso_diag()."""
+
+    gu_tso_override: Optional[NDArray[np.float64]] = None
+    """Complete g_u vector for TSO."""
+
+    gu_dso_override: Optional[NDArray[np.float64]] = None
+    """Complete g_u vector for DSO."""
+
     # ── g_u usage penalties (per-actuator absolute level) ─────────────────
     gu_tso_q_der: float = 0.0
     """TSO DER Q usage regularisation (penalises |Q| level, not change)."""
@@ -210,8 +233,13 @@ class CascadeConfig:
     reserve_q_release_mvar: float = -40.0
     """DER Q contribution below which the engaged shunt may be released."""
 
-    reserve_cooldown_min: int = 3
-    """Minimum minutes between consecutive engage/release actions."""
+    reserve_cooldown_min: int = 15
+    """Minimum minutes between consecutive engage/release actions.
+    Ignored when ``reserve_cooldown_s`` is set."""
+
+    reserve_cooldown_s: Optional[float] = None
+    """Minimum seconds between consecutive engage/release actions.
+    Overrides ``reserve_cooldown_min`` when set."""
 
     # ── DSO OLTC initialisation ───────────────────────────────────────────
     dso_oltc_init_tol_pu: float = 0.01
@@ -236,6 +264,36 @@ class CascadeConfig:
         """Return the DSO voltage setpoint, falling back to ``v_setpoint_pu``."""
         return self.dso_v_setpoint_pu if self.dso_v_setpoint_pu is not None else self.v_setpoint_pu
 
+    @property
+    def effective_tso_period_s(self) -> float:
+        """TSO period in seconds (uses ``tso_period_s`` if set, else ``tso_period_min * 60``)."""
+        return self.tso_period_s if self.tso_period_s is not None else self.tso_period_min * 60.0
+
+    @property
+    def effective_dso_period_s(self) -> float:
+        """DSO period in seconds (uses ``dso_period_s`` if set, else ``dso_period_min * 60``)."""
+        return self.dso_period_s if self.dso_period_s is not None else self.dso_period_min * 60.0
+
+    @property
+    def effective_n_seconds(self) -> int:
+        """Total simulation duration in seconds."""
+        return self.n_seconds if self.n_seconds is not None else self.n_minutes * 60
+
+    @property
+    def effective_reserve_cooldown_s(self) -> float:
+        """Reserve observer cooldown in seconds."""
+        return self.reserve_cooldown_s if self.reserve_cooldown_s is not None else self.reserve_cooldown_min * 60.0
+
+    @property
+    def effective_sim_step_s(self) -> float:
+        """Simulation timestep in seconds (smallest controller period)."""
+        return min(self.effective_tso_period_s, self.effective_dso_period_s)
+
+    @property
+    def uses_sub_minute_timing(self) -> bool:
+        """True if any period is sub-minute (seconds-based)."""
+        return self.effective_sim_step_s < 60.0
+
     # ═══════════════════════════════════════════════════════════════════════
     #  Builder methods — construct runtime numpy vectors from scalar fields
     # ═══════════════════════════════════════════════════════════════════════
@@ -244,6 +302,8 @@ class CascadeConfig:
         self, n_der: int, n_pcc: int, n_gen: int, n_oltc: int, n_shunt: int,
     ) -> NDArray[np.float64]:
         """Build the TSO g_w diagonal vector: [Q_DER | Q_PCC | V_gen | s_OLTC | s_shunt]."""
+        if self.gw_tso_override is not None:
+            return self.gw_tso_override
         return np.concatenate([
             np.full(n_der,   self.gw_tso_q_der),
             np.full(n_pcc,   self.gw_tso_q_pcc),
@@ -256,6 +316,8 @@ class CascadeConfig:
         self, n_der: int, n_oltc: int, n_shunt: int,
     ) -> NDArray[np.float64]:
         """Build the DSO g_w diagonal vector: [Q_DER | s_OLTC | s_shunt]."""
+        if self.gw_dso_override is not None:
+            return self.gw_dso_override
         return np.concatenate([
             np.full(n_der,   self.gw_dso_q_der),
             np.full(n_oltc,  self.gw_dso_oltc),
@@ -266,6 +328,8 @@ class CascadeConfig:
         self, n_der: int, n_pcc: int, n_gen: int, n_oltc: int, n_shunt: int,
     ) -> NDArray[np.float64]:
         """Build the TSO g_u vector (usage/level penalties)."""
+        if self.gu_tso_override is not None:
+            return self.gu_tso_override
         return np.concatenate([
             np.full(n_der,   self.gu_tso_q_der),
             np.full(n_pcc,   self.gu_tso_q_pcc),
@@ -278,6 +342,8 @@ class CascadeConfig:
         self, n_der: int, n_oltc: int, n_shunt: int,
     ) -> NDArray[np.float64]:
         """Build the DSO g_u vector (usage/level penalties)."""
+        if self.gu_dso_override is not None:
+            return self.gu_dso_override
         return np.concatenate([
             np.full(n_der,   self.gu_dso_q_der),
             np.full(n_oltc,  self.gu_dso_oltc),
@@ -314,6 +380,7 @@ class CascadeConfig:
             q_release_mvar=self.reserve_q_release_mvar,
             shunt_q_steps_mvar=shunt_q_steps_mvar,
             cooldown_min=self.reserve_cooldown_min,
+            cooldown_s=self.reserve_cooldown_s,
         )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -335,6 +402,12 @@ class CascadeConfig:
         d["n_minutes"] = self.n_minutes
         d["tso_period_min"] = self.tso_period_min
         d["dso_period_min"] = self.dso_period_min
+        if self.n_seconds is not None:
+            d["n_seconds"] = self.n_seconds
+        if self.tso_period_s is not None:
+            d["tso_period_s"] = self.tso_period_s
+        if self.dso_period_s is not None:
+            d["dso_period_s"] = self.dso_period_s
         d["start_time"] = self.start_time.isoformat()
         d["profiles_csv"] = self.profiles_csv
         d["use_profiles"] = self.use_profiles
@@ -390,6 +463,8 @@ class CascadeConfig:
         d["reserve_q_threshold_mvar"] = self.reserve_q_threshold_mvar
         d["reserve_q_release_mvar"] = self.reserve_q_release_mvar
         d["reserve_cooldown_min"] = self.reserve_cooldown_min
+        if self.reserve_cooldown_s is not None:
+            d["reserve_cooldown_s"] = self.reserve_cooldown_s
 
         # DSO OLTC init
         d["dso_oltc_init_tol_pu"] = self.dso_oltc_init_tol_pu
@@ -404,6 +479,7 @@ class CascadeConfig:
                 "element_type": c.element_type,
                 "element_index": c.element_index,
                 "action": c.action,
+                **({"time_s": c.time_s} if c.time_s is not None else {}),
             }
             for c in self.contingencies
         ]
@@ -421,7 +497,7 @@ class CascadeConfig:
 
         Handles datetime parsing and ContingencyEvent reconstruction.
         """
-        from run_cascade import ContingencyEvent
+        from run.records import ContingencyEvent
 
         kwargs = dict(d)  # shallow copy
 

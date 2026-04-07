@@ -5,8 +5,8 @@ run/helpers.py
 ==============
 Miscellaneous helper functions used by the cascade simulation loop.
 
-Moved here from the root ``run_cascade.py`` as part of the ``run/`` package
-refactor.  The root ``run_cascade.py`` is now a backward-compatibility shim.
+Moved here from the root ``run_S_TSO_M_DSO.py`` as part of the ``run/`` package
+refactor.  The root ``run_S_TSO_M_DSO.py`` is now a backward-compatibility shim.
 """
 
 from __future__ import annotations

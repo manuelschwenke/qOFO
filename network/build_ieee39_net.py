@@ -355,6 +355,30 @@ def build_ieee39_net(
         machine_trafo_indices.append(int(tidx))
         machine_trafo_gen_map.append(g)
 
+    # ── Add controllable OLTCs for the network transformers at Bus 12 ───────
+    #
+    # Bus 12 (1-indexed = bus 11, 0-indexed) is connected to the backbone via
+    # two transformers: 11-10 (Bus 12-Bus 11) and 11-12 (Bus 12-Bus 13).
+    # Even though these are not machine step-up transformers, we make them
+    # controllable OLTCs to give the TSO more reactive-power control.
+    bus12_0idx = 11
+    mask_b12 = (net.trafo["lv_bus"] == bus12_0idx) | (net.trafo["hv_bus"] == bus12_0idx)
+    b12_trafos = net.trafo.index[mask_b12].tolist()
+
+    for tidx in b12_trafos:
+        if tidx in machine_trafo_indices:
+            continue
+        # Set OLTC tap parameters (standard ±9, 1.25 % step)
+        net.trafo.at[tidx, "tap_min"] = -9
+        net.trafo.at[tidx, "tap_max"] = 9
+        net.trafo.at[tidx, "tap_step_percent"] = 1.25
+        net.trafo.at[tidx, "tap_pos"] = 0
+        net.trafo.at[tidx, "tap_side"] = "hv"
+        net.trafo.at[tidx, "tap_neutral"] = 0
+
+        machine_trafo_indices.append(int(tidx))
+        machine_trafo_gen_map.append(-1)  # -1 indicates a network (non-machine) OLTC
+
     # Refresh gen_bus_indices after potential bus reassignments
     gen_bus_indices = [int(net.gen.at[g, "bus"]) for g in gen_indices]
 
@@ -525,16 +549,11 @@ _SUBNET_DEFS: List[dict] = [
          ieee_1idx=(14, 4, 3),   hv_buses=(3, 0, 8), scale=1.50, gen="mixed"),
     dict(net_id="DSO_3", zone=2,
          ieee_1idx=(11, 10, 13), hv_buses=(3, 0, 8), scale=0.75, gen="mixed"),
-    dict(net_id="DSO_4", zone=3,
-         ieee_1idx=(24, 21, 23), hv_buses=(3, 0, 8), scale=2.00, gen="pv"),
-    dict(net_id="DSO_5", zone=1,
-         ieee_1idx=(27, 26, 25), hv_buses=(3, 0, 8), scale=3.00, gen="wind"),
+    # dict(net_id="DSO_4", zone=3,
+    #      ieee_1idx=(24, 21, 23), hv_buses=(3, 0, 8), scale=2.00, gen="pv"),
+    # dict(net_id="DSO_5", zone=1,
+    #      ieee_1idx=(27, 26, 25), hv_buses=(3, 0, 8), scale=3.00, gen="wind"),
 ]
-
-# Bus 12 (1-indexed = bus 11, 0-indexed) is removed for DSO_3.
-# Its load is redistributed 50/50 to buses 11 and 13 (1-idx) = 10 and 12 (0-idx).
-_BUS_TO_REMOVE_0IDX = 11   # IEEE Bus 12 (1-indexed)
-_REDIST_BUSES_0IDX = (10, 12)  # buses 11 and 13 (1-indexed)
 
 
 def _get_load_at_bus(net: pp.pandapowerNet, bus: int) -> Tuple[float, float]:
@@ -959,8 +978,6 @@ def add_hv_networks(
 
     Special handling
     ----------------
-    * **Bus 12 (1-idx = bus 11, 0-idx)** is removed entirely.  Its load
-      (8.53 MW, 88 Mvar) is redistributed 50/50 to buses 11 and 13 (1-idx).
     * **DSO_3** coupling buses have no IEEE load after removal; its reference
       load is set to the average of DSO_1 and DSO_2 totals.
     * EHV profiles (HS4/HS5) are wired to all remaining IEEE 39-bus loads.
@@ -991,88 +1008,13 @@ def add_hv_networks(
             print(f"  {net_id}: P={p:.1f} MW, Q={q:.1f} Mvar")
 
     # =====================================================================
-    # 2. Remove IEEE Bus 12 (1-idx = bus 11, 0-idx)
-    # =====================================================================
-    bus_rm = _BUS_TO_REMOVE_0IDX  # bus 11 (0-idx)
-    p_rm, q_rm = _get_load_at_bus(net, bus_rm)
-
-    if verbose:
-        print(f"\n[add_hv_networks] Removing IEEE Bus 12 (0-idx {bus_rm}):")
-        print(f"  Load: {p_rm:.2f} MW + j{q_rm:.1f} Mvar")
-
-    # Redistribute load 50/50 to neighbouring buses
-    for rb in _REDIST_BUSES_0IDX:
-        mask = net.load["bus"] == rb
-        if mask.any():
-            for li in net.load.index[mask]:
-                net.load.at[li, "p_mw"] += p_rm / 2.0
-                net.load.at[li, "q_mvar"] += q_rm / 2.0
-        else:
-            # Create a small load if none exists
-            pp.create_load(
-                net, bus=rb,
-                p_mw=p_rm / 2.0, q_mvar=q_rm / 2.0,
-                sn_mva=max(abs(p_rm / 2.0), 1.0),
-                name=f"Redist_from_bus{bus_rm}",
-                subnet="TN",
-            )
-        if verbose:
-            print(f"  +{p_rm/2:.2f} MW, +{q_rm/2:.1f} Mvar -> bus {rb}")
-
-    # Delete loads at the removed bus
-    _delete_loads_at_bus(net, bus_rm)
-
-    # Delete lines connected to the removed bus
-    lines_to_drop = net.line.index[
-        (net.line["from_bus"] == bus_rm) | (net.line["to_bus"] == bus_rm)
-    ]
-    if verbose and len(lines_to_drop) > 0:
-        for li in lines_to_drop:
-            fb = int(net.line.at[li, "from_bus"])
-            tb = int(net.line.at[li, "to_bus"])
-            print(f"  Removing line {li}: bus {fb} -> bus {tb}")
-    net.line.drop(index=lines_to_drop, inplace=True)
-
-    # Delete trafos connected to the removed bus
-    trafos_to_drop = net.trafo.index[
-        (net.trafo["hv_bus"] == bus_rm) | (net.trafo["lv_bus"] == bus_rm)
-    ]
-    if verbose and len(trafos_to_drop) > 0:
-        for ti in trafos_to_drop:
-            hv = int(net.trafo.at[ti, "hv_bus"])
-            lv = int(net.trafo.at[ti, "lv_bus"])
-            print(f"  Removing trafo {ti}: bus {hv} -> bus {lv}")
-    net.trafo.drop(index=trafos_to_drop, inplace=True)
-
-    # Delete the bus itself
-    net.bus.drop(index=[bus_rm], inplace=True)
-
-    # Update TN metadata (bus 11 is no longer a TN bus)
-    tn_buses_updated = tuple(b for b in meta.tn_bus_indices if b != bus_rm)
-    tn_lines_updated = tuple(
-        li for li in meta.tn_line_indices if li not in set(lines_to_drop)
-    )
-
-    # Also remove any TSO DERs that were at the removed bus
-    tso_der_indices_updated = []
-    tso_der_buses_updated = []
-    for s, b in zip(meta.tso_der_indices, meta.tso_der_buses):
-        if b != bus_rm:
-            tso_der_indices_updated.append(s)
-            tso_der_buses_updated.append(b)
-
-    if verbose:
-        print(f"  Bus {bus_rm} removed from network.\n")
-
-    # =====================================================================
-    # 3. Delete IEEE loads at all coupling buses (they are replaced by HV nets)
+    # 2. Delete IEEE loads at all coupling buses (they are replaced by HV nets)
     # =====================================================================
     all_coupling_buses_0idx = set()
     for sdef in _SUBNET_DEFS:
         for b1 in sdef["ieee_1idx"]:
             b0 = b1 - 1
-            if b0 != bus_rm:  # already removed
-                all_coupling_buses_0idx.add(b0)
+            all_coupling_buses_0idx.add(b0)
 
     if verbose:
         print("[add_hv_networks] Deleting IEEE loads at coupling buses "
@@ -1084,6 +1026,10 @@ def add_hv_networks(
     # Also remove TN-DER sgens at coupling buses (they were placed before
     # HV sub-networks replaced the loads).
     sgens_to_remove = net.sgen.index[net.sgen["bus"].isin(all_coupling_buses_0idx)].tolist()
+    
+    tso_der_indices_updated = list(meta.tso_der_indices)
+    tso_der_buses_updated = list(meta.tso_der_buses)
+
     if sgens_to_remove:
         net.sgen.drop(index=sgens_to_remove, inplace=True)
         # Update meta to remove these sgens from tso_der lists
@@ -1091,11 +1037,11 @@ def add_hv_networks(
         tso_der_indices_updated = [s for s in tso_der_indices_updated if s not in removed_set]
         tso_der_buses_updated = [
             b for s, b in zip(meta.tso_der_indices, meta.tso_der_buses)
-            if s not in removed_set and b != bus_rm
+            if s not in removed_set
         ]
 
     # =====================================================================
-    # 4. Create 5 HV sub-networks
+    # 3. Create 5 HV sub-networks
     # =====================================================================
     hv_nets: List[HVNetworkInfo] = []
 
@@ -1123,26 +1069,26 @@ def add_hv_networks(
         hv_nets.append(hv)
 
     # =====================================================================
-    # 5. Wire EHV profiles to remaining IEEE 39-bus loads
+    # 4. Wire EHV profiles to remaining IEEE 39-bus loads
     # =====================================================================
     _wire_ehv_profiles(net)
 
     # =====================================================================
-    # 6. Power flow
+    # 5. Power flow
     # =====================================================================
 
     # Verify no stale trafo references
-    print(net.trafo[["hv_bus", "lv_bus", "vn_hv_kv", "vn_lv_kv"]])
+    #print(net.trafo[["hv_bus", "lv_bus", "vn_hv_kv", "vn_lv_kv"]])
     pp.runpp(net, run_control=False, calculate_voltage_angles=True, init='auto', max_iteration=50)
 
     # =====================================================================
-    # 7. Debug output
+    # 6. Debug output
     # =====================================================================
     if verbose:
         _print_hv_summary(hv_nets, net)
 
     # =====================================================================
-    # 8. Update metadata
+    # 7. Update metadata
     # =====================================================================
     all_dn_buses = sorted(
         int(b) for b in net.bus.index
@@ -1154,8 +1100,8 @@ def add_hv_networks(
     )
 
     return IEEE39NetworkMeta(
-        tn_bus_indices=tn_buses_updated,
-        tn_line_indices=tn_lines_updated,
+        tn_bus_indices=meta.tn_bus_indices,
+        tn_line_indices=meta.tn_line_indices,
         gen_indices=meta.gen_indices,
         gen_bus_indices=meta.gen_bus_indices,
         gen_grid_bus_indices=meta.gen_grid_bus_indices,

@@ -1049,6 +1049,7 @@ class ZoneStabilityResult:
     alpha_max_coupled:  float
     diagonally_dominant: bool
     warnings:           list = field(default_factory=list)
+    eigenvalue_diagnostics: list = field(default_factory=list)
 
     # ── Lyapunov / small-gain analysis (populated by analyse_multi_zone_stability) ──
     n_effective:        int = 0
@@ -1282,32 +1283,44 @@ def analyse_multi_zone_stability(
         # Filter near-zero eigenvalues (null-space of H^T Q H from co-located
         # DERs or inactive actuators).  These directions are neutrally stable
         # (σ* = 0) and must not dominate the contraction rate.
-        eig_tol = 1e-10 * max(lambda_max_all, 1e-14)
-        eig_ii = eig_ii_all[eig_ii_all > eig_tol]
-        n_effective = len(eig_ii)
+        #
+        # For multi-zone analysis, we distinguish between:
+        #   1. Null-space modes (lam < 1e-12 * lam_max) -> ignore
+        #   2. Slow modes (1e-12 < lam < 0.01 * lam_max) -> report as 'slow'
+        #   3. Active modes (lam > 0.01 * lam_max) -> determine rho_i
+        eig_tol_null = 1e-12 * max(lambda_max_all, 1e-14)
+        eig_tol_active = 0.01 * max(lambda_max_all, 1e-14)
+        
+        eig_ii_eff = eig_ii_all[eig_ii_all > eig_tol_null]
+        eig_ii_active = eig_ii_all[eig_ii_all > eig_tol_active]
+        
+        n_effective = len(eig_ii_eff)
+        n_active = len(eig_ii_active)
         n_null = len(eig_ii_all) - n_effective
 
+        if n_active == 0:
+            # Degenerate or only slow modes
+            lambda_max = lambda_max_all
+            lambda_min = float(eig_ii_eff[0]) if n_effective > 0 else 0.0
+            rho_i = 1.0
+        else:
+            lambda_max = float(eig_ii_active[-1])
+            lambda_min = float(eig_ii_active[0])
+            # Actual contraction rate at current α_i (active eigenvalues only)
+            rho_i = max(abs(1.0 - alpha_i * lam) for lam in eig_ii_active)
+
         if n_effective == 0:
-            # Degenerate: all eigenvalues are zero (H_ii is zero).
-            lambda_max = 0.0
-            lambda_min = 0.0
             kappa = 1.0
             alpha_max_local = np.inf
             alpha_i_opt = 0.0
             rho_i_opt = 0.0
-            rho_i = 0.0
         else:
-            lambda_max = float(eig_ii[-1])
-            lambda_min = float(eig_ii[0])
-            alpha_max_local = 2.0 / lambda_max if lambda_max > 1e-14 else np.inf
-            kappa = lambda_max / lambda_min if lambda_min > 1e-14 else np.inf
-
-            # Optimal step size and contraction rate (effective subspace only)
-            alpha_i_opt = 2.0 / (lambda_min + lambda_max) if (lambda_min + lambda_max) > 1e-14 else 0.0
+            l_max_eff = float(eig_ii_eff[-1])
+            l_min_eff = float(eig_ii_eff[0])
+            alpha_max_local = 2.0 / l_max_eff if l_max_eff > 1e-14 else np.inf
+            kappa = l_max_eff / l_min_eff if l_min_eff > 1e-14 else np.inf
+            alpha_i_opt = 2.0 / (l_min_eff + l_max_eff) if (l_min_eff + l_max_eff) > 1e-14 else 0.0
             rho_i_opt = (kappa - 1.0) / (kappa + 1.0) if kappa < np.inf else 1.0
-
-            # Actual contraction rate at current α_i (effective eigenvalues only)
-            rho_i = max(abs(1.0 - alpha_i * lam) for lam in eig_ii)
 
         # Coupling norms: ||M_ij||₂ for j ≠ i
         coupling_norms: Dict[int, float] = {}
@@ -1323,7 +1336,7 @@ def analyse_multi_zone_stability(
         coupling_sum = sum(coupling_norms.values())
 
         # Cross-coupling gains σ_ij = α_i · ‖M_ij‖₂
-        sigma_ij_current = {j: alpha_i * norm for j, norm in coupling_norms.items()}
+        sigma_ij_current = {j: alpha_list[i_idx] * norm for j, norm in coupling_norms.items()}
         sigma_ij_optimal = {j: alpha_i_opt * norm for j, norm in coupling_norms.items()}
 
         # Lyapunov row sums: ρ_i + Σ_{j≠i} σ_ij
@@ -1331,7 +1344,7 @@ def analyse_multi_zone_stability(
         lyap_row_opt = rho_i_opt + sum(sigma_ij_optimal.values())
 
         # Diagonal-dominance condition: α_i · (λ_max + Σ||M_ij||₂) ∈ (0, 2)
-        contraction_lhs = alpha_i * (lambda_max + coupling_sum)
+        contraction_lhs = alpha_list[i_idx] * (lambda_max + coupling_sum)
         alpha_max_coupled = (
             2.0 / (lambda_max + coupling_sum)
             if (lambda_max + coupling_sum) > 1e-14 else np.inf
@@ -1357,6 +1370,57 @@ def analyse_multi_zone_stability(
                 f"Adding DERs to Zone {i} strengthens the diagonal block."
             )
 
+        # ── Per-zone eigenvalue diagnostics ──────────────────────────────────
+        # We reuse the mode-building logic to show actuator participation per zone.
+        # This helps identify why rho_i is high.
+        ev_diag = []
+        if n_u_i > 0:
+            # Re-run eigh to get vectors
+            Mi_eig, Mi_vecs = np.linalg.eigh(M_ii)
+            
+            # Map column indices to names for diagnostics
+            # Note: order matches G_w_list construction
+            ac = actuator_counts[i_idx] if actuator_counts else {}
+            a_names = (
+                [f'Q_DER_{k}' for k in range(ac.get('n_der', 0))] +
+                [f'Q_PCC_{k}' for k in range(ac.get('n_pcc', 0))] +
+                [f'V_gen_{k}' for k in range(ac.get('n_gen', 0))] +
+                [f'OLTC_{k}'  for k in range(ac.get('n_oltc', 0))] +
+                [f'Shunt_{k}' for k in range(ac.get('n_shunt', 0))]
+            )
+            # Pad names if counts missing
+            if len(a_names) < n_u_i:
+                a_names += [f'u_{k}' for k in range(len(a_names), n_u_i)]
+
+            def _build_mode(idx):
+                lam = float(Mi_eig[idx])
+                if lam < 1e-14: return None
+                v_sq = Mi_vecs[:, idx]**2
+                tc = {}
+                for k, name in enumerate(a_names):
+                    atype = name.rsplit('_', 1)[0]
+                    tc[atype] = tc.get(atype, 0.0) + float(v_sq[k])
+                return {
+                    'eigenvalue': lam,
+                    'contraction': abs(1.0 - alpha_list[i_idx] * lam),
+                    'type_contribution': tc,
+                    'active': lam > eig_tol_active,
+                    '_slowest_active': lam <= eig_tol_active and lam > eig_tol_null
+                }
+
+            # Top 3 modes
+            for k in range(min(3, n_u_i)):
+                m = _build_mode(n_u_i - 1 - k)
+                if m: ev_diag.append(m)
+            # Slowest active mode
+            if n_active > 0:
+                first_active_idx = int(np.where(Mi_eig > eig_tol_active)[0][0])
+                if n_u_i - 1 - first_active_idx >= 3: # if not already in top 3
+                    m = _build_mode(first_active_idx)
+                    if m: 
+                        m['_slowest_active'] = True
+                        ev_diag.append(m)
+
         zone_results.append(ZoneStabilityResult(
             zone_id=i,
             n_controls=n_u_i,
@@ -1370,6 +1434,7 @@ def analyse_multi_zone_stability(
             alpha_max_coupled=alpha_max_coupled,
             diagonally_dominant=diag_dom,
             warnings=warnings,
+            eigenvalue_diagnostics=ev_diag,
             # Lyapunov fields
             n_effective=n_effective,
             n_null=n_null,
@@ -1599,6 +1664,27 @@ def _print_multi_zone_report(
             f"{status:>8s}"
         )
     print()
+
+    # ── Per-zone Eigenvalue diagnostics ────────────────────────────────────
+    print("  Per-zone Eigenvalue diagnostics (top/slow modes of M_ii):")
+    for i_idx, zr in enumerate(result.zones):
+        if zr.eigenvalue_diagnostics:
+            print(f"    {zone_names[i_idx]}:")
+            print(f"      {'mode':>6s}   {'lam(M)':>10s}   {'|1-a*l|':>8s}   "
+                  f"actuator-type participation")
+            
+            for k, mode in enumerate(zr.eigenvalue_diagnostics):
+                lam = mode['eigenvalue']
+                contraction = mode['contraction']
+                tc = mode['type_contribution']
+                parts = sorted(tc.items(), key=lambda x: -x[1])
+                parts_str = '  '.join(
+                    f'{name}: {100*w:.0f}%' for name, w in parts if w >= 0.01
+                )
+                label = 'slow' if mode.get('_slowest_active') else str(k+1)
+                print(f"      {label:>6s}   {lam:>10.4g}   {contraction:>8.4f}   {parts_str}")
+            print()
+
 
     # ── Per-actuator-type contribution to M_ii ──────────────────────────────
     zone_ids = [zr.zone_id for zr in result.zones]

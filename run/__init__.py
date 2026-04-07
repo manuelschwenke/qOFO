@@ -19,7 +19,7 @@ from .records import (
     ContingencyEvent,
     IterationRecord,
 )
-from .run_cascade import main, run_cascade
+from .run_S_TSO_M_DSO import main, run_cascade
 
 __all__ = [
     # lambdas

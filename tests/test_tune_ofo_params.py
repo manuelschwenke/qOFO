@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from core.cascade_config import CascadeConfig
-from tune_ofo_params import (
+from analysis.tune_ofo_params import (
     ZoneTuningResult,
     TuningResult,
     compute_optimal_gw,

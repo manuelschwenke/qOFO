@@ -279,8 +279,8 @@ class MIQPSolver:
         self,
         solver: Optional[str] = None,
         verbose: bool = False,
-        time_limit_s: float = 60.0,
-        mip_gap: float = 1e-6,
+        time_limit_s: float = 30.0,
+        mip_gap: float = 1e-4,
     ) -> None:
         """
         Initialise the MIQP solver.

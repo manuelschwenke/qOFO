@@ -32,6 +32,7 @@ from numpy.typing import NDArray
 from core.network_state import NetworkState
 from core.measurement import Measurement
 from core.actuator_bounds import ActuatorBounds
+from core.der_mapping import DERMapping
 from sensitivity.jacobian import JacobianSensitivities
 from optimisation.miqp_solver import (
     MIQPSolver,
@@ -379,8 +380,14 @@ class BaseOFOController(ABC):
         grad_f = self._compute_objective_gradient(measurement)
         
         # Step 6: Build sensitivity matrix H
-        H = self._build_sensitivity_matrix()
-        
+        #   _build_sensitivity_matrix returns the bus-level H (full rank).
+        #   If a DER mapping is active, expand to per-DER via H_bus @ E.
+        H_bus = self._build_sensitivity_matrix()
+        H = self._expand_H_to_der_level(H_bus)
+
+        # Step 6b: Build per-variable weight vectors if DER mapping is active
+        g_w_vector, g_u_vector = self._build_per_variable_weights()
+
         # Step 7: Build and solve MIQP problem
         problem = build_miqp_problem(
             alpha=self.params.alpha,
@@ -396,6 +403,8 @@ class BaseOFOController(ABC):
             g_u=self.params.g_u,
             g_z=self.params.g_z,
             integer_indices=self._integer_indices,
+            g_w_vector=g_w_vector,
+            g_u_vector=g_u_vector,
         )
         
         result = self.solver.solve(problem)
@@ -646,13 +655,163 @@ class BaseOFOController(ABC):
     @abstractmethod
     def _build_sensitivity_matrix(self) -> NDArray[np.float64]:
         """
-        Build the input-output sensitivity matrix H.
-        
-        Uses the JacobianSensitivities instance to compute ∂y/∂u.
-        
+        Build the bus-level input-output sensitivity matrix H_bus.
+
+        Uses the JacobianSensitivities instance to compute dy/du.
+        DER columns correspond to **unique buses** (one column per bus),
+        ensuring full column rank.
+
+        Returns
+        -------
+        H_bus : NDArray[np.float64]
+            Bus-level sensitivity matrix of shape
+            ``(n_outputs, n_controls_bus)``.
+        """
+        pass
+
+    # ------------------------------------------------------------------
+    #  Per-DER expansion and weight construction
+    # ------------------------------------------------------------------
+
+    def _get_der_mapping(self) -> Optional[DERMapping]:
+        """
+        Return the DER mapping from the subclass config, if any.
+
+        Subclasses should override this if they support per-DER
+        modelling.  The default returns ``None`` (bus-level).
+        """
+        return None
+
+    def _get_n_der_bus(self) -> int:
+        """
+        Return the number of DER-related columns in H_bus.
+
+        Subclasses must override this to return the count of unique
+        DER bus columns that precede other actuator columns in H.
+        """
+        raise NotImplementedError
+
+    def _expand_H_to_der_level(
+        self, H_bus: NDArray[np.float64],
+    ) -> NDArray[np.float64]:
+        """
+        Expand H_bus to per-DER columns via the incidence matrix E.
+
+        If no DER mapping is active, returns H_bus unchanged.
+
+        The factorisation is:
+            H_der[:, :n_der] = H_bus[:, :n_bus_der] @ E
+            H_der[:, n_der:] = H_bus[:, n_bus_der:]   (non-DER cols)
+
+        Parameters
+        ----------
+        H_bus : NDArray[np.float64]
+            Bus-level sensitivity matrix with shape
+            ``(n_outputs, n_controls_bus)``.
+
         Returns
         -------
         H : NDArray[np.float64]
-            Sensitivity matrix of shape (n_outputs, n_controls).
+            Sensitivity matrix with shape ``(n_outputs, n_controls)``.
+            If a DER mapping is active, ``n_controls > n_controls_bus``
+            because each bus with multiple DERs gets expanded.
         """
-        pass
+        mapping = self._get_der_mapping()
+        if mapping is None:
+            return H_bus
+
+        n_bus_der = mapping.n_unique_bus
+        E = mapping.E  # (n_unique_bus, n_der)
+
+        # Split H_bus into DER-bus columns and the rest
+        H_bus_der = H_bus[:, :n_bus_der]           # (n_out, n_bus_der)
+        H_bus_rest = H_bus[:, n_bus_der:]           # (n_out, n_other)
+
+        # Expand DER columns: H_der_part = H_bus_der @ E
+        H_der_part = H_bus_der @ E                  # (n_out, n_der)
+
+        # Reassemble
+        return np.hstack([H_der_part, H_bus_rest])
+
+    def _build_per_variable_weights(
+        self,
+    ) -> Tuple[Optional[NDArray[np.float64]], Optional[NDArray[np.float64]]]:
+        """
+        Build per-variable weight vectors for the MIQP objective.
+
+        When a DER mapping with non-uniform weights is active, this
+        constructs ``g_w_vector`` and ``g_u_vector`` arrays where the
+        first ``n_der`` entries are scaled by the per-DER weights and
+        the remaining entries use the scalar defaults.
+
+        Returns
+        -------
+        g_w_vector : NDArray or None
+            Per-variable change weights, or None for uniform.
+        g_u_vector : NDArray or None
+            Per-variable usage weights, or None for uniform.
+        """
+        mapping = self._get_der_mapping()
+        if mapping is None:
+            return None, None
+
+        n_total = self.n_controls
+        n_der = mapping.n_der
+
+        # Extract base scalar values from params (handle Union types)
+        g_w_scalar = np.asarray(self.params.g_w)
+        if g_w_scalar.ndim == 0:
+            g_w_base = float(g_w_scalar)
+        else:
+            # g_w is already an array or matrix; use mean of diagonal
+            # as base for DER weight scaling
+            if g_w_scalar.ndim == 2:
+                g_w_base = float(np.mean(np.diag(g_w_scalar)[:n_der]))
+            else:
+                g_w_base = float(np.mean(g_w_scalar[:n_der]))
+
+        g_u_scalar = np.asarray(self.params.g_u)
+        if g_u_scalar.ndim == 0:
+            g_u_base = float(g_u_scalar)
+        else:
+            g_u_base = float(np.mean(g_u_scalar[:n_der]))
+
+        # Build g_w per variable: DER entries scaled by per-DER weights
+        g_w_vec = np.broadcast_to(
+            np.asarray(self.params.g_w, dtype=np.float64),
+            (n_total,),
+        ).copy()
+        g_w_vec[:n_der] = g_w_base * mapping.weights
+
+        # Build g_u per variable: same treatment
+        g_u_vec = np.broadcast_to(
+            np.asarray(self.params.g_u, dtype=np.float64),
+            (n_total,),
+        ).copy()
+        g_u_vec[:n_der] = g_u_base * mapping.weights
+
+        return g_w_vec, g_u_vec
+
+    def get_bus_level_sensitivity(
+        self,
+    ) -> Tuple[NDArray[np.float64], Optional[NDArray[np.float64]]]:
+        """
+        Return the bus-level sensitivity matrix and incidence matrix.
+
+        This is intended for closed-loop stability / eigenvalue
+        analysis, where full column rank of H is required.
+
+        Returns
+        -------
+        H_bus : NDArray[np.float64]
+            Bus-level sensitivity matrix (full column rank in the
+            DER columns).
+        E : NDArray[np.float64] or None
+            DER-to-bus incidence matrix of shape
+            ``(n_unique_bus, n_der)``, or ``None`` if no DER mapping
+            is active.
+        """
+        H_bus = self._build_sensitivity_matrix()
+        mapping = self._get_der_mapping()
+        E = mapping.E if mapping is not None else None
+        return H_bus, E

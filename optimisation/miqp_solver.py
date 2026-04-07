@@ -634,6 +634,8 @@ def build_miqp_problem(
     g_u: Union[float, NDArray[np.float64]],
     g_z: Union[float, NDArray[np.float64]],
     integer_indices: Optional[List[int]] = None,
+    g_w_vector: Optional[NDArray[np.float64]] = None,
+    g_u_vector: Optional[NDArray[np.float64]] = None,
 ) -> MIQPProblem:
     """
     Build an MIQP problem from OFO controller data.
@@ -682,6 +684,14 @@ def build_miqp_problem(
     integer_indices : List[int], optional
         Indices of integer variables within u_current. If None, all
         variables are treated as continuous.
+    g_w_vector : NDArray[np.float64], optional
+        Per-variable change weights of length ``n_total``.  When
+        provided, overrides ``g_w`` for constructing the diagonal of
+        ``G_w``.  This enables per-DER cost differentiation.
+    g_u_vector : NDArray[np.float64], optional
+        Per-variable usage (regularisation) weights of length
+        ``n_total``.  When provided, overrides ``g_u`` for the
+        regularisation diagonal.
 
     Returns
     -------
@@ -743,8 +753,30 @@ def build_miqp_problem(
     # Integer variables:     w_i = Δu        (direct state change, no α)
     #   Quadratic: G_w_i = diag(g_w + g_u)   (no α² factor)
     #   Linear:    grad_i = grad_f + 2 · g_u · u  (no α factor)
-    g_w_arr = np.asarray(g_w, dtype=np.float64)
-    g_u_vec = np.broadcast_to(np.asarray(g_u, dtype=np.float64), (n_total,)).copy()
+
+    # --- Per-variable weight overrides (DER mapping) ---
+    # When g_w_vector is provided, it overrides g_w for diagonal construction.
+    # This allows per-DER cost differentiation while remaining compatible
+    # with the existing scalar / array / matrix g_w interface.
+    if g_w_vector is not None:
+        if len(g_w_vector) != n_total:
+            raise ValueError(
+                f"g_w_vector length {len(g_w_vector)} does not match "
+                f"n_total {n_total}"
+            )
+        g_w_arr = np.asarray(g_w_vector, dtype=np.float64)
+    else:
+        g_w_arr = np.asarray(g_w, dtype=np.float64)
+
+    if g_u_vector is not None:
+        if len(g_u_vector) != n_total:
+            raise ValueError(
+                f"g_u_vector length {len(g_u_vector)} does not match "
+                f"n_total {n_total}"
+            )
+        g_u_vec = np.asarray(g_u_vector, dtype=np.float64)
+    else:
+        g_u_vec = np.broadcast_to(np.asarray(g_u, dtype=np.float64), (n_total,)).copy()
 
     continuous_mask = np.ones(n_total, dtype=bool)
     for idx in integer_indices:

@@ -271,9 +271,16 @@ class MIQPSolver:
     
     # Solver preference order for MIQP problems
     MIQP_SOLVERS = ['GUROBI'] #['SCIP', 'MOSEK', 'GUROBI', 'ECOS_BB']
-    
+
     # Solver preference order for QP problems (continuous only)
     QP_SOLVERS = ['OSQP', 'ECOS', 'SCS', 'CVXOPT']
+
+    # Class-level cache of the selected solver per problem shape
+    # (has_integers → solver name or None).  ``cp.installed_solvers()`` is
+    # O(seconds) on a Windows network share because it walks importlib
+    # metadata for every candidate backend, so we must hit it exactly once
+    # per Python process rather than once per controller / once per step.
+    _SOLVER_CACHE: dict[bool, Optional[str]] = {}
     
     def __init__(
         self,
@@ -284,7 +291,7 @@ class MIQPSolver:
     ) -> None:
         """
         Initialise the MIQP solver.
-        
+
         Parameters
         ----------
         solver : str, optional
@@ -333,22 +340,37 @@ class MIQPSolver:
         else:
             return self._solve_qp(problem, solver_name)
     
-    def _select_solver(self, has_integers: bool) -> str:
-        """Select an appropriate solver based on problem type."""
+    def _select_solver(self, has_integers: bool) -> Optional[str]:
+        """Select an appropriate solver based on problem type.
+
+        The result is memoised at the **class level** per ``has_integers``
+        key because ``cp.installed_solvers()`` walks importlib metadata on
+        every call and is prohibitively expensive over a Windows network
+        share (~25 ms per filesystem stat × hundreds of candidates =
+        multiple seconds per invocation).  One lookup per Python process is
+        sufficient; the set of installed solvers does not change at runtime,
+        and sharing the cache across all MIQPSolver instances avoids paying
+        the cost once per controller.
+        """
         if self.solver is not None:
             return self.solver
-        
+
+        cache = type(self)._SOLVER_CACHE
+        if has_integers in cache:
+            return cache[has_integers]
+
         solver_list = self.MIQP_SOLVERS if has_integers else self.QP_SOLVERS
-        
+        installed = set(cp.installed_solvers())
+
+        picked: Optional[str] = None
         for solver_name in solver_list:
-            try:
-                if solver_name in cp.installed_solvers():
-                    return solver_name
-            except Exception:
-                continue
-        
-        # Fallback to default CVXPY solver
-        return None
+            if solver_name in installed:
+                picked = solver_name
+                break
+
+        # Fallback to default CVXPY solver (None)
+        cache[has_integers] = picked
+        return picked
     
     def _solve_qp(
         self,

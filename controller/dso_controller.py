@@ -809,7 +809,14 @@ class DSOController(BaseOFOController):
         return result
 
     def invalidate_sensitivity_cache(self) -> None:
-        """Invalidate the cached sensitivity matrix."""
+        """Invalidate the cached sensitivity matrix.
+
+        Also clears the per-DER expansion cache on the base class so the
+        next ``step()`` rebuilds ``H_der`` from the freshly computed
+        ``H_bus`` (e.g. after a contingency or topology change).
+        """
         self._H_cache = None
         self._H_mappings = None
         self._sensitivity_updater = None
+        self._H_der_cache = None
+        self._H_der_cache_base_id = None

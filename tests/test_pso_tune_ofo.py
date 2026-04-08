@@ -213,8 +213,9 @@ class TestPSOInvariants:
         assert len(result.history) >= 1
         assert len(result.history) <= 20
         required = {
-            'iter', 'fitness', 'spectral_half', 'gamma',
-            'max_dso_decay', 'alpha_eff_tso', 'alpha_eff_dso',
+            'iter', 'fitness', 'rho_max_tso', 'rho_max_dso',
+            'spectral', 'gamma', 'max_dso_decay',
+            'alpha_eff_tso', 'alpha_eff_dso',
         }
         for entry in result.history:
             missing = required - set(entry.keys())

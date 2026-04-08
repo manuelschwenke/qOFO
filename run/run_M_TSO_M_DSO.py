@@ -273,8 +273,8 @@ class MultiTSOConfig:
     # convergence rate across the three stability components, so the
     # invariant ``f < 1`` is exactly the multi-zone-with-cascade stability
     # condition.
-    pso_swarm_size:        int = 30
-    pso_max_iterations:    int = 100
+    pso_swarm_size:        int = 50
+    pso_max_iterations:    int = 300
     pso_seed:              Optional[int] = None
     pso_w_inertia:         Tuple[float, float] = (0.7, 0.4)
     pso_c_cognitive:       float = 1.5
@@ -282,7 +282,12 @@ class MultiTSOConfig:
     pso_velocity_clamp_frac: float = 0.2
     pso_g_w_upper_factor:  float = 1e6
     pso_alpha_bounds:      Tuple[float, float] = (1e-4, 1.0)
-    pso_cascade_margin_target: float = 0.3
+    pso_cascade_margin_target: float = 0.2
+    pso_spectral_target:   float = 1.8
+    """Hard cap on the global TSO spectral metric ``alpha_eff*lam_max(M_sys)``.
+    Default 1.8 leaves a 10% margin below the absolute stability bound 2.0
+    so the operating-point shift between PSO and the post-PSO stability
+    re-evaluation cannot push the closed loop into instability."""
     # Per-actuator-type lower bounds for the PSO search.  Independent of
     # the legacy tune_min_gw_* floors so PSO is free to explore lower g_w
     # than the greedy tuner permits.
@@ -301,7 +306,7 @@ class MultiTSOConfig:
     # gradients, so the analysis is misleading.  After one simulated hour
     # the setpoints have largely equilibrated and the H/C matrices reflect
     # a representative operating point.  Set to 0 to run at t=0 (legacy).
-    stability_analysis_at_s:      float = 3600.0
+    stability_analysis_at_s:      float = 600.0
     sensitivity_update_interval:  int  = 1E6  # recompute H_ij every N TSO steps
 
     # ── Output ────────────────────────────────────────────────────────────────
@@ -912,9 +917,11 @@ def _write_tuned_params_json(
                 history_summary.append({
                     "iter":          int(entry.get("iter", 0)),
                     "fitness":       float(entry.get("fitness", float("nan"))),
-                    "spectral_half": float(entry.get("spectral_half", float("nan"))),
-                    "gamma":         float(entry.get("gamma", float("nan"))),
+                    "rho_max_tso":   float(entry.get("rho_max_tso", float("nan"))),
+                    "rho_max_dso":   float(entry.get("rho_max_dso", float("nan"))),
                     "max_dso_decay": float(entry.get("max_dso_decay", float("nan"))),
+                    "spectral":      float(entry.get("spectral", float("nan"))),
+                    "gamma":         float(entry.get("gamma", float("nan"))),
                     "alpha_eff_tso": float(entry.get("alpha_eff_tso", float("nan"))),
                     "alpha_eff_dso": float(entry.get("alpha_eff_dso", float("nan"))),
                 })
@@ -1396,6 +1403,7 @@ def _run_auto_tune_and_apply(
         c_social=config.pso_c_social,
         velocity_clamp_frac=config.pso_velocity_clamp_frac,
         cascade_margin_target=config.pso_cascade_margin_target,
+        spectral_target=config.pso_spectral_target,
         tso_period_s=config.tso_period_s,
         dso_period_s=config.dso_period_s,
         alpha_init_tso=config.alpha,
@@ -2533,7 +2541,7 @@ def main() -> None:
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
-        auto_tune_gw=False,
+        auto_tune_gw=True,
         verbose=1,
         live_plot=True,
         add_tso_ders=True,

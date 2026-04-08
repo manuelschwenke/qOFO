@@ -265,6 +265,35 @@ class MultiTSOConfig:
     # The DER block lands at  g_w ~ tune_dso_safety_factor * alpha * c_diag / 2.
     tune_dso_safety_factor: float = 0.1
 
+    # ── PSO joint tuning ─────────────────────────────────────────────────────
+    # When auto_tune_gw=True the runner calls the PSO tuner instead of the
+    # legacy greedy tune_multi_zone + tune_dso pair.  PSO jointly searches
+    # over per-zone alpha (TSO + per-DSO) and per-actuator g_w (TSO + DSO),
+    # warm-started from the Gershgorin solution.  Fitness is the min-max
+    # convergence rate across the three stability components, so the
+    # invariant ``f < 1`` is exactly the multi-zone-with-cascade stability
+    # condition.
+    pso_swarm_size:        int = 30
+    pso_max_iterations:    int = 100
+    pso_seed:              Optional[int] = None
+    pso_w_inertia:         Tuple[float, float] = (0.7, 0.4)
+    pso_c_cognitive:       float = 1.5
+    pso_c_social:          float = 1.5
+    pso_velocity_clamp_frac: float = 0.2
+    pso_g_w_upper_factor:  float = 1e6
+    pso_alpha_bounds:      Tuple[float, float] = (1e-4, 1.0)
+    pso_cascade_margin_target: float = 0.3
+    # Per-actuator-type lower bounds for the PSO search.  Independent of
+    # the legacy tune_min_gw_* floors so PSO is free to explore lower g_w
+    # than the greedy tuner permits.
+    pso_min_gw_tso_der:    float = 1e-3
+    pso_min_gw_tso_pcc:    float = 0.01
+    pso_min_gw_tso_gen:    float = 1e2
+    pso_min_gw_tso_oltc:   float = 1.0
+    pso_min_gw_dso_der:    float = 1e-3
+    pso_min_gw_dso_oltc:   float = 0.1
+    pso_min_gw_dso_shunt:  float = 10.0
+
     # ── Stability analysis ─────────────────────────────────────────────────────
     run_stability_analysis:       bool = True
     # When (in simulated seconds) to run the stability analysis.  The
@@ -756,6 +785,7 @@ def _write_tuned_params_json(
     dso_controllers,
     hv_info_map: Dict[str, "HVNetworkInfo"],
     stab_result: Optional["MultiZoneStabilityResult"] = None,
+    pso_result: Optional[Any] = None,
 ) -> None:
     """Serialise the tuned g_w and alpha values to a JSON file.
 
@@ -856,6 +886,33 @@ def _write_tuned_params_json(
             },
         }
     payload["dso_controllers"] = dso_payload
+
+    # ── Optional PSO meta ───────────────────────────────────────────────
+    if pso_result is not None:
+        try:
+            history_summary = []
+            for entry in getattr(pso_result, "history", []):
+                history_summary.append({
+                    "iter":          int(entry.get("iter", 0)),
+                    "fitness":       float(entry.get("fitness", float("nan"))),
+                    "spectral_half": float(entry.get("spectral_half", float("nan"))),
+                    "gamma":         float(entry.get("gamma", float("nan"))),
+                    "max_dso_decay": float(entry.get("max_dso_decay", float("nan"))),
+                    "alpha_eff_tso": float(entry.get("alpha_eff_tso", float("nan"))),
+                    "alpha_eff_dso": float(entry.get("alpha_eff_dso", float("nan"))),
+                })
+            payload["pso_meta"] = {
+                "swarm_size":          int(getattr(pso_result, "swarm_size", 0)),
+                "iterations":          int(getattr(pso_result, "iterations", 0)),
+                "fitness":             float(getattr(pso_result, "fitness", float("nan"))),
+                "warm_start_fitness":  float(getattr(pso_result, "warm_start_fitness", float("nan"))),
+                "converged":           bool(getattr(pso_result, "converged", False)),
+                "feasibility_warnings": list(getattr(pso_result, "feasibility_warnings", [])),
+                "history":             history_summary,
+            }
+        except Exception:
+            # Never let metadata serialisation kill the main JSON write.
+            pass
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
@@ -1213,29 +1270,38 @@ def _run_auto_tune_and_apply(
     net,
     verbose: int,
 ) -> None:
-    """Refresh cross-sensitivities, run the multi-zone TSO auto-tuner and
-    the per-DSO tuner, and apply the results in place to the controllers.
+    """Refresh cross-sensitivities, run the joint PSO tuner over all TSO
+    zones and DSO controllers, and apply the results in place.
 
     Called from the main simulation loop at ``config.stability_analysis_at_s``,
     together with the delayed stability analysis.  At that point the
     plant has equilibrated, so the sensitivity matrices and curvature
     blocks reflect a representative operating point -- much better than
     the uncontrolled initial state.
+
+    The PSO replaces the legacy ``tune_multi_zone`` + per-DSO ``tune_dso``
+    pair.  It searches jointly over per-zone alpha (TSO + per-DSO) and
+    per-actuator g_w (TSO + DSO), warm-started from the Gershgorin
+    solution so the new path can never regress below the old one.
     """
     import dataclasses
-    from analysis.tune_ofo_params import tune_dso as _tune_dso
+    from analysis.pso_tune_ofo import (
+        DSOTuneInput,
+        PSOTuningResult,
+        tune_pso_all,
+    )
 
     if verbose >= 1:
-        print("[9a] Auto-tuning per-actuator g_w weights (multi-zone) ...")
+        print("[9a] PSO joint tuning of g_w + alpha (TSO zones + DSOs) ...")
 
-    # Refresh cross-sensitivities so the tune call sees the current
-    # operating point (profiles + post-warmup controller state).
+    # Refresh cross-sensitivities so PSO sees the current operating point
+    # (profiles + post-warmup controller state).
     coordinator.compute_cross_sensitivities()
     coordinator.compute_M_blocks()
 
     zone_ids_sorted = sorted(zone_defs.keys())
 
-    # ── TSO-level tune_multi_zone ────────────────────────────────────────
+    # ── Build TSO inputs (same shape as the legacy tuner) ────────────────
     H_blocks_tune = {k: coordinator.get_H_block(*k)
                      for k in coordinator._H_blocks}
     Q_obj_list = [zone_defs[z].q_obj_diagonal() for z in zone_ids_sorted]
@@ -1249,36 +1315,14 @@ def _run_auto_tune_and_apply(
         for z in zone_ids_sorted
     ]
 
-    tune_result = tune_multi_zone(
-        H_blocks=H_blocks_tune,
-        Q_obj_list=Q_obj_list,
-        actuator_counts=actuator_counts,
-        alpha_init=config.alpha,
-        zone_ids=zone_ids_sorted,
-        min_gw_der=config.tune_min_gw_der,
-        min_gw_pcc=config.tune_min_gw_pcc,
-        min_gw_gen=config.tune_min_gw_gen,
-        min_gw_oltc=config.tune_min_gw_oltc,
-        objective="spectral",
-        spectral_target=config.tune_spectral_target,
-        gamma_target=config.tune_gamma_target,
-        max_iterations=30,
-        verbose=(verbose >= 1),
-    )
-
-    # Apply tuned g_w and alpha to TSO controllers
-    for ztr in tune_result.zones:
-        z = ztr.zone_id
-        tso_controllers[z].params = dataclasses.replace(
-            tso_controllers[z].params, g_w=ztr.g_w, alpha=ztr.alpha)
-        zone_defs[z] = dataclasses.replace(zone_defs[z], alpha=ztr.alpha)
-
-    # ── DSO-level tune_dso per controller ────────────────────────────────
+    # ── Build DSO inputs (one entry per DSO controller) ──────────────────
     # DSO sensitivity row ordering is [interface_Q | voltage | current]
     # with weights (config.g_q, config.dso_g_v, 0).  Column order is
-    # [DER | OLTC | shunt] matching tune_dso's expectation.
-    dso_tune_results: Dict[str, Tuple[np.ndarray, float, float]] = {}
-    for dso_id_key, dso_ctrl in dso_controllers.items():
+    # [DER | OLTC | shunt] matching the PSO tuner's expectation.
+    dso_inputs: List[DSOTuneInput] = []
+    dso_id_order: List[str] = list(dso_controllers.keys())
+    for dso_id_key in dso_id_order:
+        dso_ctrl = dso_controllers[dso_id_key]
         dso_cfg_local = dso_ctrl.config
         # Refresh H_dso for the new operating point
         dso_ctrl.invalidate_sensitivity_cache()
@@ -1290,39 +1334,89 @@ def _run_auto_tune_and_apply(
                              dtype=np.float64)
         q_obj_dso[:n_interfaces] = float(config.g_q)
         if (dso_cfg_local.v_setpoints_pu is not None and n_voltage > 0):
-            q_obj_dso[n_interfaces:n_interfaces + n_voltage] = float(config.dso_g_v)
+            q_obj_dso[n_interfaces:n_interfaces + n_voltage] = float(
+                config.dso_g_v
+            )
 
         H_bus_dso = dso_ctrl._build_sensitivity_matrix()
         H_dso     = dso_ctrl._expand_H_to_der_level(H_bus_dso)
 
-        n_der_dso   = len(dso_cfg_local.der_indices)
-        n_oltc_dso  = len(dso_cfg_local.interface_trafo_indices)
-        n_shunt_dso = len(dso_cfg_local.shunt_bus_indices)
+        dso_inputs.append(DSOTuneInput(
+            dso_id=dso_id_key,
+            H=H_dso,
+            q_obj_diag=q_obj_dso,
+            n_der=len(dso_cfg_local.der_indices),
+            n_oltc=len(dso_cfg_local.interface_trafo_indices),
+            n_shunt=len(dso_cfg_local.shunt_bus_indices),
+        ))
 
-        g_w_dso, rho_dso, margin_dso = _tune_dso(
-            H_dso, q_obj_dso,
-            n_der=n_der_dso,
-            n_oltc=n_oltc_dso,
-            n_shunt=n_shunt_dso,
-            alpha=config.dso_alpha,
-            safety_factor=config.tune_dso_safety_factor,
-            min_gw_der=config.tune_min_gw_der,
-            min_gw_oltc=config.tune_min_gw_oltc,
-            min_gw_shunt=config.tune_min_gw_oltc,
-            tso_period_s=config.tso_period_s,
-            dso_period_s=config.dso_period_s,
-            # Phase-1 only (max_refinement_iterations default 0).  Set
-            # non-zero for well-conditioned DSO topologies if needed.
+    floors_tso = {
+        'der':  config.pso_min_gw_tso_der,
+        'pcc':  config.pso_min_gw_tso_pcc,
+        'gen':  config.pso_min_gw_tso_gen,
+        'oltc': config.pso_min_gw_tso_oltc,
+    }
+    floors_dso = {
+        'der':   config.pso_min_gw_dso_der,
+        'oltc':  config.pso_min_gw_dso_oltc,
+        'shunt': config.pso_min_gw_dso_shunt,
+    }
+
+    pso_result: PSOTuningResult = tune_pso_all(
+        H_blocks=H_blocks_tune,
+        Q_obj_list=Q_obj_list,
+        actuator_counts=actuator_counts,
+        zone_ids=zone_ids_sorted,
+        dso_inputs=dso_inputs,
+        floors_tso=floors_tso,
+        floors_dso=floors_dso,
+        g_w_upper_factor=config.pso_g_w_upper_factor,
+        alpha_bounds=config.pso_alpha_bounds,
+        swarm_size=config.pso_swarm_size,
+        max_iterations=config.pso_max_iterations,
+        w_inertia=config.pso_w_inertia,
+        c_cognitive=config.pso_c_cognitive,
+        c_social=config.pso_c_social,
+        velocity_clamp_frac=config.pso_velocity_clamp_frac,
+        cascade_margin_target=config.pso_cascade_margin_target,
+        tso_period_s=config.tso_period_s,
+        dso_period_s=config.dso_period_s,
+        alpha_init_tso=config.alpha,
+        alpha_init_dso=config.dso_alpha,
+        seed=config.pso_seed,
+        verbose=(verbose >= 1),
+    )
+
+    # Apply tuned g_w and alpha to TSO controllers (and zone_defs)
+    for ztr in pso_result.tso_zones:
+        z = ztr.zone_id
+        tso_controllers[z].params = dataclasses.replace(
+            tso_controllers[z].params, g_w=ztr.g_w, alpha=ztr.alpha,
         )
-        dso_tune_results[dso_id_key] = (g_w_dso, float(rho_dso), float(margin_dso))
-        dso_ctrl.params = dataclasses.replace(dso_ctrl.params, g_w=g_w_dso)
+        zone_defs[z] = dataclasses.replace(zone_defs[z], alpha=ztr.alpha)
+
+    # Apply tuned g_w and (per-DSO) alpha to DSO controllers
+    for dso_id_key, dso_ctrl in dso_controllers.items():
+        g_w_dso, alpha_dso, _rho, _margin = pso_result.dso[dso_id_key]
+        dso_ctrl.params = dataclasses.replace(
+            dso_ctrl.params, g_w=g_w_dso, alpha=alpha_dso,
+        )
+
+    # Stash the result on the coordinator so the JSON serialiser can
+    # include the convergence history alongside the tuned weights.
+    coordinator._last_pso_result = pso_result  # type: ignore[attr-defined]
 
     # ── Compact per-controller console output ───────────────────────────
     if verbose >= 1:
-        status = "CONVERGED" if tune_result.converged else "NOT CONVERGED"
-        print(f"\n[9b] Auto-tuning {status} after {tune_result.iterations} "
-              f"iterations (alpha_eff*lam_sys={tune_result.spectral_metric:.4f}, "
-              f"gamma={tune_result.small_gain_gamma:.4f}).  Applied weights:\n")
+        status = "CONVERGED" if pso_result.converged else "NOT CONVERGED"
+        print(
+            f"\n[9b] PSO {status} after {pso_result.iterations} iterations "
+            f"(fitness = {pso_result.fitness:.4f}, "
+            f"warm-start = {pso_result.warm_start_fitness:.4f}).  "
+            f"Applied weights:\n"
+        )
+        for w in pso_result.feasibility_warnings:
+            print(f"    WARNING: {w}")
 
         _name_col_width = 30
 
@@ -1335,7 +1429,7 @@ def _run_auto_tune_and_apply(
                     f"{str(name)[:_name_col_width]:<{_name_col_width}s} "
                     f"(bus {int(bus):>4d})  g_w = {gw_str}")
 
-        for ztr in tune_result.zones:
+        for ztr in pso_result.tso_zones:
             z = ztr.zone_id
             zd = zone_defs[z]
             gw_vec = ztr.g_w
@@ -1368,11 +1462,11 @@ def _run_auto_tune_and_apply(
             print()
 
         for dso_id_key, dso_ctrl in dso_controllers.items():
-            g_w_dso, rho_dso, margin_dso = dso_tune_results[dso_id_key]
+            g_w_dso, alpha_dso, rho_dso, margin_dso = pso_result.dso[dso_id_key]
             parent_zone = (hv_info_map[dso_id_key].zone
                            if dso_id_key in hv_info_map else "?")
             print(f"  DSO {dso_id_key} (under TSO Zone {parent_zone}) "
-                  f"[alpha = {config.dso_alpha:.4g}, "
+                  f"[alpha = {alpha_dso:.4g}, "
                   f"rho = {rho_dso:.4f}, margin = {margin_dso:.4f}]")
 
             dso_cfg_out = dso_ctrl.config
@@ -1486,6 +1580,7 @@ def _run_delayed_stability_analysis(
             dso_controllers=dso_controllers,
             hv_info_map=hv_info_map,
             stab_result=stab_result,
+            pso_result=getattr(coordinator, "_last_pso_result", None),
         )
         if verbose >= 1:
             print(f"  Tuned params snapshot:       {json_path}")

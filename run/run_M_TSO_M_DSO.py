@@ -247,7 +247,7 @@ class MultiTSOConfig:
     load_tuned_params_path: Optional[str] = None
 
     # ── Auto-tune g_w based on local curvature ────────────────────────────────
-    auto_tune_gw: bool = True  # If True, calculates per-actuator g_w at t=0
+    auto_tune_gw: bool = False  # If True, calculates per-actuator g_w at t=0
 
     # Per-actuator-type minimum g_w values enforced during auto-tuning.
     # These act as floors on the tuner output so no single actuator type
@@ -2409,15 +2409,15 @@ def main() -> None:
         dso_period_s=20.0 * 1,    # DSO every 20 seconds
         alpha={1: 0.01, 2: 0.01, 3: 0.01},
         dso_alpha=0.1,
-        g_v=100000.0,
+        g_v=150000.0,
         g_q=2,
         dso_g_v=1000.0,
-        g_w_der=1.0,
+        g_w_der=0.5,
         g_w_gen=5e4,
-        g_w_pcc=1.0,
-        g_w_tso_oltc=50,
-        g_w_dso_der = 1.0,     # DSO DER Q regularisation
-        g_w_dso_oltc = 5.0,    # DSO OLTC tap regularisation
+        g_w_pcc=0.5,
+        g_w_tso_oltc=60,
+        g_w_dso_der = 2.0,     # DSO DER Q regularisation
+        g_w_dso_oltc = 4.0,    # DSO OLTC tap regularisation
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -2433,8 +2433,8 @@ def main() -> None:
             # Example: trip line 0 at t=30 min, restore at t=60 min
             ContingencyEvent(minute=90, element_type="gen", element_index=3, action="trip"),
             ContingencyEvent(minute=120, element_type="gen", element_index=3, action="restore"),
-            ContingencyEvent(minute=180, element_type="gen", element_index=2, action="trip"),
-            ContingencyEvent(minute=240, element_type="gen", element_index=2, action="restore"),
+            ContingencyEvent(minute=240, element_type="gen", element_index=2, action="trip"),
+            ContingencyEvent(minute=360, element_type="gen", element_index=2, action="restore"),
         ],
     )
     log = run_multi_tso_dso(cfg)

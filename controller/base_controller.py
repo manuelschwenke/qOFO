@@ -252,12 +252,26 @@ class BaseOFOController(ABC):
         
         # Initialise iteration counter
         self.iteration = 0
-        
+
         # Initialise control variables (to be set by subclass)
         self._u_current: Optional[NDArray[np.float64]] = None
         self._n_continuous: int = 0
         self._n_integer: int = 0
         self._integer_indices: List[int] = []
+
+        # ---- Caches populated lazily in step() / initialise() ----
+        # Expanded per-DER H (shape n_out × n_controls).  Tracked by the
+        # identity of the bus-level H it was built from so we can reuse it
+        # as long as SensitivityUpdater mutates the base matrix in place.
+        self._H_der_cache: Optional[NDArray[np.float64]] = None
+        self._H_der_cache_base_id: Optional[int] = None
+        # Pre-computed per-variable weight vectors (None when no DER mapping).
+        self._g_w_vector_cache: Optional[NDArray[np.float64]] = None
+        self._g_u_vector_cache: Optional[NDArray[np.float64]] = None
+        # Vectorised continuous/integer index arrays for the step loop.
+        self._cont_idx_arr: Optional[NDArray[np.int64]] = None
+        self._int_idx_arr: Optional[NDArray[np.int64]] = None
+        self._alpha_vec: Optional[NDArray[np.float64]] = None
     
     @property
     def u_current(self) -> NDArray[np.float64]:
@@ -286,16 +300,16 @@ class BaseOFOController(ABC):
     def initialise(self, measurement: Measurement) -> None:
         """
         Initialise the controller from the current system state.
-        
+
         This method must be called before the first call to step().
         It extracts initial control variable values from measurements
         and sets up the internal state.
-        
+
         Parameters
         ----------
         measurement : Measurement
             Current system measurements.
-        
+
         Raises
         ------
         ValueError
@@ -316,6 +330,36 @@ class BaseOFOController(ABC):
         self._int_cooldown = self.params.int_cooldown
         self._int_max_step = self.params.int_max_step
         self._int_lock_until: dict[int, int] = {}   # idx -> iteration when lock expires
+
+        # ---- Vectorised continuous/integer index arrays for step() ----
+        # Used to replace `for i in range(n_controls): if i in integer_indices`
+        # Python loops with pure numpy indexing.
+        n_total = self._n_continuous + self._n_integer
+        mask = np.ones(n_total, dtype=bool)
+        if self._integer_indices:
+            mask[list(self._integer_indices)] = False
+        self._cont_idx_arr = np.flatnonzero(mask).astype(np.int64)
+        self._int_idx_arr = np.asarray(
+            self._integer_indices, dtype=np.int64,
+        )
+        # Per-variable effective step-size vector: continuous entries get
+        # the alpha step (gradient micro-step), integer entries get 1.0
+        # (direct state change).
+        alpha_vec = np.ones(n_total, dtype=np.float64)
+        alpha_vec[self._cont_idx_arr] = float(self.params.alpha)
+        self._alpha_vec = alpha_vec
+
+        # ---- Precompute per-variable MIQP weight vectors ----
+        # When a DER mapping with per-DER weights is active, both g_w and
+        # g_u get scaled per-DER.  All inputs are static for the life of
+        # the controller, so we compute once here instead of rebuilding
+        # the arrays on every step.
+        self._g_w_vector_cache, self._g_u_vector_cache = \
+            self._compute_per_variable_weights()
+
+        # Expanded H cache is invalidated on re-init (new operating point).
+        self._H_der_cache = None
+        self._H_der_cache_base_id = None
     
     def step(self, measurement: Measurement) -> ControllerOutput:
         """
@@ -382,11 +426,15 @@ class BaseOFOController(ABC):
         # Step 6: Build sensitivity matrix H
         #   _build_sensitivity_matrix returns the bus-level H (full rank).
         #   If a DER mapping is active, expand to per-DER via H_bus @ E.
+        #   The expansion result is cached across steps as long as the
+        #   bus-level matrix identity does not change (see
+        #   _expand_H_to_der_level).
         H_bus = self._build_sensitivity_matrix()
         H = self._expand_H_to_der_level(H_bus)
 
-        # Step 6b: Build per-variable weight vectors if DER mapping is active
-        g_w_vector, g_u_vector = self._build_per_variable_weights()
+        # Step 6b: Per-variable weight vectors are computed once in
+        # initialise() and stored on the instance — just fetch them.
+        g_w_vector, g_u_vector = self._get_per_variable_weights()
 
         # Step 7: Build and solve MIQP problem
         problem = build_miqp_problem(
@@ -406,7 +454,7 @@ class BaseOFOController(ABC):
             g_w_vector=g_w_vector,
             g_u_vector=g_u_vector,
         )
-        
+
         result = self.solver.solve(problem)
 
         if not result.is_feasible:
@@ -415,61 +463,57 @@ class BaseOFOController(ABC):
                 f"{result.status}"
             )
 
+        # Step 8: Reassemble sigma in original (unreordered) variable
+        # order using the precomputed continuous/integer index arrays.
+        # Replaces three Python `for i in range(n_controls): if i in
+        # self._integer_indices` loops, which were O(n_controls × n_int)
+        # and dominated the per-step cost after the per-DER refactor.
+        cont_idx = self._cont_idx_arr
+        int_idx = self._int_idx_arr
+        alpha_vec = self._alpha_vec  # cont = α, int = 1.0
 
-        # Step 8: Compute full sigma (combining continuous and integer)
-        sigma = np.zeros(self.n_controls)
-        
-        # Reorder back from [continuous, integer] to original order
-        continuous_indices = [
-            i for i in range(self.n_controls) 
-            if i not in self._integer_indices
-        ]
-        
-        for i, ci in enumerate(continuous_indices):
-            sigma[ci] = result.w_continuous[i]
-        for i, ii in enumerate(self._integer_indices):
-            sigma[ii] = float(result.w_integer[i])
+        sigma = np.zeros(self.n_controls, dtype=np.float64)
+        sigma[cont_idx] = result.w_continuous
+        if int_idx.size > 0:
+            sigma[int_idx] = result.w_integer.astype(np.float64)
 
-        # Step 9: Apply OFO update
-        #   Continuous: u^{k+1} = u^k + α · σ^k   (gradient micro-step)
-        #   Integer:    u^{k+1} = u^k + σ^k        (direct state change)
-        u_new = self._u_current.copy()
-        for i in range(self.n_controls):
-            if i in self._integer_indices:
-                u_new[i] += sigma[i]                     # direct
-            else:
-                u_new[i] += self.params.alpha * sigma[i]  # scaled
+        # Step 9: OFO update — single vectorised expression.
+        #   continuous:  u_new = u + α · σ
+        #   integer:     u_new = u + σ      then rounded
+        # alpha_vec already encodes the per-variable scaling (cont = α,
+        # int = 1.0) so a single elementwise multiply does both branches.
+        scaled_sigma = alpha_vec * sigma
+        u_new = self._u_current + scaled_sigma
+        if int_idx.size > 0:
+            # Note: u_new[int_idx] = np.round(u_new[int_idx]) is the
+            # correct in-place write — fancy-indexed assignment writes
+            # back, while np.round(..., out=u_new[int_idx]) would write
+            # into a temporary copy.
+            u_new[int_idx] = np.round(u_new[int_idx])
 
-        # Round integer variables
-        for idx in self._integer_indices:
-            u_new[idx] = np.round(u_new[idx])
+        # Step 10: Predict new outputs.
+        #   Δy ≈ H · (α_vec ⊙ σ)
+        y_predicted = y_current + H @ scaled_sigma
 
-        # Step 10: Predict new outputs
-        #   Δy ≈ α · H_c · σ_c  +  H_i · σ_i
-        y_predicted = y_current.copy()
-        for i in range(self.n_controls):
-            if i in self._integer_indices:
-                y_predicted += H[:, i] * sigma[i]
-            else:
-                y_predicted += self.params.alpha * H[:, i] * sigma[i]
-        
-        # Step 11: Update internal state and set cooldown for switched integers
-        for idx in self._integer_indices:
-            if u_new[idx] != self._u_current[idx]:
-                self._int_lock_until[idx] = self.iteration + 1 + self._int_cooldown
+        # Step 11: Cooldown bookkeeping for integer switches.
+        if int_idx.size > 0:
+            switched = u_new[int_idx] != self._u_current[int_idx]
+            for j in np.flatnonzero(switched):
+                idx = int(int_idx[j])
+                self._int_lock_until[idx] = (
+                    self.iteration + 1 + self._int_cooldown
+                )
 
         self._u_current = u_new.copy()
         self.iteration += 1
 
-        # Step 12: Extract continuous and integer parts
-        u_continuous = np.array([
-            u_new[i] for i in range(self.n_controls) 
-            if i not in self._integer_indices
-        ])
-        u_integer = np.array([
-            int(np.round(u_new[i])) for i in self._integer_indices
-        ], dtype=np.int64)
-        
+        # Step 12: Continuous and integer slices in original order.
+        u_continuous = u_new[cont_idx].copy()
+        if int_idx.size > 0:
+            u_integer = u_new[int_idx].astype(np.int64)
+        else:
+            u_integer = np.array([], dtype=np.int64)
+
         return ControllerOutput(
             iteration=self.iteration,
             u_new=u_new,
@@ -703,6 +747,14 @@ class BaseOFOController(ABC):
             H_der[:, :n_der] = H_bus[:, :n_bus_der] @ E
             H_der[:, n_der:] = H_bus[:, n_bus_der:]   (non-DER cols)
 
+        A cache of the expanded matrix is kept and reused across steps
+        as long as the **identity** of the bus-level matrix does not
+        change.  The ``SensitivityUpdater`` mutates ``_H_current`` in
+        place on every step (only a scalar column rescaling for shunts)
+        and returns the same ndarray, so identity-based invalidation is
+        sufficient: the cached per-DER expansion is automatically reused
+        until ``invalidate_sensitivity_cache()`` clears it.
+
         Parameters
         ----------
         H_bus : NDArray[np.float64]
@@ -720,29 +772,53 @@ class BaseOFOController(ABC):
         if mapping is None:
             return H_bus
 
+        base_id = id(H_bus)
+        if (
+            self._H_der_cache is not None
+            and self._H_der_cache_base_id == base_id
+        ):
+            # Overwrite the DER block from the (possibly rescaled)
+            # H_bus[:, :n_bus_der] @ E and the rest block from
+            # H_bus[:, n_bus_der:], without allocating a new matrix.
+            n_bus_der = mapping.n_unique_bus
+            n_der = mapping.n_der
+            E = mapping.E
+            np.matmul(
+                H_bus[:, :n_bus_der], E,
+                out=self._H_der_cache[:, :n_der],
+            )
+            self._H_der_cache[:, n_der:] = H_bus[:, n_bus_der:]
+            return self._H_der_cache
+
+        # First-time (or post-invalidation) build.
         n_bus_der = mapping.n_unique_bus
-        E = mapping.E  # (n_unique_bus, n_der)
+        E = mapping.E
+        H_bus_der = H_bus[:, :n_bus_der]
+        H_bus_rest = H_bus[:, n_bus_der:]
+        H_der_part = H_bus_der @ E
+        H = np.hstack([H_der_part, H_bus_rest])
+        self._H_der_cache = H
+        self._H_der_cache_base_id = base_id
+        return H
 
-        # Split H_bus into DER-bus columns and the rest
-        H_bus_der = H_bus[:, :n_bus_der]           # (n_out, n_bus_der)
-        H_bus_rest = H_bus[:, n_bus_der:]           # (n_out, n_other)
-
-        # Expand DER columns: H_der_part = H_bus_der @ E
-        H_der_part = H_bus_der @ E                  # (n_out, n_der)
-
-        # Reassemble
-        return np.hstack([H_der_part, H_bus_rest])
-
-    def _build_per_variable_weights(
+    def _compute_per_variable_weights(
         self,
     ) -> Tuple[Optional[NDArray[np.float64]], Optional[NDArray[np.float64]]]:
         """
-        Build per-variable weight vectors for the MIQP objective.
+        Compute per-variable MIQP weight vectors **once** at init time.
 
         When a DER mapping with non-uniform weights is active, this
         constructs ``g_w_vector`` and ``g_u_vector`` arrays where the
         first ``n_der`` entries are scaled by the per-DER weights and
         the remaining entries use the scalar defaults.
+
+        All inputs (``self.params.g_w``, ``self.params.g_u``,
+        ``mapping.weights``) are static for the life of the controller,
+        so this function is called from ``initialise()`` and the result
+        is cached on ``self._g_w_vector_cache`` /
+        ``self._g_u_vector_cache``.  ``step()`` then reads the cached
+        refs via ``_get_per_variable_weights()`` instead of rebuilding
+        the arrays on every iteration.
 
         Returns
         -------
@@ -791,6 +867,12 @@ class BaseOFOController(ABC):
         g_u_vec[:n_der] = g_u_base * mapping.weights
 
         return g_w_vec, g_u_vec
+
+    def _get_per_variable_weights(
+        self,
+    ) -> Tuple[Optional[NDArray[np.float64]], Optional[NDArray[np.float64]]]:
+        """Return the cached per-variable weight vectors (or None/None)."""
+        return self._g_w_vector_cache, self._g_u_vector_cache
 
     def get_bus_level_sensitivity(
         self,

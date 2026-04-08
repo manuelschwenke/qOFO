@@ -293,7 +293,7 @@ class MultiTSOConfig:
     # than the greedy tuner permits.
     pso_min_gw_tso_der:    float = 1e-3
     pso_min_gw_tso_pcc:    float = 0.01
-    pso_min_gw_tso_gen:    float = 1e2
+    pso_min_gw_tso_gen:    float = 1e4
     pso_min_gw_tso_oltc:   float = 1.0
     pso_min_gw_dso_der:    float = 1e-3
     pso_min_gw_dso_oltc:   float = 0.1

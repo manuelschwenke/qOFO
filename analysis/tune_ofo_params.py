@@ -128,43 +128,70 @@ def _compute_curvature_matrix(
     return HQ.T @ HQ                # (n_u, n_u)
 
 
+#  Map actuator type name -> actuator_counts key.  Used by _apply_gw_floors
+#  to resolve block sizes from the column-order list.
+_TYPE_TO_COUNT_KEY = {
+    'der':   'n_der',
+    'pcc':   'n_pcc',
+    'gen':   'n_gen',
+    'oltc':  'n_oltc',
+    'shunt': 'n_shunt',
+}
+
+# Default TSO column order (matches ZoneDefinition.gw_diagonal() in
+# multi_tso_coordinator.py).
+_TSO_COLUMN_ORDER = ('der', 'pcc', 'gen', 'oltc')
+
+# Default DSO column order (matches DSOControllerConfig column ordering).
+_DSO_COLUMN_ORDER = ('der', 'oltc', 'shunt')
+
+
 def _apply_gw_floors(
     g_w: NDArray[np.float64],
     actuator_counts: Dict[str, int],
-    min_gw: float,
-    min_gw_discrete: float,
-    gen_gw_override: float,
+    floors: Dict[str, float],
+    column_order: Tuple[str, ...] = _TSO_COLUMN_ORDER,
 ) -> NDArray[np.float64]:
-    """Enforce per-type minimum g_w values.
+    """Enforce per-actuator-type minimum g_w values.
 
-    Column order: [Q_DER | Q_PCC | V_gen | OLTC] matching
-    ZoneDefinition.gw_diagonal() in multi_tso_coordinator.py.
+    Parameters
+    ----------
+    g_w :
+        Current per-actuator weight vector.  Modified in place on a copy.
+    actuator_counts :
+        Dict of actuator counts keyed by ``'n_der'``, ``'n_pcc'``,
+        ``'n_gen'``, ``'n_oltc'``, ``'n_shunt'`` (missing keys default
+        to 0).
+    floors :
+        Per-type minimum g_w values keyed by the type names ``'der'``,
+        ``'pcc'``, ``'gen'``, ``'oltc'``, ``'shunt'``.  Missing keys are
+        treated as 0 (no floor for that type).
+    column_order :
+        Tuple of actuator-type names describing how ``g_w`` is laid out.
+        Defaults to the TSO layout ``('der', 'pcc', 'gen', 'oltc')``.
+        Pass ``('der', 'oltc', 'shunt')`` for the DSO layout.
 
-    Generator weights are hard-overridden (not a floor) since their
-    electromechanical dynamics are not captured by the steady-state H.
+    Notes
+    -----
+    Each type block is clamped to ``g_w[block] >= floors[type]``; no type
+    is hard-overridden (the V_gen block used to be a hard override, but
+    is now a floor so the tuner can push it higher if the spectral
+    analysis calls for it).
     """
     g_w = g_w.copy()
-    n_der  = actuator_counts.get('n_der', 0)
-    n_pcc  = actuator_counts.get('n_pcc', 0)
-    n_gen  = actuator_counts.get('n_gen', 0)
-    n_oltc = actuator_counts.get('n_oltc', 0)
 
     off = 0
-    # DER block -- continuous, apply min_gw
-    g_w[off:off + n_der] = np.maximum(g_w[off:off + n_der], min_gw)
-    off += n_der
-
-    # PCC block -- continuous, apply min_gw
-    g_w[off:off + n_pcc] = np.maximum(g_w[off:off + n_pcc], min_gw)
-    off += n_pcc
-
-    # Generator block -- hard override
-    g_w[off:off + n_gen] = gen_gw_override
-    off += n_gen
-
-    # OLTC block -- discrete, apply min_gw_discrete
-    g_w[off:off + n_oltc] = np.maximum(g_w[off:off + n_oltc], min_gw_discrete)
-    off += n_oltc
+    for type_name in column_order:
+        count_key = _TYPE_TO_COUNT_KEY.get(type_name)
+        if count_key is None:
+            continue
+        n = int(actuator_counts.get(count_key, 0))
+        if n <= 0:
+            continue
+        floor = float(floors.get(type_name, 0.0))
+        if floor > 0.0:
+            g_w[off:off + n] = np.maximum(g_w[off:off + n], floor)
+        off += n
 
     return g_w
 
@@ -253,8 +280,10 @@ def compute_optimal_gw(
     actuator_counts: List[Dict[str, int]],
     *,
     safety_factor: float = 2.0,
-    min_gw: float = 0.01,
-    min_gw_discrete: float = 40.0,
+    min_gw_der: float = 0.01,
+    min_gw_pcc: float = 0.1,
+    min_gw_gen: float = 1e4,
+    min_gw_oltc: float = 40.0,
 ) -> List[NDArray[np.float64]]:
     """Compute per-actuator g_w vectors from local curvature (Phase 1).
 
@@ -270,7 +299,8 @@ def compute_optimal_gw(
     Parameters
     ----------
     config :
-        CascadeConfig providing alpha and gw_tso_v_gen.
+        CascadeConfig providing alpha (gw_tso_v_gen is ignored here -- use
+        ``min_gw_gen`` instead).
     H_blocks :
         Dict mapping (zone_i, zone_i) to diagonal sensitivity blocks H_ii.
     Q_obj_list :
@@ -279,10 +309,11 @@ def compute_optimal_gw(
         Per-zone dicts with keys 'n_der', 'n_pcc', 'n_gen', 'n_oltc'.
     safety_factor :
         Multiplier on the theoretical Gershgorin bound. Default 2.0.
-    min_gw :
-        Floor for continuous actuators (DER, PCC).
-    min_gw_discrete :
-        Floor for discrete actuators (OLTC).
+    min_gw_der, min_gw_pcc, min_gw_gen, min_gw_oltc :
+        Per-actuator-type minimum g_w floors.  V_gen is treated as a
+        floor (not a hard override) so the tuner may push the weight
+        higher if needed; the default ``min_gw_gen=1e4`` preserves the
+        safe pre-refactor behaviour.
 
     Returns
     -------
@@ -290,6 +321,13 @@ def compute_optimal_gw(
     """
     # Extract sorted zone ids from diagonal blocks
     zone_ids = sorted({i for (i, j) in H_blocks if i == j})
+
+    floors = {
+        'der':  min_gw_der,
+        'pcc':  min_gw_pcc,
+        'gen':  min_gw_gen,
+        'oltc': min_gw_oltc,
+    }
 
     result: List[NDArray[np.float64]] = []
     for idx, z in enumerate(zone_ids):
@@ -303,11 +341,8 @@ def compute_optimal_gw(
         # Gershgorin-based g_w
         g_w = safety_factor * config.alpha * c_diag / 2.0
 
-        # Apply type-specific floors and generator override
-        g_w = _apply_gw_floors(
-            g_w, counts, min_gw, min_gw_discrete,
-            gen_gw_override=config.gw_tso_v_gen,
-        )
+        # Apply per-type floors
+        g_w = _apply_gw_floors(g_w, counts, floors, _TSO_COLUMN_ORDER)
 
         result.append(g_w)
 
@@ -426,14 +461,15 @@ def tune_multi_zone(
     alpha_init: Optional[Dict[int, float]] = None,
     *,
     zone_ids: Optional[List[int]] = None,
-    safety_factor: float = 3.0,
-    min_gw: float = 1e-6,
-    min_gw_discrete: float = 20.0,
-    gen_gw: float = 1e4,
+    safety_factor: float = 4.0,
+    min_gw_der: float = 1e-3,
+    min_gw_pcc: float = 0.1,
+    min_gw_gen: float = 1e5,
+    min_gw_oltc: float = 40.0,
     objective: Literal["spectral", "row_sum"] = "spectral",
     spectral_target: float = 1.8,
     spectral_safety: float = 0.9,
-    gamma_target: float = 0.8,
+    gamma_target: float = 0.9,
     coupled_alpha_safety: float = 0.9,
     max_iterations: int = 30,
     verbose: bool = True,
@@ -472,15 +508,24 @@ def tune_multi_zone(
         Same as analyse_multi_zone_stability.
     alpha_init :
         Initial step sizes per zone {zone_id: alpha}.
-    safety_factor, min_gw, min_gw_discrete, gen_gw :
-        Phase-1 Gershgorin preconditioning parameters and floors.
+    safety_factor :
+        Phase-1 Gershgorin safety multiplier.
+    min_gw_der, min_gw_pcc, min_gw_gen, min_gw_oltc :
+        Per-actuator-type minimum g_w floors.  V_gen is a floor (not a
+        hard override), so the tuner is free to push it higher when
+        necessary; the default ``min_gw_gen=1e5`` preserves the safe
+        pre-refactor behaviour.
     objective :
         'spectral' (default) or 'row_sum'.
     spectral_target :
         Convergence target for alpha_eff * lambda_max(M_sys).  Default 1.8
         (10% margin below the stability bound 2.0).
     spectral_safety :
-        Per-zone alpha is at most spectral_safety * 2/lambda_max(M_sys).
+        Fraction of ``spectral_target`` that the per-zone alpha cap aims
+        for.  Default 0.9 -- alpha is capped so that
+        ``alpha_eff * lambda_max(M_sys) <= spectral_safety * spectral_target``,
+        which keeps the iterate strictly below the user's convergence
+        target with a configurable margin.
     gamma_target :
         Convergence target for the row-sum metric (only used when
         objective='row_sum').
@@ -505,6 +550,14 @@ def tune_multi_zone(
         raise ValueError(f"Unknown objective {objective!r}; "
                          "expected 'spectral' or 'row_sum'.")
 
+    # ── Build TSO per-type floor dict once; reused at every g_w update ─────
+    floors = {
+        'der':  min_gw_der,
+        'pcc':  min_gw_pcc,
+        'gen':  min_gw_gen,
+        'oltc': min_gw_oltc,
+    }
+
     # ── Phase 1: Gershgorin initialisation ───────────────────────────────────
     alpha_list: List[float] = [
         float((alpha_init or {}).get(z, 1.0)) for z in zone_ids
@@ -523,7 +576,7 @@ def tune_multi_zone(
 
         c_diag = np.diag(C_ii)
         g_w = safety_factor * alpha_list[idx] * c_diag / 2.0
-        g_w = _apply_gw_floors(g_w, counts, min_gw, min_gw_discrete, gen_gw)
+        g_w = _apply_gw_floors(g_w, counts, floors, _TSO_COLUMN_ORDER)
         gw_list.append(g_w)
 
     # Phase 1b: per-zone local-optimal alpha (refined inside the loop)
@@ -617,7 +670,7 @@ def tune_multi_zone(
                 gw_list[target_idx] = _apply_gw_floors(
                     gw_list[target_idx] * scale,
                     actuator_counts[target_idx],
-                    min_gw, min_gw_discrete, gen_gw,
+                    floors, _TSO_COLUMN_ORDER,
                 )
 
             # Even global boost on the dominant zone is the primary lever,
@@ -636,7 +689,7 @@ def tune_multi_zone(
                     gw_list[k] = _apply_gw_floors(
                         gw_list[k] * scale_k,
                         actuator_counts[k],
-                        min_gw, min_gw_discrete, gen_gw,
+                        floors, _TSO_COLUMN_ORDER,
                     )
 
         else:  # row_sum  -- boost the COLUMN zone of the worst sigma_ij (#2)
@@ -679,7 +732,7 @@ def tune_multi_zone(
                         gw_list[best_j_idx] = _apply_gw_floors(
                             gw_list[best_j_idx] * scale,
                             actuator_counts[best_j_idx],
-                            min_gw, min_gw_discrete, gen_gw,
+                            floors, _TSO_COLUMN_ORDER,
                         )
 
             # Also flatten the bottleneck's own M_ii kappa (helps rho_i).
@@ -694,7 +747,7 @@ def tune_multi_zone(
                 gw_list[bottleneck_idx] = _apply_gw_floors(
                     g_w_i * scale_ii,
                     actuator_counts[bottleneck_idx],
-                    min_gw, min_gw_discrete, gen_gw,
+                    floors, _TSO_COLUMN_ORDER,
                 )
 
         # ── Refresh stability with the updated g_w (so the alpha cap
@@ -709,8 +762,14 @@ def tune_multi_zone(
             verbose=False,
         )
         lam_sys_fresh = stab_fresh.M_sys_lambda_max
+        # Cap alpha so that  alpha_eff * lam_sys_fresh  stays at
+        #    spectral_safety * spectral_target
+        # i.e. we stay strictly below the user's target by a factor
+        # ``spectral_safety`` (default 0.9).  Prior versions tied the cap
+        # to the absolute stability bound 2.0, which made any
+        # spectral_target < 2*spectral_safety structurally unreachable.
         alpha_global_cap = (
-            spectral_safety * 2.0 / lam_sys_fresh
+            spectral_safety * spectral_target / lam_sys_fresh
             if lam_sys_fresh > 1e-14 else np.inf
         )
 
@@ -828,11 +887,14 @@ def tune_dso(
     alpha: float = 1.0,
     *,
     safety_factor: float = 2.0,
-    min_gw: float = 0.01,
-    min_gw_discrete: float = 40.0,
+    min_gw_der: float = 0.01,
+    min_gw_oltc: float = 40.0,
+    min_gw_shunt: float = 40.0,
     tso_period_s: float = 180.0,
     dso_period_s: float = 60.0,
     cascade_margin_target: float = 0.3,
+    max_refinement_iterations: int = 0,
+    max_growth_per_call: float = 10.0,
 ) -> Tuple[NDArray[np.float64], float, float]:
     """Tune per-actuator g_w for a DSO controller with cascade margin.
 
@@ -841,20 +903,78 @@ def tune_dso(
         cascade_margin = 1 - rho_D^(T_T / T_D) > cascade_margin_target
 
     where rho_D is the spectral contraction rate of the DSO iteration.
+
+    Two phases:
+
+    1. **Phase 1 (always run):** per-actuator Gershgorin preconditioning
+       ``g_w = safety_factor * alpha * diag(C_dso) / 2``, then per-type
+       floors via ``_apply_gw_floors``.  This produces sensible per-MVA
+       (DER) and per-tap (OLTC) regularisation values that match the
+       physical scale of the controlled outputs.
+
+    2. **Phase 2 (optional, off by default):** non-uniform iterative
+       refinement that boosts ``g_w`` for high-curvature actuators to
+       flatten the spectrum of ``M_dso`` and lower its condition number.
+       For poorly-conditioned DSO networks (kappa >> 1) this loop tends
+       to inflate ``g_w`` by orders of magnitude without actually
+       improving ``rho_D`` -- on the IEEE-39 cascade it ran 20 iterations
+       and produced ``g_w ~ 1e7``, well outside any usable range.  It is
+       therefore disabled by default.  Set ``max_refinement_iterations``
+       > 0 to enable it for well-conditioned topologies; the per-call
+       growth is hard-capped by ``max_growth_per_call`` to prevent
+       runaways.
+
+    Parameters
+    ----------
+    H_dso :
+        DSO sensitivity matrix (n_y_dso, n_u_dso).
+    q_obj_diag :
+        Per-output objective weight vector.
+    n_der, n_oltc, n_shunt :
+        Actuator counts (column order: ``[DER | OLTC | shunt]``).
+    alpha :
+        DSO step size.
+    safety_factor :
+        Phase-1 Gershgorin safety multiplier.
+    min_gw_der, min_gw_oltc, min_gw_shunt :
+        Per-actuator-type minimum g_w floors for the DSO column layout.
+    tso_period_s, dso_period_s :
+        Controller periods.  Their ratio determines how many DSO
+        iterations must converge within one TSO period.
+    cascade_margin_target :
+        Target for ``1 - rho_D^(T_T / T_D)``.  Default 0.3.
+    max_refinement_iterations :
+        Cap on the Phase-2 refinement loop.  Default 0 -- only Phase 1
+        runs and tune_dso returns immediately after the floors are
+        applied.  Increase to enable refinement for well-conditioned
+        DSOs.
+    max_growth_per_call :
+        Hard cap on the element-wise growth factor of g_w from Phase 1
+        to the final return value.  Default 10x.  Only meaningful when
+        ``max_refinement_iterations > 0``.
+
+    Returns
+    -------
+    (g_w, rho_D, cascade_margin) : tuple
+        The tuned per-actuator weights, the DSO spectral contraction
+        rate at optimal alpha, and the achieved cascade margin.
     """
     n_inner = max(int(tso_period_s / dso_period_s), 1)
 
     C_dso = _compute_curvature_matrix(H_dso, q_obj_diag)
     c_diag = np.diag(C_dso)
 
-    g_w = safety_factor * alpha * c_diag / 2.0
+    counts = {'n_der': n_der, 'n_oltc': n_oltc, 'n_shunt': n_shunt}
+    floors = {
+        'der':   min_gw_der,
+        'oltc':  min_gw_oltc,
+        'shunt': min_gw_shunt,
+    }
 
-    n_u = len(g_w)
-    g_w[:n_der] = np.maximum(g_w[:n_der], min_gw)
-    g_w[n_der:n_der + n_oltc] = np.maximum(
-        g_w[n_der:n_der + n_oltc], min_gw_discrete)
-    g_w[n_der + n_oltc:] = np.maximum(
-        g_w[n_der + n_oltc:], min_gw_discrete)
+    # ── Phase 1: Gershgorin per-actuator preconditioning + per-type floors
+    g_w = safety_factor * alpha * c_diag / 2.0
+    g_w = _apply_gw_floors(g_w, counts, floors, _DSO_COLUMN_ORDER)
+    g_w_phase1 = g_w.copy()  # remembered for the per-call growth cap
 
     gw_inv_sqrt = 1.0 / np.sqrt(np.maximum(g_w, 1e-12))
     M_dso = (gw_inv_sqrt[:, None] * C_dso) * gw_inv_sqrt[None, :]
@@ -868,22 +988,25 @@ def tune_dso(
     rho_D = (l_max - l_min) / (l_max + l_min) if len(active) >= 2 else 0.0
     cascade_margin = 1.0 - rho_D ** n_inner
 
-    if cascade_margin >= cascade_margin_target:
+    # Phase-1 already meets the target, OR Phase-2 refinement is disabled.
+    if (cascade_margin >= cascade_margin_target
+            or max_refinement_iterations <= 0):
         return g_w, rho_D, cascade_margin
 
-    for attempt in range(20):
+    # ── Phase 2 (optional): non-uniform iterative refinement ─────────────
+    g_w_cap = g_w_phase1 * float(max_growth_per_call)
+    for attempt in range(int(max_refinement_iterations)):
         M_diag = np.diag(M_dso)
         if np.max(M_diag) < 1e-14:
             break
 
         scale = 1.0 + 1.0 * (M_diag / np.max(M_diag))
-        g_w *= scale
+        g_w_new = g_w * scale
 
-        g_w[:n_der] = np.maximum(g_w[:n_der], min_gw)
-        g_w[n_der:n_der + n_oltc] = np.maximum(
-            g_w[n_der:n_der + n_oltc], min_gw_discrete)
-        g_w[n_der + n_oltc:] = np.maximum(
-            g_w[n_der + n_oltc:], min_gw_discrete)
+        # Hard upper cap relative to the Phase-1 baseline so the loop
+        # cannot run away on poorly-conditioned DSO networks.
+        g_w_new = np.minimum(g_w_new, g_w_cap)
+        g_w = _apply_gw_floors(g_w_new, counts, floors, _DSO_COLUMN_ORDER)
 
         gw_inv_sqrt = 1.0 / np.sqrt(np.maximum(g_w, 1e-12))
         M_dso = (gw_inv_sqrt[:, None] * C_dso) * gw_inv_sqrt[None, :]

@@ -2425,7 +2425,6 @@ def main() -> None:
         verbose=1,
         live_plot=True,
         add_tso_ders=True,
-        load_tuned_params_path=r'',
         # ── Profile & contingency settings ───────────────────────────────
         start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles=True,

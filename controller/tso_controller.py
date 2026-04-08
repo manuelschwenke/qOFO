@@ -124,8 +124,8 @@ class TSOControllerConfig:
     g_v: float = 1.0
     gen_indices: List[int] = field(default_factory=list)
     gen_bus_indices: List[int] = field(default_factory=list)
-    gen_vm_min_pu: float = 0.95
-    gen_vm_max_pu: float = 1.05
+    gen_vm_min_pu: float = 1.00
+    gen_vm_max_pu: float = 1.07
 
     k_t_avt: float = 0.0
     """Achieved-Value Tracking factor for PCC-Q reset.
@@ -682,17 +682,32 @@ class TSOController(BaseOFOController):
                 margin = margin_frac * q_range
 
                 # Near overexcitation limit → block V_gen increase
+                # Clamp u_upper down to the current setpoint, but never
+                # below the absolute lower bound gen_vm_min_pu (otherwise
+                # u_lower > u_upper if the current setpoint happens to
+                # sit below the configured lower bound, e.g. when the
+                # bounds are tightened after the plant equilibrated at a
+                # lower voltage).
                 if gen_q[k] >= gen_q_max[k] - margin:
-                    u_upper[avr_start + k] = min(
-                        u_upper[avr_start + k],
-                        self._u_current[avr_start + k],
+                    u_upper[avr_start + k] = max(
+                        self.config.gen_vm_min_pu,
+                        min(
+                            u_upper[avr_start + k],
+                            self._u_current[avr_start + k],
+                        ),
                     )
 
-                # Near underexcitation limit → block V_gen decrease
+                # Near underexcitation limit → block V_gen decrease.
+                # Clamp u_lower up to the current setpoint, but never
+                # above the absolute upper bound gen_vm_max_pu (symmetric
+                # safety to the overexcitation branch above).
                 if gen_q[k] <= gen_q_min[k] + margin:
-                    u_lower[avr_start + k] = max(
-                        u_lower[avr_start + k],
-                        self._u_current[avr_start + k],
+                    u_lower[avr_start + k] = min(
+                        self.config.gen_vm_max_pu,
+                        max(
+                            u_lower[avr_start + k],
+                            self._u_current[avr_start + k],
+                        ),
                     )
 
         # --- OLTC tap bounds (fixed mechanical limits) ---

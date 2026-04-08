@@ -294,9 +294,9 @@ class MultiTSOConfig:
     pso_min_gw_tso_der:    float = 1e-3
     pso_min_gw_tso_pcc:    float = 0.01
     pso_min_gw_tso_gen:    float = 1e4
-    pso_min_gw_tso_oltc:   float = 1.0
+    pso_min_gw_tso_oltc:   float = 10.0
     pso_min_gw_dso_der:    float = 1e-3
-    pso_min_gw_dso_oltc:   float = 0.1
+    pso_min_gw_dso_oltc:   float = 5.0
     pso_min_gw_dso_shunt:  float = 10.0
 
     # ── Stability analysis ─────────────────────────────────────────────────────

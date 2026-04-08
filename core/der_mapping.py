@@ -65,9 +65,24 @@ class DERMapping:
     # ------------------------------------------------------------------
     #  Derived (cached) properties
     # ------------------------------------------------------------------
+    #
+    # ``E``, ``unique_bus_indices``, and ``n_unique_bus`` are pure
+    # functions of ``bus_indices`` (which is immutable because the
+    # dataclass is ``frozen=True``).  They were previously ``@property``
+    # methods that recomputed on every access, which became a per-step
+    # hot path after the per-DER H refactor (commit 65513fb): the
+    # base-controller step loop reaches into ``mapping.E`` through
+    # ``_expand_H_to_der_level`` every iteration, so a Python dedup +
+    # dict build + ``np.zeros`` allocation ran on every call.
+    #
+    # We now materialise all three once in ``__post_init__`` and stash
+    # them on the instance via ``object.__setattr__`` (required because
+    # frozen dataclasses forbid normal attribute assignment).  The
+    # public names remain the same and the ``@property`` contract is
+    # preserved — callers still do ``mapping.E`` etc.
 
     def __post_init__(self) -> None:
-        """Validate inputs."""
+        """Validate inputs and precompute derived caches."""
         n = len(self.sgen_indices)
         if len(self.bus_indices) != n:
             raise ValueError(
@@ -90,6 +105,25 @@ class DERMapping:
                 f"sgen_indices length ({n})"
             )
 
+        # ---- Deduplicated bus list, preserving first-seen order ----
+        seen: set[int] = set()
+        unique: List[int] = []
+        for b in self.bus_indices:
+            if b not in seen:
+                seen.add(b)
+                unique.append(b)
+
+        # ---- Incidence matrix E of shape (n_unique_bus, n_der) ----
+        bus_to_row = {bus: row for row, bus in enumerate(unique)}
+        E = np.zeros((len(unique), n), dtype=np.float64)
+        for d, bus in enumerate(self.bus_indices):
+            E[bus_to_row[bus], d] = 1.0
+
+        # Frozen dataclass → must bypass __setattr__
+        object.__setattr__(self, "_unique_bus_indices", unique)
+        object.__setattr__(self, "_n_unique_bus", len(unique))
+        object.__setattr__(self, "_E", E)
+
     @property
     def n_der(self) -> int:
         """Total number of DERs."""
@@ -97,19 +131,17 @@ class DERMapping:
 
     @property
     def unique_bus_indices(self) -> List[int]:
-        """Deduplicated bus indices, preserving first-seen order."""
-        seen: set[int] = set()
-        result: List[int] = []
-        for b in self.bus_indices:
-            if b not in seen:
-                seen.add(b)
-                result.append(b)
-        return result
+        """Deduplicated bus indices, preserving first-seen order.
+
+        Cached in ``__post_init__`` — returns the same list instance on
+        every call.  Do not mutate the returned list.
+        """
+        return self._unique_bus_indices  # type: ignore[attr-defined]
 
     @property
     def n_unique_bus(self) -> int:
-        """Number of unique DER buses."""
-        return len(self.unique_bus_indices)
+        """Number of unique DER buses (cached)."""
+        return self._n_unique_bus  # type: ignore[attr-defined]
 
     @property
     def E(self) -> NDArray[np.float64]:
@@ -119,13 +151,11 @@ class DERMapping:
         ``E[b, d] = 1`` if DER *d* is connected at unique bus *b*.
         This supports the factorisation ``H_der = H_bus @ E`` where
         ``H_bus`` has one column per unique bus.
+
+        Cached in ``__post_init__`` — returns the same ndarray on every
+        call.  Do not mutate the returned array.
         """
-        unique = self.unique_bus_indices
-        bus_to_row = {bus: row for row, bus in enumerate(unique)}
-        E = np.zeros((len(unique), self.n_der), dtype=np.float64)
-        for d, bus in enumerate(self.bus_indices):
-            E[bus_to_row[bus], d] = 1.0
-        return E
+        return self._E  # type: ignore[attr-defined]
 
     def bus_to_der_indices(self, bus: int) -> List[int]:
         """Return list of DER indices (position in sgen_indices) at *bus*."""

@@ -273,8 +273,8 @@ class MultiTSOConfig:
     # convergence rate across the three stability components, so the
     # invariant ``f < 1`` is exactly the multi-zone-with-cascade stability
     # condition.
-    pso_swarm_size:        int = 30
-    pso_max_iterations:    int = 100
+    pso_swarm_size:        int = 50
+    pso_max_iterations:    int = 300
     pso_seed:              Optional[int] = None
     pso_w_inertia:         Tuple[float, float] = (0.7, 0.4)
     pso_c_cognitive:       float = 1.5
@@ -282,7 +282,12 @@ class MultiTSOConfig:
     pso_velocity_clamp_frac: float = 0.2
     pso_g_w_upper_factor:  float = 1e6
     pso_alpha_bounds:      Tuple[float, float] = (1e-4, 1.0)
-    pso_cascade_margin_target: float = 0.3
+    pso_cascade_margin_target: float = 0.2
+    pso_spectral_target:   float = 1.8
+    """Hard cap on the global TSO spectral metric ``alpha_eff*lam_max(M_sys)``.
+    Default 1.8 leaves a 10% margin below the absolute stability bound 2.0
+    so the operating-point shift between PSO and the post-PSO stability
+    re-evaluation cannot push the closed loop into instability."""
     # Per-actuator-type lower bounds for the PSO search.  Independent of
     # the legacy tune_min_gw_* floors so PSO is free to explore lower g_w
     # than the greedy tuner permits.
@@ -301,7 +306,7 @@ class MultiTSOConfig:
     # gradients, so the analysis is misleading.  After one simulated hour
     # the setpoints have largely equilibrated and the H/C matrices reflect
     # a representative operating point.  Set to 0 to run at t=0 (legacy).
-    stability_analysis_at_s:      float = 3600.0
+    stability_analysis_at_s:      float = 600.0
     sensitivity_update_interval:  int  = 1E6  # recompute H_ij every N TSO steps
 
     # ── Output ────────────────────────────────────────────────────────────────
@@ -372,10 +377,12 @@ class MultiTSOIterationRecord:
     dso_status:        Dict[str, Optional[str]]   = field(default_factory=dict)
 
     # DSO network-group aggregates
-    dso_group_q_der_mvar: Dict[str, float] = field(default_factory=dict)
-    dso_group_v_min_pu:   Dict[str, float] = field(default_factory=dict)
-    dso_group_v_mean_pu:  Dict[str, float] = field(default_factory=dict)
-    dso_group_v_max_pu:   Dict[str, float] = field(default_factory=dict)
+    dso_group_q_der_mvar:     Dict[str, float] = field(default_factory=dict)
+    dso_group_q_der_min_mvar: Dict[str, float] = field(default_factory=dict)
+    dso_group_q_der_max_mvar: Dict[str, float] = field(default_factory=dict)
+    dso_group_v_min_pu:       Dict[str, float] = field(default_factory=dict)
+    dso_group_v_mean_pu:      Dict[str, float] = field(default_factory=dict)
+    dso_group_v_max_pu:       Dict[str, float] = field(default_factory=dict)
 
     # Transformer-level DSO interface and OLTC data
     dso_trafo_q_set_mvar:    Dict[str, float] = field(default_factory=dict)
@@ -616,6 +623,8 @@ def _record_dso_group_and_transformer_data(
     Per-trafo data is keyed by ``"{dso_id}|trafo_{trafo_idx}"``.
     """
     group_q_der: Dict[str, List[float]] = {}
+    group_q_der_min: Dict[str, List[float]] = {}
+    group_q_der_max: Dict[str, List[float]] = {}
     group_v_min: Dict[str, List[float]] = {}
     group_v_mean: Dict[str, List[float]] = {}
     group_v_max: Dict[str, List[float]] = {}
@@ -660,7 +669,16 @@ def _record_dso_group_and_transformer_data(
         q_der_total = float(net.res_sgen.loc[dsocfg.der_indices, "q_mvar"].sum())
         vm_pu = net.res_bus.loc[dsocfg.voltage_bus_indices, "vm_pu"].to_numpy(dtype=float)
 
+        # Per-DSO DER reactive power capability (sum over the DSO's DERs).
+        # Used by the live plotter to draw a shaded headroom band around the
+        # DER Q line. Bounds come from the VDE-AR-N 4120 capability curve in
+        # actuator_bounds; they depend on the current active power dispatch.
+        der_p = net.res_sgen.loc[dsocfg.der_indices, "p_mw"].to_numpy(dtype=float)
+        q_min_arr, q_max_arr = dso_ctrl.actuator_bounds.compute_der_q_bounds(der_p)
+
         group_q_der.setdefault(group_id, []).append(q_der_total)
+        group_q_der_min.setdefault(group_id, []).append(float(q_min_arr.sum()))
+        group_q_der_max.setdefault(group_id, []).append(float(q_max_arr.sum()))
         if vm_pu.size > 0:
             group_v_min.setdefault(group_id, []).append(float(np.min(vm_pu)))
             group_v_mean.setdefault(group_id, []).append(float(np.mean(vm_pu)))
@@ -668,6 +686,10 @@ def _record_dso_group_and_transformer_data(
 
     for group_id, values in group_q_der.items():
         rec.dso_group_q_der_mvar[group_id] = float(np.sum(values))
+    for group_id, values in group_q_der_min.items():
+        rec.dso_group_q_der_min_mvar[group_id] = float(np.sum(values))
+    for group_id, values in group_q_der_max.items():
+        rec.dso_group_q_der_max_mvar[group_id] = float(np.sum(values))
     for group_id, values in group_v_min.items():
         rec.dso_group_v_min_pu[group_id] = float(np.min(values))
     for group_id, values in group_v_mean.items():
@@ -895,9 +917,11 @@ def _write_tuned_params_json(
                 history_summary.append({
                     "iter":          int(entry.get("iter", 0)),
                     "fitness":       float(entry.get("fitness", float("nan"))),
-                    "spectral_half": float(entry.get("spectral_half", float("nan"))),
-                    "gamma":         float(entry.get("gamma", float("nan"))),
+                    "rho_max_tso":   float(entry.get("rho_max_tso", float("nan"))),
+                    "rho_max_dso":   float(entry.get("rho_max_dso", float("nan"))),
                     "max_dso_decay": float(entry.get("max_dso_decay", float("nan"))),
+                    "spectral":      float(entry.get("spectral", float("nan"))),
+                    "gamma":         float(entry.get("gamma", float("nan"))),
                     "alpha_eff_tso": float(entry.get("alpha_eff_tso", float("nan"))),
                     "alpha_eff_dso": float(entry.get("alpha_eff_dso", float("nan"))),
                 })
@@ -1379,6 +1403,7 @@ def _run_auto_tune_and_apply(
         c_social=config.pso_c_social,
         velocity_clamp_frac=config.pso_velocity_clamp_frac,
         cascade_margin_target=config.pso_cascade_margin_target,
+        spectral_target=config.pso_spectral_target,
         tso_period_s=config.tso_period_s,
         dso_period_s=config.dso_period_s,
         alpha_init_tso=config.alpha,
@@ -2504,19 +2529,19 @@ def main() -> None:
         dso_period_s=20.0 * 1,    # DSO every 20 seconds
         alpha={1: 0.01, 2: 0.01, 3: 0.01},
         dso_alpha=0.1,
-        g_v=100000.0,
+        g_v=150000.0,
         g_q=2,
         dso_g_v=1000.0,
-        g_w_der=1.0,
+        g_w_der=0.5,
         g_w_gen=5e4,
-        g_w_pcc=1.0,
-        g_w_tso_oltc=50,
-        g_w_dso_der = 1.0,     # DSO DER Q regularisation
-        g_w_dso_oltc = 5.0,    # DSO OLTC tap regularisation
+        g_w_pcc=0.5,
+        g_w_tso_oltc=60,
+        g_w_dso_der = 2.0,     # DSO DER Q regularisation
+        g_w_dso_oltc = 4.0,    # DSO OLTC tap regularisation
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
-        auto_tune_gw=False,
+        auto_tune_gw=True,
         verbose=1,
         live_plot=True,
         add_tso_ders=True,
@@ -2528,8 +2553,8 @@ def main() -> None:
             # Example: trip line 0 at t=30 min, restore at t=60 min
             ContingencyEvent(minute=90, element_type="gen", element_index=3, action="trip"),
             ContingencyEvent(minute=120, element_type="gen", element_index=3, action="restore"),
-            ContingencyEvent(minute=180, element_type="gen", element_index=2, action="trip"),
-            ContingencyEvent(minute=240, element_type="gen", element_index=2, action="restore"),
+            ContingencyEvent(minute=240, element_type="gen", element_index=2, action="trip"),
+            ContingencyEvent(minute=360, element_type="gen", element_index=2, action="restore"),
         ],
     )
     log = run_multi_tso_dso(cfg)

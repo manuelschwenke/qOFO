@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Sequence
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import numpy as np
 
 if TYPE_CHECKING:
@@ -184,6 +185,8 @@ class MultiTSOLivePlotter:
         self._trafo_ids: List[str] = []
 
         self._dso_group_q_der: Dict[str, List[float]] = {}
+        self._dso_group_q_der_min: Dict[str, List[float]] = {}
+        self._dso_group_q_der_max: Dict[str, List[float]] = {}
         self._dso_group_v_min: Dict[str, List[float]] = {}
         self._dso_group_v_mean: Dict[str, List[float]] = {}
         self._dso_group_v_max: Dict[str, List[float]] = {}
@@ -251,47 +254,66 @@ class MultiTSOLivePlotter:
         )
 
         # ── Build DSO / stability figure ─────────────────────────────────────
-        # Rows:
-        #   1) Interface Q per transformer (set vs actual), grouped by HV group
-        #   2) DSO DER reactive power per HV network group
-        #   3) TSO-DSO transformer tap position per transformer
-        #   4) DSO voltage bands per HV network group
-        _n_dso_rows = 4
+        # Layout (2N + 2 rows for N DSOs):
+        #   rows 0..N-1   : interface Q (set vs actual) for each DSO
+        #   row  N        : DSO DER reactive power per group + capability band
+        #   rows N+1..2N  : transformer tap positions for each DSO
+        #   row  2N+1     : DSO voltage bands per group
+        n = len(self._dso_ids)
+        if n < 1:
+            raise ValueError("MultiTSOLivePlotter requires at least one DSO id.")
+
+        self._dso_groups_sorted: List[str] = sorted(self._dso_ids)
+        n_rows = 2 * n + 2
+        height_ratios = [1.2] * n + [1.0] + [0.7] * n + [1.2]
+
         self._fig_dso, self._axes_dso = plt.subplots(
-            _n_dso_rows, 1,
-            figsize=(11, 2.8 * _n_dso_rows),
+            n_rows, 1,
+            figsize=(11, min(28.0, sum(height_ratios) * 2.2)),
             sharex=True,
             constrained_layout=True,
+            gridspec_kw={"height_ratios": height_ratios},
         )
         self._fig_dso.suptitle("Multi-DSO / Stability (live)", fontweight="bold")
         self._fig_dso.set_constrained_layout_pads(h_pad=0.05, hspace=0.05)
 
-        ax = self._axes_dso[0]
-        ax.set_ylabel(r"$Q$ / Mvar")
-        ax.set_title("TSO-DSO Interface Q per Transformer (group colour, set vs actual)")
-        ax.grid(True, alpha=0.3)
-        self._ax_iface = ax
+        # Slice the axes array into the four blocks. np.atleast_1d guards
+        # against the degenerate single-axis case (n_rows == 1 cannot happen
+        # here because n >= 1 implies n_rows >= 4, but be defensive).
+        axes_arr = np.atleast_1d(self._axes_dso)
+        self._ax_iface_list: List[plt.Axes] = list(axes_arr[:n])
+        self._ax_dso_qder = axes_arr[n]
+        self._ax_tap_list: List[plt.Axes] = list(axes_arr[n + 1 : 2 * n + 1])
+        self._ax_dso_v = axes_arr[-1]
 
-        ax = self._axes_dso[1]
+        self._ax_iface_by_group: Dict[str, plt.Axes] = dict(
+            zip(self._dso_groups_sorted, self._ax_iface_list)
+        )
+        self._ax_tap_by_group: Dict[str, plt.Axes] = dict(
+            zip(self._dso_groups_sorted, self._ax_tap_list)
+        )
+
+        # Static decoration so empty subplots are still informative.
+        for g, ax in self._ax_iface_by_group.items():
+            ax.set_title(f"TSO-DSO Interface Q — {g} (set vs actual)")
+            ax.set_ylabel(r"$Q$ / Mvar")
+            ax.grid(True, alpha=0.3)
+
+        ax = self._ax_dso_qder
         ax.set_ylabel(r"$Q_\mathrm{DER}$ / Mvar")
-        ax.set_title("DSO DER Reactive Power per HV Network Group")
+        ax.set_title("DSO DER Reactive Power per HV Network Group (line: actual, band: DER capability)")
         ax.grid(True, alpha=0.3)
-        self._ax_dso_qder = ax
 
-        ax = self._axes_dso[2]
-        ax.set_ylabel("Tap position")
-        ax.set_title("TSO-DSO Transformer Tap Position per Transformer")
-        ax.grid(True, alpha=0.3)
-        self._ax_tap = ax
+        for g, ax in self._ax_tap_by_group.items():
+            ax.set_title(f"TSO-DSO Transformer Tap Position — {g}")
+            ax.set_ylabel("Tap position")
+            ax.grid(True, alpha=0.3)
 
-        ax = self._axes_dso[3]
+        ax = self._ax_dso_v
         ax.set_ylabel("Voltage / p.u.")
         ax.set_title("DSO Voltages per HV Network Group (V_min / V_mean / V_max bands)")
         ax.axhline(self._v_set, color="k", ls="--", lw=1.0, label=f"V_set={self._v_set:.3f}")
-        #ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
-        #ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
         ax.grid(True, alpha=0.3)
-        self._ax_dso_v = ax
 
         self._axes_dso[-1].set_xlabel(
             "Time [s]" if sub_minute else "Time [min]"
@@ -381,6 +403,11 @@ class MultiTSOLivePlotter:
             if any(field is None for field in required_group_fields):
                 raise RuntimeError("DSO grouped plotting fields are missing in record.")
 
+            # Optional fields for backward compatibility with replayed logs
+            # that pre-date the DER capability bound recording.
+            q_min_map = getattr(rec, "dso_group_q_der_min_mvar", None) or {}
+            q_max_map = getattr(rec, "dso_group_q_der_max_mvar", None) or {}
+
             for group_id in sorted(rec.dso_group_q_der_mvar.keys()):
                 if group_id not in rec.dso_group_v_min_pu:
                     raise KeyError(f"Missing dso_group_v_min_pu for group '{group_id}'.")
@@ -389,14 +416,29 @@ class MultiTSOLivePlotter:
                 if group_id not in rec.dso_group_v_max_pu:
                     raise KeyError(f"Missing dso_group_v_max_pu for group '{group_id}'.")
 
+                if group_id not in self._ax_iface_by_group:
+                    raise RuntimeError(
+                        f"Group '{group_id}' was not in dso_ids passed at init "
+                        f"({self._dso_groups_sorted!r}); the per-DSO split-row "
+                        f"layout requires static groups."
+                    )
+
                 if group_id not in self._group_ids:
                     self._group_ids.append(group_id)
                     self._dso_group_q_der[group_id] = []
+                    self._dso_group_q_der_min[group_id] = []
+                    self._dso_group_q_der_max[group_id] = []
                     self._dso_group_v_min[group_id] = []
                     self._dso_group_v_mean[group_id] = []
                     self._dso_group_v_max[group_id] = []
 
                 self._dso_group_q_der[group_id].append(float(rec.dso_group_q_der_mvar[group_id]))
+                self._dso_group_q_der_min[group_id].append(
+                    float(q_min_map.get(group_id, float("nan")))
+                )
+                self._dso_group_q_der_max[group_id].append(
+                    float(q_max_map.get(group_id, float("nan")))
+                )
                 self._dso_group_v_min[group_id].append(float(rec.dso_group_v_min_pu[group_id]))
                 self._dso_group_v_mean[group_id].append(float(rec.dso_group_v_mean_pu[group_id]))
                 self._dso_group_v_max[group_id].append(float(rec.dso_group_v_max_pu[group_id]))
@@ -597,126 +639,121 @@ class MultiTSOLivePlotter:
         """Redraw the DSO / stability figure."""
         dso_t = np.array(self._dso_min)
 
-        # ------------------------------------------------------------------
-        # Row 1: interface Q per transformer, colour by HV network group
-        # ------------------------------------------------------------------
-        ax = self._ax_iface
-        ax.clear()
-        ax.set_ylabel(r"$Q$ [Mvar]")
-        ax.set_title("TSO-DSO Interface Q per Transformer (group colour, set vs actual)")
-        ax.grid(True, alpha=0.3)
-        _apply_x_fmt(ax, self._sub_minute)
+        # Colour index uses the static init-time group ordering so that the
+        # split subplots and the per-group line colours stay in sync across
+        # redraws.
+        group_colour_index = {
+            g: i for i, g in enumerate(self._dso_groups_sorted)
+        }
 
-        group_colour_index = {g: i for i, g in enumerate(sorted(self._group_ids))}
-
-        has_iface = False
+        # Pre-group transformer IDs by group for the per-DSO subplots.
+        trafo_ids_by_group: Dict[str, List[str]] = {
+            g: [] for g in self._dso_groups_sorted
+        }
         for trafo_id in self._trafo_ids:
             if trafo_id not in self._dso_trafo_group:
                 raise KeyError(f"Missing group assignment for transformer '{trafo_id}'.")
-
-            group_id = self._dso_trafo_group[trafo_id]
-            col = _c(group_colour_index[group_id])
-
-            q_set = np.array(self._dso_trafo_q_set[trafo_id], dtype=float)
-            q_act = np.array(self._dso_trafo_q_actual[trafo_id], dtype=float)
-            t_set = np.array(self._dso_trafo_q_set_t[trafo_id], dtype=float)
-            t_act = np.array(self._dso_trafo_q_actual_t[trafo_id], dtype=float)
-
-            if q_set.size > 0:
-                ax.plot(
-                    t_set, q_set,
-                    lw=1.1, ls="--", color=col, alpha=0.9,
-                    #label=f"{group_id} | {trafo_id} set",
-                )
-                has_iface = True
-
-            if q_act.size > 0:
-                ax.plot(
-                    t_act, q_act,
-                    lw=1.3, ls="-", color=col, alpha=0.9,
-                    #label=f"{group_id} | {trafo_id} actual",
-                )
-                has_iface = True
-
-        if has_iface:
-            #ax.legend(fontsize=7, ncol=3, loc="upper left")
-            # One colour swatch per HV network group
-            colour_handles = [
-                Line2D([0], [0],
-                       color=_c(group_colour_index[g]), lw=1.8, ls="-",
-                       label=g)
-                for g in sorted(self._group_ids)
-            ]
-            # Two linestyle entries (colour-agnostic) for set vs actual
-            style_handles = [
-                Line2D([0], [0], color="0.35", lw=1.1, ls="--", label="setpoint"),
-                Line2D([0], [0], color="0.35", lw=1.3, ls="-", label="actual"),
-            ]
-            ax.legend(
-                handles=colour_handles + style_handles,
-                fontsize=7, ncol=2, loc="upper left",
-            )
+            g = self._dso_trafo_group[trafo_id]
+            if g in trafo_ids_by_group:
+                trafo_ids_by_group[g].append(trafo_id)
 
         # ------------------------------------------------------------------
-        # Row 2: DSO DER reactive power per HV network group
+        # Block A: interface Q per DSO (one subplot per DSO)
+        # ------------------------------------------------------------------
+        for gi, g in enumerate(self._dso_groups_sorted):
+            ax = self._ax_iface_by_group[g]
+            ax.clear()
+            ax.set_title(f"TSO-DSO Interface Q — {g} (set vs actual)")
+            ax.set_ylabel(r"$Q$ / Mvar")
+            ax.grid(True, alpha=0.3)
+            _apply_x_fmt(ax, self._sub_minute)
+
+            col = _c(group_colour_index[g])
+
+            for trafo_id in trafo_ids_by_group[g]:
+                q_set = np.array(self._dso_trafo_q_set[trafo_id], dtype=float)
+                q_act = np.array(self._dso_trafo_q_actual[trafo_id], dtype=float)
+                t_set = np.array(self._dso_trafo_q_set_t[trafo_id], dtype=float)
+                t_act = np.array(self._dso_trafo_q_actual_t[trafo_id], dtype=float)
+
+                if q_set.size > 0:
+                    ax.plot(t_set, q_set, lw=1.1, ls="--", color=col, alpha=0.9)
+                if q_act.size > 0:
+                    ax.plot(t_act, q_act, lw=1.3, ls="-", color=col, alpha=0.9)
+
+            # Show the linestyle legend on the first interface subplot only.
+            if gi == 0:
+                style_handles = [
+                    Line2D([0], [0], color="0.35", lw=1.1, ls="--", label="setpoint"),
+                    Line2D([0], [0], color="0.35", lw=1.3, ls="-", label="actual"),
+                ]
+                ax.legend(handles=style_handles, fontsize=7, loc="upper left")
+
+        # ------------------------------------------------------------------
+        # Block B: DSO DER reactive power per group, with capability band
         # ------------------------------------------------------------------
         ax = self._ax_dso_qder
         ax.clear()
         ax.set_ylabel(r"$Q_\mathrm{DER}$ / Mvar")
-        ax.set_title("DSO DER Reactive Power per HV Network Group")
+        ax.set_title("DSO DER Reactive Power per HV Network Group (line: actual, band: DER capability)")
         ax.grid(True, alpha=0.3)
         _apply_x_fmt(ax, self._sub_minute)
 
-        has_qder = False
-        for group_id in sorted(self._group_ids):
-            if group_id not in self._dso_group_q_der:
-                raise KeyError(f"Missing grouped DER Q trace for '{group_id}'.")
-
-            q_arr = np.array(self._dso_group_q_der[group_id], dtype=float)
-            t_arr = dso_t[:len(q_arr)]
-            col = _c(group_colour_index[group_id])
+        line_handles: List[Line2D] = []
+        has_band = False
+        for g in self._dso_groups_sorted:
+            if g not in self._dso_group_q_der:
+                continue  # group has not yet emitted any DSO step
+            q_arr = np.array(self._dso_group_q_der[g], dtype=float)
+            q_min = np.array(self._dso_group_q_der_min.get(g, []), dtype=float)
+            q_max = np.array(self._dso_group_q_der_max.get(g, []), dtype=float)
+            col = _c(group_colour_index[g])
 
             if q_arr.size > 0:
-                ax.plot(
-                    t_arr, q_arr,
-                    lw=1.3, color=col,
-                    label=f"{group_id}",
-                )
-                has_qder = True
+                t_line = dso_t[:len(q_arr)]
+                line, = ax.plot(t_line, q_arr, lw=1.3, color=col, label=str(g))
+                line_handles.append(line)
 
-        if has_qder:
-            ax.legend(fontsize=7, ncol=3, loc="upper left")
+                # Shaded capability band where bound data is available.
+                m = min(len(q_arr), len(q_min), len(q_max))
+                if m > 0:
+                    t_band = dso_t[:m]
+                    ax.fill_between(
+                        t_band, q_min[:m], q_max[:m],
+                        color=col, alpha=0.15, linewidth=0.0,
+                    )
+                    has_band = True
+
+        if line_handles:
+            handles: List = list(line_handles)
+            if has_band:
+                handles.append(
+                    Patch(facecolor="0.5", alpha=0.25, label="DER Q capability")
+                )
+            ax.legend(handles=handles, fontsize=7, ncol=3, loc="upper left")
 
         # ------------------------------------------------------------------
-        # Row 3: transformer tap positions, colour by HV network group
+        # Block C: transformer tap positions per DSO (one subplot per DSO)
         # ------------------------------------------------------------------
-        ax = self._ax_tap
-        ax.clear()
-        ax.set_ylabel("Tap position")
-        ax.set_title("TSO-DSO Transformer Tap Position per Transformer")
-        ax.grid(True, alpha=0.3)
-        _apply_x_fmt(ax, self._sub_minute)
+        for g in self._dso_groups_sorted:
+            ax = self._ax_tap_by_group[g]
+            ax.clear()
+            ax.set_title(f"TSO-DSO Transformer Tap Position — {g}")
+            ax.set_ylabel("Tap position")
+            ax.grid(True, alpha=0.3)
+            _apply_x_fmt(ax, self._sub_minute)
 
-        has_tap = False
-        for trafo_id in self._trafo_ids:
-            group_id = self._dso_trafo_group[trafo_id]
-            col = _c(group_colour_index[group_id])
-
-            tap_arr = np.array(self._dso_trafo_tap_pos[trafo_id], dtype=float)
-            t_arr = np.array(self._dso_trafo_tap_t[trafo_id], dtype=float)
-
-            if tap_arr.size > 0:
-                ax.step(
-                    t_arr, tap_arr,
-                    where="post",
-                    lw=1.2, color=col,
-                    label=f"{group_id} | {trafo_id}",
-                )
-                has_tap = True
-
-        if has_tap:
-            ax.legend(fontsize=7, ncol=3, loc="upper left")
-        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+            col = _c(group_colour_index[g])
+            for trafo_id in trafo_ids_by_group[g]:
+                tap_arr = np.array(self._dso_trafo_tap_pos[trafo_id], dtype=float)
+                t_arr = np.array(self._dso_trafo_tap_t[trafo_id], dtype=float)
+                if tap_arr.size > 0:
+                    ax.step(
+                        t_arr, tap_arr,
+                        where="post",
+                        lw=1.2, color=col,
+                    )
+            ax.yaxis.set_major_locator(MaxNLocator(integer=True))
 
         # ------------------------------------------------------------------
         # Row 4: DSO voltage min/mean/max per HV network group
@@ -732,13 +769,9 @@ class MultiTSOLivePlotter:
         _apply_x_fmt(ax, self._sub_minute)
 
         has_v = False
-        for group_id in sorted(self._group_ids):
+        for group_id in self._dso_groups_sorted:
             if group_id not in self._dso_group_v_min:
-                raise KeyError(f"Missing grouped V_min trace for '{group_id}'.")
-            if group_id not in self._dso_group_v_mean:
-                raise KeyError(f"Missing grouped V_mean trace for '{group_id}'.")
-            if group_id not in self._dso_group_v_max:
-                raise KeyError(f"Missing grouped V_max trace for '{group_id}'.")
+                continue  # group not yet observed in any DSO step
 
             v_min = np.array(self._dso_group_v_min[group_id], dtype=float)
             v_mean = np.array(self._dso_group_v_mean[group_id], dtype=float)

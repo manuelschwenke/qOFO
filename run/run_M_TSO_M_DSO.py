@@ -343,10 +343,12 @@ class MultiTSOIterationRecord:
     dso_status:        Dict[str, Optional[str]]   = field(default_factory=dict)
 
     # DSO network-group aggregates
-    dso_group_q_der_mvar: Dict[str, float] = field(default_factory=dict)
-    dso_group_v_min_pu:   Dict[str, float] = field(default_factory=dict)
-    dso_group_v_mean_pu:  Dict[str, float] = field(default_factory=dict)
-    dso_group_v_max_pu:   Dict[str, float] = field(default_factory=dict)
+    dso_group_q_der_mvar:     Dict[str, float] = field(default_factory=dict)
+    dso_group_q_der_min_mvar: Dict[str, float] = field(default_factory=dict)
+    dso_group_q_der_max_mvar: Dict[str, float] = field(default_factory=dict)
+    dso_group_v_min_pu:       Dict[str, float] = field(default_factory=dict)
+    dso_group_v_mean_pu:      Dict[str, float] = field(default_factory=dict)
+    dso_group_v_max_pu:       Dict[str, float] = field(default_factory=dict)
 
     # Transformer-level DSO interface and OLTC data
     dso_trafo_q_set_mvar:    Dict[str, float] = field(default_factory=dict)
@@ -587,6 +589,8 @@ def _record_dso_group_and_transformer_data(
     Per-trafo data is keyed by ``"{dso_id}|trafo_{trafo_idx}"``.
     """
     group_q_der: Dict[str, List[float]] = {}
+    group_q_der_min: Dict[str, List[float]] = {}
+    group_q_der_max: Dict[str, List[float]] = {}
     group_v_min: Dict[str, List[float]] = {}
     group_v_mean: Dict[str, List[float]] = {}
     group_v_max: Dict[str, List[float]] = {}
@@ -631,7 +635,16 @@ def _record_dso_group_and_transformer_data(
         q_der_total = float(net.res_sgen.loc[dsocfg.der_indices, "q_mvar"].sum())
         vm_pu = net.res_bus.loc[dsocfg.voltage_bus_indices, "vm_pu"].to_numpy(dtype=float)
 
+        # Per-DSO DER reactive power capability (sum over the DSO's DERs).
+        # Used by the live plotter to draw a shaded headroom band around the
+        # DER Q line. Bounds come from the VDE-AR-N 4120 capability curve in
+        # actuator_bounds; they depend on the current active power dispatch.
+        der_p = net.res_sgen.loc[dsocfg.der_indices, "p_mw"].to_numpy(dtype=float)
+        q_min_arr, q_max_arr = dso_ctrl.actuator_bounds.compute_der_q_bounds(der_p)
+
         group_q_der.setdefault(group_id, []).append(q_der_total)
+        group_q_der_min.setdefault(group_id, []).append(float(q_min_arr.sum()))
+        group_q_der_max.setdefault(group_id, []).append(float(q_max_arr.sum()))
         if vm_pu.size > 0:
             group_v_min.setdefault(group_id, []).append(float(np.min(vm_pu)))
             group_v_mean.setdefault(group_id, []).append(float(np.mean(vm_pu)))
@@ -639,6 +652,10 @@ def _record_dso_group_and_transformer_data(
 
     for group_id, values in group_q_der.items():
         rec.dso_group_q_der_mvar[group_id] = float(np.sum(values))
+    for group_id, values in group_q_der_min.items():
+        rec.dso_group_q_der_min_mvar[group_id] = float(np.sum(values))
+    for group_id, values in group_q_der_max.items():
+        rec.dso_group_q_der_max_mvar[group_id] = float(np.sum(values))
     for group_id, values in group_v_min.items():
         rec.dso_group_v_min_pu[group_id] = float(np.min(values))
     for group_id, values in group_v_mean.items():

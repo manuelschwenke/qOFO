@@ -1634,245 +1634,77 @@ def _print_multi_zone_report(
     G_w_list: Optional[List[NDArray[np.float64]]] = None,
     actuator_counts: Optional[List[Dict[str, int]]] = None,
 ) -> None:
-    """Print a formatted multi-zone stability report to stdout."""
-    sep  = "=" * 72
-    thin = "-" * 72
+    """Print a compact multi-zone stability summary to stdout.
 
-    print(sep)
-    print("  Multi-Zone TSO-DSO OFO Stability Analysis")
-    print("  Condition: alpha_i * (lam_max(M_ii) + Sum_{j!=i} ||M_ij||_2) < 2  (diagonal dominance)")
-    print("  Condition: alpha_eff * lam_max(M_sys) < 2                      (global eigenvalue)")
-    print(sep)
-    print()
-
-    # ── Per-zone report ───────────────────────────────────────────────────────
-    print(thin)
-    print(f"  {'Zone':<14s} {'lam_max(Mii)':>12s} {'Sum||Mij||':>10s} "
-          f"{'a*(l+S)':>10s} {'a_max_local':>12s} {'a_max_coupled':>14s} {'Status':>8s}")
-    print(thin)
-
-    for i_idx, zr in enumerate(result.zones):
-        status = "OK" if zr.diagonally_dominant else "VIOLATED"
-        alpha_i = alpha_list[i_idx]
-        print(
-            f"  {zone_names[i_idx]:<14s} "
-            f"{zr.lambda_max_Mii:>12.4g} "
-            f"{zr.coupling_sum:>10.4g} "
-            f"{zr.contraction_lhs:>10.4g} "
-            f"{zr.alpha_max_local:>12.4g} "
-            f"{zr.alpha_max_coupled:>14.4g} "
-            f"{status:>8s}"
-        )
-    print()
-
-    # ── Per-zone Eigenvalue diagnostics ────────────────────────────────────
-    print("  Per-zone Eigenvalue diagnostics (top/slow modes of M_ii):")
-    for i_idx, zr in enumerate(result.zones):
-        if zr.eigenvalue_diagnostics:
-            print(f"    {zone_names[i_idx]}:")
-            print(f"      {'mode':>6s}   {'lam(M)':>10s}   {'|1-a*l|':>8s}   "
-                  f"actuator-type participation")
-            
-            for k, mode in enumerate(zr.eigenvalue_diagnostics):
-                lam = mode['eigenvalue']
-                contraction = mode['contraction']
-                tc = mode['type_contribution']
-                parts = sorted(tc.items(), key=lambda x: -x[1])
-                parts_str = '  '.join(
-                    f'{name}: {100*w:.0f}%' for name, w in parts if w >= 0.01
-                )
-                label = 'slow' if mode.get('_slowest_active') else str(k+1)
-                print(f"      {label:>6s}   {lam:>10.4g}   {contraction:>8.4f}   {parts_str}")
-            print()
-
-
-    # ── Per-actuator-type contribution to M_ii ──────────────────────────────
-    zone_ids = [zr.zone_id for zr in result.zones]
-    n_zones  = len(zone_ids)
-    if (actuator_counts is not None
-            and H_blocks is not None
-            and Q_obj_list is not None
-            and G_w_list is not None):
-        print("  Per-actuator-type contribution to M_ii diagonal:")
-        print(f"    {'Zone':<14s} {'Type':<10s} {'n':>4s} {'||H_cols||_F':>12s} "
-              f"{'g_w':>10s} {'trace(M_sub)':>12s} {'% of tr(M)':>10s}")
-        print(f"    {'-'*14} {'-'*10} {'-'*4} {'-'*12} "
-              f"{'-'*10} {'-'*12} {'-'*10}")
-        for i_idx, zr in enumerate(result.zones):
-            zi = zr.zone_id
-            H_ii = H_blocks.get((zi, zi))
-            q_obj = Q_obj_list[i_idx]
-            gw = G_w_list[i_idx]
-            ac = actuator_counts[i_idx]
-            if H_ii is None:
-                continue
-            q_sqrt = np.sqrt(np.maximum(q_obj, 0.0))
-            gw_inv_sqrt = 1.0 / np.sqrt(np.maximum(gw, 1e-12))
-            # Total trace of M_ii
-            QH = q_sqrt[:, None] * H_ii
-            C_ii = QH.T @ QH
-            M_ii_diag = (gw_inv_sqrt ** 2) * np.diag(C_ii)
-            total_trace = float(np.sum(M_ii_diag))
-
-            col_offset = 0
-            type_order = [('Q_DER', 'n_der'), ('Q_PCC', 'n_pcc'),
-                          ('V_gen', 'n_gen'), ('OLTC', 'n_oltc'),
-                          ('Shunt', 'n_shunt')]
-            first = True
-            for type_name, count_key in type_order:
-                n_k = ac.get(count_key, 0)
-                if n_k == 0:
-                    col_offset += 0
-                    continue
-                cols = H_ii[:, col_offset:col_offset + n_k]
-                gw_k = gw[col_offset:col_offset + n_k]
-                h_norm = float(np.linalg.norm(cols))
-                gw_repr = float(gw_k[0]) if np.all(gw_k == gw_k[0]) else float(np.mean(gw_k))
-                # Per-type trace contribution
-                sub_diag = M_ii_diag[col_offset:col_offset + n_k]
-                sub_trace = float(np.sum(sub_diag))
-                pct = 100.0 * sub_trace / total_trace if total_trace > 1e-14 else 0.0
-                zname = zone_names[i_idx] if first else ""
-                first = False
-                print(f"    {zname:<14s} {type_name:<10s} {n_k:>4d} "
-                      f"{h_norm:>12.4f} {gw_repr:>10.1f} "
-                      f"{sub_trace:>12.4f} {pct:>9.1f}%")
-                col_offset += n_k
-        print()
-
-    # ── Coupling matrix (spectral norms) ──────────────────────────────────────
-    if n_zones <= 6:
-        print("  Inter-zone coupling norms ||M_TSO,ij||_2:")
-        header = f"  {'':14s}" + "".join(f"  {zone_names[j]:>10s}" for j in range(n_zones))
-        print(header)
-        for i_idx, zr in enumerate(result.zones):
-            row_str = f"  {zone_names[i_idx]:<14s}"
-            for j in zone_ids:
-                if j == zr.zone_id:
-                    row_str += f"  {'(diag)':>10s}"
-                else:
-                    norm = zr.coupling_norms.get(j, 0.0)
-                    row_str += f"  {norm:>10.4g}"
-            print(row_str)
-        print()
-
-    # ── Global eigenvalue analysis ────────────────────────────────────────────
-    print(thin)
-    print("  Global M_sys eigenvalue analysis")
-    print(thin)
-    n_show = min(8, len(result.M_sys_eigenvalues))
-    eigs_desc = result.M_sys_eigenvalues[::-1][:n_show]
-    alpha_eff = max(alpha_list)
-    print(f"  alpha_eff (max over zones) = {alpha_eff}")
-    print(f"  lam_max(M_sys)             = {result.M_sys_lambda_max:.6g}")
-    print(f"  alpha_max_global           = 2 / lam_max = {result.alpha_max_global:.6g}")
-    print(f"  alpha_eff * lam_max(M_sys) = {alpha_eff * result.M_sys_lambda_max:.6g}  "
-          f"({'< 2 OK' if result.globally_stable else '>= 2 UNSTABLE'})")
-    print()
-    print(f"  Top {n_show} eigenvalues of M_sys (descending):")
-    for k, lam in enumerate(eigs_desc):
-        contraction = abs(1.0 - alpha_eff * lam)
-        print(f"    lam_{k+1:02d} = {lam:>12.6g}   alpha*lam = {alpha_eff*lam:>8.4f}   "
-              f"|1 - a*l| = {contraction:>8.4f}")
-    print()
-
-    # ── Lyapunov / Small-Gain Analysis ──────────────────────────────────────
-    print(thin)
-    print("  Lyapunov / Small-Gain Stability Analysis")
-    print(thin)
-    print()
-
-    # Per-zone Lyapunov parameters table
-    print(f"  {'Zone':<14s} {'rho_i':>8s} {'rho*_i':>8s} {'alpha_i':>8s} {'a*_i':>8s} "
-          f"{'kappa(Mii)':>10s} {'lam_min':>10s} {'lam_max':>10s} "
-          f"{'rank':>6s} {'row_sum':>10s} {'row*_sum':>10s}")
-    print(f"  {'-'*14} {'-'*8} {'-'*8} {'-'*8} {'-'*8} "
-          f"{'-'*10} {'-'*10} {'-'*10} "
-          f"{'-'*6} {'-'*10} {'-'*10}")
-
-    for i_idx, zr in enumerate(result.zones):
-        kappa_str = f"{zr.kappa_Mii:.1f}" if zr.kappa_Mii < 1e6 else "inf"
-        rank_str = f"{zr.n_effective}/{zr.n_effective + zr.n_null}"
-        print(
-            f"  {zone_names[i_idx]:<14s} "
-            f"{zr.rho_i:>8.4f} "
-            f"{zr.rho_i_opt:>8.4f} "
-            f"{alpha_list[i_idx]:>8.4g} "
-            f"{zr.alpha_i_opt:>8.4g} "
-            f"{kappa_str:>10s} "
-            f"{zr.lambda_min_Mii:>10.4g} "
-            f"{zr.lambda_max_Mii:>10.4g} "
-            f"{rank_str:>6s} "
-            f"{zr.lyapunov_row_sum:>10.4f} "
-            f"{zr.lyapunov_row_sum_opt:>10.4f}"
-        )
-    print()
-
-    # Cross-coupling gains σ_ij matrix
+    The output is intentionally brief (~15-20 lines): one header line, a
+    per-zone single-row table, a global-eigenvalue summary line, a
+    small-gain summary line, a diagonal-dominance count, and any
+    warnings.  The full diagnostic tables (eigenvalue breakdown,
+    per-actuator-type contribution, sigma_ij matrix, pairwise small-gain
+    detail, tuning recommendations) have been removed -- every value they
+    displayed is still available on ``MultiZoneStabilityResult`` if
+    programmatic access is needed.
+    """
+    sep  = "=" * 86
+    thin = "-" * 86
     n_zones = len(result.zones)
-    zone_ids = [zr.zone_id for zr in result.zones]
-    if n_zones <= 6:
-        print("  Cross-coupling gains sigma_ij = alpha_i * ||M_ij||_2:")
-        header = f"  {'':14s}" + "".join(f"  {zone_names[j]:>10s}" for j in range(n_zones))
-        print(header)
-        for i_idx, zr in enumerate(result.zones):
-            row_str = f"  {zone_names[i_idx]:<14s}"
-            for j_idx, zj in enumerate(zone_ids):
-                if zj == zr.zone_id:
-                    row_str += f"  {'rho=' + f'{zr.rho_i:.4f}':>10s}"
-                else:
-                    sig = zr.sigma_ij.get(zj, 0.0)
-                    row_str += f"  {sig:>10.4f}"
-            print(row_str)
-        print()
+    alpha_eff = max(alpha_list) if alpha_list else 0.0
+    spectral_metric = alpha_eff * result.M_sys_lambda_max
 
-    # N-zone small-gain condition
-    sg_ok = "SATISFIED" if result.small_gain_stable else "VIOLATED"
-    sg_opt_ok = "SATISFIED" if result.small_gain_stable_opt else "VIOLATED"
-    print(f"  N-zone small-gain (gamma = max_i row_sum_i < 1):")
-    print(f"    Current:  gamma = {result.small_gain_gamma:.4f}  [{sg_ok}]")
-    print(f"    Optimal:  gamma* = {result.small_gain_gamma_opt:.4f}  [{sg_opt_ok}]")
-    print()
+    print(sep)
+    print("  Multi-Zone OFO Stability Summary")
+    print(thin)
 
-    # Pairwise small-gain checks
-    if result.pairwise_small_gain:
-        print("  Pairwise small-gain (sigma_ij * sigma_ji < (1-rho_i)(1-rho_j)):")
-        for (zi, zj), ok in sorted(result.pairwise_small_gain.items()):
-            status = "OK" if ok else "VIOLATED"
-            ok_opt = result.pairwise_small_gain_opt.get((zi, zj), False)
-            status_opt = "OK" if ok_opt else "VIOLATED"
-            # Find the relevant zone results
-            zr_i = next(zr for zr in result.zones if zr.zone_id == zi)
-            zr_j = next(zr for zr in result.zones if zr.zone_id == zj)
-            sig_ij = zr_i.sigma_ij.get(zj, 0.0)
-            sig_ji = zr_j.sigma_ij.get(zi, 0.0)
-            product = sig_ij * sig_ji
-            bound = max(1.0 - zr_i.rho_i, 0.0) * max(1.0 - zr_j.rho_i, 0.0)
-            print(f"    Zones ({zi},{zj}): sigma*sigma = {product:.4g} vs bound = {bound:.4g}  "
-                  f"[{status}]  (optimal: [{status_opt}])")
-        print()
+    # Per-zone compact table: one row per zone with the most load-bearing
+    # numbers (alpha, eigenspectrum, coupling, contraction rate, row sum).
+    header = (f"  {'Zone':<10s} {'alpha':>9s} {'lam_max':>9s} {'kappa':>9s} "
+              f"{'Sum||Mij||':>11s} {'rho_i':>7s} {'row_sum':>9s} {'Status':>9s}")
+    print(header)
+    print(thin)
 
-    # ── Tuning Recommendations ────────────────────────────────────────────────
-    if result.recommendations:
-        print(thin)
-        print("  Tuning Recommendations")
-        print(thin)
-        for rec in result.recommendations:
-            print(f"    {rec}")
-        print()
+    n_diag_dom = 0
+    for i_idx, zr in enumerate(result.zones):
+        if zr.diagonally_dominant:
+            n_diag_dom += 1
+            status = "OK"
+        else:
+            status = "VIOLATED"
+        kappa_str = "inf" if zr.kappa_Mii >= 1e6 else f"{zr.kappa_Mii:>9.3g}"
+        print(
+            f"  {zone_names[i_idx]:<10s} "
+            f"{alpha_list[i_idx]:>9.4g} "
+            f"{zr.lambda_max_Mii:>9.3g} "
+            f"{kappa_str:>9s} "
+            f"{zr.coupling_sum:>11.4g} "
+            f"{zr.rho_i:>7.4f} "
+            f"{zr.lyapunov_row_sum:>9.4f} "
+            f"{status:>9s}"
+        )
+    print(thin)
 
-    # ── Warnings ──────────────────────────────────────────────────────────────
+    # Global spectral bound (necessary-and-sufficient)
+    global_tag = "STABLE" if result.globally_stable else "VIOLATED"
+    print(f"  Global spectral:  lam_max(M_sys) = {result.M_sys_lambda_max:.4g}   "
+          f"alpha_eff*lam_sys = {spectral_metric:.4f}   "
+          f"[{global_tag}]")
+
+    # Small-gain (sufficient only)
+    sg_tag = "SATISFIED" if result.small_gain_stable else "VIOLATED"
+    print(f"  Small-gain:       gamma = {result.small_gain_gamma:.4f}   "
+          f"[{sg_tag}]")
+
+    # Diagonal-dominance count
+    print(f"  Diag. dominance:  {n_diag_dom}/{n_zones} zones pass")
+
+    # Warnings (collected across all zones).  The recommendations block is
+    # intentionally removed per the compact-report design.
     all_warnings = []
     for i_idx, zr in enumerate(result.zones):
         for w in zr.warnings:
             all_warnings.append(f"[{zone_names[i_idx]}] {w}")
     if all_warnings:
-        print("  Warnings:")
+        print(thin)
         for w in all_warnings:
-            print(f"    {w}")
-        print()
+            print(f"  ! {w}")
 
-    # ── Overall status ────────────────────────────────────────────────────────
-    print(sep)
-    print(f"  OVERALL: {result.summary}")
     print(sep)

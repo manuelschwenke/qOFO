@@ -279,13 +279,18 @@ class MultiTSOConfig:
     pso_spectral_target:   float = 1.9
     """Hard cap on ``lam_max(M_sys)``.  Default 1.9 leaves a 5% margin
     below the absolute stability bound 2.0."""
-    pso_gw_oltc_ref:       float = 50.0
-    """Reference g_w for OLTC actuators.  PSO pays a soft penalty for
-    exceeding this, which steers it toward flattening kappa via
-    continuous actuators rather than by freezing OLTCs."""
-    pso_oltc_penalty_weight: float = 0.01
-    """Weight of the OLTC penalty.  0.01 adds ~0.03 penalty per decade
-    above the reference, small relative to rho_opt in [0.9, 1.0]."""
+    pso_gw_oltc_ref_tso:   float = 50.0
+    """Reference g_w for TSO OLTCs.  PSO pays a soft penalty for g_w
+    deviating far from this, steering it toward adjusting continuous
+    actuators instead of freezing tap changers."""
+    pso_gw_oltc_ref_dso:   float = 40.0
+    """Reference g_w for DSO OLTCs (coupling transformers).  Stronger
+    penalty than TSO because low g_w lets DSO taps switch wildly."""
+    pso_oltc_penalty_weight_tso: float = 0.01
+    """TSO OLTC penalty weight.  Mild steering."""
+    pso_oltc_penalty_weight_dso: float = 0.05
+    """DSO OLTC penalty weight.  5× stronger than TSO to prevent wild
+    tap switching on coupling transformers."""
     # Per-actuator-type lower bounds for the PSO search.  Independent of
     # the legacy tune_min_gw_* floors so PSO is free to explore lower g_w
     # than the greedy tuner permits.
@@ -1384,8 +1389,10 @@ def _run_auto_tune_and_apply(
         spectral_target=config.pso_spectral_target,
         tso_period_s=config.tso_period_s,
         dso_period_s=config.dso_period_s,
-        gw_oltc_ref=config.pso_gw_oltc_ref,
-        oltc_penalty_weight=config.pso_oltc_penalty_weight,
+        gw_oltc_ref_tso=config.pso_gw_oltc_ref_tso,
+        gw_oltc_ref_dso=config.pso_gw_oltc_ref_dso,
+        oltc_penalty_weight_tso=config.pso_oltc_penalty_weight_tso,
+        oltc_penalty_weight_dso=config.pso_oltc_penalty_weight_dso,
         seed=config.pso_seed,
         verbose=(verbose >= 1),
     )

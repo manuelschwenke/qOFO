@@ -2120,17 +2120,19 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # to centre DN voltages in the [0.9, 1.1] band with symmetric headroom.
     from pandapower.control import DiscreteTapControl
 
-    v_init = config.oltc_init_v_target_pu
+    v_init_dso = config.oltc_init_v_target_pu   # 1.0 — centre DN in [0.9, 1.1]
+    v_init_mt  = v_set                          # 1.05 — machine trafos track v_setpoint
     tol_pu = config.dso_oltc_init_tol_pu
     if verbose >= 1:
-        print(f"[7c] OLTC init: target={v_init:.2f} p.u. ± {tol_pu:.3f} p.u.")
+        print(f"[7c] OLTC init: DSO coupling target={v_init_dso:.2f} p.u., "
+              f"machine trafo target={v_init_mt:.2f} p.u.  (± {tol_pu:.3f})")
     for hv in meta.hv_networks:
         for t3w in hv.coupling_trafo_indices:
             DiscreteTapControl(
                 net,
                 element_index=t3w,
-                vm_lower_pu=v_init - tol_pu,
-                vm_upper_pu=v_init + tol_pu,
+                vm_lower_pu=v_init_dso - tol_pu,
+                vm_upper_pu=v_init_dso + tol_pu,
                 side="mv",
                 element="trafo3w",
             )
@@ -2139,8 +2141,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             DiscreteTapControl(
                 net,
                 element_index=tidx,
-                vm_lower_pu=v_init - tol_pu,
-                vm_upper_pu=v_init + tol_pu,
+                vm_lower_pu=v_init_mt - tol_pu,
+                vm_upper_pu=v_init_mt + tol_pu,
                 side="hv",
                 element="trafo",
             )

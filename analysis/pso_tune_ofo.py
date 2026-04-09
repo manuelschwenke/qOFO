@@ -435,6 +435,62 @@ def _eigenvector_pump(
 #  Fitness
 # ---------------------------------------------------------------------------
 
+_INTEGER_ACTUATOR_TYPES = frozenset({'oltc', 'shunt'})
+
+
+def _oltc_penalty(
+    gw_tso: List[NDArray[np.float64]],
+    gw_dso: List[NDArray[np.float64]],
+    actuator_counts: List[Dict[str, int]],
+    dso_inputs: List[DSOTuneInput],
+    gw_oltc_ref: float,
+    penalty_weight: float,
+) -> float:
+    """Soft penalty for OLTC g_w exceeding ``gw_oltc_ref``.
+
+    Penalises the mean log-ratio of OLTC g_w to the reference.  This
+    steers PSO toward flattening kappa by adjusting continuous-actuator
+    weights instead of freezing OLTCs.
+
+    Returns a non-negative additive penalty term.
+    """
+    if gw_oltc_ref <= 0 or penalty_weight <= 0:
+        return 0.0
+    log_ratios: List[float] = []
+
+    # TSO OLTCs
+    for idx, counts in enumerate(actuator_counts):
+        n_oltc = int(counts.get('n_oltc', 0))
+        if n_oltc <= 0:
+            continue
+        # OLTC block is at the END of the TSO vector (after der, pcc, gen)
+        off = (int(counts.get('n_der', 0))
+               + int(counts.get('n_pcc', 0))
+               + int(counts.get('n_gen', 0)))
+        for k in range(n_oltc):
+            gw_val = float(gw_tso[idx][off + k])
+            if gw_val > gw_oltc_ref:
+                log_ratios.append(np.log10(gw_val / gw_oltc_ref))
+
+    # DSO OLTCs
+    for d_idx, d in enumerate(dso_inputs):
+        n_oltc = int(d.n_oltc)
+        if n_oltc <= 0:
+            continue
+        off = int(d.n_der)  # DSO layout: [DER | OLTC | shunt]
+        for k in range(n_oltc):
+            gw_val = float(gw_dso[d_idx][off + k])
+            if gw_val > gw_oltc_ref:
+                log_ratios.append(np.log10(gw_val / gw_oltc_ref))
+
+    if not log_ratios:
+        return 0.0
+    # Mean log-ratio × weight.  Typical scale: log10(70000/50) ≈ 3.1,
+    # so penalty_weight=0.01 gives ~0.03 penalty (small relative to
+    # rho_opt in [0.9, 1.0]).
+    return penalty_weight * float(np.mean(log_ratios))
+
+
 def _evaluate_fitness(
     x: NDArray[np.float64],
     *,
@@ -448,7 +504,9 @@ def _evaluate_fitness(
     tso_sizes: List[int],
     dso_sizes: List[int],
     n_inner: int,
-    spectral_target: float = 1.8,
+    spectral_target: float = 1.9,
+    gw_oltc_ref: float = 50.0,
+    oltc_penalty_weight: float = 0.01,
 ) -> Tuple[float, Dict[str, float], Optional[MultiZoneStabilityResult]]:
     """Compute the contraction-rate fitness for one PSO particle.
 
@@ -595,7 +653,18 @@ def _evaluate_fitness(
         # effective DSO rho over one TSO period = rho_opt_dso^n_inner
         rho_dso_per_tso = rho_opt_dso ** max(int(n_inner), 1)
 
-        fitness = float(max(rho_opt_sys, rho_dso_per_tso))
+        base_fitness = float(max(rho_opt_sys, rho_dso_per_tso))
+
+        # Soft penalty for inflated OLTC g_w: steers PSO toward
+        # flattening kappa via continuous actuators rather than by
+        # freezing OLTCs with huge g_w.
+        oltc_pen = _oltc_penalty(
+            gw_tso, gw_dso, actuator_counts, dso_inputs,
+            gw_oltc_ref, oltc_penalty_weight,
+        )
+        metrics['oltc_penalty'] = oltc_pen
+
+        fitness = base_fitness + oltc_pen
         if not np.isfinite(fitness):
             fitness = 100.0
         metrics['fitness'] = fitness
@@ -773,11 +842,13 @@ def tune_pso_all(
     c_social: float = 1.5,
     velocity_clamp_frac: float = 0.2,
     cascade_margin_target: float = 0.3,
-    spectral_target: float = 1.8,
+    spectral_target: float = 1.9,
     tso_period_s: float = 180.0,
     dso_period_s: float = 60.0,
     legacy_safety_factor_tso: float = 4.0,
     legacy_safety_factor_dso: float = 2.0,
+    gw_oltc_ref: float = 50.0,
+    oltc_penalty_weight: float = 0.01,
     seed: Optional[int] = None,
     verbose: bool = True,
 ) -> PSOTuningResult:
@@ -886,6 +957,8 @@ def tune_pso_all(
             dso_sizes=dso_sizes,
             n_inner=n_inner,
             spectral_target=float(spectral_target),
+            gw_oltc_ref=float(gw_oltc_ref),
+            oltc_penalty_weight=float(oltc_penalty_weight),
         )
 
     pump_f, pump_metrics, _ = fitness_fn(pump_vec)

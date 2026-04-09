@@ -2147,6 +2147,51 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # Re-converge with found tap positions (no control)
     pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
+    # ── Voltage feasibility check after OLTC init ──────────────────────
+    # Verify all monitored buses are within [v_min, v_max] BEFORE the
+    # OFO controller starts.  If any bus is outside, the MIQP with hard
+    # or nearly-hard output constraints may be infeasible at step 1.
+    _v_violations_found = False
+    for hv in meta.hv_networks:
+        v_buses = list(hv.bus_indices)
+        vm_pu = net.res_bus.loc[v_buses, "vm_pu"].to_numpy(dtype=float)
+        v_min_check = 0.9   # DSO controller default
+        v_max_check = 1.1
+        below = vm_pu < v_min_check
+        above = vm_pu > v_max_check
+        if np.any(below) or np.any(above):
+            _v_violations_found = True
+            n_below = int(np.sum(below))
+            n_above = int(np.sum(above))
+            vm_min = float(np.min(vm_pu))
+            vm_max = float(np.max(vm_pu))
+            print(f"  ⚠ {hv.net_id}: {n_below} buses below {v_min_check} p.u., "
+                  f"{n_above} buses above {v_max_check} p.u.  "
+                  f"(range [{vm_min:.4f}, {vm_max:.4f}] p.u.)")
+            if verbose >= 2:
+                for i, bus in enumerate(v_buses):
+                    if below[i] or above[i]:
+                        print(f"      bus {bus}: V = {vm_pu[i]:.4f} p.u.")
+    for z, zd in zone_defs.items():
+        vm_pu = net.res_bus.loc[zd.v_bus_indices, "vm_pu"].to_numpy(dtype=float)
+        below = vm_pu < 0.9
+        above = vm_pu > 1.1
+        if np.any(below) or np.any(above):
+            _v_violations_found = True
+            n_below = int(np.sum(below))
+            n_above = int(np.sum(above))
+            vm_min = float(np.min(vm_pu))
+            vm_max = float(np.max(vm_pu))
+            print(f"  ⚠ TSO zone {z}: {n_below} buses below 0.9 p.u., "
+                  f"{n_above} buses above 1.1 p.u.  "
+                  f"(range [{vm_min:.4f}, {vm_max:.4f}] p.u.)")
+    if not _v_violations_found:
+        if verbose >= 1:
+            print("[7c] ✓ All monitored buses within [0.9, 1.1] p.u. after OLTC init.")
+    else:
+        print("[7c] ⚠ Voltage violations found — MIQP may be infeasible at step 1.")
+        print("     Consider widening dso_oltc_init_tol_pu or using g_z_voltage > 0 (soft constraints).")
+
     # Re-initialise all controllers so _u_current reflects the updated
     # operating point (profiles + correct tap positions).
     for z, ctrl in tso_controllers.items():

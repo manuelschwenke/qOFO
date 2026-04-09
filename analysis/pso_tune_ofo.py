@@ -315,8 +315,6 @@ def _encode_warm_start(
     legacy_safety_factor_dso: float,
     n_inner: int,
     spectral_target: float,
-    lb: NDArray[np.float64],
-    ub: NDArray[np.float64],
     verbose: bool = False,
 ) -> NDArray[np.float64]:
     """Build the warm-start particle from Gershgorin + feasibility pump.
@@ -417,14 +415,14 @@ def _encode_warm_start(
         print(f"  [warm-start pump] did not reach target after "
               f"{max_pump_iters} iterations (lam_sys = {lam_sys:.4f})")
 
-    # ── Encode to PSO vector ────────────────────────────────────────────
+    # ── Encode to PSO vector (NO clipping — bounds are built around
+    #    this result in tune_pso_all) ─────────────────────────────────
     log_gw_tso = [np.log10(np.maximum(gw, 1e-30)) for gw in gw_tso_arrays]
 
     parts: List[NDArray[np.float64]] = []
     parts.extend(log_gw_tso)
     parts.extend(log_gw_dso)
-    x = np.concatenate(parts)
-    return np.clip(x, lb, ub)
+    return np.concatenate(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -797,15 +795,10 @@ def tune_pso_all(
             f"n_inner = {n_inner})"
         )
 
-    lb, ub = _build_bounds(
-        actuator_counts=actuator_counts,
-        dso_inputs=dso_inputs,
-        floors_tso=floors_tso,
-        floors_dso=floors_dso,
-        g_w_upper_factor=g_w_upper_factor,
-    )
-    assert lb.size == total_dim and ub.size == total_dim
-
+    # ── Step 1: Run the warm start (Gershgorin + feasibility pump) ─────
+    # The pump runs WITHOUT bounds so it can push g_w as high as needed
+    # to reach lambda_max(M_sys) < spectral_target.  We build PSO bounds
+    # AROUND the pump result so the warm-start particle always lies inside.
     warm_start = _encode_warm_start(
         H_blocks=H_blocks,
         Q_obj_list=Q_obj_list,
@@ -818,10 +811,30 @@ def tune_pso_all(
         legacy_safety_factor_dso=legacy_safety_factor_dso,
         n_inner=n_inner,
         spectral_target=float(spectral_target),
-        lb=lb,
-        ub=ub,
         verbose=verbose,
     )
+
+    # ── Step 2: Build PSO bounds centred on the pump result ──────────────
+    # Floor-based lower bounds (same as before):
+    lb_floor, ub_floor = _build_bounds(
+        actuator_counts=actuator_counts,
+        dso_inputs=dso_inputs,
+        floors_tso=floors_tso,
+        floors_dso=floors_dso,
+        g_w_upper_factor=g_w_upper_factor,
+    )
+    # Upper bound: max of floor-based upper and (pump result + 2 decades).
+    # This ensures the pump's g_w are comfortably inside the search range
+    # even when the pump pushed well above the floor-based upper bound.
+    ub = np.maximum(ub_floor, warm_start + 2.0)  # +2 decades above pump
+    # Lower bound: floor-based lower (never below the actuator-type floor),
+    # but also at most (pump result - 3 decades) so PSO can explore below.
+    lb = np.minimum(lb_floor, warm_start - 3.0)
+    lb = np.maximum(lb, lb_floor)  # never below the absolute floor
+    assert lb.size == total_dim and ub.size == total_dim
+    # Clip the warm start into the bounds (should be a no-op if bounds
+    # are built correctly around it, but safety).
+    warm_start = np.clip(warm_start, lb, ub)
 
     def fitness_fn(x: NDArray[np.float64]):
         return _evaluate_fitness(

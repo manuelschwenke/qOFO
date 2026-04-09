@@ -2467,31 +2467,31 @@ def main() -> None:
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0 * 1,    # DSO every 20 seconds
         g_v=150000.0,
-        g_q=2,
+        g_q=1,
         dso_g_v=2000.0,
         g_w_der=50.0,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_gen=5e6,           # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
+        g_w_gen=1e7,           # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
         g_w_pcc=50.0,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_tso_oltc=60,       # unchanged (was at alpha=1)
-        g_w_dso_der=20.0,      # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
-        g_w_dso_oltc=4.0,      # unchanged (was at alpha=1)
+        g_w_tso_oltc=50,       # unchanged (was at alpha=1)
+        g_w_dso_der=15.0,      # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
+        g_w_dso_oltc=2.0,      # unchanged (was at alpha=1)
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
-        auto_tune_gw=False,
+        auto_tune_gw=True,
         verbose=1,
         live_plot=True,
         add_tso_ders=True,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 7, 6, 0),
+        start_time=datetime(2016, 1, 6, 6, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
             # Example: trip line 0 at t=30 min, restore at t=60 min
-            ContingencyEvent(minute=90, element_type="gen", element_index=3, action="trip"),
-            ContingencyEvent(minute=120, element_type="gen", element_index=3, action="restore"),
-            ContingencyEvent(minute=240, element_type="gen", element_index=2, action="trip"),
-            ContingencyEvent(minute=360, element_type="gen", element_index=2, action="restore"),
+            # ContingencyEvent(minute=90, element_type="gen", element_index=3, action="trip"),
+            # ContingencyEvent(minute=120, element_type="gen", element_index=3, action="restore"),
+            # ContingencyEvent(minute=240, element_type="gen", element_index=2, action="trip"),
+            # ContingencyEvent(minute=360, element_type="gen", element_index=2, action="restore"),
         ],
     )
     log = run_multi_tso_dso(cfg)

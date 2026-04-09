@@ -395,49 +395,62 @@ class MIQPSolver:
         n_total = problem.n_total
         n_outputs = problem.n_outputs
         alpha = problem.alpha
-        
+
+        # g_z semantics: g_z = 0 → hard output constraints (no slack),
+        #                g_z > 0 → soft output constraints (z penalised).
+        has_slack = bool(np.any(np.diag(problem.G_z) > 0))
+
         # Decision variables
         w = cp.Variable(n_total, name='w')
-        z = cp.Variable(n_outputs, name='z', nonneg=True)
-        
-        # Objective function (Equation 27 from PSCC paper)
-        # g = w^T G_w w + ∇f^T H̃ w + z^T G_z z
-        objective = (
-            cp.quad_form(w, problem.G_w, assume_PSD=True) +
-            problem.grad_f @ w +
-            cp.quad_form(z, problem.G_z)
-        )
-        
+
+        if has_slack:
+            z = cp.Variable(n_outputs, name='z', nonneg=True)
+            # Objective: g = w^T G_w w + ∇f^T w + z^T G_z z
+            objective = (
+                cp.quad_form(w, problem.G_w, assume_PSD=True) +
+                problem.grad_f @ w +
+                cp.quad_form(z, problem.G_z)
+            )
+        else:
+            # No slack → pure quadratic + linear objective
+            objective = (
+                cp.quad_form(w, problem.G_w, assume_PSD=True) +
+                problem.grad_f @ w
+            )
+
         # Constraints
         constraints = []
-        
+
         # Input constraints (Equation 24): αw ∈ [u_LL - u^k, u_UL - u^k]
         w_lower = (problem.u_lower - problem.u_current) / alpha
         w_upper = (problem.u_upper - problem.u_current) / alpha
         constraints.append(w >= w_lower)
         constraints.append(w <= w_upper)
-        
-        # Output constraints (Equation 25): α∇H w ∈ [y_LL - y^k - z, y_UL - y^k + z]
-        # Reformulated as two inequalities:
-        #   α H̃ w >= y_LL - y^k - z
-        #   α H̃ w <= y_UL - y^k + z
+
+        # Output constraints (Equation 25)
         Hw = alpha * (problem.H_tilde @ w)
         y_error_lower = problem.y_lower - problem.y_current
         y_error_upper = problem.y_upper - problem.y_current
-        
-        constraints.append(Hw >= y_error_lower - z)
-        constraints.append(Hw <= y_error_upper + z)
-        
+
+        if has_slack:
+            # Soft output constraints: α H̃ w ∈ [y_LL - y^k - z, y_UL - y^k + z]
+            constraints.append(Hw >= y_error_lower - z)
+            constraints.append(Hw <= y_error_upper + z)
+        else:
+            # Hard output constraints: α H̃ w ∈ [y_LL - y^k, y_UL - y^k]
+            constraints.append(Hw >= y_error_lower)
+            constraints.append(Hw <= y_error_upper)
+
         # Formulate and solve
         cvxpy_problem = cp.Problem(cp.Minimize(objective), constraints)
-        
+
         solver_kwargs = {
             'verbose': self.verbose,
         }
-        
+
         if solver_name is not None:
             solver_kwargs['solver'] = solver_name
-        
+
         try:
             cvxpy_problem.solve(**solver_kwargs)
         except cp.SolverError as e:
@@ -449,19 +462,19 @@ class MIQPSolver:
                 status=str(e),
                 solve_time_s=0.0,
             )
-        
+
         # Extract solution
         if cvxpy_problem.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
             w_opt = np.array(w.value, dtype=np.float64)
-            z_opt = np.array(z.value, dtype=np.float64)
+            z_opt = np.array(z.value, dtype=np.float64) if has_slack else np.zeros(n_outputs)
             obj_val = float(cvxpy_problem.value)
         else:
             w_opt = np.zeros(n_total)
             z_opt = np.zeros(n_outputs)
             obj_val = np.inf
-        
+
         solve_time = cvxpy_problem.solver_stats.solve_time or 0.0
-        
+
         return MIQPResult(
             w_continuous=w_opt,
             w_integer=np.array([], dtype=np.int64),
@@ -498,35 +511,46 @@ class MIQPSolver:
         n_total = problem.n_total
         n_outputs = problem.n_outputs
         alpha = problem.alpha
-        
+
+        # g_z semantics: g_z = 0 → hard output constraints (no slack),
+        #                g_z > 0 → soft output constraints (z penalised).
+        has_slack = bool(np.any(np.diag(problem.G_z) > 0))
+
         # Decision variables
         # w_c: continuous changes (DER Q)
         # w_i: integer changes (OLTC taps, shunt states)
         w_c = cp.Variable(n_continuous, name='w_continuous')
         w_i = cp.Variable(n_integer, name='w_integer', integer=True)
-        z = cp.Variable(n_outputs, name='z', nonneg=True)
-        
+
         # Combine w = [w_c; w_i] for matrix operations
         w = cp.hstack([w_c, w_i])
-        
-        # Objective function: g = w^T G_w w + ∇f^T H̃ w + z^T G_z z
-        objective = (
-            cp.quad_form(w, problem.G_w, assume_PSD=True) +
-            problem.grad_f @ w +
-            cp.quad_form(z, problem.G_z)
-        )
-        
+
+        if has_slack:
+            z = cp.Variable(n_outputs, name='z', nonneg=True)
+            # Objective: g = w^T G_w w + ∇f^T w + z^T G_z z
+            objective = (
+                cp.quad_form(w, problem.G_w, assume_PSD=True) +
+                problem.grad_f @ w +
+                cp.quad_form(z, problem.G_z)
+            )
+        else:
+            # No slack → pure quadratic + linear objective
+            objective = (
+                cp.quad_form(w, problem.G_w, assume_PSD=True) +
+                problem.grad_f @ w
+            )
+
         # Constraints
         constraints = []
-        
+
         # Input constraints for continuous variables
-        w_c_lower = (problem.u_lower[:n_continuous] - 
+        w_c_lower = (problem.u_lower[:n_continuous] -
                      problem.u_current[:n_continuous]) / alpha
-        w_c_upper = (problem.u_upper[:n_continuous] - 
+        w_c_upper = (problem.u_upper[:n_continuous] -
                      problem.u_current[:n_continuous]) / alpha
         constraints.append(w_c >= w_c_lower)
         constraints.append(w_c <= w_c_upper)
-        
+
         # Input constraints for integer variables
         # w_i represents the DIRECT change in discrete state (e.g., +1 tap,
         # -1 shunt step).  No alpha scaling — these are physical switching
@@ -541,7 +565,7 @@ class MIQPSolver:
         constraints.append(w_i >= w_i_lower_int)
         constraints.append(w_i <= w_i_upper_int)
 
-        # Output constraints with slack variables
+        # Output constraints
         # Continuous part is scaled by α (gradient step), integer part is
         # unscaled (direct state change):
         #   Δy ≈ α · H_c · w_c  +  H_i · w_i
@@ -550,17 +574,23 @@ class MIQPSolver:
         Hw = alpha * (H_c @ w_c) + H_i @ w_i
         y_error_lower = problem.y_lower - problem.y_current
         y_error_upper = problem.y_upper - problem.y_current
-        
-        constraints.append(Hw >= y_error_lower - z)
-        constraints.append(Hw <= y_error_upper + z)
-        
+
+        if has_slack:
+            # Soft output constraints with slack
+            constraints.append(Hw >= y_error_lower - z)
+            constraints.append(Hw <= y_error_upper + z)
+        else:
+            # Hard output constraints (no slack)
+            constraints.append(Hw >= y_error_lower)
+            constraints.append(Hw <= y_error_upper)
+
         # Formulate and solve
         cvxpy_problem = cp.Problem(cp.Minimize(objective), constraints)
-        
+
         solver_kwargs = {
             'verbose': self.verbose,
         }
-        
+
         if solver_name is not None:
             solver_kwargs['solver'] = solver_name
             # Add solver-specific options
@@ -577,7 +607,7 @@ class MIQPSolver:
                     'MSK_DPAR_OPTIMIZER_MAX_TIME': self.time_limit_s,
                     'MSK_DPAR_MIO_TOL_REL_GAP': self.mip_gap,
                 }
-        
+
         try:
             cvxpy_problem.solve(**solver_kwargs)
         except cp.SolverError as e:
@@ -589,19 +619,19 @@ class MIQPSolver:
                 status=str(e),
                 solve_time_s=0.0,
             )
-        
+
         # Extract solution
         if cvxpy_problem.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
             w_c_opt = np.array(w_c.value, dtype=np.float64)
             w_i_opt = np.round(w_i.value).astype(np.int64)
-            z_opt = np.array(z.value, dtype=np.float64)
+            z_opt = np.array(z.value, dtype=np.float64) if has_slack else np.zeros(n_outputs)
             obj_val = float(cvxpy_problem.value)
         else:
             w_c_opt = np.zeros(n_continuous)
             w_i_opt = np.zeros(n_integer, dtype=np.int64)
             z_opt = np.zeros(n_outputs)
             obj_val = np.inf
-        
+
         solve_time = cvxpy_problem.solver_stats.solve_time or 0.0
         
         return MIQPResult(

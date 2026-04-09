@@ -393,5 +393,138 @@ class TestMIQPSolverIntegration:
         assert np.all(y_predicted >= y_current - 1e-6)
 
 
+class TestGzHardSoftConstraints:
+    """Tests for g_z = 0 (hard) vs g_z > 0 (soft) output constraint semantics."""
+
+    def _make_simple_problem(self, g_z: float, y_upper: float = 0.3):
+        """Build a 2-input, 1-output problem where the gradient wants to
+        push the output beyond ``y_upper``.
+
+        With g_z = 0 (hard): the step is clipped to respect the bound.
+        With g_z > 0 (soft): a small slack z > 0 may appear.
+        """
+        H = np.array([[1.0, 0.5]])          # y ≈ u0 + 0.5·u1
+        return build_miqp_problem(
+            alpha=1.0,
+            u_current=np.zeros(2),
+            y_current=np.zeros(1),
+            H=H,
+            grad_f=np.array([-2.0, -1.0]),   # pushes w positive → y positive
+            u_lower=-10.0 * np.ones(2),
+            u_upper=10.0 * np.ones(2),
+            y_lower=np.array([-100.0]),
+            y_upper=np.array([y_upper]),      # tight upper bound
+            g_w=1.0,
+            g_u=0.0,
+            g_z=g_z,
+        )
+
+    def test_hard_constraints_z_is_zero(self):
+        """g_z = 0 → hard output constraints, z must be exactly zero."""
+        problem = self._make_simple_problem(g_z=0.0)
+        solver = MIQPSolver(verbose=False)
+        result = solver.solve(problem)
+
+        assert result.is_feasible
+        assert_allclose(result.z, 0.0, atol=1e-10,
+                        err_msg="z must be zero with hard constraints (g_z=0)")
+
+    def test_hard_constraints_output_respected(self):
+        """g_z = 0 → predicted output must stay within hard bounds."""
+        y_upper = 0.3
+        problem = self._make_simple_problem(g_z=0.0, y_upper=y_upper)
+        solver = MIQPSolver(verbose=False)
+        result = solver.solve(problem)
+
+        assert result.is_feasible
+        y_pred = problem.H_tilde @ result.w_continuous  # alpha=1
+        assert y_pred[0] <= y_upper + 1e-6, (
+            f"Hard constraint violated: y_pred={y_pred[0]:.6f} > y_upper={y_upper}"
+        )
+
+    def test_soft_constraints_allow_slack(self):
+        """g_z > 0 with tight bounds → solver may use z > 0."""
+        # Use a small g_z so the solver prefers some slack over a worse w
+        problem = self._make_simple_problem(g_z=0.1, y_upper=0.05)
+        solver = MIQPSolver(verbose=False)
+        result = solver.solve(problem)
+
+        assert result.is_feasible
+        # With very tight y_upper and low g_z, solver should use some slack
+        assert np.any(result.z > 1e-6), (
+            f"Expected non-zero slack with soft constraints, got z={result.z}"
+        )
+
+    def test_hard_vs_soft_different_step(self):
+        """Hard and soft constraints produce different steps when bounds bite."""
+        y_upper = 0.1  # very tight
+        prob_hard = self._make_simple_problem(g_z=0.0, y_upper=y_upper)
+        prob_soft = self._make_simple_problem(g_z=0.1, y_upper=y_upper)
+
+        solver = MIQPSolver(verbose=False)
+        res_hard = solver.solve(prob_hard)
+        res_soft = solver.solve(prob_soft)
+
+        assert res_hard.is_feasible
+        assert res_soft.is_feasible
+
+        # Steps should differ because soft constraints allow violation
+        assert not np.allclose(res_hard.w_continuous, res_soft.w_continuous, atol=1e-4), (
+            "Expected different w with hard vs soft constraints"
+        )
+
+    def test_hard_infeasible_output_constraints(self):
+        """g_z = 0 with contradictory output bounds → solver reports infeasible."""
+        # y_lower > y_upper relative to current state makes it infeasible
+        problem = build_miqp_problem(
+            alpha=1.0,
+            u_current=np.zeros(2),
+            y_current=np.array([0.5]),
+            H=np.array([[1.0, 1.0]]),
+            grad_f=np.zeros(2),
+            u_lower=-0.01 * np.ones(2),    # very tight input bounds
+            u_upper=0.01 * np.ones(2),
+            y_lower=np.array([0.6]),        # need y >= 0.6 → need Hw >= 0.1
+            y_upper=np.array([0.7]),
+            g_w=1.0,
+            g_u=0.0,
+            g_z=0.0,  # hard constraints
+        )
+        solver = MIQPSolver(verbose=False)
+        result = solver.solve(problem)
+
+        # With tight input bounds, can't reach y_lower=0.6 from y_current=0.5
+        # max Hw = H @ w_upper = [1,1] @ [0.01, 0.01] = 0.02 < 0.1 needed
+        assert not result.is_feasible or not result.is_optimal, (
+            "Expected infeasible with hard constraints and impossible bounds"
+        )
+
+    def test_soft_feasible_same_scenario(self):
+        """Same impossible scenario with g_z > 0 → solver finds a solution using slack."""
+        problem = build_miqp_problem(
+            alpha=1.0,
+            u_current=np.zeros(2),
+            y_current=np.array([0.5]),
+            H=np.array([[1.0, 1.0]]),
+            grad_f=np.zeros(2),
+            u_lower=-0.01 * np.ones(2),
+            u_upper=0.01 * np.ones(2),
+            y_lower=np.array([0.6]),
+            y_upper=np.array([0.7]),
+            g_w=1.0,
+            g_u=0.0,
+            g_z=100.0,  # soft constraints
+        )
+        solver = MIQPSolver(verbose=False)
+        result = solver.solve(problem)
+
+        assert result.is_feasible, (
+            f"Soft constraints should always be feasible, got status={result.status}"
+        )
+        assert result.z[0] > 0.01, (
+            f"Expected substantial slack, got z={result.z[0]:.6f}"
+        )
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

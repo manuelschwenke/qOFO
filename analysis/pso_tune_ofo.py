@@ -523,34 +523,79 @@ def _evaluate_fitness(
             metrics['fitness'] = penalty
             return penalty, metrics, stab
 
-        # Per-zone TSO contraction rate (alpha=1)
+        # ── TSO condition number κ(M_sys) = λ_max / λ_min ────────────────
+        # This is the PRIMARY objective.  Lower κ → the optimal contraction
+        # rate ρ* = (κ−1)/(κ+1) is tighter → faster convergence.
+        # Use the ACTIVE eigenvalues of M_sys (after null-space filtering).
+        sys_eigs = stab.M_sys_eigenvalues
+        sys_eigs_active = sys_eigs[sys_eigs > 1e-10 * max(float(sys_eigs[-1]), 1e-14)]
+        if len(sys_eigs_active) >= 2:
+            kappa_sys = float(sys_eigs_active[-1] / sys_eigs_active[0])
+        elif len(sys_eigs_active) == 1:
+            kappa_sys = 1.0
+        else:
+            kappa_sys = 1e6  # degenerate
+
+        rho_opt_sys = (kappa_sys - 1.0) / (kappa_sys + 1.0)
+        metrics['kappa_sys'] = kappa_sys
+        metrics['rho_opt_sys'] = rho_opt_sys
+
+        # Per-zone contraction for diagnostics
         rho_max_tso = max(
             (float(zr.rho_i) for zr in stab.zones),
             default=0.0,
         )
         metrics['rho_max_tso'] = rho_max_tso
 
-        # ── DSO blocks: contraction + hard stability check ──────────────
-        rho_max_dso = 0.0
+        # ── DSO condition numbers ───────────────────────────────────────
+        max_kappa_dso = 1.0
         max_dso_decay = 0.0
+        rho_max_dso = 0.0
         for d_idx, d in enumerate(dso_inputs):
-            rho_d, decay_d, lam_max_d = _dso_actual_decay(
-                d.H, d.q_obj_diag, gw_dso[d_idx], n_inner,
-            )
-            # Soft constraint: DSO spectral bound (lam_max < 2 absolute)
+            C_d = _compute_curvature_matrix(d.H, d.q_obj_diag)
+            gw_inv = 1.0 / np.sqrt(np.maximum(gw_dso[d_idx], 1e-12))
+            M_d = (gw_inv[:, None] * C_d) * gw_inv[None, :]
+            eigs_d_all = np.linalg.eigvalsh(M_d)
+            eigs_d = eigs_d_all[eigs_d_all > 1e-10 * max(float(eigs_d_all[-1]), 1e-14)]
+
+            if len(eigs_d) == 0:
+                continue
+
+            lam_max_d = float(eigs_d[-1])
+            lam_min_d = float(eigs_d[0]) if len(eigs_d) >= 2 else lam_max_d
+
+            # Soft stability constraint on DSO
             if lam_max_d >= 2.0:
                 excess = (lam_max_d / 2.0) - 1.0
-                penalty = 1.0 + excess * excess
+                penalty = 1e3 + excess * excess  # large penalty, well above any κ
                 metrics['fitness'] = penalty
                 return penalty, metrics, stab
+
+            kappa_d = lam_max_d / max(lam_min_d, 1e-14) if len(eigs_d) >= 2 else 1.0
+            rho_d = (kappa_d - 1.0) / (kappa_d + 1.0) if kappa_d > 1.0 else 0.0
+            decay_d = rho_d ** max(int(n_inner), 1)
+
+            if kappa_d > max_kappa_dso:
+                max_kappa_dso = kappa_d
             if decay_d > max_dso_decay:
                 max_dso_decay = decay_d
             if rho_d > rho_max_dso:
                 rho_max_dso = rho_d
+
+        metrics['max_kappa_dso'] = max_kappa_dso
         metrics['rho_max_dso'] = rho_max_dso
         metrics['max_dso_decay'] = max_dso_decay
 
-        fitness = float(max(rho_max_tso, max_dso_decay))
+        # ── Combined fitness: worst condition number across layers ───────
+        # Use kappa_sys for TSO and max_kappa_dso for DSO.
+        # To make them comparable, convert both to optimal rho and take
+        # the maximum — this weights the layer that converges slowest.
+        rho_opt_dso = (max_kappa_dso - 1.0) / (max_kappa_dso + 1.0) if max_kappa_dso > 1 else 0.0
+        # Account for DSO having n_inner steps per TSO period:
+        # effective DSO rho over one TSO period = rho_opt_dso^n_inner
+        rho_dso_per_tso = rho_opt_dso ** max(int(n_inner), 1)
+
+        fitness = float(max(rho_opt_sys, rho_dso_per_tso))
         if not np.isfinite(fitness):
             fitness = 100.0
         metrics['fitness'] = fitness
@@ -682,10 +727,10 @@ def _pso_loop(
         if verbose:
             print(
                 f"  [pso] iter {it:3d}: f_best={g_best_f:.4f}  "
-                f"rho_tso={m_best.get('rho_max_tso', float('nan')):.4f}  "
-                f"rho_dso={m_best.get('rho_max_dso', float('nan')):.4f}  "
+                f"kappa_sys={m_best.get('kappa_sys', float('nan')):.1f}  "
+                f"rho_opt={m_best.get('rho_opt_sys', float('nan')):.4f}  "
+                f"kappa_dso={m_best.get('max_kappa_dso', float('nan')):.1f}  "
                 f"spec={m_best.get('spectral', float('nan')):.4f}  "
-                f"gamma={m_best.get('gamma', float('nan')):.4f}  "
                 f"w={w:.3f}"
             )
 
@@ -846,9 +891,10 @@ def tune_pso_all(
     pump_f, pump_metrics, _ = fitness_fn(pump_vec)
     if verbose:
         print(f"  [pump] fitness = {pump_f:.4f}  "
-              f"spec = {pump_metrics.get('spectral', float('nan')):.4f}  "
-              f"rho_tso = {pump_metrics.get('rho_max_tso', float('nan')):.4f}  "
-              f"rho_dso = {pump_metrics.get('rho_max_dso', float('nan')):.4f}")
+              f"kappa_sys = {pump_metrics.get('kappa_sys', float('nan')):.1f}  "
+              f"rho_opt = {pump_metrics.get('rho_opt_sys', float('nan')):.4f}  "
+              f"kappa_dso = {pump_metrics.get('max_kappa_dso', float('nan')):.1f}  "
+              f"spec = {pump_metrics.get('spectral', float('nan')):.4f}")
 
     # ── Step 2: Optional PSO refinement ──────────────────────────────────
     # Only runs if the pump succeeded (fitness < 1) AND max_iterations > 0.

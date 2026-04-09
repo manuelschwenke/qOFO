@@ -10,7 +10,6 @@ results on synthetic sensitivity matrices.
 import numpy as np
 import pytest
 
-from core.cascade_config import CascadeConfig
 from analysis.tune_ofo_params import (
     ZoneTuningResult,
     TuningResult,
@@ -176,16 +175,15 @@ class TestBuildActuatorLabels:
 
 class TestComputeOptimalGw:
     def test_identity_single_zone(self):
-        """H = I, Q = I  →  C_diag = [1,...,1]
-        g_w = safety * alpha * 1 / 2 = 2 * 1 * 1 / 2 = 1.0"""
+        """H = I, Q = I  ->  C_diag = [1,...,1]
+        g_w = safety * 1 / 2 = 2 * 1 / 2 = 1.0"""
         n = 4
         H = np.eye(n)
         q = np.ones(n)
-        config = CascadeConfig(alpha=1.0, gw_tso_v_gen=1e7)
         # 2 DER, 1 PCC, 1 gen, 0 OLTC
         counts = [{'n_der': 2, 'n_pcc': 1, 'n_gen': 1, 'n_oltc': 0}]
         result = compute_optimal_gw(
-            config, {(0, 0): H}, [q], counts,
+            {(0, 0): H}, [q], counts,
             safety_factor=2.0,
             min_gw_der=0.01, min_gw_pcc=0.01,
             min_gw_gen=1e7, min_gw_oltc=40.0,
@@ -193,7 +191,7 @@ class TestComputeOptimalGw:
         assert len(result) == 1
         g_w = result[0]
         assert len(g_w) == 4
-        # DER and PCC get safety * alpha * 1 / 2 = 1.0
+        # DER and PCC get safety * 1 / 2 = 1.0
         np.testing.assert_allclose(g_w[0], 1.0)  # DER_0
         np.testing.assert_allclose(g_w[1], 1.0)  # DER_1
         np.testing.assert_allclose(g_w[2], 1.0)  # PCC_0
@@ -201,20 +199,19 @@ class TestComputeOptimalGw:
         assert g_w[3] == 1e7
 
     def test_scaled_curvature(self):
-        """Diagonal H with different sensitivities → proportional g_w."""
+        """Diagonal H with different sensitivities -> proportional g_w."""
         H = np.diag([1.0, 10.0, 0.1])  # 3 actuators
         q = np.ones(3)
-        config = CascadeConfig(alpha=0.5, gw_tso_v_gen=1e7)
         counts = [{'n_der': 3, 'n_pcc': 0, 'n_gen': 0, 'n_oltc': 0}]
         result = compute_optimal_gw(
-            config, {(0, 0): H}, [q], counts,
+            {(0, 0): H}, [q], counts,
             safety_factor=2.0, min_gw_der=0.01,
         )
         g_w = result[0]
-        # g_w[k] = 2 * 0.5 * h_k^2 / 2 = 0.5 * h_k^2
-        np.testing.assert_allclose(g_w[0], 0.5 * 1.0)
-        np.testing.assert_allclose(g_w[1], 0.5 * 100.0)
-        np.testing.assert_allclose(g_w[2], max(0.5 * 0.01, 0.01))
+        # g_w[k] = 2 * h_k^2 / 2 = h_k^2  (alpha=1)
+        np.testing.assert_allclose(g_w[0], 1.0)
+        np.testing.assert_allclose(g_w[1], 100.0)
+        np.testing.assert_allclose(g_w[2], max(0.01, 0.01))
 
     def test_two_zones(self):
         """Two zones produce two g_w vectors."""
@@ -222,13 +219,12 @@ class TestComputeOptimalGw:
         H2 = 2.0 * np.eye(3)
         q1 = np.ones(2)
         q2 = np.ones(3)
-        config = CascadeConfig(alpha=1.0, gw_tso_v_gen=1e7)
         counts = [
             {'n_der': 2, 'n_pcc': 0, 'n_gen': 0, 'n_oltc': 0},
             {'n_der': 3, 'n_pcc': 0, 'n_gen': 0, 'n_oltc': 0},
         ]
         result = compute_optimal_gw(
-            config, {(1, 1): H1, (2, 2): H2}, [q1, q2], counts,
+            {(1, 1): H1, (2, 2): H2}, [q1, q2], counts,
         )
         assert len(result) == 2
         assert len(result[0]) == 2
@@ -240,10 +236,9 @@ class TestComputeOptimalGw:
         """OLTC actuators respect min_gw_oltc."""
         H = np.diag([0.01])  # tiny sensitivity
         q = np.ones(1)
-        config = CascadeConfig(alpha=1.0, gw_tso_v_gen=1e7)
         counts = [{'n_der': 0, 'n_pcc': 0, 'n_gen': 0, 'n_oltc': 1}]
         result = compute_optimal_gw(
-            config, {(0, 0): H}, [q], counts,
+            {(0, 0): H}, [q], counts,
             min_gw_oltc=40.0,
         )
         assert result[0][0] == 40.0  # floor applied
@@ -326,8 +321,8 @@ class TestTuneMultiZone:
         assert len(vecs) == 1
         assert len(vecs[0]) == 3
 
-    def test_alpha_dict_method(self):
-        """TuningResult.alpha_dict() returns {zone_id: alpha}."""
+    def test_gw_vectors_with_zone_ids(self):
+        """TuningResult.gw_vectors() works with custom zone_ids."""
         H = np.eye(3)
         q = np.ones(3)
         result = tune_multi_zone(
@@ -338,9 +333,9 @@ class TestTuneMultiZone:
             min_gw_gen=1e7,
             verbose=False,
         )
-        d = result.alpha_dict()
-        assert 5 in d
-        assert d[5] > 0
+        vecs = result.gw_vectors()
+        assert len(vecs) == 1
+        assert len(vecs[0]) == 3
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -355,7 +350,7 @@ class TestTuneDso:
         q = np.ones(n)
         g_w, rho, margin = tune_dso(
             H, q, n_der=3, n_oltc=0, n_shunt=0,
-            alpha=1.0, safety_factor=2.0,
+            safety_factor=2.0,
             tso_period_s=180.0, dso_period_s=60.0,
         )
         assert len(g_w) == 3
@@ -374,7 +369,7 @@ class TestTuneDso:
         q = np.ones(6)
         g_w, rho, margin = tune_dso(
             H, q, n_der=2, n_oltc=1, n_shunt=1,
-            alpha=0.5, safety_factor=2.0,
+            safety_factor=2.0,
             cascade_margin_target=0.3,
             max_refinement_iterations=20,
         )
@@ -387,7 +382,7 @@ class TestTuneDso:
         q = np.ones(6)
         g_w_phase1, rho_p1, margin_p1 = tune_dso(
             H, q, n_der=2, n_oltc=1, n_shunt=1,
-            alpha=0.5, safety_factor=2.0,
+            safety_factor=2.0,
             cascade_margin_target=0.99,  # impossible target -> would loop
         )
         # max_refinement_iterations=0 (default) -> Phase 1 only -> g_w
@@ -396,7 +391,7 @@ class TestTuneDso:
         # produces strictly larger weights for at least one actuator.
         g_w_p2, _, _ = tune_dso(
             H, q, n_der=2, n_oltc=1, n_shunt=1,
-            alpha=0.5, safety_factor=2.0,
+            safety_factor=2.0,
             cascade_margin_target=0.99,
             max_refinement_iterations=20,
         )

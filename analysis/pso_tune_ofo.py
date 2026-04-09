@@ -172,26 +172,26 @@ def _eigenvector_pump(
     """
     n_zones = len(zone_ids)
 
-    # ── Phase 1: max(user_init, Gershgorin) ─────────────────────────────
+    # ── Phase 1: type-based floors only (no Gershgorin inflation) ────────
+    #
+    # With alpha-separated stability, the Gershgorin per-actuator condition
+    # g_w > C_ii/2 is no longer needed: alpha handles the global bound.
+    # Phase 1 only applies the per-type minimum floors to ensure reasonable
+    # preconditioning.  The user's init values remain the primary g_w.
     gw_tso_arrays: List[NDArray[np.float64]] = []
     for idx, z in enumerate(zone_ids):
-        H_ii = H_blocks[(z, z)]
-        c_diag = _compute_curvature_diagonal(H_ii, Q_obj_list[idx])
-        gw_gersh = safety_factor_tso * c_diag / 2.0
-        gw_gersh = _apply_gw_floors(
-            gw_gersh, actuator_counts[idx], floors_tso, _TSO_COLUMN_ORDER,
+        gw = _apply_gw_floors(
+            gw_tso_init[idx].copy(), actuator_counts[idx],
+            floors_tso, _TSO_COLUMN_ORDER,
         )
-        # User's init values are the FLOOR — pump can only increase
-        gw = np.maximum(gw_tso_init[idx], gw_gersh)
         gw_tso_arrays.append(gw)
 
     gw_dso_arrays: List[NDArray[np.float64]] = []
     for d_idx, d in enumerate(dso_inputs):
-        c_diag = _compute_curvature_diagonal(d.H, d.q_obj_diag)
         counts = {'n_der': d.n_der, 'n_oltc': d.n_oltc, 'n_shunt': d.n_shunt}
-        gw_gersh = safety_factor_dso * c_diag / 2.0
-        gw_gersh = _apply_gw_floors(gw_gersh, counts, floors_dso, _DSO_COLUMN_ORDER)
-        gw = np.maximum(gw_dso_init[d_idx], gw_gersh)
+        gw = _apply_gw_floors(
+            gw_dso_init[d_idx].copy(), counts, floors_dso, _DSO_COLUMN_ORDER,
+        )
         gw_dso_arrays.append(gw)
 
     # ── Phase 2a: Compute alpha_tso from M_sys ─────────────────────────
@@ -213,26 +213,29 @@ def _eigenvector_pump(
     # alpha_tso: the step-size that makes |1 - alpha * lambda_i| < 1
     # for ALL eigenvalues of M_sys.
     #
-    # For real lambda:   alpha < 2 / lambda
-    # For complex lambda = a + bi:  alpha < 2a / (a² + b²)
-    #   (derived from |1 - alpha*(a+bi)|² < 1)
+    # For real lambda:   alpha_crit = 2 / lambda
+    # For complex lambda = a + bi:  alpha_crit = 2a / (a² + b²)
+    #   (derived from |1 - alpha*(a+bi)|² = 1)
     #
-    # The safety margin uses spectral_target/2 instead of 1.0 as the
-    # contraction radius target.
-    safety = float(spectral_target) / 2.0   # e.g. 1.9/2 = 0.95
+    # Safety margin: alpha = 0.95 * alpha_crit (5% below critical).
+    # spectral_target only affects the feasibility CHECK, not alpha.
+    _ALPHA_SAFETY = 0.95
 
     sys_eigs = np.linalg.eigvals(stab.M_sys)
-    alpha_bounds: List[float] = []
+    alpha_crit_bounds: List[float] = []
     for lam in sys_eigs:
         a, b = float(lam.real), float(lam.imag)
         mag_sq = a * a + b * b
         if mag_sq < 1e-14:
             continue
-        # |1 - alpha*lambda|² < 1  →  alpha < 2a / (a²+b²)
         if a > 1e-14:
-            alpha_bounds.append(safety * 2.0 * a / mag_sq)
-        # If a <= 0 (shouldn't happen for PSD-ish M), skip
-    alpha_tso = min(1.0, min(alpha_bounds)) if alpha_bounds else 1.0
+            # Critical alpha where |1 - alpha*lambda| = 1 exactly
+            alpha_crit_bounds.append(2.0 * a / mag_sq)
+    if alpha_crit_bounds:
+        alpha_crit = min(alpha_crit_bounds)
+        alpha_tso = min(1.0, _ALPHA_SAFETY * alpha_crit)
+    else:
+        alpha_tso = 1.0
 
     if verbose:
         rho_at_alpha = float(np.max(np.abs(1.0 - alpha_tso * sys_eigs)))

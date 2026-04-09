@@ -5,7 +5,7 @@ Base Controller Module
 This module defines the abstract base class for OFO controllers.
 
 The base controller implements the common OFO iteration logic:
-    u^{k+1} = u^k + α · σ(u^k, d^k, y^k)
+    u^{k+1} = u^k + σ(u^k, d^k, y^k)
 
 where σ is the solution to the MIQP optimisation problem.
 
@@ -16,7 +16,7 @@ The controller maintains:
 
 References
 ----------
-[1] Schwenke et al., PSCC 2026, Eq. (22) - OFO iteration update
+[1] Schwenke et al., PSCC 2026, Eq. (22) - OFO iteration update (alpha=1)
 [2] Schwenke et al., PSCC 2026, Eq. (23)-(27) - MIQP formulation
 
 Author: Manuel Schwenke
@@ -52,9 +52,6 @@ class OFOParameters:
     
     Attributes
     ----------
-    alpha : float
-        Step size (gain) for the OFO update. Must be positive.
-        Larger values lead to faster but potentially less stable convergence.
     g_w : float or NDArray[np.float64]
         Weight for control variable changes (w^T G_w w term).
         Penalises large changes in setpoints per iteration.
@@ -80,7 +77,6 @@ class OFOParameters:
     solver_verbose : bool
         Whether to print solver output for debugging.
     """
-    alpha: float
     g_w: Union[float, NDArray[np.float64]]
     g_z: Union[float, NDArray[np.float64]]
     g_u: Union[float, NDArray[np.float64]] = 0.0
@@ -91,8 +87,6 @@ class OFOParameters:
 
     def __post_init__(self) -> None:
         """Validate parameters after initialisation."""
-        if np.any(self.alpha) <= 0:
-            raise ValueError(f"alpha must be positive, got {self.alpha}")
         g_w_arr = np.asarray(self.g_w)
         if g_w_arr.ndim <= 1 and np.any(g_w_arr < 0):
             raise ValueError(f"g_w diagonal must be non-negative, got {self.g_w}")
@@ -171,7 +165,7 @@ class BaseOFOController(ABC):
     (TSOController, DSOController) for problem-specific behaviour.
     
     The OFO update rule is:
-        u^{k+1} = u^k + α · σ^k
+        u^{k+1} = u^k + σ^k
     
     where σ^k is the solution to the MIQP problem:
         σ^k = argmin g(w, z, Δs)
@@ -271,7 +265,7 @@ class BaseOFOController(ABC):
         # Vectorised continuous/integer index arrays for the step loop.
         self._cont_idx_arr: Optional[NDArray[np.int64]] = None
         self._int_idx_arr: Optional[NDArray[np.int64]] = None
-        self._alpha_vec: Optional[NDArray[np.float64]] = None
+        # (alpha_vec removed: step-size is absorbed into per-actuator g_w)
     
     @property
     def u_current(self) -> NDArray[np.float64]:
@@ -342,12 +336,7 @@ class BaseOFOController(ABC):
         self._int_idx_arr = np.asarray(
             self._integer_indices, dtype=np.int64,
         )
-        # Per-variable effective step-size vector: continuous entries get
-        # the alpha step (gradient micro-step), integer entries get 1.0
-        # (direct state change).
-        alpha_vec = np.ones(n_total, dtype=np.float64)
-        alpha_vec[self._cont_idx_arr] = float(self.params.alpha)
-        self._alpha_vec = alpha_vec
+        # (alpha_vec removed: step-size is now absorbed into per-actuator g_w)
 
         # ---- Precompute per-variable MIQP weight vectors ----
         # When a DER mapping with per-DER weights is active, both g_w and
@@ -364,13 +353,13 @@ class BaseOFOController(ABC):
     def step(self, measurement: Measurement) -> ControllerOutput:
         """
         Execute one OFO iteration.
-        
+
         This method performs the core OFO update:
             1. Extract current outputs y^k from measurements
             2. Compute objective gradient ∇f
             3. Compute sensitivity matrix H
             4. Build and solve MIQP problem
-            5. Apply update: u^{k+1} = u^k + α · σ^k
+            5. Apply update: u^{k+1} = u^k + σ^k
         
         Parameters
         ----------
@@ -438,7 +427,7 @@ class BaseOFOController(ABC):
 
         # Step 7: Build and solve MIQP problem
         problem = build_miqp_problem(
-            alpha=self.params.alpha,
+            alpha=1.0,
             u_current=self._u_current,
             y_current=y_current,
             H=H,
@@ -470,7 +459,6 @@ class BaseOFOController(ABC):
         # and dominated the per-step cost after the per-DER refactor.
         cont_idx = self._cont_idx_arr
         int_idx = self._int_idx_arr
-        alpha_vec = self._alpha_vec  # cont = α, int = 1.0
 
         sigma = np.zeros(self.n_controls, dtype=np.float64)
         sigma[cont_idx] = result.w_continuous
@@ -478,12 +466,8 @@ class BaseOFOController(ABC):
             sigma[int_idx] = result.w_integer.astype(np.float64)
 
         # Step 9: OFO update — single vectorised expression.
-        #   continuous:  u_new = u + α · σ
-        #   integer:     u_new = u + σ      then rounded
-        # alpha_vec already encodes the per-variable scaling (cont = α,
-        # int = 1.0) so a single elementwise multiply does both branches.
-        scaled_sigma = alpha_vec * sigma
-        u_new = self._u_current + scaled_sigma
+        #   u_new = u + σ   (alpha is now absorbed into per-actuator g_w)
+        u_new = self._u_current + sigma
         if int_idx.size > 0:
             # Note: u_new[int_idx] = np.round(u_new[int_idx]) is the
             # correct in-place write — fancy-indexed assignment writes
@@ -492,8 +476,8 @@ class BaseOFOController(ABC):
             u_new[int_idx] = np.round(u_new[int_idx])
 
         # Step 10: Predict new outputs.
-        #   Δy ≈ H · (α_vec ⊙ σ)
-        y_predicted = y_current + H @ scaled_sigma
+        #   Δy ≈ H · σ
+        y_predicted = y_current + H @ sigma
 
         # Step 11: Cooldown bookkeeping for integer switches.
         if int_idx.size > 0:

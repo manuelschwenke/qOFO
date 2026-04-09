@@ -174,41 +174,30 @@ class TestOFOParameters:
     def test_valid_construction(self) -> None:
         """Test valid parameter construction."""
         params = OFOParameters(
-            alpha=0.03, g_w=0.2, g_z=1000.0, g_u=0.01
+            g_w=0.2, g_z=1000.0, g_u=0.01
         )
-        assert params.alpha == 0.03
         assert params.g_w == 0.2
         assert params.g_z == 1000.0
         assert params.g_u == 0.01
 
-    def test_negative_alpha_raises(self) -> None:
-        """Test that negative alpha raises ValueError."""
-        with pytest.raises(ValueError, match="alpha must be positive"):
-            OFOParameters(alpha=-0.1, g_w=1.0, g_z=1.0)
-
-    def test_zero_alpha_raises(self) -> None:
-        """Test that zero alpha raises ValueError."""
-        with pytest.raises(ValueError, match="alpha must be positive"):
-            OFOParameters(alpha=0.0, g_w=1.0, g_z=1.0)
-
     def test_negative_g_w_raises(self) -> None:
         """Test that negative g_w raises ValueError."""
-        with pytest.raises(ValueError, match="g_w must be non-negative"):
-            OFOParameters(alpha=0.1, g_w=-1.0, g_z=1.0)
+        with pytest.raises(ValueError, match="g_w.*non-negative"):
+            OFOParameters(g_w=-1.0, g_z=1.0)
 
     def test_negative_g_z_raises(self) -> None:
         """Test that negative g_z raises ValueError."""
         with pytest.raises(ValueError, match="g_z must be non-negative"):
-            OFOParameters(alpha=0.1, g_w=1.0, g_z=-1.0)
+            OFOParameters(g_w=1.0, g_z=-1.0)
 
     def test_negative_g_u_raises(self) -> None:
         """Test that negative g_u raises ValueError."""
         with pytest.raises(ValueError, match="g_u must be non-negative"):
-            OFOParameters(alpha=0.1, g_w=1.0, g_z=1.0, g_u=-0.5)
+            OFOParameters(g_w=1.0, g_z=1.0, g_u=-0.5)
 
     def test_default_g_u_is_zero(self) -> None:
         """Test that g_u defaults to zero."""
-        params = OFOParameters(alpha=0.1, g_w=1.0, g_z=1.0)
+        params = OFOParameters(g_w=1.0, g_z=1.0)
         assert params.g_u == 0.0
 
 
@@ -415,7 +404,7 @@ class TestDSOController:
         )
 
         params = OFOParameters(
-            alpha=0.03, g_w=0.2, g_z=1000.0, g_u=0.01
+            g_w=0.2, g_z=1000.0, g_u=0.01
         )
 
         network_state = _make_network_state()
@@ -639,7 +628,7 @@ class TestTSOController:
         )
 
         params = OFOParameters(
-            alpha=0.03, g_w=0.2, g_z=1000.0, g_u=0.01
+            g_w=0.2, g_z=1000.0, g_u=0.01
         )
 
         network_state = _make_network_state()
@@ -933,7 +922,7 @@ class TestCascadedCommunication:
             current_line_indices=current_lines,
         )
         tso_params = OFOParameters(
-            alpha=0.03, g_w=0.2, g_z=1000.0
+            g_w=0.2, g_z=1000.0
         )
         tso = TSOController(
             controller_id="tso_main",
@@ -1008,7 +997,7 @@ class TestCascadedCommunication:
 
         tso = TSOController(
             controller_id="tso_main",
-            params=OFOParameters(alpha=0.03, g_w=0.2, g_z=1000.0),
+            params=OFOParameters(g_w=0.2, g_z=1000.0),
             config=TSOControllerConfig(
                 der_indices=der_buses,
                 pcc_trafo_indices=pcc_trafos,
@@ -1028,7 +1017,7 @@ class TestCascadedCommunication:
 
         dso = DSOController(
             controller_id="dso_1",
-            params=OFOParameters(alpha=0.03, g_w=0.2, g_z=1000.0),
+            params=OFOParameters(g_w=0.2, g_z=1000.0),
             config=DSOControllerConfig(
                 der_indices=der_buses,
                 oltc_trafo_indices=oltc_trafos,
@@ -1086,7 +1075,7 @@ class TestBaseOFOControllerViaSubclass:
         n_out = 6
         controller = DSOController(
             controller_id="copy_test",
-            params=OFOParameters(alpha=0.1, g_w=1.0, g_z=100.0),
+            params=OFOParameters(g_w=1.0, g_z=100.0),
             config=DSOControllerConfig(
                 der_indices=[2, 3],
                 oltc_trafo_indices=[0],
@@ -1135,7 +1124,7 @@ class TestBaseOFOControllerViaSubclass:
             DSOController(
                 controller_id="",
                 params=OFOParameters(
-                    alpha=0.1, g_w=1.0, g_z=100.0
+                    g_w=1.0, g_z=100.0
                 ),
                 config=DSOControllerConfig(
                     der_indices=[],
@@ -1188,7 +1177,7 @@ class TestTSOAvtReset:
             k_t_avt=k_t_avt,
         )
 
-        params = OFOParameters(alpha=0.03, g_w=0.2, g_z=1000.0, g_u=0.01)
+        params = OFOParameters(g_w=0.2, g_z=1000.0, g_u=0.01)
         controller = TSOController(
             controller_id="tso_avt_test",
             params=params,

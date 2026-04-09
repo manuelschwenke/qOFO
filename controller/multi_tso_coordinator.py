@@ -649,20 +649,26 @@ class MultiTSOCoordinator:
 
             coupling_sum = sum(coupling_norms.values())
 
-            # ── Diagonal-dominance criterion (alpha=1, absorbed into g_w) ────
-            contraction_lhs = lambda_max + coupling_sum
+            # ── Diagonal-dominance criterion with alpha ─────────────────────
+            # Get alpha from the first zone's controller (same for all TSO zones)
+            _alpha = 1.0
+            if self.tso_controllers:
+                first_ctrl = next(iter(self.tso_controllers.values()), None)
+                if first_ctrl is not None:
+                    _alpha = getattr(first_ctrl.params, 'alpha', 1.0)
+            contraction_lhs = _alpha * (lambda_max + coupling_sum)
             stable = (contraction_lhs > 0.0) and (contraction_lhs < 2.0)
 
             warnings: List[str] = []
             if contraction_lhs >= 2.0:
                 warnings.append(
-                    f"Zone {i}: contraction_lhs = {contraction_lhs:.4f} >= 2.0 -- "
-                    f"INSTABILITY RISK.  Increase g_w_i."
+                    f"Zone {i}: alpha*(lam+coupling) = {contraction_lhs:.4f} >= 2.0 "
+                    f"(alpha={_alpha:.4f}) -- INSTABILITY RISK."
                 )
             elif contraction_lhs > 1.5:
                 warnings.append(
-                    f"Zone {i}: contraction_lhs = {contraction_lhs:.4f} -- "
-                    f"marginal stability (> 1.5), consider increasing g_w_i."
+                    f"Zone {i}: alpha*(lam+coupling) = {contraction_lhs:.4f} "
+                    f"(alpha={_alpha:.4f}) -- marginal stability (> 1.5)."
                 )
             if coupling_sum > lambda_max:
                 warnings.append(
@@ -671,7 +677,7 @@ class MultiTSOCoordinator:
                     f"DSO cascade can improve diagonal dominance."
                 )
 
-            if self.verbose >= 1:
+            if self.verbose >= 2:
                 print(
                     f"[MultiTSO] Zone {i}: lam_max(M_ii)={lambda_max:.4f}  "
                     f"sum||M_ij||={coupling_sum:.4f}  "

@@ -243,22 +243,6 @@ class MultiTSOConfig:
     # ── Auto-tune g_w based on local curvature ────────────────────────────────
     auto_tune_gw: bool = False  # If True, calculates per-actuator g_w at t=0
 
-    # Per-actuator-type minimum g_w values enforced during auto-tuning.
-    # These act as floors on the tuner output so no single actuator type
-    # can be driven below a sensible preconditioning level.  They apply to
-    # both the TSO (tune_multi_zone) and DSO (tune_dso) tuning calls.
-    tune_min_gw_der:  float = 1e-3    # continuous DER Q block
-    tune_min_gw_pcc:  float = 0.1     # continuous PCC Q block (prevents over-tuning)
-    tune_min_gw_gen:  float = 1e4     # V_gen block -- floor, not hard override
-    tune_min_gw_oltc: float = 40.0    # discrete OLTC / shunt blocks
-    tune_spectral_target: float = 1.0 # lam_max(M_sys) < this
-    tune_gamma_target:    float = 0.9 # row-sum gamma target (only used for 'row_sum' objective)
-    # DSO Phase-1 Gershgorin safety multiplier.  Lower values produce
-    # smaller continuous-actuator weights so the DSO controller actually
-    # moves; higher values give more conservative regularisation.
-    # The DER block lands at  g_w ~ tune_dso_safety_factor * c_diag / 2.
-    tune_dso_safety_factor: float = 0.1
-
     # ── PSO joint tuning ─────────────────────────────────────────────────────
     # When auto_tune_gw=True the runner calls the PSO tuner instead of the
     # ── Eigenvector-pump g_w tuning ──────────────────────────────────────
@@ -266,17 +250,17 @@ class MultiTSOConfig:
     # BEFORE the simulation to ensure lambda_max(M_sys) < spectral_target.
     # The user's g_w config values (g_w_der, g_w_gen, etc.) are the FLOOR:
     # the pump can only increase g_w, never decrease.
-    spectral_target:       float = 2 * 2
+    spectral_target:       float = 1.5
     """Hard cap on ``lam_max(M_sys)``.  Default 1.9 leaves a 5% margin
     below the absolute stability bound 2.0."""
     # Per-actuator-type floors for the pump (used by _apply_gw_floors).
-    min_gw_tso_der:        float = 1e-3
-    min_gw_tso_pcc:        float = 1e-3
-    min_gw_tso_gen:        float = 1e7
-    min_gw_tso_oltc:       float = 50.0
-    min_gw_dso_der:        float = 1e-3
-    min_gw_dso_oltc:       float = 5.0
-    min_gw_dso_shunt:      float = 10.0
+    min_gw_tso_der:        float = 1e-6
+    min_gw_tso_pcc:        float = 1e-6
+    min_gw_tso_gen:        float = 1e3
+    min_gw_tso_oltc:       float = 0.1
+    min_gw_dso_der:        float = 1e-6
+    min_gw_dso_oltc:       float = 0.1
+    min_gw_dso_shunt:      float = 100.0
 
     # ── Manual alpha overrides ──────────────────────────────────────────
     # When set (not None), these override the pump-computed alpha values.
@@ -312,7 +296,7 @@ class MultiTSOConfig:
     # gradients, so the analysis is misleading.  After one simulated hour
     # the setpoints have largely equilibrated and the H/C matrices reflect
     # a representative operating point.  Set to 0 to run at t=0 (legacy).
-    stability_analysis_at_s:      float = 600.0
+    stability_analysis_at_s:      float = 0.0
     sensitivity_update_interval:  int  = 1E6  # recompute H_ij every N TSO steps
 
     # ── Output ────────────────────────────────────────────────────────────────
@@ -1552,6 +1536,7 @@ def _run_delayed_stability_analysis(
         for z in zone_ids_sorted
     ]
 
+    alpha_tso = tso_controllers[zone_ids_sorted[0]].params.alpha
     stab_result = analyse_multi_zone_stability(
         H_blocks=H_blocks_stab,
         Q_obj_list=Q_obj_list,
@@ -1559,21 +1544,9 @@ def _run_delayed_stability_analysis(
         zone_ids=zone_ids_sorted,
         zone_names=[f"Zone {z}" for z in zone_ids_sorted],
         actuator_counts=actuator_counts,
+        alpha=alpha_tso,
         verbose=(verbose >= 1),
     )
-
-    # Report effective stability WITH alpha (the raw report checks lam < 2,
-    # but with alpha-separated control the condition is alpha*lam < 2).
-    if verbose >= 1:
-        alpha_tso = tso_controllers[zone_ids_sorted[0]].params.alpha
-        eff_lam = alpha_tso * stab_result.M_sys_lambda_max
-        eff_rho = float(np.max(np.abs(
-            1.0 - alpha_tso * np.linalg.eigvals(stab_result.M_sys)
-        )))
-        status = "STABLE" if eff_rho < 1.0 else "UNSTABLE"
-        print(f"  With alpha_tso = {alpha_tso:.6f}: "
-              f"alpha*lam_max = {eff_lam:.4f}, "
-              f"rho(I-alpha*M) = {eff_rho:.4f}  [{status}]")
 
     # Write markdown report + machine-readable JSON snapshot
     minutes = int(round(time_s / 60.0))
@@ -2540,15 +2513,15 @@ def main() -> None:
         n_total_s=60.0 * 720,      # 720-minute simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0 * 1,    # DSO every 20 seconds
-        g_v=150000.0,
-        g_q=2,
-        dso_g_v=5000.0,
-        g_w_der=50.0,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_gen=1e7,           # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
-        g_w_pcc=50.0,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_tso_oltc=50,       # unchanged (was at alpha=1)
-        g_w_dso_der=0.1,      # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
-        g_w_dso_oltc=15.0,      # unchanged (was at alpha=1)
+        g_v=1000.0,
+        g_q=1,
+        dso_g_v=100.0,
+        g_w_der=0.01,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        g_w_gen=1e4,           # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
+        g_w_pcc=0.01,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        g_w_tso_oltc=0.1,       # unchanged (was at alpha=1)
+        g_w_dso_der=0.01,      # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
+        g_w_dso_oltc=1,      # unchanged (was at alpha=1)
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps

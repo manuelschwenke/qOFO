@@ -133,6 +133,79 @@ def _dso_actual_decay(
 
 
 # =============================================================================
+#  Alpha computation
+# =============================================================================
+
+def _find_alpha_for_target_rho(
+    eigs: NDArray,
+    rho_target: float = 0.95,
+) -> float:
+    """Find the largest alpha such that rho(I - alpha*M) <= rho_target.
+
+    Uses ternary search to find alpha_opt (minimum rho), then binary
+    search on [alpha_opt, alpha_crit] for the largest feasible alpha.
+    Works correctly for complex eigenvalues where rho(alpha) is U-shaped.
+
+    Parameters
+    ----------
+    eigs : complex array of eigenvalues of M.
+    rho_target : desired maximum contraction rate (default 0.95).
+
+    Returns
+    -------
+    alpha in (0, 1] such that max|1 - alpha*lam_i| <= rho_target,
+    or alpha_opt if rho_target is unachievable (with a warning note).
+    """
+    if len(eigs) == 0:
+        return 1.0
+
+    eigs = np.asarray(eigs, dtype=np.complex128)
+
+    # Filter to eigenvalues with positive real part
+    active = eigs[eigs.real > 1e-14]
+    if len(active) == 0:
+        return 1.0
+
+    def _rho(alpha: float) -> float:
+        return float(np.max(np.abs(1.0 - alpha * eigs)))
+
+    # Upper bound: alpha_crit = min over eigenvalues of 2*Re(lam)/|lam|^2
+    alpha_crit = min(
+        2.0 * float(lam.real) / max(float(abs(lam)**2), 1e-30)
+        for lam in active
+    )
+
+    # ── Step 1: Ternary search for alpha_opt = argmin rho(alpha) ──────
+    # rho(alpha) = max|1 - alpha*lam_i| is convex, so ternary search works.
+    lo, hi = 0.0, alpha_crit
+    for _ in range(80):
+        m1 = lo + (hi - lo) / 3.0
+        m2 = hi - (hi - lo) / 3.0
+        if _rho(m1) < _rho(m2):
+            hi = m2
+        else:
+            lo = m1
+    alpha_opt = 0.5 * (lo + hi)
+    rho_min = _rho(alpha_opt)
+
+    # ── Step 2: If target is unachievable, return alpha_opt ───────────
+    if rho_min >= rho_target:
+        return min(1.0, alpha_opt)
+
+    # ── Step 3: Binary search on [alpha_opt, alpha_crit] for largest
+    #            alpha with rho <= rho_target ───────────────────────────
+    lo2, hi2 = alpha_opt, alpha_crit
+    for _ in range(60):
+        mid = 0.5 * (lo2 + hi2)
+        if _rho(mid) <= rho_target:
+            lo2 = mid
+        else:
+            hi2 = mid
+
+    return min(1.0, lo2)
+
+
+# =============================================================================
 #  Eigenvector pump
 # =============================================================================
 
@@ -164,41 +237,46 @@ def _eigenvector_pump(
     The user's hand-tuned values act as the floor.
 
     **Phase 2a — TSO alpha computation:**
-    Computes ``alpha_tso = spectral_target / lambda_max(M_sys)``
-    using Phase-1 g_w values (no g_w inflation).
+    Computes alpha_tso via binary search on rho(I - alpha*M_sys) = rho_target,
+    using Phase-1 preconditioned g_w.
 
     **Phase 2b — Per-DSO alpha computation:**
-    Computes ``alpha_dso = 1.8 / lambda_max(M_dso)`` per DSO.
+    Computes alpha_dso analogously per DSO.
     """
     n_zones = len(zone_ids)
 
-    # ── Phase 1: type-based floors only (no Gershgorin inflation) ────────
+    # ── Phase 1: Gershgorin preconditioning + user floor ───────────────
     #
-    # With alpha-separated stability, the Gershgorin per-actuator condition
-    # g_w > C_ii/2 is no longer needed: alpha handles the global bound.
-    # Phase 1 only applies the per-type minimum floors to ensure reasonable
-    # preconditioning.  The user's init values remain the primary g_w.
+    # Curvature-proportional g_w normalises M so eigenvalues are ~O(1),
+    # giving alpha ~O(1) and good conditioning.  safety_factor = 1 gives
+    # g_w = C_ii/2 (the necessary per-actuator condition at alpha=1).
+    # The user's init values act as the floor — Phase 1 can only increase.
+    # Phase 2 handles global stability via alpha (no further g_w inflation).
     gw_tso_arrays: List[NDArray[np.float64]] = []
     for idx, z in enumerate(zone_ids):
-        gw = _apply_gw_floors(
-            gw_tso_init[idx].copy(), actuator_counts[idx],
-            floors_tso, _TSO_COLUMN_ORDER,
+        H_ii = H_blocks[(z, z)]
+        c_diag = _compute_curvature_diagonal(H_ii, Q_obj_list[idx])
+        gw_gersh = safety_factor_tso * c_diag / 2.0
+        gw_gersh = _apply_gw_floors(
+            gw_gersh, actuator_counts[idx], floors_tso, _TSO_COLUMN_ORDER,
         )
+        gw = np.maximum(gw_tso_init[idx], gw_gersh)
         gw_tso_arrays.append(gw)
 
     gw_dso_arrays: List[NDArray[np.float64]] = []
     for d_idx, d in enumerate(dso_inputs):
+        c_diag = _compute_curvature_diagonal(d.H, d.q_obj_diag)
         counts = {'n_der': d.n_der, 'n_oltc': d.n_oltc, 'n_shunt': d.n_shunt}
-        gw = _apply_gw_floors(
-            gw_dso_init[d_idx].copy(), counts, floors_dso, _DSO_COLUMN_ORDER,
-        )
+        gw_gersh = safety_factor_dso * c_diag / 2.0
+        gw_gersh = _apply_gw_floors(gw_gersh, counts, floors_dso, _DSO_COLUMN_ORDER)
+        gw = np.maximum(gw_dso_init[d_idx], gw_gersh)
         gw_dso_arrays.append(gw)
 
     # ── Phase 2a: Compute alpha_tso from M_sys ─────────────────────────
     #
-    # Instead of inflating g_w to push lambda_max below 2, we keep the
-    # Phase-1 g_w values and compute alpha = target / lambda_max(M_sys).
-    # This decouples stability (alpha) from action amplitude (g_w).
+    # Binary search for the largest alpha such that
+    # rho(I - alpha*M_sys) <= rho_target.  This correctly handles complex
+    # eigenvalues (where the analytic 0.95*alpha_crit formula fails).
     stab = analyse_multi_zone_stability(
         H_blocks=H_blocks,
         Q_obj_list=Q_obj_list,
@@ -210,32 +288,8 @@ def _eigenvector_pump(
     lam_sys = float(stab.M_sys_lambda_max)
     pump_iters_tso = 1
 
-    # alpha_tso: the step-size that makes |1 - alpha * lambda_i| < 1
-    # for ALL eigenvalues of M_sys.
-    #
-    # For real lambda:   alpha_crit = 2 / lambda
-    # For complex lambda = a + bi:  alpha_crit = 2a / (a² + b²)
-    #   (derived from |1 - alpha*(a+bi)|² = 1)
-    #
-    # Safety margin: alpha = 0.95 * alpha_crit (5% below critical).
-    # spectral_target only affects the feasibility CHECK, not alpha.
-    _ALPHA_SAFETY = 0.95
-
     sys_eigs = np.linalg.eigvals(stab.M_sys)
-    alpha_crit_bounds: List[float] = []
-    for lam in sys_eigs:
-        a, b = float(lam.real), float(lam.imag)
-        mag_sq = a * a + b * b
-        if mag_sq < 1e-14:
-            continue
-        if a > 1e-14:
-            # Critical alpha where |1 - alpha*lambda| = 1 exactly
-            alpha_crit_bounds.append(2.0 * a / mag_sq)
-    if alpha_crit_bounds:
-        alpha_crit = min(alpha_crit_bounds)
-        alpha_tso = min(1.0, _ALPHA_SAFETY * alpha_crit)
-    else:
-        alpha_tso = 1.0
+    alpha_tso = _find_alpha_for_target_rho(sys_eigs, rho_target=0.95)
 
     if verbose:
         rho_at_alpha = float(np.max(np.abs(1.0 - alpha_tso * sys_eigs)))
@@ -256,19 +310,18 @@ def _eigenvector_pump(
         C_d = _compute_curvature_matrix(d.H, d.q_obj_diag)
         gw_inv = 1.0 / np.sqrt(np.maximum(gw_dso_arrays[d_idx], 1e-12))
         M_d = (gw_inv[:, None] * C_d) * gw_inv[None, :]
-        eigs_d = np.linalg.eigvalsh(M_d)
-        lam_max_d = float(eigs_d[-1]) if len(eigs_d) > 0 else 0.0
+        # DSO M_d is symmetric → eigvalsh gives real eigenvalues
+        eigs_d = np.linalg.eigvalsh(M_d).astype(np.complex128)
+        lam_max_d = float(eigs_d[-1].real) if len(eigs_d) > 0 else 0.0
 
-        if lam_max_d > 1e-14:
-            alpha_d = min(1.0, 1.8 / lam_max_d)
-        else:
-            alpha_d = 1.0
+        alpha_d = _find_alpha_for_target_rho(eigs_d, rho_target=0.95)
         alpha_dso_list.append(alpha_d)
 
         if verbose:
+            rho_d = float(np.max(np.abs(1.0 - alpha_d * eigs_d)))
             print(f"  [alpha DSO {d.dso_id}] lam_max = {lam_max_d:.4f}, "
                   f"alpha_dso = {alpha_d:.6f}  "
-                  f"(alpha*lam = {alpha_d * lam_max_d:.4f})")
+                  f"(rho = {rho_d:.4f})")
 
     return gw_tso_arrays, gw_dso_arrays, pump_iters_tso, alpha_tso, alpha_dso_list
 
@@ -291,8 +344,8 @@ def tune_gw(
     spectral_target: float = 1.9,
     tso_period_s: float = 180.0,
     dso_period_s: float = 60.0,
-    safety_factor_tso: float = 4.0,
-    safety_factor_dso: float = 2.0,
+    safety_factor_tso: float = 1.0,
+    safety_factor_dso: float = 1.0,
     verbose: bool = True,
 ) -> TuneGwResult:
     """Tune per-actuator g_w for the multi-TSO + DSO cascade.

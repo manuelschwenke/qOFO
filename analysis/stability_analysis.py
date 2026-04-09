@@ -1168,6 +1168,7 @@ def analyse_multi_zone_stability(
     zone_ids:    Optional[List[int]] = None,
     zone_names:  Optional[List[str]] = None,
     actuator_counts: Optional[List[Dict[str, int]]] = None,
+    alpha:       float = 1.0,
     verbose:     bool = True,
 ) -> "MultiZoneStabilityResult":
     """
@@ -1314,8 +1315,8 @@ def analyse_multi_zone_stability(
         else:
             lambda_max = float(eig_ii_active[-1])
             lambda_min = float(eig_ii_active[0])
-            # Contraction rate (alpha=1, absorbed into g_w)
-            rho_i = max(abs(1.0 - lam) for lam in eig_ii_active)
+            # Contraction rate with alpha
+            rho_i = max(abs(1.0 - alpha * lam) for lam in eig_ii_active)
 
         if n_effective == 0:
             kappa = 1.0
@@ -1343,16 +1344,16 @@ def analyse_multi_zone_stability(
 
         coupling_sum = sum(coupling_norms.values())
 
-        # Cross-coupling gains σ_ij = ‖M_ij‖₂ (no alpha)
-        sigma_ij_current = {j: norm for j, norm in coupling_norms.items()}
+        # Cross-coupling gains σ_ij = α · ‖M_ij‖₂
+        sigma_ij_current = {j: alpha * norm for j, norm in coupling_norms.items()}
         sigma_ij_optimal = {j: norm for j, norm in coupling_norms.items()}
 
         # Lyapunov row sums: ρ_i + Σ_{j≠i} σ_ij
         lyap_row = rho_i + sum(sigma_ij_current.values())
         lyap_row_opt = rho_i_opt + sum(sigma_ij_optimal.values())
 
-        # Diagonal-dominance condition: (λ_max + Σ||M_ij||₂) ∈ (0, 2)
-        contraction_lhs = lambda_max + coupling_sum
+        # Diagonal-dominance condition: α·(λ_max + Σ||M_ij||₂) ∈ (0, 2)
+        contraction_lhs = alpha * (lambda_max + coupling_sum)
         alpha_max_coupled = (
             2.0 / (lambda_max + coupling_sum)
             if (lambda_max + coupling_sum) > 1e-14 else np.inf
@@ -1362,9 +1363,9 @@ def analyse_multi_zone_stability(
         warnings: List[str] = []
         if contraction_lhs >= 2.0:
             warnings.append(
-                f"{zone_names[i_idx]}: contraction_lhs = {contraction_lhs:.4f} >= 2.0 -- "
-                f"diagonal-dominance condition VIOLATED.  "
-                f"Increase g_w to bring lambda_max below {alpha_max_coupled:.4g}."
+                f"{zone_names[i_idx]}: alpha*contraction_lhs = {contraction_lhs:.4f} >= 2.0 -- "
+                f"diagonal-dominance VIOLATED (alpha={alpha:.4f}).  "
+                f"Reduce alpha below {alpha_max_coupled:.4g}."
             )
         elif contraction_lhs > 1.5:
             warnings.append(
@@ -1497,8 +1498,8 @@ def analyse_multi_zone_stability(
     max_imag = float(np.max(np.abs(sys_eigs_all.imag)))
     has_complex = max_imag > 1e-8
 
-    # Stability metric: spectral radius rho(I - M_sys) = max|1 - lambda_i|
-    spectral_radius = float(np.max(np.abs(1.0 - sys_eigs_all)))
+    # Stability metric: spectral radius rho(I - alpha*M_sys) = max|1 - alpha*lambda_i|
+    spectral_radius = float(np.max(np.abs(1.0 - alpha * sys_eigs_all)))
 
     # For lambda_max reporting: use max real part of eigenvalues
     # Filter near-zero eigenvalues (null-space directions)
@@ -1509,7 +1510,7 @@ def analyse_multi_zone_stability(
     M_sys_lambda_max = float(np.max(sys_eigs_real[active_mask])) if np.any(active_mask) else 0.0
     alpha_max_global = (2.0 / M_sys_lambda_max) if M_sys_lambda_max > 1e-14 else np.inf
 
-    # Global stability: rho(I - M_sys) < 1 (true contraction condition)
+    # Global stability: rho(I - alpha*M_sys) < 1 (true contraction condition)
     globally_stable = (spectral_radius < 1.0)
 
     all_diag_dom = all(zr.diagonally_dominant for zr in zone_results)
@@ -1622,12 +1623,12 @@ def analyse_multi_zone_stability(
     d_status = "satisfied" if all_diag_dom else "VIOLATED for some zones"
     sg_status = "satisfied" if small_gain_stable else "VIOLATED"
     asym_note = f"  M_sys asymmetry = {M_sys_asymmetry:.4g}." if M_sys_asymmetry > 1e-6 else ""
-    rho_note = f"  rho(I-M_sys) = {spectral_radius:.4g}."
+    alpha_note = f"  alpha = {alpha:.4g}." if alpha < 1.0 - 1e-6 else ""
     summary = (
         f"Multi-zone stability: {g_status}.  "
         f"lam_max(M_sys) = {M_sys_lambda_max:.4g}, "
-        f"rho(I-M_sys) = {spectral_radius:.4g}, "
-        f"alpha_max_global = {alpha_max_global:.4g}.  "
+        f"alpha = {alpha:.4g}, "
+        f"rho(I-alpha*M) = {spectral_radius:.4g}.  "
         f"Diagonal-dominance condition {d_status}.  "
         f"Small-gain condition {sg_status} (gamma = {small_gain_gamma:.4f}).  "
         f"N_zones = {n_zones}, N_controls_total = {n_total}."
@@ -1719,7 +1720,8 @@ def _print_multi_zone_report(
 
     # Global spectral bound (necessary-and-sufficient)
     global_tag = "STABLE" if result.globally_stable else "VIOLATED"
-    print(f"  Global spectral:  lam_max(M_sys) = {result.M_sys_lambda_max:.4g}   "
+    rho_str = f", rho(I-alpha*M) = {result.M_sys_spectral_radius:.4f}" if result.M_sys_spectral_radius > 0 else ""
+    print(f"  Global spectral:  lam_max(M_sys) = {result.M_sys_lambda_max:.4g}{rho_str}   "
           f"[{global_tag}]")
 
     # Small-gain (sufficient only)

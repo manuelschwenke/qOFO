@@ -466,6 +466,41 @@ class BaseOFOController(ABC):
                 f"{result.status}"
             )
 
+        # ── Diagnostic: output constraint analysis (first 5 iterations) ──
+        if self.iteration < 5:
+            _gz_diag = np.diag(problem.G_z)
+            _has_soft = np.any(_gz_diag > 0)
+            if _has_soft:
+                y_err_lo = problem.y_lower - problem.y_current
+                y_err_up = problem.y_upper - problem.y_current
+                # Reconstruct Hw from the reordered solution
+                _w_full = np.zeros(problem.n_total)
+                _w_full[:problem.n_continuous] = result.w_continuous
+                if problem.n_integer > 0:
+                    _w_full[problem.n_continuous:] = result.w_integer
+                _Hw = problem.H_tilde @ _w_full
+                # Check which outputs are near their bounds
+                _margin_up = y_err_up - _Hw   # positive = headroom
+                _margin_lo = _Hw - y_err_lo   # positive = headroom
+                _z = result.z
+                _binding_up = _margin_up < 1e-4
+                _binding_lo = _margin_lo < 1e-4
+                _n_bind = int(np.sum(_binding_up) + np.sum(_binding_lo))
+                print(f"  [{self.controller_id} iter {self.iteration}] "
+                      f"MIQP diag: |w|={np.max(np.abs(_w_full)):.4f}, "
+                      f"|Hw|_max={np.max(np.abs(_Hw)):.4f}, "
+                      f"z_max={np.max(_z):.2e}, "
+                      f"margin_up_min={np.min(_margin_up):.4f}, "
+                      f"margin_lo_min={np.min(_margin_lo):.4f}, "
+                      f"n_binding={_n_bind}")
+                if _n_bind > 0:
+                    for i in range(len(_Hw)):
+                        if _binding_up[i] or _binding_lo[i]:
+                            print(f"    out[{i}]: y={problem.y_current[i]:.4f}, "
+                                  f"Hw={_Hw[i]:.4f}, "
+                                  f"bounds=[{problem.y_lower[i]:.4f}, {problem.y_upper[i]:.4f}], "
+                                  f"z={_z[i]:.2e}, g_z={_gz_diag[i]:.1e}")
+
         # Step 8: Reassemble sigma in original (unreordered) variable
         # order using the precomputed continuous/integer index arrays.
         # Replaces three Python `for i in range(n_controls): if i in

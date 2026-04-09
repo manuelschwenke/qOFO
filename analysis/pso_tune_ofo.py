@@ -67,6 +67,10 @@ class TuneGwResult:
     per_zone_kappa: List[float]
     per_dso_lam_max: List[float]
     stability_result: Optional[MultiZoneStabilityResult] = None
+    alpha_tso: float = 1.0
+    """Computed OFO step-size for TSO continuous actuators."""
+    alpha_dso: List[float] = field(default_factory=list)
+    """Per-DSO computed OFO step-sizes for continuous actuators."""
 
 
 # =============================================================================
@@ -148,22 +152,23 @@ def _eigenvector_pump(
     spectral_target: float,
     max_pump_iters: int = 50,
     verbose: bool = False,
-) -> Tuple[List[NDArray[np.float64]], List[NDArray[np.float64]], int]:
-    """Deterministic eigenvector-directed g_w tuner (TSO + DSO).
+) -> Tuple[List[NDArray[np.float64]], List[NDArray[np.float64]], int,
+           float, List[float]]:
+    """Deterministic g_w + alpha tuner (TSO + DSO).
 
-    Returns ``(gw_tso_list, gw_dso_list, pump_iters_tso)``.
+    Returns ``(gw_tso_list, gw_dso_list, pump_iters_tso,
+               alpha_tso, alpha_dso_list)``.
 
     **Phase 1 — Gershgorin + user floor:**
     ``g_w = max(gw_user_init, safety * diag(C) / 2)`` per zone/DSO.
     The user's hand-tuned values act as the floor.
 
-    **Phase 2a — TSO global pump:**
-    Boosts g_w along the dominant eigenvector of M_sys until
-    ``lambda_max(M_sys) < 0.95 * spectral_target``.
+    **Phase 2a — TSO alpha computation:**
+    Computes ``alpha_tso = spectral_target / lambda_max(M_sys)``
+    using Phase-1 g_w values (no g_w inflation).
 
-    **Phase 2b — Per-DSO pump:**
-    Boosts g_w along each DSO's dominant eigenvector until
-    ``lambda_max(M_dso) < 1.8``.
+    **Phase 2b — Per-DSO alpha computation:**
+    Computes ``alpha_dso = 1.8 / lambda_max(M_dso)`` per DSO.
     """
     n_zones = len(zone_ids)
 
@@ -189,81 +194,80 @@ def _eigenvector_pump(
         gw = np.maximum(gw_dso_init[d_idx], gw_gersh)
         gw_dso_arrays.append(gw)
 
-    # ── Phase 2a: TSO global pump ───────────────────────────────────────
-    target_inner = 0.95 * float(spectral_target)
-    n_per_zone = [len(gw) for gw in gw_tso_arrays]
-    zone_ranges = _zone_index_ranges(n_per_zone)
+    # ── Phase 2a: Compute alpha_tso from M_sys ─────────────────────────
+    #
+    # Instead of inflating g_w to push lambda_max below 2, we keep the
+    # Phase-1 g_w values and compute alpha = target / lambda_max(M_sys).
+    # This decouples stability (alpha) from action amplitude (g_w).
+    stab = analyse_multi_zone_stability(
+        H_blocks=H_blocks,
+        Q_obj_list=Q_obj_list,
+        G_w_list=gw_tso_arrays,
+        zone_ids=zone_ids,
+        actuator_counts=actuator_counts,
+        verbose=False,
+    )
+    lam_sys = float(stab.M_sys_lambda_max)
+    pump_iters_tso = 1
 
-    lam_sys = float('inf')
-    pump_iters_tso = 0
-    for pump_iter in range(max_pump_iters):
-        stab = analyse_multi_zone_stability(
-            H_blocks=H_blocks,
-            Q_obj_list=Q_obj_list,
-            G_w_list=gw_tso_arrays,
-            zone_ids=zone_ids,
-            actuator_counts=actuator_counts,
-            verbose=False,
-        )
-        lam_sys = float(stab.M_sys_lambda_max)
-        pump_iters_tso = pump_iter + 1
-        if verbose:
-            print(f"  [pump TSO] iter {pump_iter}: "
-                  f"lam_sys = {lam_sys:.4f}  (target < {target_inner:.2f})")
-        if lam_sys < target_inner:
-            break
+    # alpha_tso: the step-size that makes |1 - alpha * lambda_i| < 1
+    # for ALL eigenvalues of M_sys.
+    #
+    # For real lambda:   alpha < 2 / lambda
+    # For complex lambda = a + bi:  alpha < 2a / (a² + b²)
+    #   (derived from |1 - alpha*(a+bi)|² < 1)
+    #
+    # The safety margin uses spectral_target/2 instead of 1.0 as the
+    # contraction radius target.
+    safety = float(spectral_target) / 2.0   # e.g. 1.9/2 = 0.95
 
-        _, v_sys = _dominant_eigenpair(stab.M_sys)
-        v_sq = v_sys * v_sys
-        for k in range(n_zones):
-            lo, hi = zone_ranges[k]
-            v_zone = v_sq[lo:hi]
-            v_zone_max = float(np.max(v_zone)) if v_zone.size else 0.0
-            if v_zone_max < 1e-14:
-                continue
-            scale = 1.0 + 2.0 * (v_zone / v_zone_max)
-            gw_tso_arrays[k] = np.maximum(
-                gw_tso_init[k],  # never go below user init
-                _apply_gw_floors(
-                    gw_tso_arrays[k] * scale,
-                    actuator_counts[k],
-                    floors_tso, _TSO_COLUMN_ORDER,
-                ),
-            )
+    sys_eigs = np.linalg.eigvals(stab.M_sys)
+    alpha_bounds: List[float] = []
+    for lam in sys_eigs:
+        a, b = float(lam.real), float(lam.imag)
+        mag_sq = a * a + b * b
+        if mag_sq < 1e-14:
+            continue
+        # |1 - alpha*lambda|² < 1  →  alpha < 2a / (a²+b²)
+        if a > 1e-14:
+            alpha_bounds.append(safety * 2.0 * a / mag_sq)
+        # If a <= 0 (shouldn't happen for PSD-ish M), skip
+    alpha_tso = min(1.0, min(alpha_bounds)) if alpha_bounds else 1.0
 
-    if verbose and lam_sys >= target_inner:
-        print(f"  [pump TSO] did not reach target after "
-              f"{max_pump_iters} iters (lam_sys = {lam_sys:.4f})")
+    if verbose:
+        rho_at_alpha = float(np.max(np.abs(1.0 - alpha_tso * sys_eigs)))
+        print(f"  [alpha TSO] lam_max(Re) = {lam_sys:.4f}, "
+              f"alpha_tso = {alpha_tso:.6f}  "
+              f"(rho(I-alpha*M) = {rho_at_alpha:.4f})")
+        if stab.M_sys_asymmetry > 0.01:
+            print(f"  [alpha TSO] M_sys asymmetry = "
+                  f"{stab.M_sys_asymmetry:.4f}")
+        if stab.M_sys_has_complex_eigenvalues:
+            print(f"  [alpha TSO] M_sys has complex eigenvalues, "
+                  f"rho(I-M) = {stab.M_sys_spectral_radius:.4f}")
 
-    # ── Phase 2b: Per-DSO pump ──────────────────────────────────────────
+    # ── Phase 2b: Per-DSO alpha computation ────────────────────────────
+    # DSO M_dso is symmetric (single-zone, C = H^T Q H) → eigvalsh is correct.
+    alpha_dso_list: List[float] = []
     for d_idx, d in enumerate(dso_inputs):
-        counts = {'n_der': d.n_der, 'n_oltc': d.n_oltc, 'n_shunt': d.n_shunt}
-        for dso_pump in range(max_pump_iters):
-            C_d = _compute_curvature_matrix(d.H, d.q_obj_diag)
-            gw_inv = 1.0 / np.sqrt(np.maximum(gw_dso_arrays[d_idx], 1e-12))
-            M_d = (gw_inv[:, None] * C_d) * gw_inv[None, :]
-            eigs_d = np.linalg.eigvalsh(M_d)
-            lam_max_d = float(eigs_d[-1]) if len(eigs_d) > 0 else 0.0
-            if verbose:
-                print(f"  [pump DSO {d.dso_id}] iter {dso_pump}: "
-                      f"lam_max = {lam_max_d:.4f}")
-            if lam_max_d < 1.8:
-                break
-            _, vecs_d = np.linalg.eigh(M_d)
-            v_d = vecs_d[:, -1] ** 2
-            v_max_d = float(np.max(v_d)) if v_d.size else 0.0
-            if v_max_d < 1e-14:
-                break
-            scale_d = 1.0 + 2.0 * (v_d / v_max_d)
-            gw_dso_arrays[d_idx] = np.maximum(
-                gw_dso_init[d_idx],  # never go below user init
-                _apply_gw_floors(
-                    gw_dso_arrays[d_idx] * scale_d,
-                    counts, floors_dso, _DSO_COLUMN_ORDER,
-                ),
-            )
+        C_d = _compute_curvature_matrix(d.H, d.q_obj_diag)
+        gw_inv = 1.0 / np.sqrt(np.maximum(gw_dso_arrays[d_idx], 1e-12))
+        M_d = (gw_inv[:, None] * C_d) * gw_inv[None, :]
+        eigs_d = np.linalg.eigvalsh(M_d)
+        lam_max_d = float(eigs_d[-1]) if len(eigs_d) > 0 else 0.0
 
-    return gw_tso_arrays, gw_dso_arrays, pump_iters_tso
+        if lam_max_d > 1e-14:
+            alpha_d = min(1.0, 1.8 / lam_max_d)
+        else:
+            alpha_d = 1.0
+        alpha_dso_list.append(alpha_d)
+
+        if verbose:
+            print(f"  [alpha DSO {d.dso_id}] lam_max = {lam_max_d:.4f}, "
+                  f"alpha_dso = {alpha_d:.6f}  "
+                  f"(alpha*lam = {alpha_d * lam_max_d:.4f})")
+
+    return gw_tso_arrays, gw_dso_arrays, pump_iters_tso, alpha_tso, alpha_dso_list
 
 
 # =============================================================================
@@ -298,7 +302,7 @@ def tune_gw(
     """
     n_inner = max(int(round(tso_period_s / max(dso_period_s, 1e-9))), 1)
 
-    gw_tso, gw_dso, pump_iters = _eigenvector_pump(
+    gw_tso, gw_dso, pump_iters, alpha_tso, alpha_dso = _eigenvector_pump(
         H_blocks=H_blocks,
         Q_obj_list=Q_obj_list,
         actuator_counts=actuator_counts,
@@ -344,9 +348,11 @@ def tune_gw(
         gw_tso=gw_tso,
         gw_dso=gw_dso,
         lam_max_sys=lam_sys,
-        spectral_feasible=bool(lam_sys < spectral_target),
+        spectral_feasible=bool(alpha_tso * lam_sys < 2.0),
         pump_iterations_tso=pump_iters,
         per_zone_kappa=per_zone_kappa,
         per_dso_lam_max=per_dso_lam_max,
         stability_result=stab,
+        alpha_tso=alpha_tso,
+        alpha_dso=alpha_dso,
     )

@@ -80,6 +80,11 @@ class OFOParameters:
     g_w: Union[float, NDArray[np.float64]]
     g_z: Union[float, NDArray[np.float64]]
     g_u: Union[float, NDArray[np.float64]] = 0.0
+    alpha: float = 1.0
+    """OFO step-size for continuous actuators.  Decoupled from g_w so that
+    stability (controlled by alpha) and MIQP action amplitude (controlled
+    by g_w) are independent.  Discrete actuators always use alpha=1.
+    Set to 2/lambda_max(M) × safety_factor after stability analysis."""
     max_iter_per_step: int = 100
     solver_verbose: bool = False
     int_max_step: int = 1
@@ -439,8 +444,11 @@ class BaseOFOController(ABC):
         g_w_vector, g_u_vector = self._get_per_variable_weights()
 
         # Step 7: Build and solve MIQP problem
+        #   alpha scales continuous variables only; discrete actuators
+        #   use alpha=1 (they cannot move "a fraction of a step").
+        alpha = self.params.alpha
         problem = build_miqp_problem(
-            alpha=1.0,
+            alpha=alpha,
             u_current=self._u_current,
             y_current=y_current,
             H=H,
@@ -474,12 +482,13 @@ class BaseOFOController(ABC):
         int_idx = self._int_idx_arr
 
         sigma = np.zeros(self.n_controls, dtype=np.float64)
-        sigma[cont_idx] = result.w_continuous
+        sigma[cont_idx] = alpha * result.w_continuous
         if int_idx.size > 0:
             sigma[int_idx] = result.w_integer.astype(np.float64)
 
-        # Step 9: OFO update — single vectorised expression.
-        #   u_new = u + σ   (alpha is now absorbed into per-actuator g_w)
+        # Step 9: OFO update.
+        #   Continuous: u_new = u + α·w   (alpha controls step size)
+        #   Discrete:   u_new = u + w     (full step, cannot move fractionally)
         u_new = self._u_current + sigma
         if int_idx.size > 0:
             # Note: u_new[int_idx] = np.round(u_new[int_idx]) is the

@@ -216,14 +216,32 @@ def _effective_eigenspectrum(
 
 
 def _dominant_eigenpair(M: NDArray[np.float64]) -> Tuple[float, NDArray[np.float64]]:
-    """Return (lambda_max, unit eigenvector) of a symmetric matrix M.
+    """Return (lambda_max, unit eigenvector) of M (may be non-symmetric).
 
-    Uses np.linalg.eigh and takes the largest eigenvalue / its eigenvector.
+    For non-symmetric M the eigenvalues may be complex.  Returns the
+    eigenvalue with the largest *real part* and the corresponding
+    eigenvector (real part, unit-normalised).  Falls back to eigh for
+    symmetric M (faster and numerically cleaner).
     """
     if M.size == 0:
         return 0.0, np.zeros(0)
-    eigs, vecs = np.linalg.eigh(M)
-    return float(eigs[-1]), np.asarray(vecs[:, -1], dtype=np.float64)
+
+    # Check symmetry — use fast symmetric solver when possible
+    asym = float(np.linalg.norm(M - M.T, 'fro'))
+    if asym < 1e-10 * max(float(np.linalg.norm(M, 'fro')), 1e-14):
+        eigs, vecs = np.linalg.eigh(M)
+        return float(eigs[-1]), np.asarray(vecs[:, -1], dtype=np.float64)
+
+    # General (non-symmetric) eigensolver
+    eigs, vecs = np.linalg.eig(M)
+    # Pick eigenvalue with largest real part
+    idx = int(np.argmax(eigs.real))
+    lam = float(eigs[idx].real)
+    v = np.asarray(vecs[:, idx].real, dtype=np.float64)
+    v_norm = np.linalg.norm(v)
+    if v_norm > 1e-14:
+        v /= v_norm
+    return lam, v
 
 
 def _zone_index_ranges(n_per_zone: List[int]) -> List[Tuple[int, int]]:

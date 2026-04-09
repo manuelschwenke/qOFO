@@ -1097,12 +1097,14 @@ class MultiZoneStabilityResult:
         Per-zone results, ordered by zone_id.
     M_sys : NDArray
         Full assembled block system matrix of shape (Σ n_u_i, Σ n_u_i).
-        This is the M_sys = [[M_TSO,ij]] block matrix (symmetric if Q_obj_i
-        are symmetric and G_w_i are diagonal).
+        This is the M_sys = [[M_TSO,ij]] block matrix.  NOTE: M_sys is
+        generally NOT symmetric because C_ij = H_ii^T Q_i H_ij sums over
+        zone i's observation buses, while C_ji^T sums over zone j's.
     M_sys_eigenvalues : NDArray
-        Real parts of M_sys eigenvalues (M_sys is symmetric PSD → all real).
+        Eigenvalues of M_sys (may be complex for non-symmetric M_sys;
+        stored as complex128, use .real for the real parts).
     M_sys_lambda_max : float
-        Largest eigenvalue of M_sys.
+        Stability-relevant metric: max Re(λ) of M_sys eigenvalues.
     alpha_max_global : float
         Global stability bound: 2 / λ_max(M_sys).
         This is the TIGHTEST stability bound — tighter than the per-zone
@@ -1145,6 +1147,17 @@ class MultiZoneStabilityResult:
 
     recommendations:            List[str] = field(default_factory=list)
     """Actionable tuning recommendations."""
+
+    M_sys_asymmetry:            float = 0.0
+    """Relative Frobenius-norm asymmetry ‖M−M^T‖_F / ‖M‖_F.
+    Values > 0.01 indicate eigvalsh is unreliable."""
+
+    M_sys_spectral_radius:      float = 0.0
+    """Spectral radius ρ(I − M_sys) = max|1 − λ_i(M_sys)| using general
+    (non-symmetric) eigenvalues.  Must be < 1 for convergence."""
+
+    M_sys_has_complex_eigenvalues: bool = False
+    """True if M_sys has eigenvalues with |imag| > 1e-8."""
 
 
 def analyse_multi_zone_stability(
@@ -1468,16 +1481,36 @@ def analyse_multi_zone_stability(
             col_offset += n_per_zone[j_idx]
         row_offset += n_per_zone[i_idx]
 
-    # M_sys eigenvalues (symmetric → all real).
-    # Filter near-zero eigenvalues (null-space directions) as for per-zone analysis.
-    sys_eigs_all = np.linalg.eigvalsh(M_sys)
-    sys_eig_tol = 1e-10 * max(float(np.maximum(sys_eigs_all[-1], 0.0)), 1e-14)
-    sys_eigs = sys_eigs_all[sys_eigs_all > sys_eig_tol]
-    M_sys_lambda_max = float(sys_eigs[-1]) if len(sys_eigs) > 0 else 0.0
+    # ── M_sys asymmetry diagnostic ──────────────────────────────────────────
+    # M_sys is NOT generally symmetric: C_ij = H_ii^T Q_i H_ij sums over
+    # zone i's observation buses, while C_ji^T sums over zone j's.  The
+    # correct stability criterion is rho(I - M_sys) < 1 using general
+    # (non-symmetric) eigenvalues.
+    M_norm = float(np.linalg.norm(M_sys, 'fro'))
+    M_asym = float(np.linalg.norm(M_sys - M_sys.T, 'fro'))
+    M_sys_asymmetry = M_asym / max(M_norm, 1e-14)
+
+    # General eigenvalue computation (handles non-symmetric M_sys).
+    sys_eigs_all = np.linalg.eigvals(M_sys)
+
+    # Check for complex eigenvalues (indicates oscillatory coupling modes)
+    max_imag = float(np.max(np.abs(sys_eigs_all.imag)))
+    has_complex = max_imag > 1e-8
+
+    # Stability metric: spectral radius rho(I - M_sys) = max|1 - lambda_i|
+    spectral_radius = float(np.max(np.abs(1.0 - sys_eigs_all)))
+
+    # For lambda_max reporting: use max real part of eigenvalues
+    # Filter near-zero eigenvalues (null-space directions)
+    sys_eigs_real = sys_eigs_all.real
+    sys_eig_tol = 1e-10 * max(float(np.max(np.abs(sys_eigs_real))), 1e-14)
+    active_mask = np.abs(sys_eigs_real) > sys_eig_tol
+    sys_eigs_active = sys_eigs_all[active_mask]
+    M_sys_lambda_max = float(np.max(sys_eigs_real[active_mask])) if np.any(active_mask) else 0.0
     alpha_max_global = (2.0 / M_sys_lambda_max) if M_sys_lambda_max > 1e-14 else np.inf
 
-    # Global stability: λ_max(M_sys) < 2 (alpha absorbed into g_w)
-    globally_stable = (M_sys_lambda_max < 2.0)
+    # Global stability: rho(I - M_sys) < 1 (true contraction condition)
+    globally_stable = (spectral_radius < 1.0)
 
     all_diag_dom = all(zr.diagonally_dominant for zr in zone_results)
 
@@ -1571,22 +1604,40 @@ def analyse_multi_zone_stability(
                 f"Reduce coupling between these zones."
             )
 
+    # ── Asymmetry and complex eigenvalue warnings ──────────────────────────
+    if M_sys_asymmetry > 0.01:
+        recommendations.append(
+            f"  ⚠ M_sys asymmetry = {M_sys_asymmetry:.4f} (> 0.01).  "
+            f"Off-diagonal blocks C_ij != C_ji^T.  "
+            f"Stability assessment uses general eigenvalues (non-symmetric)."
+        )
+    if has_complex:
+        recommendations.append(
+            f"  ⚠ M_sys has complex eigenvalues (max |imag| = {max_imag:.4g}).  "
+            f"This indicates oscillatory coupling modes between zones."
+        )
+
     # ── Build summary string ──────────────────────────────────────────────────
     g_status = "STABLE" if globally_stable else "UNSTABLE"
     d_status = "satisfied" if all_diag_dom else "VIOLATED for some zones"
     sg_status = "satisfied" if small_gain_stable else "VIOLATED"
+    asym_note = f"  M_sys asymmetry = {M_sys_asymmetry:.4g}." if M_sys_asymmetry > 1e-6 else ""
+    rho_note = f"  rho(I-M_sys) = {spectral_radius:.4g}."
     summary = (
         f"Multi-zone stability: {g_status}.  "
-        f"lam_max(M_sys) = {M_sys_lambda_max:.4g}, alpha_max_global = {alpha_max_global:.4g}.  "
+        f"lam_max(M_sys) = {M_sys_lambda_max:.4g}, "
+        f"rho(I-M_sys) = {spectral_radius:.4g}, "
+        f"alpha_max_global = {alpha_max_global:.4g}.  "
         f"Diagonal-dominance condition {d_status}.  "
         f"Small-gain condition {sg_status} (gamma = {small_gain_gamma:.4f}).  "
         f"N_zones = {n_zones}, N_controls_total = {n_total}."
+        f"{asym_note}"
     )
 
     result = MultiZoneStabilityResult(
         zones=zone_results,
         M_sys=M_sys,
-        M_sys_eigenvalues=sys_eigs,
+        M_sys_eigenvalues=sys_eigs_active,
         M_sys_lambda_max=M_sys_lambda_max,
         alpha_max_global=alpha_max_global,
         globally_stable=globally_stable,
@@ -1599,6 +1650,9 @@ def analyse_multi_zone_stability(
         pairwise_small_gain=pairwise_sg,
         pairwise_small_gain_opt=pairwise_sg_opt,
         recommendations=recommendations,
+        M_sys_asymmetry=M_sys_asymmetry,
+        M_sys_spectral_radius=spectral_radius,
+        M_sys_has_complex_eigenvalues=has_complex,
     )
 
     if verbose:

@@ -124,7 +124,7 @@ class TSOControllerConfig:
     g_v: float = 1.0
     gen_indices: List[int] = field(default_factory=list)
     gen_bus_indices: List[int] = field(default_factory=list)
-    gen_vm_min_pu: float = 1.00
+    gen_vm_min_pu: float = 0.95
     gen_vm_max_pu: float = 1.07
 
     k_t_avt: float = 0.0

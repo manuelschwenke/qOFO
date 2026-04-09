@@ -276,8 +276,8 @@ class MultiTSOConfig:
     pso_velocity_clamp_frac: float = 0.2
     pso_g_w_upper_factor:  float = 1e6
     pso_cascade_margin_target: float = 0.2
-    pso_spectral_target:   float = 1.8
-    """Hard cap on ``lam_max(M_sys)``.  Default 1.8 leaves a 10% margin
+    pso_spectral_target:   float = 1.9
+    """Hard cap on ``lam_max(M_sys)``.  Default 1.9 leaves a 5% margin
     below the absolute stability bound 2.0."""
     # Per-actuator-type lower bounds for the PSO search.  Independent of
     # the legacy tune_min_gw_* floors so PSO is free to explore lower g_w

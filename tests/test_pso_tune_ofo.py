@@ -1,17 +1,8 @@
 """
-Tests for analysis/pso_tune_ofo.py
-==================================
+Tests for analysis/pso_tune_ofo.py (eigenvector-pump g_w tuner)
+================================================================
 
-Validates the PSO joint TSO + DSO tuner on a synthetic 2-zone + 1-DSO
-problem.  The test focuses on the invariants the runner relies on:
-
-* PSO never regresses below the Gershgorin warm start
-  (``pso_result.fitness <= warm_start_fitness``)
-* Every per-actuator g_w respects its PSO floor
-* The synthetic problem is small enough that PSO converges to a feasible
-  solution (``fitness < 1``) within a tiny budget (15 particles, 30 iters)
-* The decode/bound bookkeeping handles a TSO zone *with* PCC actuators
-  AND a DSO with shunt actuators (covers all column blocks)
+Validates the deterministic pump on a synthetic 2-zone + 1-DSO problem.
 """
 
 import numpy as np
@@ -19,34 +10,23 @@ import pytest
 
 from analysis.pso_tune_ofo import (
     DSOTuneInput,
-    PSOTuningResult,
+    TuneGwResult,
     _dso_cascade_decay,
-    tune_pso_all,
+    tune_gw,
 )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Synthetic problem builders
+#  Synthetic problem builder
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _make_psd_diag_block(n: int, seed: int) -> np.ndarray:
-    """Build a tall H whose columns are independent (so H^T H is PD)."""
     rng = np.random.default_rng(seed)
     H = rng.standard_normal((n + 4, n))
     return H
 
 
 def _build_2zone_1dso():
-    """A small 2-TSO-zone + 1-DSO test problem.
-
-    Zone layout:
-        Zone 1: 2 DER + 1 PCC + 1 GEN + 1 OLTC = 5 actuators
-        Zone 2: 2 DER + 0 PCC + 2 GEN + 1 OLTC = 5 actuators
-        DSO  1: 3 DER + 1 OLTC + 1 SHUNT       = 5 actuators
-    """
-    # ── TSO ─────────────────────────────────────────────────────────────
-    # Cross-zone coupling is intentionally moderate so a feasible region
-    # exists but the warm start is not already optimal.
     H11 = _make_psd_diag_block(5, seed=11)
     H22 = _make_psd_diag_block(5, seed=22)
     H12 = 0.15 * np.random.default_rng(12).standard_normal((H11.shape[0], 5))
@@ -60,28 +40,27 @@ def _build_2zone_1dso():
     ]
     zone_ids = [1, 2]
 
-    # ── DSO ─────────────────────────────────────────────────────────────
     H_dso = _make_psd_diag_block(5, seed=33)
     q_obj_dso = np.concatenate([
-        np.full(2, 1.0),                # 2 interface Q rows
-        np.full(H_dso.shape[0] - 4, 100.0),  # voltage rows
-        np.zeros(2),                    # current rows (no weight)
+        np.full(2, 1.0),
+        np.full(H_dso.shape[0] - 4, 100.0),
+        np.zeros(2),
     ])
     dso_inputs = [DSOTuneInput(
-        dso_id="DSO_TEST",
-        H=H_dso,
-        q_obj_diag=q_obj_dso,
-        n_der=3,
-        n_oltc=1,
-        n_shunt=1,
+        dso_id="DSO_TEST", H=H_dso, q_obj_diag=q_obj_dso,
+        n_der=3, n_oltc=1, n_shunt=1,
     )]
 
     floors_tso = {'der': 1e-3, 'pcc': 0.01, 'gen': 1e2, 'oltc': 1.0}
     floors_dso = {'der': 1e-3, 'oltc': 0.1, 'shunt': 10.0}
 
+    # Initial g_w (user's hand-tuned values)
+    gw_tso_init = [np.ones(5) * 10.0, np.ones(5) * 10.0]
+    gw_dso_init = [np.ones(5) * 5.0]
+
     return (
         H_blocks, Q_obj_list, actuator_counts, zone_ids,
-        dso_inputs, floors_tso, floors_dso,
+        dso_inputs, floors_tso, floors_dso, gw_tso_init, gw_dso_init,
     )
 
 
@@ -89,156 +68,127 @@ def _build_2zone_1dso():
 #  Tests
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestPSOInvariants:
+class TestTuneGw:
 
-    def test_no_regression_versus_warm_start(self):
-        """PSO must never return a worse fitness than the warm start."""
+    def test_user_init_respected(self):
+        """Pump must never decrease g_w below the user's init values."""
         (H_blocks, Q_obj_list, actuator_counts, zone_ids,
-         dso_inputs, floors_tso, floors_dso) = _build_2zone_1dso()
+         dso_inputs, floors_tso, floors_dso,
+         gw_tso_init, gw_dso_init) = _build_2zone_1dso()
 
-        result = tune_pso_all(
-            H_blocks=H_blocks,
-            Q_obj_list=Q_obj_list,
-            actuator_counts=actuator_counts,
-            zone_ids=zone_ids,
+        # Use large init values — pump should keep them
+        large_tso = [np.full(5, 1000.0), np.full(5, 1000.0)]
+        large_dso = [np.full(5, 500.0)]
+
+        result = tune_gw(
+            H_blocks=H_blocks, Q_obj_list=Q_obj_list,
+            actuator_counts=actuator_counts, zone_ids=zone_ids,
             dso_inputs=dso_inputs,
-            floors_tso=floors_tso,
-            floors_dso=floors_dso,
-            swarm_size=15,
-            max_iterations=30,
-            seed=42,
+            gw_tso_init=large_tso, gw_dso_init=large_dso,
+            floors_tso=floors_tso, floors_dso=floors_dso,
             verbose=False,
         )
-        assert isinstance(result, PSOTuningResult)
-        assert np.isfinite(result.fitness)
-        assert result.fitness <= result.warm_start_fitness + 1e-9
+        for idx, gw in enumerate(result.gw_tso):
+            assert np.all(gw >= large_tso[idx] - 1e-9), (
+                f"Zone {zone_ids[idx]}: pump decreased g_w below user init"
+            )
+        for idx, gw in enumerate(result.gw_dso):
+            assert np.all(gw >= large_dso[idx] - 1e-9), (
+                f"DSO {dso_inputs[idx].dso_id}: pump decreased g_w below user init"
+            )
 
     def test_floors_respected(self):
-        """Every per-actuator g_w must lie above its PSO floor."""
+        """Every per-actuator g_w must lie above its floor."""
         (H_blocks, Q_obj_list, actuator_counts, zone_ids,
-         dso_inputs, floors_tso, floors_dso) = _build_2zone_1dso()
+         dso_inputs, floors_tso, floors_dso,
+         gw_tso_init, gw_dso_init) = _build_2zone_1dso()
 
-        result = tune_pso_all(
-            H_blocks=H_blocks,
-            Q_obj_list=Q_obj_list,
-            actuator_counts=actuator_counts,
-            zone_ids=zone_ids,
+        result = tune_gw(
+            H_blocks=H_blocks, Q_obj_list=Q_obj_list,
+            actuator_counts=actuator_counts, zone_ids=zone_ids,
             dso_inputs=dso_inputs,
-            floors_tso=floors_tso,
-            floors_dso=floors_dso,
-            swarm_size=15,
-            max_iterations=30,
-            seed=7,
+            gw_tso_init=gw_tso_init, gw_dso_init=gw_dso_init,
+            floors_tso=floors_tso, floors_dso=floors_dso,
             verbose=False,
         )
 
-        # ── TSO floors ──────────────────────────────────────────────────
-        for ztr, counts in zip(result.tso_zones, actuator_counts):
-            gw = ztr.g_w
+        for ztr_gw, counts in zip(result.gw_tso, actuator_counts):
             off = 0
             for type_name in ('der', 'pcc', 'gen', 'oltc'):
                 n = counts.get(f'n_{type_name}', 0)
                 if n <= 0:
                     continue
-                block = gw[off:off + n]
-                # Allow tiny floating-point slack
+                block = ztr_gw[off:off + n]
                 assert np.all(block >= floors_tso[type_name] * (1 - 1e-9)), (
-                    f"Zone {ztr.zone_id}: {type_name} block "
-                    f"{block} below floor {floors_tso[type_name]}"
+                    f"{type_name} block {block} below floor {floors_tso[type_name]}"
                 )
                 off += n
 
-        # ── DSO floors ──────────────────────────────────────────────────
-        for d in dso_inputs:
-            gw_dso, _rho, _margin = result.dso[d.dso_id]
+        for d, gw in zip(dso_inputs, result.gw_dso):
             off = 0
-            for type_name, n in (('der', d.n_der),
-                                 ('oltc', d.n_oltc),
-                                 ('shunt', d.n_shunt)):
+            for type_name, n in (('der', d.n_der), ('oltc', d.n_oltc), ('shunt', d.n_shunt)):
                 if n <= 0:
                     continue
-                block = gw_dso[off:off + n]
+                block = gw[off:off + n]
                 assert np.all(block >= floors_dso[type_name] * (1 - 1e-9)), (
-                    f"DSO {d.dso_id}: {type_name} block "
-                    f"{block} below floor {floors_dso[type_name]}"
+                    f"DSO {d.dso_id}: {type_name} below floor {floors_dso[type_name]}"
                 )
                 off += n
 
     def test_feasible_on_synthetic(self):
-        """On a small well-conditioned synthetic problem PSO should reach
-        f < 1 within 30 iterations."""
+        """On a small synthetic problem the pump should reach feasibility."""
         (H_blocks, Q_obj_list, actuator_counts, zone_ids,
-         dso_inputs, floors_tso, floors_dso) = _build_2zone_1dso()
+         dso_inputs, floors_tso, floors_dso,
+         gw_tso_init, gw_dso_init) = _build_2zone_1dso()
 
-        result = tune_pso_all(
-            H_blocks=H_blocks,
-            Q_obj_list=Q_obj_list,
-            actuator_counts=actuator_counts,
-            zone_ids=zone_ids,
+        result = tune_gw(
+            H_blocks=H_blocks, Q_obj_list=Q_obj_list,
+            actuator_counts=actuator_counts, zone_ids=zone_ids,
             dso_inputs=dso_inputs,
-            floors_tso=floors_tso,
-            floors_dso=floors_dso,
-            swarm_size=25,
-            max_iterations=50,
-            spectral_target=1.95,   # slightly relaxed for test
-            seed=123,
+            gw_tso_init=gw_tso_init, gw_dso_init=gw_dso_init,
+            floors_tso=floors_tso, floors_dso=floors_dso,
+            spectral_target=1.95,
             verbose=False,
         )
-        assert result.fitness < 1.0, (
-            f"PSO failed to reach feasibility on the synthetic problem: "
-            f"fitness = {result.fitness:.4f}, "
-            f"warnings = {result.feasibility_warnings}"
+        assert result.spectral_feasible, (
+            f"Pump failed: lam_max_sys = {result.lam_max_sys:.4f}"
         )
-        assert result.converged
 
-    def test_history_length_and_keys(self):
-        """The convergence history should have one entry per iteration
-        and each entry should expose the metrics the JSON serialiser
-        relies on."""
+    def test_returns_correct_types(self):
+        """Result has the expected types and shapes."""
         (H_blocks, Q_obj_list, actuator_counts, zone_ids,
-         dso_inputs, floors_tso, floors_dso) = _build_2zone_1dso()
+         dso_inputs, floors_tso, floors_dso,
+         gw_tso_init, gw_dso_init) = _build_2zone_1dso()
 
-        result = tune_pso_all(
-            H_blocks=H_blocks,
-            Q_obj_list=Q_obj_list,
-            actuator_counts=actuator_counts,
-            zone_ids=zone_ids,
+        result = tune_gw(
+            H_blocks=H_blocks, Q_obj_list=Q_obj_list,
+            actuator_counts=actuator_counts, zone_ids=zone_ids,
             dso_inputs=dso_inputs,
-            floors_tso=floors_tso,
-            floors_dso=floors_dso,
-            swarm_size=10,
-            max_iterations=20,
-            seed=1,
+            gw_tso_init=gw_tso_init, gw_dso_init=gw_dso_init,
+            floors_tso=floors_tso, floors_dso=floors_dso,
             verbose=False,
         )
-        assert len(result.history) >= 1
-        assert len(result.history) <= 20
-        required = {
-            'iter', 'fitness', 'kappa_sys', 'rho_opt_sys',
-            'rho_max_tso', 'max_kappa_dso', 'rho_max_dso',
-            'spectral', 'gamma', 'max_dso_decay',
-        }
-        for entry in result.history:
-            missing = required - set(entry.keys())
-            assert not missing, f"Missing history keys: {missing}"
+        assert isinstance(result, TuneGwResult)
+        assert len(result.gw_tso) == 2
+        assert len(result.gw_dso) == 1
+        assert len(result.per_zone_kappa) == 2
+        assert len(result.per_dso_lam_max) == 1
+        assert isinstance(result.lam_max_sys, float)
+        assert isinstance(result.pump_iterations_tso, int)
 
 
 class TestDSOCascadeDecay:
 
     def test_well_conditioned_decay(self):
-        """A diagonal H with uniform g_w should yield rho = 0 (perfect
-        contraction)."""
         H = np.eye(4) * 2.0
         q = np.ones(4)
-        g_w = np.full(4, 4.0)  # any uniform value
+        g_w = np.full(4, 4.0)
         rho, decay, alpha_opt = _dso_cascade_decay(H, q, g_w, n_inner=3)
         assert rho == pytest.approx(0.0, abs=1e-12)
         assert decay == pytest.approx(0.0, abs=1e-12)
         assert alpha_opt == pytest.approx(1.0)
 
     def test_known_two_eigenvalue_case(self):
-        """Two distinct eigenvalues 1 and 4 → rho = (4-1)/(4+1) = 0.6."""
-        # Build a H so that C = diag([1, 4])
         H = np.diag([1.0, 2.0])
         q = np.ones(2)
         g_w = np.ones(2)

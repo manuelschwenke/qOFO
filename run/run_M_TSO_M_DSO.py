@@ -278,6 +278,23 @@ class MultiTSOConfig:
     min_gw_dso_oltc:       float = 5.0
     min_gw_dso_shunt:      float = 10.0
 
+    # ── Slack variable penalty (g_z) ─────────────────────────────────────
+    # Per-output-type penalty for the slack variable z in the MIQP:
+    #   g_z = 0   → z is free for that output → output constraint DISABLED
+    #   g_z > 0   → z penalised by g_z · z² → soft constraint (nearly hard
+    #               when g_z is very large, e.g. 1e12)
+    # Note: as long as ANY output has g_z > 0, the solver creates slack
+    # variables.  Outputs with g_z = 0 then have free slack = unconstrained.
+    g_z_voltage:           float = 1e12
+    """Nearly-hard voltage constraint penalty.  Very large so the solver
+    keeps predicted voltages within [v_min, v_max] up to ~1e-12 p.u."""
+    g_z_current:           float = 0.0
+    """Current outputs unconstrained (z free).  Set > 0 to enable soft
+    current limits."""
+    g_z_interface:         float = 0.0
+    """DSO interface-Q outputs unconstrained (z free).  Set > 0 to
+    enable soft Q-interface limits."""
+
     # ── Stability analysis ─────────────────────────────────────────────────────
     run_stability_analysis:       bool = True
     # When (in simulated seconds) to run the stability analysis.  The
@@ -1791,12 +1808,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         # ── G_w diagonal for this zone's u vector ────────────────────────────
         gw_diag = zd.gw_diagonal()
         gz_diag = np.concatenate([
-            np.full(len(zd.v_bus_indices), 0.0),   # voltage constraint slacks (g_z=0)
-            np.full(len(zd.line_indices),  0.0),    # current constraint slacks
+            np.full(len(zd.v_bus_indices), config.g_z_voltage),   # voltage slacks
+            np.full(len(zd.line_indices),  config.g_z_current),   # current slacks
         ])
-        # TSOController expects g_z as a flat array (one entry per output variable)
-        # A value of 0 means "no slack variable", i.e. hard constraint.
-        # For soft constraints set g_z > 0.
+        # g_z = 0 → hard output constraints; g_z > 0 → soft (nearly hard when large)
 
         ofo_params = OFOParameters(
             g_w=gw_diag,    # 1-D vector; alpha absorbed into g_w
@@ -1962,9 +1977,14 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         n_iface = len(interface_trafos)
         n_v = len(v_buses)
         n_i = len(hv_lines)
+        dso_gz = np.concatenate([
+            np.full(n_iface, config.g_z_interface),   # interface-Q slacks
+            np.full(n_v,     config.g_z_voltage),     # voltage slacks
+            np.full(n_i,     config.g_z_current),     # current slacks
+        ])
         dso_ofo = OFOParameters(
             g_w=dso_gw_diag,
-            g_z=np.zeros(n_iface + n_v + n_i),
+            g_z=dso_gz,
             g_u=np.zeros_like(dso_gw_diag),
             int_max_step=config.int_max_step,
             int_cooldown=config.int_cooldown,

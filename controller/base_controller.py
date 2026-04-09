@@ -350,18 +350,11 @@ class BaseOFOController(ABC):
         self._H_der_cache = None
         self._H_der_cache_base_id = None
 
-        # Warn about g_z > 0 potentially causing oscillations
-        g_z_arr = np.asarray(self.params.g_z)
-        if np.any(g_z_arr > 0):
-            import warnings
-            warnings.warn(
-                f"g_z > 0 ({self.params.g_z}) enables output-constraint slack "
-                f"variables in the MIQP. This can cause oscillations even when "
-                f"constraints are not violated, because the solver may use the "
-                f"slack as a shortcut that couples constraint satisfaction to "
-                f"the step direction. Set g_z=0 to disable slack variables.",
-                stacklevel=2,
-            )
+        # g_z semantics (enforced in the MIQP solver):
+        #   g_z = 0  → hard output constraints (no slack variable z)
+        #   g_z > 0  → soft output constraints (z penalised by z^T G_z z)
+        # Use g_z > 0 for transient robustness when the problem may be
+        # temporarily infeasible (e.g., after large disturbances).
 
     def step(self, measurement: Measurement) -> ControllerOutput:
         """

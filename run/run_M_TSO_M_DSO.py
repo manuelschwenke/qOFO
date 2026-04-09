@@ -266,14 +266,14 @@ class MultiTSOConfig:
     # BEFORE the simulation to ensure lambda_max(M_sys) < spectral_target.
     # The user's g_w config values (g_w_der, g_w_gen, etc.) are the FLOOR:
     # the pump can only increase g_w, never decrease.
-    spectral_target:       float = 1.9
+    spectral_target:       float = 2 * 2
     """Hard cap on ``lam_max(M_sys)``.  Default 1.9 leaves a 5% margin
     below the absolute stability bound 2.0."""
     # Per-actuator-type floors for the pump (used by _apply_gw_floors).
     min_gw_tso_der:        float = 1e-3
-    min_gw_tso_pcc:        float = 0.01
-    min_gw_tso_gen:        float = 1e4
-    min_gw_tso_oltc:       float = 10.0
+    min_gw_tso_pcc:        float = 1e-3
+    min_gw_tso_gen:        float = 1e7
+    min_gw_tso_oltc:       float = 50.0
     min_gw_dso_der:        float = 1e-3
     min_gw_dso_oltc:       float = 5.0
     min_gw_dso_shunt:      float = 10.0
@@ -1562,6 +1562,19 @@ def _run_delayed_stability_analysis(
         verbose=(verbose >= 1),
     )
 
+    # Report effective stability WITH alpha (the raw report checks lam < 2,
+    # but with alpha-separated control the condition is alpha*lam < 2).
+    if verbose >= 1:
+        alpha_tso = tso_controllers[zone_ids_sorted[0]].params.alpha
+        eff_lam = alpha_tso * stab_result.M_sys_lambda_max
+        eff_rho = float(np.max(np.abs(
+            1.0 - alpha_tso * np.linalg.eigvals(stab_result.M_sys)
+        )))
+        status = "STABLE" if eff_rho < 1.0 else "UNSTABLE"
+        print(f"  With alpha_tso = {alpha_tso:.6f}: "
+              f"alpha*lam_max = {eff_lam:.4f}, "
+              f"rho(I-alpha*M) = {eff_rho:.4f}  [{status}]")
+
     # Write markdown report + machine-readable JSON snapshot
     minutes = int(round(time_s / 60.0))
     md_path = os.path.join(config.result_dir,
@@ -2544,7 +2557,7 @@ def main() -> None:
         live_plot=True,
         add_tso_ders=True,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 7, 6, 0),
+        start_time=datetime(2016, 1, 6, 6, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[

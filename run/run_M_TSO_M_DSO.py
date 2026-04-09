@@ -1358,11 +1358,20 @@ def _tune_and_apply_gw(
     if verbose >= 1:
         feasible_str = "FEASIBLE" if result.spectral_feasible else "INFEASIBLE"
         print(f"\n  {'=' * 66}")
-        print(f"    Eigenvector Pump: g_w tuning results")
+        print(f"    Eigenvector Pump: g_w + alpha tuning results")
         print(f"  {'─' * 66}")
         print(f"    Global: lam_max(M_sys) = {result.lam_max_sys:.4f}  "
               f"(target < {config.spectral_target:.2f})   {feasible_str}")
-        print(f"    Pump converged in {result.pump_iterations_tso} TSO iterations")
+        print(f"    alpha_tso = {result.alpha_tso:.6f}  "
+              f"(alpha*lam = {result.alpha_tso * result.lam_max_sys:.4f})")
+        if result.stability_result is not None:
+            sr = result.stability_result
+            if sr.M_sys_asymmetry > 1e-6:
+                print(f"    M_sys asymmetry = {sr.M_sys_asymmetry:.4f}"
+                      f"{'  ⚠ NON-SYMMETRIC' if sr.M_sys_asymmetry > 0.01 else ''}")
+            if sr.M_sys_has_complex_eigenvalues:
+                print(f"    M_sys has complex eigenvalues, "
+                      f"rho(I-M) = {sr.M_sys_spectral_radius:.4f}")
         print(f"  {'─' * 66}")
 
         def _fmt_gw(v: float) -> str:
@@ -1416,7 +1425,9 @@ def _tune_and_apply_gw(
             parent_zone = (hv_info_map[dso_id_key].zone
                            if dso_id_key in hv_info_map else "?")
             lam_d = result.per_dso_lam_max[d_idx] if d_idx < len(result.per_dso_lam_max) else float('nan')
-            print(f"    DSO {dso_id_key} (Zone {parent_zone})   [lam_max = {lam_d:.4f}]")
+            alpha_d = result.alpha_dso[d_idx] if d_idx < len(result.alpha_dso) else float('nan')
+            print(f"    DSO {dso_id_key} (Zone {parent_zone})   "
+                  f"[lam_max = {lam_d:.4f}, alpha_dso = {alpha_d:.6f}]")
             print(f"      {'Actuator':<30s} {'Type':<6s}  {'g_w (init)':>11s}  {'g_w (tuned)':>11s}  Change")
 
             gw_old_d = gw_dso_init[d_idx]
@@ -1458,15 +1469,22 @@ def _tune_and_apply_gw(
     if apply:
         for idx, z in enumerate(zone_ids_sorted):
             tso_controllers[z].params = dataclasses.replace(
-                tso_controllers[z].params, g_w=result.gw_tso[idx],
+                tso_controllers[z].params,
+                g_w=result.gw_tso[idx],
+                alpha=result.alpha_tso,
             )
         for d_idx, (dso_id_key, dso_ctrl) in enumerate(dso_controllers.items()):
+            alpha_d = result.alpha_dso[d_idx] if d_idx < len(result.alpha_dso) else 1.0
             dso_ctrl.params = dataclasses.replace(
-                dso_ctrl.params, g_w=result.gw_dso[d_idx],
+                dso_ctrl.params,
+                g_w=result.gw_dso[d_idx],
+                alpha=alpha_d,
             )
         coordinator._last_pump_result = result  # type: ignore[attr-defined]
         if verbose >= 1:
-            print("  Tuned g_w applied.")
+            print(f"  Tuned g_w + alpha applied.  "
+                  f"alpha_tso = {result.alpha_tso:.6f}, "
+                  f"alpha_dso = {[f'{a:.4f}' for a in result.alpha_dso]}")
     else:
         coordinator._last_pump_result = None  # type: ignore[attr-defined]
 
@@ -2487,14 +2505,14 @@ def main() -> None:
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0 * 1,    # DSO every 20 seconds
         g_v=150000.0,
-        g_q=1,
-        dso_g_v=2000.0,
+        g_q=2,
+        dso_g_v=5000.0,
         g_w_der=50.0,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
         g_w_gen=1e7,           # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
         g_w_pcc=50.0,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
         g_w_tso_oltc=50,       # unchanged (was at alpha=1)
-        g_w_dso_der=15.0,      # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
-        g_w_dso_oltc=2.0,      # unchanged (was at alpha=1)
+        g_w_dso_der=0.1,      # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
+        g_w_dso_oltc=15.0,      # unchanged (was at alpha=1)
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -2503,15 +2521,15 @@ def main() -> None:
         live_plot=True,
         add_tso_ders=True,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 6, 6, 0),
+        start_time=datetime(2016, 1, 7, 6, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
             # Example: trip line 0 at t=30 min, restore at t=60 min
-            # ContingencyEvent(minute=90, element_type="gen", element_index=3, action="trip"),
-            # ContingencyEvent(minute=120, element_type="gen", element_index=3, action="restore"),
-            # ContingencyEvent(minute=240, element_type="gen", element_index=2, action="trip"),
-            # ContingencyEvent(minute=360, element_type="gen", element_index=2, action="restore"),
+            ContingencyEvent(minute=90, element_type="gen", element_index=3, action="trip"),
+            ContingencyEvent(minute=120, element_type="gen", element_index=3, action="restore"),
+            ContingencyEvent(minute=240, element_type="gen", element_index=2, action="trip"),
+            ContingencyEvent(minute=360, element_type="gen", element_index=2, action="restore"),
         ],
     )
     log = run_multi_tso_dso(cfg)

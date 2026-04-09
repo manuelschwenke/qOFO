@@ -32,6 +32,7 @@ from analysis.stability_analysis import (
 from analysis.tune_ofo_params import (
     _DSO_COLUMN_ORDER,
     _TSO_COLUMN_ORDER,
+    _TYPE_TO_COUNT_KEY,
     _apply_gw_floors,
     _compute_curvature_diagonal,
     _compute_curvature_matrix,
@@ -225,8 +226,8 @@ def _eigenvector_pump(
     gw_dso_init: List[NDArray[np.float64]],
     floors_tso: Dict[str, float],
     floors_dso: Dict[str, float],
-    safety_factor_tso: float,
-    safety_factor_dso: float,
+    safety_factor_continuous: float,
+    safety_factor_discrete: float,
     spectral_target: float,
     max_pump_iters: int = 50,
     verbose: bool = False,
@@ -252,16 +253,42 @@ def _eigenvector_pump(
 
     # ── Phase 1: Gershgorin preconditioning + user floor ───────────────
     #
-    # Curvature-proportional g_w normalises M so eigenvalues are ~O(1),
-    # giving alpha ~O(1) and good conditioning.  safety_factor = 1 gives
-    # g_w = C_ii/2 (the necessary per-actuator condition at alpha=1).
+    # Curvature-proportional g_w normalises M so eigenvalues are ~O(1).
+    # Continuous actuators (DER, PCC, V_gen) use safety_factor_continuous
+    # (default 1.0: preconditioning only, alpha handles stability).
+    # Discrete actuators (OLTC, shunt) use safety_factor_discrete
+    # (default 3.0: anti-oscillation, since discrete uses alpha=1 and
+    # must not overshoot the setpoint on a single tap step).
+    #
     # The user's init values act as the floor — Phase 1 can only increase.
-    # Phase 2 handles global stability via alpha (no further g_w inflation).
+
+    # Continuous vs discrete actuator types (by column-order name)
+    _CONTINUOUS_TYPES = {'der', 'pcc', 'gen'}  # alpha-scaled, preconditioning only
+    _DISCRETE_TYPES = {'oltc', 'shunt'}        # alpha=1, anti-oscillation
+
+    def _per_type_safety(c_diag, counts, col_order, cont_types, disc_types):
+        """Build per-actuator safety factor vector."""
+        sf = np.empty_like(c_diag)
+        off = 0
+        for atype in col_order:
+            count_key = _TYPE_TO_COUNT_KEY.get(atype, atype)
+            n = counts.get(count_key, counts.get(atype, 0))
+            if atype in cont_types:
+                sf[off:off+n] = safety_factor_continuous
+            else:
+                sf[off:off+n] = safety_factor_discrete
+            off += n
+        return sf
+
     gw_tso_arrays: List[NDArray[np.float64]] = []
     for idx, z in enumerate(zone_ids):
         H_ii = H_blocks[(z, z)]
         c_diag = _compute_curvature_diagonal(H_ii, Q_obj_list[idx])
-        gw_gersh = safety_factor_tso * c_diag / 2.0
+        sf_vec = _per_type_safety(
+            c_diag, actuator_counts[idx], _TSO_COLUMN_ORDER,
+            _CONTINUOUS_TYPES, _DISCRETE_TYPES,
+        )
+        gw_gersh = sf_vec * c_diag / 2.0
         gw_gersh = _apply_gw_floors(
             gw_gersh, actuator_counts[idx], floors_tso, _TSO_COLUMN_ORDER,
         )
@@ -272,7 +299,11 @@ def _eigenvector_pump(
     for d_idx, d in enumerate(dso_inputs):
         c_diag = _compute_curvature_diagonal(d.H, d.q_obj_diag)
         counts = {'n_der': d.n_der, 'n_oltc': d.n_oltc, 'n_shunt': d.n_shunt}
-        gw_gersh = safety_factor_dso * c_diag / 2.0
+        sf_vec = _per_type_safety(
+            c_diag, counts, _DSO_COLUMN_ORDER,
+            _CONTINUOUS_TYPES, _DISCRETE_TYPES,
+        )
+        gw_gersh = sf_vec * c_diag / 2.0
         gw_gersh = _apply_gw_floors(gw_gersh, counts, floors_dso, _DSO_COLUMN_ORDER)
         gw = np.maximum(gw_dso_init[d_idx], gw_gersh)
         gw_dso_arrays.append(gw)
@@ -349,15 +380,22 @@ def tune_gw(
     spectral_target: float = 1.9,
     tso_period_s: float = 180.0,
     dso_period_s: float = 60.0,
-    safety_factor_tso: float = 1.0,
-    safety_factor_dso: float = 1.0,
+    safety_factor_continuous: float = 1.0,
+    safety_factor_discrete: float = 3.0,
     verbose: bool = True,
 ) -> TuneGwResult:
     """Tune per-actuator g_w for the multi-TSO + DSO cascade.
 
-    Uses the deterministic eigenvector pump.  The user's ``gw_tso_init``
-    and ``gw_dso_init`` are the FLOOR: the pump can only increase g_w
-    above these values, never decrease.
+    Uses Gershgorin preconditioning (Phase 1) with separate safety
+    factors for continuous (DER, PCC, V_gen) and discrete (OLTC, shunt)
+    actuators, followed by alpha computation (Phase 2).
+
+    ``safety_factor_continuous`` (default 1.0): preconditioning for
+    continuous actuators.  g_w = sf * C_ii/2.  Alpha handles stability.
+
+    ``safety_factor_discrete`` (default 3.0): anti-oscillation for
+    discrete actuators.  g_w = sf * C_ii/2 ≥ 1.5*C_ii prevents
+    gradient-reversal oscillation after a single tap step.
 
     Returns :class:`TuneGwResult`.
     """
@@ -373,8 +411,8 @@ def tune_gw(
         gw_dso_init=gw_dso_init,
         floors_tso=floors_tso,
         floors_dso=floors_dso,
-        safety_factor_tso=safety_factor_tso,
-        safety_factor_dso=safety_factor_dso,
+        safety_factor_continuous=safety_factor_continuous,
+        safety_factor_discrete=safety_factor_discrete,
         spectral_target=spectral_target,
         verbose=verbose,
     )

@@ -250,16 +250,16 @@ class MultiTSOConfig:
     # BEFORE the simulation to ensure lambda_max(M_sys) < spectral_target.
     # The user's g_w config values (g_w_der, g_w_gen, etc.) are the FLOOR:
     # the pump can only increase g_w, never decrease.
-    spectral_target:       float = 1.5
+    spectral_target:       float = 1.8
     """Hard cap on ``lam_max(M_sys)``.  Default 1.9 leaves a 5% margin
     below the absolute stability bound 2.0."""
     # Per-actuator-type floors for the pump (used by _apply_gw_floors).
     min_gw_tso_der:        float = 1e-6
     min_gw_tso_pcc:        float = 1e-6
     min_gw_tso_gen:        float = 1e3
-    min_gw_tso_oltc:       float = 0.1
+    min_gw_tso_oltc:       float = 1
     min_gw_dso_der:        float = 1e-6
-    min_gw_dso_oltc:       float = 0.1
+    min_gw_dso_oltc:       float = 1
     min_gw_dso_shunt:      float = 100.0
 
     # ── Manual alpha overrides ──────────────────────────────────────────
@@ -272,6 +272,16 @@ class MultiTSOConfig:
     """Manual DSO step-size (applied to ALL DSOs).  Overrides pump-computed
     alpha_dso when set."""
 
+    # ── Gershgorin safety factors (Phase 1 preconditioning) ─────────────
+    safety_factor_continuous: float = 1.0
+    """g_w = sf * C_ii/2 for continuous actuators (DER, PCC, V_gen).
+    Preconditioning only; alpha handles stability.  Default 1.0."""
+
+    safety_factor_discrete: float = 3.0
+    """g_w = sf * C_ii/2 for discrete actuators (OLTC, shunt).
+    Anti-oscillation: sf=3 gives g_w=1.5*C_ii, preventing gradient
+    reversal after a single tap step.  Default 3.0."""
+
     # ── Slack variable penalty (g_z) ─────────────────────────────────────
     # Per-output-type penalty for the slack variable z in the MIQP:
     #   g_z = 0   → z is free for that output → output constraint DISABLED
@@ -279,7 +289,7 @@ class MultiTSOConfig:
     #               when g_z is very large, e.g. 1e12)
     # Note: as long as ANY output has g_z > 0, the solver creates slack
     # variables.  Outputs with g_z = 0 then have free slack = unconstrained.
-    g_z_voltage:           float = 1e12
+    g_z_voltage:           float = 0.0000001
     """Nearly-hard voltage constraint penalty.  Very large so the solver
     keeps predicted voltages within [v_min, v_max] up to ~1e-12 p.u."""
     g_z_current:           float = 0.0
@@ -1345,6 +1355,8 @@ def _tune_and_apply_gw(
         spectral_target=config.spectral_target,
         tso_period_s=config.tso_period_s,
         dso_period_s=config.dso_period_s,
+        safety_factor_continuous=config.safety_factor_continuous,
+        safety_factor_discrete=config.safety_factor_discrete,
         verbose=(verbose >= 1),
     )
 
@@ -2560,13 +2572,13 @@ def main() -> None:
         dso_period_s=20.0 * 1,    # DSO every 20 seconds
         g_v=1000.0,
         g_q=1,
-        dso_g_v=100.0,
-        g_w_der=0.01,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        dso_g_v=200.0,
+        g_w_der=0.1,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
         g_w_gen=1e4,           # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
-        g_w_pcc=0.01,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_tso_oltc=0.1,       # unchanged (was at alpha=1)
-        g_w_dso_der=0.01,      # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
-        g_w_dso_oltc=1,      # unchanged (was at alpha=1)
+        g_w_pcc=0.1,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        g_w_tso_oltc=1,       # unchanged (was at alpha=1)
+        g_w_dso_der=1,      # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
+        g_w_dso_oltc=2,      # unchanged (was at alpha=1)
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps

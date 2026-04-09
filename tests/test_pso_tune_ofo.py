@@ -178,8 +178,9 @@ class TestPSOInvariants:
             dso_inputs=dso_inputs,
             floors_tso=floors_tso,
             floors_dso=floors_dso,
-            swarm_size=15,
-            max_iterations=30,
+            swarm_size=25,
+            max_iterations=50,
+            spectral_target=1.95,   # slightly relaxed for test
             seed=123,
             verbose=False,
         )

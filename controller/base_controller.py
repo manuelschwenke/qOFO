@@ -349,7 +349,20 @@ class BaseOFOController(ABC):
         # Expanded H cache is invalidated on re-init (new operating point).
         self._H_der_cache = None
         self._H_der_cache_base_id = None
-    
+
+        # Warn about g_z > 0 potentially causing oscillations
+        g_z_arr = np.asarray(self.params.g_z)
+        if np.any(g_z_arr > 0):
+            import warnings
+            warnings.warn(
+                f"g_z > 0 ({self.params.g_z}) enables output-constraint slack "
+                f"variables in the MIQP. This can cause oscillations even when "
+                f"constraints are not violated, because the solver may use the "
+                f"slack as a shortcut that couples constraint satisfaction to "
+                f"the step direction. Set g_z=0 to disable slack variables.",
+                stacklevel=2,
+            )
+
     def step(self, measurement: Measurement) -> ControllerOutput:
         """
         Execute one OFO iteration.

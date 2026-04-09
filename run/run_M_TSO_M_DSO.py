@@ -222,7 +222,12 @@ class MultiTSOConfig:
     int_cooldown:   int = 1         # iterations to lock after switching
 
     # ── DSO OLTC initialisation ──────────────────────────────────────────────
-    dso_oltc_init_tol_pu: float = 0.01
+    oltc_init_v_target_pu: float = 1.0
+    """Voltage target for DiscreteTapControl at OLTC init.  Separate from
+    v_setpoint_pu (the OFO tracking target) to allow headroom below the
+    output constraint upper bound (1.1 p.u.).  Default 1.0 centres the
+    initial DN voltages in the [0.9, 1.1] band."""
+    dso_oltc_init_tol_pu: float = 0.02
     """Voltage deadband half-width for the initial DiscreteTapControl run
     that sets coupling-transformer tap positions before OFO starts."""
 
@@ -2072,27 +2077,31 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
     # ── Initialise 2W and 3W OLTC tap positions via DiscreteTapControl ────────────
     # Run AFTER profiles/dispatch so taps are found for the actual operating point.
+    # Use oltc_init_v_target_pu (default 1.0) instead of v_setpoint_pu (1.05)
+    # to centre DN voltages in the [0.9, 1.1] band with symmetric headroom.
     from pandapower.control import DiscreteTapControl
 
+    v_init = config.oltc_init_v_target_pu
     tol_pu = config.dso_oltc_init_tol_pu
+    if verbose >= 1:
+        print(f"[7c] OLTC init: target={v_init:.2f} p.u. ± {tol_pu:.3f} p.u.")
     for hv in meta.hv_networks:
         for t3w in hv.coupling_trafo_indices:
             DiscreteTapControl(
                 net,
                 element_index=t3w,
-                vm_lower_pu=v_set - tol_pu,
-                vm_upper_pu=v_set + tol_pu,
+                vm_lower_pu=v_init - tol_pu,
+                vm_upper_pu=v_init + tol_pu,
                 side="mv",
                 element="trafo3w",
             )
     if meta.machine_trafo_indices:
-        mt_tol_pu = config.dso_oltc_init_tol_pu
         for tidx in meta.machine_trafo_indices:
             DiscreteTapControl(
                 net,
                 element_index=tidx,
-                vm_lower_pu=v_set - mt_tol_pu,
-                vm_upper_pu=v_set + mt_tol_pu,
+                vm_lower_pu=v_init - tol_pu,
+                vm_upper_pu=v_init + tol_pu,
                 side="hv",
                 element="trafo",
             )
@@ -2121,49 +2130,49 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
     # ── Voltage feasibility check after OLTC init ──────────────────────
-    # Verify all monitored buses are within [v_min, v_max] BEFORE the
-    # OFO controller starts.  If any bus is outside, the MIQP with hard
-    # or nearly-hard output constraints may be infeasible at step 1.
+    # Always print the voltage range for each DSO/zone so the user can
+    # see how close voltages are to the constraint boundaries [0.9, 1.1].
+    # Even if all buses are "within bounds", voltages near 1.1 leave no
+    # headroom for the MIQP output constraint H·w ≤ (y_upper − y_current).
     _v_violations_found = False
+    if verbose >= 1:
+        print("[7c] Voltage ranges after OLTC init (constraints [0.9, 1.1]):")
     for hv in meta.hv_networks:
         v_buses = list(hv.bus_indices)
         vm_pu = net.res_bus.loc[v_buses, "vm_pu"].to_numpy(dtype=float)
-        v_min_check = 0.9   # DSO controller default
-        v_max_check = 1.1
-        below = vm_pu < v_min_check
-        above = vm_pu > v_max_check
-        if np.any(below) or np.any(above):
+        vm_min = float(np.min(vm_pu))
+        vm_max = float(np.max(vm_pu))
+        n_below = int(np.sum(vm_pu < 0.9))
+        n_above = int(np.sum(vm_pu > 1.1))
+        headroom_up = 1.1 - vm_max
+        headroom_dn = vm_min - 0.9
+        status = "✓" if (n_below == 0 and n_above == 0) else "⚠"
+        if verbose >= 1:
+            print(f"  {status} {hv.net_id}: {len(v_buses)} buses, "
+                  f"V ∈ [{vm_min:.4f}, {vm_max:.4f}] p.u.  "
+                  f"(headroom: ↑{headroom_up:.4f}, ↓{headroom_dn:.4f})")
+        if n_below > 0 or n_above > 0:
             _v_violations_found = True
-            n_below = int(np.sum(below))
-            n_above = int(np.sum(above))
-            vm_min = float(np.min(vm_pu))
-            vm_max = float(np.max(vm_pu))
-            print(f"  ⚠ {hv.net_id}: {n_below} buses below {v_min_check} p.u., "
-                  f"{n_above} buses above {v_max_check} p.u.  "
-                  f"(range [{vm_min:.4f}, {vm_max:.4f}] p.u.)")
-            if verbose >= 2:
-                for i, bus in enumerate(v_buses):
-                    if below[i] or above[i]:
-                        print(f"      bus {bus}: V = {vm_pu[i]:.4f} p.u.")
+            print(f"     {n_below} below 0.9, {n_above} above 1.1")
+        elif headroom_up < 0.02 or headroom_dn < 0.02:
+            print(f"     ⚠ Low headroom — MIQP output constraints may bite hard")
     for z, zd in zone_defs.items():
         vm_pu = net.res_bus.loc[zd.v_bus_indices, "vm_pu"].to_numpy(dtype=float)
-        below = vm_pu < 0.9
-        above = vm_pu > 1.1
-        if np.any(below) or np.any(above):
-            _v_violations_found = True
-            n_below = int(np.sum(below))
-            n_above = int(np.sum(above))
-            vm_min = float(np.min(vm_pu))
-            vm_max = float(np.max(vm_pu))
-            print(f"  ⚠ TSO zone {z}: {n_below} buses below 0.9 p.u., "
-                  f"{n_above} buses above 1.1 p.u.  "
-                  f"(range [{vm_min:.4f}, {vm_max:.4f}] p.u.)")
-    if not _v_violations_found:
+        vm_min = float(np.min(vm_pu))
+        vm_max = float(np.max(vm_pu))
+        n_below = int(np.sum(vm_pu < 0.9))
+        n_above = int(np.sum(vm_pu > 1.1))
+        headroom_up = 1.1 - vm_max
+        headroom_dn = vm_min - 0.9
+        status = "✓" if (n_below == 0 and n_above == 0) else "⚠"
         if verbose >= 1:
-            print("[7c] ✓ All monitored buses within [0.9, 1.1] p.u. after OLTC init.")
-    else:
-        print("[7c] ⚠ Voltage violations found — MIQP may be infeasible at step 1.")
-        print("     Consider widening dso_oltc_init_tol_pu or using g_z_voltage > 0 (soft constraints).")
+            print(f"  {status} TSO zone {z}: {len(zd.v_bus_indices)} buses, "
+                  f"V ∈ [{vm_min:.4f}, {vm_max:.4f}] p.u.  "
+                  f"(headroom: ↑{headroom_up:.4f}, ↓{headroom_dn:.4f})")
+        if n_below > 0 or n_above > 0:
+            _v_violations_found = True
+    if _v_violations_found:
+        print("  ⚠ Voltage violations found — MIQP will be infeasible with hard constraints.")
 
     # Re-initialise all controllers so _u_current reflects the updated
     # operating point (profiles + correct tap positions).

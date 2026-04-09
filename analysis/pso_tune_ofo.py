@@ -161,13 +161,18 @@ def _find_alpha_for_target_rho(
 
     eigs = np.asarray(eigs, dtype=np.complex128)
 
-    # Filter to eigenvalues with positive real part
-    active = eigs[eigs.real > 1e-14]
+    # Filter to eigenvalues with significant magnitude.  Near-zero
+    # eigenvalues are null-space directions (co-located DERs, inactive
+    # actuators) where |1 - alpha*0| = 1 for all alpha — they must not
+    # constrain the step size.
+    mag_threshold = 1e-6 * float(np.max(np.abs(eigs)))
+    active = eigs[np.abs(eigs) > max(mag_threshold, 1e-14)]
+    active = active[active.real > 1e-14]
     if len(active) == 0:
         return 1.0
 
     def _rho(alpha: float) -> float:
-        return float(np.max(np.abs(1.0 - alpha * eigs)))
+        return float(np.max(np.abs(1.0 - alpha * active)))
 
     # Upper bound: alpha_crit = min over eigenvalues of 2*Re(lam)/|lam|^2
     alpha_crit = min(

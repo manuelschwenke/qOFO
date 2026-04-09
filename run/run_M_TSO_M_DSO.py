@@ -279,18 +279,21 @@ class MultiTSOConfig:
     min_gw_dso_shunt:      float = 10.0
 
     # ── Slack variable penalty (g_z) ─────────────────────────────────────
-    # g_z = 0  → hard output constraints (solver may be infeasible)
-    # g_z > 0  → soft output constraints with z^T G_z z penalty
-    # Use large values (1e6–1e12) for "nearly hard" constraints that still
-    # allow the solver to find a solution during transients.
-    g_z_voltage:           float = 1e6
-    """Slack penalty for voltage output constraints (TSO + DSO)."""
-    g_z_current:           float = 1e3
-    """Slack penalty for current output constraints (TSO + DSO).
-    Smaller than g_z_voltage because branch currents are only weakly
-    controllable via reactive power."""
-    g_z_interface:         float = 1e6
-    """Slack penalty for DSO interface-Q output constraints."""
+    # Per-output-type penalty for the slack variable z in the MIQP:
+    #   g_z = 0   → z is free for that output → output constraint DISABLED
+    #   g_z > 0   → z penalised by g_z · z² → soft constraint (nearly hard
+    #               when g_z is very large, e.g. 1e12)
+    # Note: as long as ANY output has g_z > 0, the solver creates slack
+    # variables.  Outputs with g_z = 0 then have free slack = unconstrained.
+    g_z_voltage:           float = 1e12
+    """Nearly-hard voltage constraint penalty.  Very large so the solver
+    keeps predicted voltages within [v_min, v_max] up to ~1e-12 p.u."""
+    g_z_current:           float = 0.0
+    """Current outputs unconstrained (z free).  Set > 0 to enable soft
+    current limits."""
+    g_z_interface:         float = 0.0
+    """DSO interface-Q outputs unconstrained (z free).  Set > 0 to
+    enable soft Q-interface limits."""
 
     # ── Stability analysis ─────────────────────────────────────────────────────
     run_stability_analysis:       bool = True

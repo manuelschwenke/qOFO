@@ -42,7 +42,9 @@ from analysis.tune_ofo_params import (
     _build_actuator_labels,
     _compute_curvature_diagonal,
     _compute_curvature_matrix,
+    _dominant_eigenpair,
     _effective_eigenspectrum,
+    _zone_index_ranges,
 )
 
 
@@ -315,40 +317,108 @@ def _encode_warm_start(
     spectral_target: float,
     lb: NDArray[np.float64],
     ub: NDArray[np.float64],
+    verbose: bool = False,
 ) -> NDArray[np.float64]:
-    """Build the warm-start particle from the existing Gershgorin path.
+    """Build the warm-start particle from Gershgorin + feasibility pump.
 
-    The TSO block reproduces ``compute_optimal_gw`` (Phase 1 of
-    ``tune_multi_zone``) with alpha=1.
+    **Phase 1 — Gershgorin preconditioning** (per-zone, fast):
+    Sets ``g_w = safety · diag(C_ii) / 2`` for each zone/DSO independently.
+    This satisfies the per-actuator necessary condition but usually leaves
+    ``λ_max(M_sys)`` well above ``spectral_target`` because it ignores
+    inter-zone coupling.
 
-    The DSO block reproduces Phase 1 of ``tune_dso`` with alpha=1.
-
-    This guarantees PSO starts from a point at least as good as what the
-    legacy tuner would have produced *and* satisfies the hard fitness
-    constraints, so the no-regression invariant of the search holds.
+    **Phase 2 — Feasibility pump** (global, iterative):
+    Repeatedly evaluates ``M_sys``, finds its dominant eigenvector, and
+    boosts g_w of the actuators that participate most in the worst global
+    mode — the same eigenvector-directed scaling that ``tune_multi_zone``
+    Phase 2 uses.  Runs until ``λ_max(M_sys) < 0.95 · spectral_target``
+    or a cap of 50 iterations.  This brings the warm start into the
+    feasible region so PSO starts by optimising the *contraction rate*
+    instead of spending hundreds of iterations crawling through the
+    infeasibility penalty landscape.
     """
     n_zones = len(zone_ids)
     n_dsos = len(dso_inputs)
 
-    log_gw_tso: List[NDArray[np.float64]] = []
+    # ── Phase 1: Gershgorin per-zone preconditioning ────────────────────
+    gw_tso_arrays: List[NDArray[np.float64]] = []
     for idx, z in enumerate(zone_ids):
         H_ii = H_blocks[(z, z)]
         c_diag = _compute_curvature_diagonal(H_ii, Q_obj_list[idx])
-        # g_w = safety * c_diag / 2  (alpha=1)
         gw = legacy_safety_factor_tso * c_diag / 2.0
         gw = _apply_gw_floors(
             gw, actuator_counts[idx], floors_tso, _TSO_COLUMN_ORDER,
         )
-        log_gw_tso.append(np.log10(np.maximum(gw, 1e-30)))
+        gw_tso_arrays.append(gw)
 
     log_gw_dso: List[NDArray[np.float64]] = []
     for d_idx, d in enumerate(dso_inputs):
         c_diag = _compute_curvature_diagonal(d.H, d.q_obj_diag)
         counts = {'n_der': d.n_der, 'n_oltc': d.n_oltc, 'n_shunt': d.n_shunt}
-        # g_w = safety * c_diag / 2  (alpha=1)
         gw = legacy_safety_factor_dso * c_diag / 2.0
         gw = _apply_gw_floors(gw, counts, floors_dso, _DSO_COLUMN_ORDER)
         log_gw_dso.append(np.log10(np.maximum(gw, 1e-30)))
+
+    # ── Phase 2: Feasibility pump — boost g_w along the dominant ────────
+    #    eigenvector of M_sys until lambda_max < 0.95 * spectral_target.
+    #    This is the same directional scaling as tune_multi_zone Phase 2
+    #    but applied without any alpha (since alpha is absorbed).
+    target_inner = 0.95 * float(spectral_target)
+    max_pump_iters = 50
+    n_per_zone = [len(gw) for gw in gw_tso_arrays]
+    zone_ranges = _zone_index_ranges(n_per_zone)
+
+    for pump_iter in range(max_pump_iters):
+        stab = analyse_multi_zone_stability(
+            H_blocks=H_blocks,
+            Q_obj_list=Q_obj_list,
+            G_w_list=gw_tso_arrays,
+            zone_ids=zone_ids,
+            actuator_counts=actuator_counts,
+            verbose=False,
+        )
+        lam_sys = float(stab.M_sys_lambda_max)
+        if verbose:
+            print(f"  [warm-start pump] iter {pump_iter}: "
+                  f"lam_sys = {lam_sys:.4f}  "
+                  f"(target < {target_inner:.2f})")
+        if lam_sys < target_inner:
+            break
+
+        # Boost g_w in the direction of the dominant eigenvector.
+        # Actuators with the largest squared participation in the worst
+        # global mode get the biggest boost → flattens that mode's
+        # eigenvalue in the next iteration.
+        _, v_sys = _dominant_eigenpair(stab.M_sys)
+        v_sq = v_sys * v_sys
+
+        # Per-zone: boost the zone with the most mass in the dominant mode
+        zone_mass = np.array([
+            float(np.sum(v_sq[lo:hi])) for (lo, hi) in zone_ranges
+        ])
+        for k in range(n_zones):
+            lo, hi = zone_ranges[k]
+            v_zone = v_sq[lo:hi]
+            v_zone_max = float(np.max(v_zone)) if v_zone.size else 0.0
+            if v_zone_max < 1e-14:
+                continue
+            # Scale factor in [1.0, 3.0]: actuators participating most
+            # in the worst mode get the biggest boost.
+            # Aggressive scaling (up to 3x) to converge quickly.
+            participation = v_zone / v_zone_max
+            scale = 1.0 + 2.0 * participation
+            gw_tso_arrays[k] = _apply_gw_floors(
+                gw_tso_arrays[k] * scale,
+                actuator_counts[k],
+                floors_tso, _TSO_COLUMN_ORDER,
+            )
+
+    if verbose and lam_sys >= target_inner:
+        print(f"  [warm-start pump] did not reach target after "
+              f"{max_pump_iters} iterations (lam_sys = {lam_sys:.4f})")
+
+    # ── Encode to PSO vector ────────────────────────────────────────────
+    log_gw_tso = [np.log10(np.maximum(gw, 1e-30)) for gw in gw_tso_arrays]
 
     parts: List[NDArray[np.float64]] = []
     parts.extend(log_gw_tso)
@@ -407,7 +477,7 @@ def _evaluate_fitness(
     # Default metrics dict layout -- every return path returns the same keys
     # so the convergence history has a uniform schema.
     metrics: Dict[str, float] = {
-        'fitness':       1e6,
+        'fitness':       100.0,  # large but not 1e6; smooth penalty scale
         'rho_max_tso':   1.0,
         'rho_max_dso':   1.0,
         'max_dso_decay': 1.0,
@@ -435,11 +505,17 @@ def _evaluate_fitness(
         metrics['spectral'] = spectral
         metrics['gamma'] = gamma
 
-        # ── Hard constraint #1: TSO necessary-and-sufficient stability ──
-        # spectral_target < 2 leaves headroom for the operating point
-        # shifting between PSO and the post-PSO stability re-evaluation.
+        # ── Soft constraint #1: TSO spectral bound ─────────────────────
+        # Instead of a hard 1e6 cliff, use a smooth quadratic penalty
+        # that starts at 1.0 right at the spectral boundary:
+        #   f_penalty = 1.0 + (spectral/target - 1)^2
+        # This lets PSO particles near the boundary navigate smoothly
+        # back to feasibility instead of being repelled by a cliff.
         if not np.isfinite(spectral) or spectral >= spectral_target:
-            penalty = 1e6 + max(spectral, 0.0)
+            excess = (spectral / max(spectral_target, 1e-12)) - 1.0
+            penalty = 1.0 + excess * excess
+            if not np.isfinite(penalty):
+                penalty = 1e6
             metrics['fitness'] = penalty
             return penalty, metrics, stab
 
@@ -457,9 +533,10 @@ def _evaluate_fitness(
             rho_d, decay_d, lam_max_d = _dso_actual_decay(
                 d.H, d.q_obj_diag, gw_dso[d_idx], n_inner,
             )
-            # Hard stability: lam_max < spectral_target (alpha=1)
-            if lam_max_d >= spectral_target:
-                penalty = 1e6 + float(lam_max_d)
+            # Soft constraint: DSO spectral bound (lam_max < 2 absolute)
+            if lam_max_d >= 2.0:
+                excess = (lam_max_d / 2.0) - 1.0
+                penalty = 1.0 + excess * excess
                 metrics['fitness'] = penalty
                 return penalty, metrics, stab
             if decay_d > max_dso_decay:
@@ -471,14 +548,14 @@ def _evaluate_fitness(
 
         fitness = float(max(rho_max_tso, max_dso_decay))
         if not np.isfinite(fitness):
-            fitness = 1e6
+            fitness = 100.0
         metrics['fitness'] = fitness
         return fitness, metrics, stab
 
     except (np.linalg.LinAlgError, FloatingPointError, ValueError) as exc:
-        metrics['fitness'] = 1e6
+        metrics['fitness'] = 100.0
         metrics['error'] = str(exc)  # type: ignore[assignment]
-        return 1e6, metrics, None
+        return 100.0, metrics, None
 
 
 # ---------------------------------------------------------------------------
@@ -516,18 +593,14 @@ def _pso_loop(
     if swarm_size > 1:
         # Particle 1: log-uniform random across the full bounds
         X[1] = lb + rng.random(dim) * width
-    # Particles 2..N-1: warm start + Gaussian noise.  log-g_w stays in
-    # log space (sigma = 0.3 dec); alpha entries are perturbed by ~10%
-    # of the bound width to keep them inside.
+    # Particles 2..N-1: warm start + Gaussian noise in normalised units.
+    # sigma = 0.25 of the bound width per dimension in log-g_w space,
+    # giving ~1.5-decade spread around the warm start.  Wider spread than
+    # the original 0.15 to encourage exploration now that the warm start
+    # is feasible (thanks to the feasibility pump).
     if swarm_size > 2:
-        n_alpha = 0
-        # We don't know the exact split here; treat the whole vector
-        # uniformly with a single sigma in normalised units.  Since the
-        # alpha entries occupy a much smaller numerical range than the
-        # log-g_w entries, normalised noise on width gives a sensible
-        # spread for both.
         for k in range(2, swarm_size):
-            noise = rng.normal(scale=0.15, size=dim) * width
+            noise = rng.normal(scale=0.25, size=dim) * width
             X[k] = warm_start + noise
     np.clip(X, lb, ub, out=X)
 
@@ -747,6 +820,7 @@ def tune_pso_all(
         spectral_target=float(spectral_target),
         lb=lb,
         ub=ub,
+        verbose=verbose,
     )
 
     def fitness_fn(x: NDArray[np.float64]):

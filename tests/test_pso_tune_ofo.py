@@ -150,7 +150,7 @@ class TestPSOInvariants:
 
         # ── DSO floors ──────────────────────────────────────────────────
         for d in dso_inputs:
-            gw_dso, _alpha, _rho, _margin = result.dso[d.dso_id]
+            gw_dso, _rho, _margin = result.dso[d.dso_id]
             off = 0
             for type_name, n in (('der', d.n_der),
                                  ('oltc', d.n_oltc),
@@ -215,7 +215,6 @@ class TestPSOInvariants:
         required = {
             'iter', 'fitness', 'rho_max_tso', 'rho_max_dso',
             'spectral', 'gamma', 'max_dso_decay',
-            'alpha_eff_tso', 'alpha_eff_dso',
         }
         for entry in result.history:
             missing = required - set(entry.keys())

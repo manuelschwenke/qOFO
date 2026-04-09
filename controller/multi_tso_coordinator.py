@@ -31,7 +31,7 @@ For zone i with control variables u_i, outputs y_i = H_ii u_i + Σ_{j≠i} H_ij 
         M_sys = block_matrix([[M_TSO,ij]])           (symmetric, NNU × NNU)
 
     Contraction condition per zone (diagonal-dominance criterion):
-        0 < α_i · (λ_max(M_TSO,ii) + Σ_{j≠i} ||M_TSO,ij||₂) < 2
+        0 < (λ_max(M_TSO,ii) + Σ_{j≠i} ||M_TSO,ij||₂) < 2
 
 If this holds for all i, the decentralised iteration converges globally.
 See :mod:`analysis.multi_zone_stability` for the full analysis.
@@ -149,9 +149,6 @@ class ZoneDefinition:
     v_setpoint_pu : float
         Nominal voltage setpoint for all monitored buses.
 
-    alpha : float
-        OFO step-size gain α_i for this zone.
-
     g_v : float
         Voltage tracking weight in the objective (g_v in Q_obj diagonal).
 
@@ -187,7 +184,6 @@ class ZoneDefinition:
     v_setpoint_pu:      float = 1.02
     v_min_pu:           float = 0.95
     v_max_pu:           float = 1.05
-    alpha:              float = 1.0
     g_v:                float = 1.0
     g_w_der:            float = 100.0
     g_w_gen:            float = 5e8
@@ -600,9 +596,9 @@ class MultiTSOCoordinator:
         """
         Evaluate the diagonal-dominance contraction condition for each zone.
 
-        Condition (Schwenke / CIGRE 2026, eq. for multi-TSO):
+        Condition (Schwenke / CIGRE 2026, eq. for multi-TSO, alpha=1):
 
-            0  <  α_i · (λ_max(M_TSO,ii) + Σ_{j≠i} ||M_TSO,ij||₂)  <  2
+            0  <  (λ_max(M_TSO,ii) + Σ_{j≠i} ||M_TSO,ij||₂)  <  2
 
         If this holds for all i, the decentralised OFO iterations converge.
 
@@ -653,20 +649,20 @@ class MultiTSOCoordinator:
 
             coupling_sum = sum(coupling_norms.values())
 
-            # ── Diagonal-dominance criterion ──────────────────────────────────
-            contraction_lhs = zi.alpha * (lambda_max + coupling_sum)
+            # ── Diagonal-dominance criterion (alpha=1, absorbed into g_w) ────
+            contraction_lhs = lambda_max + coupling_sum
             stable = (contraction_lhs > 0.0) and (contraction_lhs < 2.0)
 
             warnings: List[str] = []
             if contraction_lhs >= 2.0:
                 warnings.append(
                     f"Zone {i}: contraction_lhs = {contraction_lhs:.4f} >= 2.0 -- "
-                    f"INSTABILITY RISK.  Reduce alpha_i or increase g_w_i."
+                    f"INSTABILITY RISK.  Increase g_w_i."
                 )
             elif contraction_lhs > 1.5:
                 warnings.append(
                     f"Zone {i}: contraction_lhs = {contraction_lhs:.4f} -- "
-                    f"marginal stability (> 1.5), consider reducing alpha_i."
+                    f"marginal stability (> 1.5), consider increasing g_w_i."
                 )
             if coupling_sum > lambda_max:
                 warnings.append(
@@ -679,7 +675,7 @@ class MultiTSOCoordinator:
                 print(
                     f"[MultiTSO] Zone {i}: lam_max(M_ii)={lambda_max:.4f}  "
                     f"sum||M_ij||={coupling_sum:.4f}  "
-                    f"alpha*(lam+sum)={contraction_lhs:.4f}  "
+                    f"(lam+sum)={contraction_lhs:.4f}  "
                     f"{'OK' if stable else 'UNSTABLE'}"
                 )
             for w in warnings:

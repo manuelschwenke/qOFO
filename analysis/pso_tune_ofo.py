@@ -1,31 +1,25 @@
 """
-PSO-based joint tuning of g_w and alpha for the multi-TSO + cascaded DSO
-==========================================================================
+PSO-based joint tuning of g_w for the multi-TSO + cascaded DSO
+================================================================
 
 A single Particle Swarm Optimisation entry point that tunes:
 
-* per-TSO-zone step size ``alpha_i``,
 * per-TSO-actuator regulariser ``g_w`` (DER, PCC, V_gen, OLTC),
-* per-DSO-controller step size ``alpha_d``,
 * per-DSO-actuator regulariser ``g_w`` (DER, OLTC, shunt).
 
-Fitness (minimised) is the **min-max convergence rate** across the three
+The step-size parameter alpha has been removed (absorbed into g_w).
+
+Fitness (minimised) is the **min-max convergence rate** across the
 stability components
 
-    s     = (1/2) * max(alpha_TSO) * lambda_max(M_sys)         # TSO spectral half-rate
-    gamma = small_gain_gamma                                     # TSO row-sum
-    delta_d = rho_D(d) ** (T_TSO / T_DSO)        per DSO d       # cascade decay
+    f(x) = max( max_i rho_i^TSO,  max_d rho_d^TSO_period )
 
-so that
-
-    f(x) = max(s, gamma, max_d delta_d)
-
-* ``f < 1``  ⇔  all three stability conditions hold,
-* ``f → 0``  ⇔  fast contraction in every layer.
+* ``f < 1``  means all stability conditions hold,
+* ``f -> 0``  means fast contraction in every layer.
 
 The PSO is hand-rolled (standard inertia-weight scheme) so the dependency
 surface stays unchanged.  Particle 0 is seeded from the existing
-Gershgorin warm start, which guarantees PSO ≥ the legacy tuner.
+Gershgorin warm start, which guarantees PSO >= the legacy tuner.
 """
 
 from __future__ import annotations
@@ -85,8 +79,8 @@ class DSOTuneInput:
 class PSOTuningResult:
     """Joint TSO + DSO PSO tuning result."""
     tso_zones: List[ZoneTuningResult]
-    dso: Dict[str, Tuple[NDArray[np.float64], float, float, float]]
-    """Per-DSO ``(g_w, alpha, rho_D, cascade_margin)``."""
+    dso: Dict[str, Tuple[NDArray[np.float64], float, float]]
+    """Per-DSO ``(g_w, rho_D, cascade_margin)``."""
     fitness: float
     """Final min-max objective value."""
     converged: bool
@@ -148,24 +142,16 @@ def _dso_actual_decay(
     H: NDArray[np.float64],
     q_obj_diag: NDArray[np.float64],
     g_w: NDArray[np.float64],
-    alpha: float,
     n_inner: int,
 ) -> Tuple[float, float, float]:
-    """Return ``(rho_d, cascade_decay, lam_max)`` at the **actual** alpha.
+    """Return ``(rho_d, cascade_decay, lam_max)`` with alpha=1.
 
-    Unlike :func:`_dso_cascade_decay` (which assumes the optimal alpha
-    and is used only by the warm start), this function evaluates the
-    contraction rate ``rho_d = max_l |1 - alpha * lambda_l(M_dso)|``
+    Evaluates the contraction rate ``rho_d = max_l |1 - lambda_l(M_dso)|``
     that the controller will actually realise.  ``cascade_decay = rho_d
     ** n_inner`` is the contraction over one TSO period.
 
-    The PSO fitness drives ``rho_d * n_inner`` down, which makes the
-    chosen ``alpha`` a real decision variable -- in contrast to the
-    legacy ``_dso_cascade_decay`` which ignored alpha entirely.
-
     Returns ``(rho_d, cascade_decay, lam_max)``.  ``lam_max`` is needed
-    by the caller to enforce the hard stability bound
-    ``alpha * lam_max < 2``.
+    by the caller to enforce the hard stability bound ``lam_max < 2``.
     """
     C = _compute_curvature_matrix(H, q_obj_diag)
     gw_inv_sqrt = 1.0 / np.sqrt(np.maximum(g_w, 1e-12))
@@ -177,8 +163,8 @@ def _dso_actual_decay(
 
     l_max = float(active[-1])
     l_min = float(active[0]) if len(active) >= 2 else l_max
-    # |1 - alpha*lambda| is maximised at one of the spectrum endpoints.
-    rho_d = max(abs(1.0 - alpha * l_max), abs(1.0 - alpha * l_min))
+    # |1 - lambda| is maximised at one of the spectrum endpoints.
+    rho_d = max(abs(1.0 - l_max), abs(1.0 - l_min))
     cascade_decay = rho_d ** max(int(n_inner), 1)
     return rho_d, cascade_decay, l_max
 
@@ -246,7 +232,7 @@ def _layout(
     n_dsos = len(dso_inputs)
     tso_sizes = [_tso_block_size(c) for c in actuator_counts]
     dso_sizes = [_dso_block_size(d) for d in dso_inputs]
-    total = n_zones + n_dsos + sum(tso_sizes) + sum(dso_sizes)
+    total = sum(tso_sizes) + sum(dso_sizes)
     return n_zones, n_dsos, total, tso_sizes, dso_sizes
 
 
@@ -257,25 +243,17 @@ def _decode(
     tso_sizes: List[int],
     dso_sizes: List[int],
 ) -> Tuple[
-    List[float],
     List[NDArray[np.float64]],
-    List[float],
     List[NDArray[np.float64]],
 ]:
-    """Decode a PSO particle into ``(alpha_TSO, gw_TSO, alpha_DSO, gw_DSO)``.
+    """Decode a PSO particle into ``(gw_TSO, gw_DSO)``.
 
     Vector layout::
 
-        [ alpha_TSO_1..Z |
-          alpha_DSO_1..D |
-          log10 g_w (TSO zone 1) | ... | log10 g_w (TSO zone Z) |
+        [ log10 g_w (TSO zone 1) | ... | log10 g_w (TSO zone Z) |
           log10 g_w (DSO 1)      | ... | log10 g_w (DSO D)         ]
     """
     off = 0
-    alpha_tso = [float(x[off + i]) for i in range(n_zones)]
-    off += n_zones
-    alpha_dso = [float(x[off + i]) for i in range(n_dsos)]
-    off += n_dsos
 
     gw_tso: List[NDArray[np.float64]] = []
     for size in tso_sizes:
@@ -287,7 +265,7 @@ def _decode(
         gw_dso.append(np.power(10.0, x[off:off + size]))
         off += size
 
-    return alpha_tso, gw_tso, alpha_dso, gw_dso
+    return gw_tso, gw_dso
 
 
 def _build_bounds(
@@ -296,25 +274,13 @@ def _build_bounds(
     floors_tso: Dict[str, float],
     floors_dso: Dict[str, float],
     g_w_upper_factor: float,
-    alpha_bounds: Tuple[float, float],
 ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Construct full lower/upper bounds for the PSO vector.
 
-    Alpha entries are linear; g_w entries are stored in log10 space.
+    g_w entries are stored in log10 space.
     """
-    n_zones = len(actuator_counts)
-    n_dsos = len(dso_inputs)
-    a_lo, a_hi = float(alpha_bounds[0]), float(alpha_bounds[1])
-
     lb_parts: List[NDArray[np.float64]] = []
     ub_parts: List[NDArray[np.float64]] = []
-
-    # alpha_TSO
-    lb_parts.append(np.full(n_zones, a_lo))
-    ub_parts.append(np.full(n_zones, a_hi))
-    # alpha_DSO
-    lb_parts.append(np.full(n_dsos, a_lo))
-    ub_parts.append(np.full(n_dsos, a_hi))
 
     log_factor = float(np.log10(max(g_w_upper_factor, 1.0)))
 
@@ -346,8 +312,6 @@ def _encode_warm_start(
     legacy_safety_factor_tso: float,
     legacy_safety_factor_dso: float,
     n_inner: int,
-    alpha_init_tso: Optional[Dict[int, float]],
-    alpha_init_dso: float,
     spectral_target: float,
     lb: NDArray[np.float64],
     ub: NDArray[np.float64],
@@ -355,14 +319,9 @@ def _encode_warm_start(
     """Build the warm-start particle from the existing Gershgorin path.
 
     The TSO block reproduces ``compute_optimal_gw`` (Phase 1 of
-    ``tune_multi_zone``).  Local-optimal alpha values are derived from
-    each zone's M_ii spectrum and then **clamped by the global spectral
-    bound** ``alpha_eff * lam_max(M_sys) < spectral_target`` so the warm
-    start is feasible by construction (the legacy ``tune_multi_zone``
-    enforces the same cap on every iteration).
+    ``tune_multi_zone``) with alpha=1.
 
-    The DSO block reproduces Phase 1 of ``tune_dso`` and the per-DSO
-    alpha is set to the local optimum.
+    The DSO block reproduces Phase 1 of ``tune_dso`` with alpha=1.
 
     This guarantees PSO starts from a point at least as good as what the
     legacy tuner would have produced *and* satisfies the hard fitness
@@ -371,84 +330,27 @@ def _encode_warm_start(
     n_zones = len(zone_ids)
     n_dsos = len(dso_inputs)
 
-    alpha_tso = np.array(
-        [float((alpha_init_tso or {}).get(z, 0.1)) for z in zone_ids],
-        dtype=np.float64,
-    )
-    alpha_dso = np.full(n_dsos, float(alpha_init_dso), dtype=np.float64)
-
     log_gw_tso: List[NDArray[np.float64]] = []
-    gw_tso_arrays: List[NDArray[np.float64]] = []
     for idx, z in enumerate(zone_ids):
         H_ii = H_blocks[(z, z)]
         c_diag = _compute_curvature_diagonal(H_ii, Q_obj_list[idx])
-        gw = legacy_safety_factor_tso * alpha_tso[idx] * c_diag / 2.0
+        # g_w = safety * c_diag / 2  (alpha=1)
+        gw = legacy_safety_factor_tso * c_diag / 2.0
         gw = _apply_gw_floors(
             gw, actuator_counts[idx], floors_tso, _TSO_COLUMN_ORDER,
         )
-        gw_tso_arrays.append(gw)
-        # Local-optimal alpha (will be capped against the global bound below)
-        C_ii = _compute_curvature_matrix(H_ii, Q_obj_list[idx])
-        gw_inv_sqrt = 1.0 / np.sqrt(np.maximum(gw, 1e-12))
-        M_ii = (gw_inv_sqrt[:, None] * C_ii) * gw_inv_sqrt[None, :]
-        _, active, _ = _effective_eigenspectrum(M_ii)
-        if len(active) >= 2:
-            alpha_tso[idx] = 2.0 / (float(active[0]) + float(active[-1]))
-        elif len(active) == 1:
-            alpha_tso[idx] = 1.0 / float(active[0])
-
-    # Global spectral cap so the warm-start particle is *strictly* feasible
-    # under the hard constraint  alpha_eff * lam_max(M_sys) < spectral_target.
-    # We aim for 0.95 * spectral_target so the warm start has a small inner
-    # margin instead of landing exactly on the constraint boundary.
-    try:
-        stab_warm = analyse_multi_zone_stability(
-            H_blocks=H_blocks,
-            Q_obj_list=Q_obj_list,
-            G_w_list=gw_tso_arrays,
-            alpha_list=alpha_tso.tolist(),
-            zone_ids=zone_ids,
-            actuator_counts=actuator_counts,
-            verbose=False,
-        )
-        lam_sys = float(stab_warm.M_sys_lambda_max)
-        if lam_sys > 1e-14:
-            alpha_cap = 0.95 * float(spectral_target) / lam_sys
-            alpha_tso = np.minimum(alpha_tso, alpha_cap)
-    except (np.linalg.LinAlgError, ValueError):
-        pass  # leave alpha_tso untouched; PSO will handle infeasibility
-
-    for gw in gw_tso_arrays:
         log_gw_tso.append(np.log10(np.maximum(gw, 1e-30)))
 
     log_gw_dso: List[NDArray[np.float64]] = []
     for d_idx, d in enumerate(dso_inputs):
         c_diag = _compute_curvature_diagonal(d.H, d.q_obj_diag)
         counts = {'n_der': d.n_der, 'n_oltc': d.n_oltc, 'n_shunt': d.n_shunt}
-        gw = legacy_safety_factor_dso * alpha_dso[d_idx] * c_diag / 2.0
+        # g_w = safety * c_diag / 2  (alpha=1)
+        gw = legacy_safety_factor_dso * c_diag / 2.0
         gw = _apply_gw_floors(gw, counts, floors_dso, _DSO_COLUMN_ORDER)
-        # Refine DSO alpha: start from local optimum 2/(lam_min+lam_max)
-        # but cap by 0.95*spectral_target/lam_max so the warm start
-        # satisfies the per-DSO hard stability bound  alpha*lam_max < target.
-        # For ill-conditioned M_dso (lam_min << lam_max) the local optimum
-        # approaches 2/lam_max which exceeds the cap; the cap is what
-        # actually applies.
-        _, _, alpha_local = _dso_cascade_decay(d.H, d.q_obj_diag, gw, n_inner)
-        # Compute lam_max via the same M assembly used by _dso_actual_decay
-        C_d = _compute_curvature_matrix(d.H, d.q_obj_diag)
-        gw_inv_sqrt = 1.0 / np.sqrt(np.maximum(gw, 1e-12))
-        M_d = (gw_inv_sqrt[:, None] * C_d) * gw_inv_sqrt[None, :]
-        _, active_d, _ = _effective_eigenspectrum(M_d)
-        if len(active_d) > 0:
-            lam_max_d = float(active_d[-1])
-            alpha_cap_d = (0.95 * float(spectral_target) / lam_max_d
-                           if lam_max_d > 1e-14 else float('inf'))
-            alpha_dso[d_idx] = float(min(alpha_local, alpha_cap_d))
-        else:
-            alpha_dso[d_idx] = float(alpha_local)
         log_gw_dso.append(np.log10(np.maximum(gw, 1e-30)))
 
-    parts: List[NDArray[np.float64]] = [alpha_tso, alpha_dso]
+    parts: List[NDArray[np.float64]] = []
     parts.extend(log_gw_tso)
     parts.extend(log_gw_dso)
     x = np.concatenate(parts)
@@ -493,9 +395,9 @@ def _evaluate_fitness(
 
     Hard stability constraints (any violation → infeasibility penalty):
 
-    1. Global TSO spectral bound: alpha_eff^TSO * lam_max(M_sys) < 2
+    1. Global TSO spectral bound: lam_max(M_sys) < 2
        (necessary-and-sufficient for the closed-loop TSO iteration).
-    2. Per-DSO local bound: alpha_d * lam_max(M_dso,d) < 2 for every DSO d.
+    2. Per-DSO local bound: lam_max(M_dso,d) < 2 for every DSO d.
 
     The conservative row-sum gamma is *not* in the fitness; it is reported
     in the metrics dict for diagnostics only.
@@ -511,30 +413,24 @@ def _evaluate_fitness(
         'max_dso_decay': 1.0,
         'spectral':      float('nan'),
         'gamma':         float('nan'),
-        'alpha_eff_tso': 0.0,
-        'alpha_eff_dso': 0.0,
     }
 
     try:
-        alpha_tso, gw_tso, alpha_dso, gw_dso = _decode(
+        gw_tso, gw_dso = _decode(
             x, n_zones, n_dsos, tso_sizes, dso_sizes,
         )
-        metrics['alpha_eff_tso'] = max(alpha_tso) if alpha_tso else 0.0
-        metrics['alpha_eff_dso'] = max(alpha_dso) if alpha_dso else 0.0
 
         # TSO block: full multi-zone stability call (cheap, ~ms).
-        # Returned ZoneStabilityResult.rho_i is computed at alpha_list[i].
         stab = analyse_multi_zone_stability(
             H_blocks=H_blocks,
             Q_obj_list=Q_obj_list,
             G_w_list=gw_tso,
-            alpha_list=alpha_tso,
             zone_ids=zone_ids,
             actuator_counts=actuator_counts,
             verbose=False,
         )
         lam_sys = float(stab.M_sys_lambda_max)
-        spectral = metrics['alpha_eff_tso'] * lam_sys
+        spectral = lam_sys   # alpha=1
         gamma = float(stab.small_gain_gamma)  # diagnostic only
         metrics['spectral'] = spectral
         metrics['gamma'] = gamma
@@ -547,24 +443,23 @@ def _evaluate_fitness(
             metrics['fitness'] = penalty
             return penalty, metrics, stab
 
-        # Per-zone TSO contraction rate at the chosen alpha
+        # Per-zone TSO contraction rate (alpha=1)
         rho_max_tso = max(
             (float(zr.rho_i) for zr in stab.zones),
             default=0.0,
         )
         metrics['rho_max_tso'] = rho_max_tso
 
-        # ── DSO blocks: actual-alpha contraction + hard stability check ─
+        # ── DSO blocks: contraction + hard stability check ──────────────
         rho_max_dso = 0.0
         max_dso_decay = 0.0
         for d_idx, d in enumerate(dso_inputs):
             rho_d, decay_d, lam_max_d = _dso_actual_decay(
-                d.H, d.q_obj_diag, gw_dso[d_idx],
-                float(alpha_dso[d_idx]), n_inner,
+                d.H, d.q_obj_diag, gw_dso[d_idx], n_inner,
             )
-            # Hard stability: alpha_d * lam_max < spectral_target
-            if alpha_dso[d_idx] * lam_max_d >= spectral_target:
-                penalty = 1e6 + float(alpha_dso[d_idx] * lam_max_d)
+            # Hard stability: lam_max < spectral_target (alpha=1)
+            if lam_max_d >= spectral_target:
+                penalty = 1e6 + float(lam_max_d)
                 metrics['fitness'] = penalty
                 return penalty, metrics, stab
             if decay_d > max_dso_decay:
@@ -749,7 +644,6 @@ def tune_pso_all(
     floors_tso: Dict[str, float],
     floors_dso: Dict[str, float],
     g_w_upper_factor: float = 1e6,
-    alpha_bounds: Tuple[float, float] = (1e-4, 1.0),
     swarm_size: int = 30,
     max_iterations: int = 100,
     w_inertia: Tuple[float, float] = (0.7, 0.4),
@@ -762,8 +656,6 @@ def tune_pso_all(
     dso_period_s: float = 60.0,
     legacy_safety_factor_tso: float = 4.0,
     legacy_safety_factor_dso: float = 2.0,
-    alpha_init_tso: Optional[Dict[int, float]] = None,
-    alpha_init_dso: float = 0.1,
     seed: Optional[int] = None,
     verbose: bool = True,
 ) -> PSOTuningResult:
@@ -786,8 +678,6 @@ def tune_pso_all(
     g_w_upper_factor :
         Upper bound multiplier on every g_w entry: ``ub = lb * factor``.
         Default ``1e6``.
-    alpha_bounds :
-        ``(alpha_min, alpha_max)`` for both TSO and DSO step sizes.
     swarm_size, max_iterations :
         PSO budget.  Default 30 × 100 ≈ 3000 fitness evals.
     w_inertia, c_cognitive, c_social, velocity_clamp_frac :
@@ -796,21 +686,16 @@ def tune_pso_all(
         Reporting threshold; not used as a hard constraint.
     spectral_target :
         Hard constraint headroom on the global TSO spectral bound.
-        PSO penalises any particle whose ``alpha_eff * lam_max(M_sys)``
-        exceeds this; the same cap is applied to the warm-start alpha.
+        PSO penalises any particle whose ``lam_max(M_sys)``
+        exceeds this.
         Default ``1.8`` (10% margin below the absolute stability bound
-        of 2.0) -- matches the legacy ``tune_multi_zone`` default and
-        leaves headroom for the operating point shifting between PSO
-        and the post-PSO stability re-evaluation.
+        of 2.0).
     tso_period_s, dso_period_s :
         Controller periods.  ``n_inner = T_TSO / T_DSO`` is the number of
         DSO iterations per TSO iteration; sets the cascade-decay exponent.
     legacy_safety_factor_tso, legacy_safety_factor_dso :
         Safety multipliers used by the Gershgorin warm start.  Match the
         defaults of ``tune_multi_zone`` and ``tune_dso``.
-    alpha_init_tso, alpha_init_dso :
-        Initial alphas seeded into the warm start (refined locally before
-        encoding).
     seed :
         ``numpy.random.default_rng`` seed for reproducibility.
     verbose :
@@ -845,7 +730,6 @@ def tune_pso_all(
         floors_tso=floors_tso,
         floors_dso=floors_dso,
         g_w_upper_factor=g_w_upper_factor,
-        alpha_bounds=alpha_bounds,
     )
     assert lb.size == total_dim and ub.size == total_dim
 
@@ -860,8 +744,6 @@ def tune_pso_all(
         legacy_safety_factor_tso=legacy_safety_factor_tso,
         legacy_safety_factor_dso=legacy_safety_factor_dso,
         n_inner=n_inner,
-        alpha_init_tso=alpha_init_tso,
-        alpha_init_dso=alpha_init_dso,
         spectral_target=float(spectral_target),
         lb=lb,
         ub=ub,
@@ -914,7 +796,7 @@ def tune_pso_all(
         g_best_f = warm_f
 
     # Decode the final solution
-    alpha_tso, gw_tso, alpha_dso, gw_dso = _decode(
+    gw_tso, gw_dso = _decode(
         g_best, n_zones, n_dsos, tso_sizes, dso_sizes,
     )
 
@@ -923,7 +805,6 @@ def tune_pso_all(
         H_blocks=H_blocks,
         Q_obj_list=Q_obj_list,
         G_w_list=gw_tso,
-        alpha_list=alpha_tso,
         zone_ids=zone_ids,
         actuator_counts=actuator_counts,
         verbose=False,
@@ -936,9 +817,6 @@ def tune_pso_all(
         zone_results.append(ZoneTuningResult(
             zone_id=zone_ids[idx],
             g_w=gw_tso[idx],
-            alpha=alpha_tso[idx],
-            alpha_max_local=zr.alpha_max_local,
-            alpha_max_coupled=zr.alpha_max_coupled,
             rho=zr.rho_i,
             kappa=zr.kappa_Mii,
             lambda_min=zr.lambda_min_Mii,
@@ -947,7 +825,7 @@ def tune_pso_all(
         ))
 
     # DSO results: rebuild rho/cascade-margin from the final g_w
-    dso_results: Dict[str, Tuple[NDArray[np.float64], float, float, float]] = {}
+    dso_results: Dict[str, Tuple[NDArray[np.float64], float, float]] = {}
     feasibility_warnings: List[str] = []
     for d_idx, d in enumerate(dso_inputs):
         rho_d, decay_d, _ = _dso_cascade_decay(
@@ -956,7 +834,6 @@ def tune_pso_all(
         cascade_margin = 1.0 - decay_d
         dso_results[d.dso_id] = (
             gw_dso[d_idx],
-            float(alpha_dso[d_idx]),
             float(rho_d),
             float(cascade_margin),
         )
@@ -968,15 +845,15 @@ def tune_pso_all(
             )
 
     # Top-level feasibility checks
-    final_spectral = max(alpha_tso) * float(stab_final.M_sys_lambda_max)
+    final_spectral = float(stab_final.M_sys_lambda_max)  # alpha=1
     if final_spectral >= 2.0:
         feasibility_warnings.append(
-            f"TSO spectral metric alpha_eff*lam_sys = {final_spectral:.4f} "
+            f"TSO spectral metric lam_sys = {final_spectral:.4f} "
             f">= 2 (UNSTABLE)"
         )
     elif final_spectral >= float(spectral_target):
         feasibility_warnings.append(
-            f"TSO spectral metric alpha_eff*lam_sys = {final_spectral:.4f} "
+            f"TSO spectral metric lam_sys = {final_spectral:.4f} "
             f">= spectral_target {spectral_target:.2f} (no headroom)"
         )
     if stab_final.small_gain_gamma >= 1.0:

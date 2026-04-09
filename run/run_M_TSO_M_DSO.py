@@ -156,9 +156,6 @@ class MultiTSOConfig:
 
     OFO tuning
     ----------
-    alpha : float
-        Step-size gain α (same for all zones in this simplified config).
-        Must satisfy α · λ_max(M_sys) < 2 for global stability.
     g_w_der : float
         Regularisation on TSO DER Q changes (prevents large single-step moves).
     g_w_gen : float
@@ -206,12 +203,9 @@ class MultiTSOConfig:
     g_q:            float = 1.0      # DSO Q-interface tracking weight
     dso_g_v:        float = 10000.0      # DSO secondary voltage weight (0 = off)
 
-    # ── OFO step-size ─────────────────────────────────────────────────────────
-    alpha: Dict[int, float] = field(default_factory=lambda: {1: 0.1, 2: 0.1, 3: 0.1})     # OFO step-size gain per zone
-    dso_alpha: float = 0.1              # OFO step-size gain for all DSO controllers
     # ── G_w regularisation weights (TSO) ─────────────────────────────────────
     #
-    # With α=1 and Q_DER in [Mvar], the step is clamped by g_w such that
+    # With Q_DER in [Mvar], the step is clamped by g_w such that
     #   w* ≈ −gradient / (2 · g_w)
     # So g_w=100 limits a single step to ~0.5/g_v Mvar for a 1-pu voltage error.
     g_w_der:        float = 20.0    # [Mvar]² cost per DER Q step
@@ -239,7 +233,7 @@ class MultiTSOConfig:
     add_tso_ders: bool = True  # False → controller uses only gen AVR (V_gen)
 
     # ── Load pre-computed tuned params from a previous run ───────────────────
-    # If set, the run starts by loading g_w and alpha values from the
+    # If set, the run starts by loading g_w values from the
     # given JSON file (written by a previous run's delayed stability
     # analysis).  When the file is loaded successfully the delayed
     # auto-tune at t = ``stability_analysis_at_s`` is skipped, but the
@@ -257,18 +251,18 @@ class MultiTSOConfig:
     tune_min_gw_pcc:  float = 0.1     # continuous PCC Q block (prevents over-tuning)
     tune_min_gw_gen:  float = 1e4     # V_gen block -- floor, not hard override
     tune_min_gw_oltc: float = 40.0    # discrete OLTC / shunt blocks
-    tune_spectral_target: float = 1.0 # alpha_eff * lam_max(M_sys) < this
+    tune_spectral_target: float = 1.0 # lam_max(M_sys) < this
     tune_gamma_target:    float = 0.9 # row-sum gamma target (only used for 'row_sum' objective)
     # DSO Phase-1 Gershgorin safety multiplier.  Lower values produce
     # smaller continuous-actuator weights so the DSO controller actually
     # moves; higher values give more conservative regularisation.
-    # The DER block lands at  g_w ~ tune_dso_safety_factor * alpha * c_diag / 2.
+    # The DER block lands at  g_w ~ tune_dso_safety_factor * c_diag / 2.
     tune_dso_safety_factor: float = 0.1
 
     # ── PSO joint tuning ─────────────────────────────────────────────────────
     # When auto_tune_gw=True the runner calls the PSO tuner instead of the
     # legacy greedy tune_multi_zone + tune_dso pair.  PSO jointly searches
-    # over per-zone alpha (TSO + per-DSO) and per-actuator g_w (TSO + DSO),
+    # over per-actuator g_w (TSO + DSO),
     # warm-started from the Gershgorin solution.  Fitness is the min-max
     # convergence rate across the three stability components, so the
     # invariant ``f < 1`` is exactly the multi-zone-with-cascade stability
@@ -281,13 +275,10 @@ class MultiTSOConfig:
     pso_c_social:          float = 1.5
     pso_velocity_clamp_frac: float = 0.2
     pso_g_w_upper_factor:  float = 1e6
-    pso_alpha_bounds:      Tuple[float, float] = (1e-4, 1.0)
     pso_cascade_margin_target: float = 0.2
     pso_spectral_target:   float = 1.8
-    """Hard cap on the global TSO spectral metric ``alpha_eff*lam_max(M_sys)``.
-    Default 1.8 leaves a 10% margin below the absolute stability bound 2.0
-    so the operating-point shift between PSO and the post-PSO stability
-    re-evaluation cannot push the closed loop into instability."""
+    """Hard cap on ``lam_max(M_sys)``.  Default 1.8 leaves a 10% margin
+    below the absolute stability bound 2.0."""
     # Per-actuator-type lower bounds for the PSO search.  Independent of
     # the legacy tune_min_gw_* floors so PSO is free to explore lower g_w
     # than the greedy tuner permits.
@@ -862,14 +853,9 @@ def _write_tuned_params_json(
     }
 
     if stab_result is not None:
-        alpha_eff = max(
-            (float(zone_defs[z].alpha) for z in zone_ids_sorted),
-            default=0.0,
-        )
         payload["global_metrics"] = {
             "lambda_max_M_sys": float(stab_result.M_sys_lambda_max),
-            "alpha_eff": alpha_eff,
-            "spectral_metric": float(alpha_eff * stab_result.M_sys_lambda_max),
+            "spectral_metric": float(stab_result.M_sys_lambda_max),
             "small_gain_gamma": float(stab_result.small_gain_gamma),
             "globally_stable": bool(stab_result.globally_stable),
         }
@@ -880,7 +866,6 @@ def _write_tuned_params_json(
         ctrl = tso_controllers[z]
         zd = zone_defs[z]
         tso_payload[str(z)] = {
-            "alpha": float(ctrl.params.alpha),
             "g_w": [float(x) for x in np.asarray(ctrl.params.g_w).ravel()],
             "actuator_counts": {
                 "n_der":  int(len(zd.tso_der_indices)),
@@ -898,7 +883,6 @@ def _write_tuned_params_json(
         parent_zone = (int(hv_info_map[dso_id_key].zone)
                        if dso_id_key in hv_info_map else None)
         dso_payload[str(dso_id_key)] = {
-            "alpha": float(dso_ctrl.params.alpha),
             "g_w": [float(x) for x in np.asarray(dso_ctrl.params.g_w).ravel()],
             "parent_zone": parent_zone,
             "actuator_counts": {
@@ -922,8 +906,7 @@ def _write_tuned_params_json(
                     "max_dso_decay": float(entry.get("max_dso_decay", float("nan"))),
                     "spectral":      float(entry.get("spectral", float("nan"))),
                     "gamma":         float(entry.get("gamma", float("nan"))),
-                    "alpha_eff_tso": float(entry.get("alpha_eff_tso", float("nan"))),
-                    "alpha_eff_dso": float(entry.get("alpha_eff_dso", float("nan"))),
+                    # alpha_eff_tso and alpha_eff_dso removed
                 })
             payload["pso_meta"] = {
                 "swarm_size":          int(getattr(pso_result, "swarm_size", 0)),
@@ -1002,7 +985,7 @@ def _load_and_apply_tuned_params(
                 f"counts mismatch: expected {expected_counts}, got {got_counts}"
             )
 
-        alpha_z = float(z_data["alpha"])
+        # alpha ignored if present in old JSON (absorbed into g_w)
         g_w_vec = np.asarray(z_data["g_w"], dtype=np.float64)
         n_expected = sum(expected_counts.values())
         if g_w_vec.size != n_expected:
@@ -1012,8 +995,7 @@ def _load_and_apply_tuned_params(
             )
 
         tso_controllers[z].params = dataclasses.replace(
-            tso_controllers[z].params, g_w=g_w_vec, alpha=alpha_z)
-        zone_defs[z] = dataclasses.replace(zd, alpha=alpha_z)
+            tso_controllers[z].params, g_w=g_w_vec)
 
     # ── Validate and apply DSO controllers ──────────────────────────────
     for dso_id_key, dso_ctrl in dso_controllers.items():
@@ -1045,9 +1027,9 @@ def _load_and_apply_tuned_params(
                 f"{g_w_dso.size} != expected {n_expected}"
             )
 
-        alpha_d = float(d_data["alpha"])
+        # alpha ignored if present in old JSON (absorbed into g_w)
         dso_ctrl.params = dataclasses.replace(
-            dso_ctrl.params, g_w=g_w_dso, alpha=alpha_d)
+            dso_ctrl.params, g_w=g_w_dso)
 
     if verbose >= 1:
         written_at = str(payload.get("written_at", "?"))
@@ -1140,10 +1122,7 @@ def _write_stability_analysis_markdown(
 
     os.makedirs(os.path.dirname(md_path) or ".", exist_ok=True)
 
-    alpha_list = [zone_defs[z].alpha for z in zone_ids_sorted]
-    alpha_eff = max(alpha_list) if alpha_list else 0.0
     lam_sys   = float(stab_result.M_sys_lambda_max)
-    spectral_metric = alpha_eff * lam_sys
     n_zones = len(stab_result.zones)
     n_diag_dom = sum(1 for zr in stab_result.zones if zr.diagonally_dominant)
     global_tag = "STABLE" if stab_result.globally_stable else "VIOLATED"
@@ -1154,7 +1133,7 @@ def _write_stability_analysis_markdown(
     lines.append("")
     lines.append(f"- **Written at:** {_dt.now().isoformat(timespec='seconds')}")
     lines.append(f"- **Simulation time:** {time_s/60.0:.1f} min ({time_s:.0f} s)")
-    lines.append(f"- **Global spectral bound:** `alpha_eff * lam_max(M_sys) = {spectral_metric:.4f}`  "
+    lines.append(f"- **Global spectral bound:** `lam_max(M_sys) = {lam_sys:.4f}`  "
                  f"[{global_tag}]")
     lines.append(f"- **Row-sum small-gain:** `gamma = {stab_result.small_gain_gamma:.4f}`  "
                  f"[{sg_tag}]")
@@ -1166,9 +1145,7 @@ def _write_stability_analysis_markdown(
     lines.append("")
     lines.append("| Metric | Value | Status |")
     lines.append("|---|---|---|")
-    lines.append(f"| `lambda_max(M_sys)` | {lam_sys:.4g} | — |")
-    lines.append(f"| `alpha_eff` (max over zones) | {alpha_eff:.4g} | — |")
-    lines.append(f"| `alpha_eff * lambda_max(M_sys)` | {spectral_metric:.4f} | {global_tag} |")
+    lines.append(f"| `lambda_max(M_sys)` | {lam_sys:.4g} | {global_tag} |")
     lines.append(f"| `gamma` (row-sum) | {stab_result.small_gain_gamma:.4f} | {sg_tag} |")
     lines.append(f"| Diagonal dominance count | {n_diag_dom}/{n_zones} | — |")
     lines.append("")
@@ -1176,14 +1153,13 @@ def _write_stability_analysis_markdown(
     # -- Per-zone compact stability table -----------------------------------
     lines.append("## Per-zone stability summary")
     lines.append("")
-    lines.append("| Zone | alpha | lam_max(Mii) | kappa | Sum ‖M_ij‖ | rho_i | row_sum | Status |")
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("| Zone | lam_max(Mii) | kappa | Sum M_ij | rho_i | row_sum | Status |")
+    lines.append("|---|---|---|---|---|---|---|")
     for i_idx, zr in enumerate(stab_result.zones):
         status = "OK" if zr.diagonally_dominant else "VIOLATED"
         kappa_str = "inf" if zr.kappa_Mii >= 1e6 else f"{zr.kappa_Mii:.3g}"
         lines.append(
             f"| Zone {zr.zone_id} "
-            f"| {alpha_list[i_idx]:.4g} "
             f"| {zr.lambda_max_Mii:.3g} "
             f"| {kappa_str} "
             f"| {zr.coupling_sum:.4g} "
@@ -1211,9 +1187,7 @@ def _write_stability_analysis_markdown(
         ctrl = tso_controllers[z]
         zd = zone_defs[z]
         gw_vec = ctrl.params.g_w
-        alpha_z = float(ctrl.params.alpha)
-
-        lines.append(f"### TSO Zone {z}  (alpha = `{alpha_z:.6g}`)")
+        lines.append(f"### TSO Zone {z}")
         lines.append("")
         lines.append("| Type | Name | Bus | g_w |")
         lines.append("|---|---|---|---|")
@@ -1252,10 +1226,8 @@ def _write_stability_analysis_markdown(
                        if dso_id_key in hv_info_map else "?")
         dso_cfg_out = dso_ctrl.config
         gw_dso = dso_ctrl.params.g_w
-        alpha_dso = float(dso_ctrl.params.alpha)
 
-        lines.append(f"### DSO `{dso_id_key}`  (under TSO Zone {parent_zone}, "
-                     f"alpha = `{alpha_dso:.4g}`)")
+        lines.append(f"### DSO `{dso_id_key}`  (under TSO Zone {parent_zone})")
         lines.append("")
         lines.append("| Type | Name | Bus | g_w |")
         lines.append("|---|---|---|---|")
@@ -1395,7 +1367,6 @@ def _run_auto_tune_and_apply(
         floors_tso=floors_tso,
         floors_dso=floors_dso,
         g_w_upper_factor=config.pso_g_w_upper_factor,
-        alpha_bounds=config.pso_alpha_bounds,
         swarm_size=config.pso_swarm_size,
         max_iterations=config.pso_max_iterations,
         w_inertia=config.pso_w_inertia,
@@ -1406,25 +1377,22 @@ def _run_auto_tune_and_apply(
         spectral_target=config.pso_spectral_target,
         tso_period_s=config.tso_period_s,
         dso_period_s=config.dso_period_s,
-        alpha_init_tso=config.alpha,
-        alpha_init_dso=config.dso_alpha,
         seed=config.pso_seed,
         verbose=(verbose >= 1),
     )
 
-    # Apply tuned g_w and alpha to TSO controllers (and zone_defs)
+    # Apply tuned g_w to TSO controllers
     for ztr in pso_result.tso_zones:
         z = ztr.zone_id
         tso_controllers[z].params = dataclasses.replace(
-            tso_controllers[z].params, g_w=ztr.g_w, alpha=ztr.alpha,
+            tso_controllers[z].params, g_w=ztr.g_w,
         )
-        zone_defs[z] = dataclasses.replace(zone_defs[z], alpha=ztr.alpha)
 
-    # Apply tuned g_w and (per-DSO) alpha to DSO controllers
+    # Apply tuned g_w to DSO controllers
     for dso_id_key, dso_ctrl in dso_controllers.items():
-        g_w_dso, alpha_dso, _rho, _margin = pso_result.dso[dso_id_key]
+        g_w_dso, _rho, _margin = pso_result.dso[dso_id_key]
         dso_ctrl.params = dataclasses.replace(
-            dso_ctrl.params, g_w=g_w_dso, alpha=alpha_dso,
+            dso_ctrl.params, g_w=g_w_dso,
         )
 
     # Stash the result on the coordinator so the JSON serialiser can
@@ -1458,7 +1426,7 @@ def _run_auto_tune_and_apply(
             z = ztr.zone_id
             zd = zone_defs[z]
             gw_vec = ztr.g_w
-            print(f"  TSO Zone {z} [alpha = {ztr.alpha:.6g}]")
+            print(f"  TSO Zone {z}")
 
             off = 0
             for k, s_idx in enumerate(zd.tso_der_indices):
@@ -1487,12 +1455,11 @@ def _run_auto_tune_and_apply(
             print()
 
         for dso_id_key, dso_ctrl in dso_controllers.items():
-            g_w_dso, alpha_dso, rho_dso, margin_dso = pso_result.dso[dso_id_key]
+            g_w_dso, rho_dso, margin_dso = pso_result.dso[dso_id_key]
             parent_zone = (hv_info_map[dso_id_key].zone
                            if dso_id_key in hv_info_map else "?")
             print(f"  DSO {dso_id_key} (under TSO Zone {parent_zone}) "
-                  f"[alpha = {alpha_dso:.4g}, "
-                  f"rho = {rho_dso:.4f}, margin = {margin_dso:.4f}]")
+                  f"[rho = {rho_dso:.4f}, margin = {margin_dso:.4f}]")
 
             dso_cfg_out = dso_ctrl.config
             off_d = 0
@@ -1548,7 +1515,6 @@ def _run_delayed_stability_analysis(
                      for k in coordinator._H_blocks}
     Q_obj_list = [zone_defs[z].q_obj_diagonal() for z in zone_ids_sorted]
     G_w_list   = [tso_controllers[z].params.g_w for z in zone_ids_sorted]
-    alpha_list = [zone_defs[z].alpha            for z in zone_ids_sorted]
     actuator_counts = [
         {
             'n_der':  len(zone_defs[z].tso_der_indices),
@@ -1563,7 +1529,6 @@ def _run_delayed_stability_analysis(
         H_blocks=H_blocks_stab,
         Q_obj_list=Q_obj_list,
         G_w_list=G_w_list,
-        alpha_list=alpha_list,
         zone_ids=zone_ids_sorted,
         zone_names=[f"Zone {z}" for z in zone_ids_sorted],
         actuator_counts=actuator_counts,
@@ -1643,7 +1608,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         print("=" * 72)
         zone_method = "fixed 3-area" if config.use_fixed_zones else "spectral"
         print("  MULTI-TSO / MULTI-DSO OFO -- IEEE 39-bus New England")
-        print(f"  V_set = {v_set:.3f} p.u.  |  N_zones = 3  |  alpha = {config.alpha}")
+        print(f"  V_set = {v_set:.3f} p.u.  |  N_zones = 3")
         print(f"  Zone partition: {zone_method}  |  5 HV sub-networks (DSO_1..DSO_5)")
         print("=" * 72)
 
@@ -1825,7 +1790,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             pcc_dso_ids=zone_pcc_dso_ids[z],
             oltc_trafo_indices=zone_oltc_trafos[z],
             v_setpoint_pu=v_set,
-            alpha=config.alpha[z],
+            # alpha removed (absorbed into g_w)
             g_v=config.g_v,
             g_w_der=config.g_w_der,
             g_w_gen=config.g_w_gen,
@@ -1863,8 +1828,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         # For soft constraints set g_z > 0.
 
         ofo_params = OFOParameters(
-            alpha=zd.alpha,
-            g_w=gw_diag,    # 1-D vector → no OLTC cross-coupling
+            g_w=gw_diag,    # 1-D vector; alpha absorbed into g_w
             g_z=gz_diag,
             g_u=np.zeros_like(gw_diag),  # no level penalty for now
             int_max_step=config.int_max_step,
@@ -2028,7 +1992,6 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         n_v = len(v_buses)
         n_i = len(hv_lines)
         dso_ofo = OFOParameters(
-            alpha=config.dso_alpha,
             g_w=dso_gw_diag,
             g_z=np.zeros(n_iface + n_v + n_i),
             g_u=np.zeros_like(dso_gw_diag),
@@ -2527,17 +2490,15 @@ def main() -> None:
         n_total_s=60.0 * 720,      # 720-minute simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0 * 1,    # DSO every 20 seconds
-        alpha={1: 0.01, 2: 0.01, 3: 0.01},
-        dso_alpha=0.1,
         g_v=150000.0,
         g_q=2,
         dso_g_v=1000.0,
-        g_w_der=0.5,
-        g_w_gen=5e4,
-        g_w_pcc=0.5,
-        g_w_tso_oltc=60,
-        g_w_dso_der = 2.0,     # DSO DER Q regularisation
-        g_w_dso_oltc = 4.0,    # DSO OLTC tap regularisation
+        g_w_der=100.0,    # absorbing old alpha=0.01
+        g_w_gen=5e6,      # absorbing old alpha=0.01
+        g_w_pcc=100.0,    # absorbing old alpha=0.01
+        g_w_tso_oltc=60,  # unchanged (was at alpha=1)
+        g_w_dso_der=10.0,      # absorbing old dso_alpha=0.1
+        g_w_dso_oltc=40.0,     # unchanged
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps

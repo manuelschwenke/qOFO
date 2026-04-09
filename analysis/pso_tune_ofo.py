@@ -443,52 +443,60 @@ def _oltc_penalty(
     gw_dso: List[NDArray[np.float64]],
     actuator_counts: List[Dict[str, int]],
     dso_inputs: List[DSOTuneInput],
-    gw_oltc_ref: float,
-    penalty_weight: float,
+    gw_oltc_ref_tso: float,
+    gw_oltc_ref_dso: float,
+    penalty_weight_tso: float,
+    penalty_weight_dso: float,
 ) -> float:
-    """Soft penalty for OLTC g_w exceeding ``gw_oltc_ref``.
+    """Soft penalty for OLTC g_w exceeding reference values.
 
-    Penalises the mean log-ratio of OLTC g_w to the reference.  This
-    steers PSO toward flattening kappa by adjusting continuous-actuator
-    weights instead of freezing OLTCs.
+    Separate reference and weight for TSO and DSO OLTCs.  DSO OLTCs
+    (coupling transformers) need a stronger penalty because low g_w
+    lets them switch taps wildly, destabilising the DSO voltage.
 
     Returns a non-negative additive penalty term.
     """
-    if gw_oltc_ref <= 0 or penalty_weight <= 0:
-        return 0.0
-    log_ratios: List[float] = []
+    total_penalty = 0.0
 
     # TSO OLTCs
-    for idx, counts in enumerate(actuator_counts):
-        n_oltc = int(counts.get('n_oltc', 0))
-        if n_oltc <= 0:
-            continue
-        # OLTC block is at the END of the TSO vector (after der, pcc, gen)
-        off = (int(counts.get('n_der', 0))
-               + int(counts.get('n_pcc', 0))
-               + int(counts.get('n_gen', 0)))
-        for k in range(n_oltc):
-            gw_val = float(gw_tso[idx][off + k])
-            if gw_val > gw_oltc_ref:
-                log_ratios.append(np.log10(gw_val / gw_oltc_ref))
+    if gw_oltc_ref_tso > 0 and penalty_weight_tso > 0:
+        tso_ratios: List[float] = []
+        for idx, counts in enumerate(actuator_counts):
+            n_oltc = int(counts.get('n_oltc', 0))
+            if n_oltc <= 0:
+                continue
+            off = (int(counts.get('n_der', 0))
+                   + int(counts.get('n_pcc', 0))
+                   + int(counts.get('n_gen', 0)))
+            for k in range(n_oltc):
+                gw_val = float(gw_tso[idx][off + k])
+                if gw_val < gw_oltc_ref_tso:
+                    # ALSO penalise g_w BELOW the reference (too aggressive)
+                    tso_ratios.append(np.log10(gw_oltc_ref_tso / gw_val))
+                elif gw_val > gw_oltc_ref_tso * 10:
+                    # Penalise g_w more than 1 decade above reference (frozen)
+                    tso_ratios.append(np.log10(gw_val / (gw_oltc_ref_tso * 10)))
+        if tso_ratios:
+            total_penalty += penalty_weight_tso * float(np.mean(tso_ratios))
 
-    # DSO OLTCs
-    for d_idx, d in enumerate(dso_inputs):
-        n_oltc = int(d.n_oltc)
-        if n_oltc <= 0:
-            continue
-        off = int(d.n_der)  # DSO layout: [DER | OLTC | shunt]
-        for k in range(n_oltc):
-            gw_val = float(gw_dso[d_idx][off + k])
-            if gw_val > gw_oltc_ref:
-                log_ratios.append(np.log10(gw_val / gw_oltc_ref))
+    # DSO OLTCs (coupling transformers) — stronger penalty
+    if gw_oltc_ref_dso > 0 and penalty_weight_dso > 0:
+        dso_ratios: List[float] = []
+        for d_idx, d in enumerate(dso_inputs):
+            n_oltc = int(d.n_oltc)
+            if n_oltc <= 0:
+                continue
+            off = int(d.n_der)
+            for k in range(n_oltc):
+                gw_val = float(gw_dso[d_idx][off + k])
+                if gw_val < gw_oltc_ref_dso:
+                    dso_ratios.append(np.log10(gw_oltc_ref_dso / gw_val))
+                elif gw_val > gw_oltc_ref_dso * 10:
+                    dso_ratios.append(np.log10(gw_val / (gw_oltc_ref_dso * 10)))
+        if dso_ratios:
+            total_penalty += penalty_weight_dso * float(np.mean(dso_ratios))
 
-    if not log_ratios:
-        return 0.0
-    # Mean log-ratio × weight.  Typical scale: log10(70000/50) ≈ 3.1,
-    # so penalty_weight=0.01 gives ~0.03 penalty (small relative to
-    # rho_opt in [0.9, 1.0]).
-    return penalty_weight * float(np.mean(log_ratios))
+    return total_penalty
 
 
 def _evaluate_fitness(
@@ -505,8 +513,10 @@ def _evaluate_fitness(
     dso_sizes: List[int],
     n_inner: int,
     spectral_target: float = 1.9,
-    gw_oltc_ref: float = 50.0,
-    oltc_penalty_weight: float = 0.01,
+    gw_oltc_ref_tso: float = 50.0,
+    gw_oltc_ref_dso: float = 40.0,
+    oltc_penalty_weight_tso: float = 0.01,
+    oltc_penalty_weight_dso: float = 0.05,
 ) -> Tuple[float, Dict[str, float], Optional[MultiZoneStabilityResult]]:
     """Compute the contraction-rate fitness for one PSO particle.
 
@@ -660,7 +670,8 @@ def _evaluate_fitness(
         # freezing OLTCs with huge g_w.
         oltc_pen = _oltc_penalty(
             gw_tso, gw_dso, actuator_counts, dso_inputs,
-            gw_oltc_ref, oltc_penalty_weight,
+            gw_oltc_ref_tso, gw_oltc_ref_dso,
+            oltc_penalty_weight_tso, oltc_penalty_weight_dso,
         )
         metrics['oltc_penalty'] = oltc_pen
 
@@ -847,8 +858,10 @@ def tune_pso_all(
     dso_period_s: float = 60.0,
     legacy_safety_factor_tso: float = 4.0,
     legacy_safety_factor_dso: float = 2.0,
-    gw_oltc_ref: float = 50.0,
-    oltc_penalty_weight: float = 0.01,
+    gw_oltc_ref_tso: float = 50.0,
+    gw_oltc_ref_dso: float = 40.0,
+    oltc_penalty_weight_tso: float = 0.01,
+    oltc_penalty_weight_dso: float = 0.05,
     seed: Optional[int] = None,
     verbose: bool = True,
 ) -> PSOTuningResult:
@@ -957,8 +970,10 @@ def tune_pso_all(
             dso_sizes=dso_sizes,
             n_inner=n_inner,
             spectral_target=float(spectral_target),
-            gw_oltc_ref=float(gw_oltc_ref),
-            oltc_penalty_weight=float(oltc_penalty_weight),
+            gw_oltc_ref_tso=float(gw_oltc_ref_tso),
+            gw_oltc_ref_dso=float(gw_oltc_ref_dso),
+            oltc_penalty_weight_tso=float(oltc_penalty_weight_tso),
+            oltc_penalty_weight_dso=float(oltc_penalty_weight_dso),
         )
 
     pump_f, pump_metrics, _ = fitness_fn(pump_vec)

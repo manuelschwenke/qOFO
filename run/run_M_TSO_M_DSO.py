@@ -278,6 +278,16 @@ class MultiTSOConfig:
     min_gw_dso_oltc:       float = 5.0
     min_gw_dso_shunt:      float = 10.0
 
+    # ── Manual alpha overrides ──────────────────────────────────────────
+    # When set (not None), these override the pump-computed alpha values.
+    # Use for manual experiments or when auto_tune_gw is disabled.
+    alpha_tso_override:    Optional[float] = None
+    """Manual TSO step-size.  Overrides pump-computed alpha_tso when set."""
+
+    alpha_dso_override:    Optional[float] = None
+    """Manual DSO step-size (applied to ALL DSOs).  Overrides pump-computed
+    alpha_dso when set."""
+
     # ── Slack variable penalty (g_z) ─────────────────────────────────────
     # Per-output-type penalty for the slack variable z in the MIQP:
     #   g_z = 0   → z is free for that output → output constraint DISABLED
@@ -1467,24 +1477,35 @@ def _tune_and_apply_gw(
             pass  # non-interactive → auto-apply
 
     if apply:
+        # Manual alpha overrides take precedence over pump-computed values
+        eff_alpha_tso = (config.alpha_tso_override
+                         if config.alpha_tso_override is not None
+                         else result.alpha_tso)
         for idx, z in enumerate(zone_ids_sorted):
             tso_controllers[z].params = dataclasses.replace(
                 tso_controllers[z].params,
                 g_w=result.gw_tso[idx],
-                alpha=result.alpha_tso,
+                alpha=eff_alpha_tso,
             )
+        eff_alpha_dso_list = []
         for d_idx, (dso_id_key, dso_ctrl) in enumerate(dso_controllers.items()):
-            alpha_d = result.alpha_dso[d_idx] if d_idx < len(result.alpha_dso) else 1.0
+            eff_alpha_d = (config.alpha_dso_override
+                           if config.alpha_dso_override is not None
+                           else (result.alpha_dso[d_idx]
+                                 if d_idx < len(result.alpha_dso) else 1.0))
+            eff_alpha_dso_list.append(eff_alpha_d)
             dso_ctrl.params = dataclasses.replace(
                 dso_ctrl.params,
                 g_w=result.gw_dso[d_idx],
-                alpha=alpha_d,
+                alpha=eff_alpha_d,
             )
         coordinator._last_pump_result = result  # type: ignore[attr-defined]
         if verbose >= 1:
+            src_tso = "override" if config.alpha_tso_override is not None else "pump"
+            src_dso = "override" if config.alpha_dso_override is not None else "pump"
             print(f"  Tuned g_w + alpha applied.  "
-                  f"alpha_tso = {result.alpha_tso:.6f}, "
-                  f"alpha_dso = {[f'{a:.4f}' for a in result.alpha_dso]}")
+                  f"alpha_tso = {eff_alpha_tso:.6f} ({src_tso}), "
+                  f"alpha_dso = {[f'{a:.4f}' for a in eff_alpha_dso_list]} ({src_dso})")
     else:
         coordinator._last_pump_result = None  # type: ignore[attr-defined]
 
@@ -1832,9 +1853,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         # g_z = 0 → hard output constraints; g_z > 0 → soft (nearly hard when large)
 
         ofo_params = OFOParameters(
-            g_w=gw_diag,    # 1-D vector; alpha absorbed into g_w
+            g_w=gw_diag,
             g_z=gz_diag,
-            g_u=np.zeros_like(gw_diag),  # no level penalty for now
+            g_u=np.zeros_like(gw_diag),
+            alpha=config.alpha_tso_override if config.alpha_tso_override is not None else 1.0,
             int_max_step=config.int_max_step,
             int_cooldown=config.int_cooldown,
         )
@@ -2004,6 +2026,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             g_w=dso_gw_diag,
             g_z=dso_gz,
             g_u=np.zeros_like(dso_gw_diag),
+            alpha=config.alpha_dso_override if config.alpha_dso_override is not None else 1.0,
             int_max_step=config.int_max_step,
             int_cooldown=config.int_cooldown,
         )

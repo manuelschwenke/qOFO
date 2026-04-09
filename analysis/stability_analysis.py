@@ -1151,7 +1151,6 @@ def analyse_multi_zone_stability(
     H_blocks:    Dict[Tuple[int, int], NDArray[np.float64]],
     Q_obj_list:  List[NDArray[np.float64]],
     G_w_list:    List[NDArray[np.float64]],
-    alpha_list:  List[float],
     *,
     zone_ids:    Optional[List[int]] = None,
     zone_names:  Optional[List[str]] = None,
@@ -1186,12 +1185,11 @@ def analyse_multi_zone_stability(
     Full system matrix:
         M_sys = [[M_TSO,ij]]                    ∈ ℝ^{Σn_u × Σn_u}
 
-    Sufficient stability condition (diagonal dominance):
-        α_i (λ_max(M_ii) + Σ_{j≠i} ||M_ij||₂) < 2   ∀ i
+    Sufficient stability condition (diagonal dominance, alpha=1):
+        (λ_max(M_ii) + Σ_{j≠i} ||M_ij||₂) < 2   ∀ i
 
     Tighter (necessary & sufficient) condition:
-        α_eff λ_max(M_sys) < 2
-    where α_eff = max_i α_i (conservative coupling across zones).
+        λ_max(M_sys) < 2
 
     Parameters
     ----------
@@ -1204,8 +1202,6 @@ def analyse_multi_zone_stability(
     G_w_list : List[NDArray]
         Per-zone G_w diagonal vectors (length n_u_i each).
         Column ordering: [Q_DER | Q_PCC | V_gen | OLTC | shunt].
-    alpha_list : List[float]
-        Per-zone OFO step sizes α_i.
     zone_ids : List[int], optional
         Zone IDs in the same order as Q_obj_list and G_w_list.
         Defaults to [0, 1, 2, …].
@@ -1269,7 +1265,6 @@ def analyse_multi_zone_stability(
     for i_idx, i in enumerate(zone_ids):
         H_ii  = H_blocks[(i, i)]
         M_ii  = M_blocks[(i, i)]
-        alpha_i = alpha_list[i_idx]
         n_y_i, n_u_i = H_ii.shape
 
         # SVD of raw H_ii
@@ -1290,10 +1285,10 @@ def analyse_multi_zone_stability(
         #   3. Active modes (lam > 0.01 * lam_max) -> determine rho_i
         eig_tol_null = 1e-12 * max(lambda_max_all, 1e-14)
         eig_tol_active = 0.01 * max(lambda_max_all, 1e-14)
-        
+
         eig_ii_eff = eig_ii_all[eig_ii_all > eig_tol_null]
         eig_ii_active = eig_ii_all[eig_ii_all > eig_tol_active]
-        
+
         n_effective = len(eig_ii_eff)
         n_active = len(eig_ii_active)
         n_null = len(eig_ii_all) - n_effective
@@ -1306,20 +1301,20 @@ def analyse_multi_zone_stability(
         else:
             lambda_max = float(eig_ii_active[-1])
             lambda_min = float(eig_ii_active[0])
-            # Actual contraction rate at current α_i (active eigenvalues only)
-            rho_i = max(abs(1.0 - alpha_i * lam) for lam in eig_ii_active)
+            # Contraction rate (alpha=1, absorbed into g_w)
+            rho_i = max(abs(1.0 - lam) for lam in eig_ii_active)
 
         if n_effective == 0:
             kappa = 1.0
             alpha_max_local = np.inf
-            alpha_i_opt = 0.0
+            alpha_i_opt = 1.0
             rho_i_opt = 0.0
         else:
             l_max_eff = float(eig_ii_eff[-1])
             l_min_eff = float(eig_ii_eff[0])
             alpha_max_local = 2.0 / l_max_eff if l_max_eff > 1e-14 else np.inf
             kappa = l_max_eff / l_min_eff if l_min_eff > 1e-14 else np.inf
-            alpha_i_opt = 2.0 / (l_min_eff + l_max_eff) if (l_min_eff + l_max_eff) > 1e-14 else 0.0
+            alpha_i_opt = 1.0   # alpha removed; kept for backward compat
             rho_i_opt = (kappa - 1.0) / (kappa + 1.0) if kappa < np.inf else 1.0
 
         # Coupling norms: ||M_ij||₂ for j ≠ i
@@ -1335,16 +1330,16 @@ def analyse_multi_zone_stability(
 
         coupling_sum = sum(coupling_norms.values())
 
-        # Cross-coupling gains σ_ij = α_i · ‖M_ij‖₂
-        sigma_ij_current = {j: alpha_list[i_idx] * norm for j, norm in coupling_norms.items()}
-        sigma_ij_optimal = {j: alpha_i_opt * norm for j, norm in coupling_norms.items()}
+        # Cross-coupling gains σ_ij = ‖M_ij‖₂ (no alpha)
+        sigma_ij_current = {j: norm for j, norm in coupling_norms.items()}
+        sigma_ij_optimal = {j: norm for j, norm in coupling_norms.items()}
 
         # Lyapunov row sums: ρ_i + Σ_{j≠i} σ_ij
         lyap_row = rho_i + sum(sigma_ij_current.values())
         lyap_row_opt = rho_i_opt + sum(sigma_ij_optimal.values())
 
-        # Diagonal-dominance condition: α_i · (λ_max + Σ||M_ij||₂) ∈ (0, 2)
-        contraction_lhs = alpha_list[i_idx] * (lambda_max + coupling_sum)
+        # Diagonal-dominance condition: (λ_max + Σ||M_ij||₂) ∈ (0, 2)
+        contraction_lhs = lambda_max + coupling_sum
         alpha_max_coupled = (
             2.0 / (lambda_max + coupling_sum)
             if (lambda_max + coupling_sum) > 1e-14 else np.inf
@@ -1356,7 +1351,7 @@ def analyse_multi_zone_stability(
             warnings.append(
                 f"{zone_names[i_idx]}: contraction_lhs = {contraction_lhs:.4f} >= 2.0 -- "
                 f"diagonal-dominance condition VIOLATED.  "
-                f"Consider reducing alpha_{i} to < {alpha_max_coupled:.4g}."
+                f"Increase g_w to bring lambda_max below {alpha_max_coupled:.4g}."
             )
         elif contraction_lhs > 1.5:
             warnings.append(
@@ -1402,7 +1397,7 @@ def analyse_multi_zone_stability(
                     tc[atype] = tc.get(atype, 0.0) + float(v_sq[k])
                 return {
                     'eigenvalue': lam,
-                    'contraction': abs(1.0 - alpha_list[i_idx] * lam),
+                    'contraction': abs(1.0 - lam),
                     'type_contribution': tc,
                     'active': lam > eig_tol_active,
                     '_slowest_active': lam <= eig_tol_active and lam > eig_tol_null
@@ -1481,9 +1476,8 @@ def analyse_multi_zone_stability(
     M_sys_lambda_max = float(sys_eigs[-1]) if len(sys_eigs) > 0 else 0.0
     alpha_max_global = (2.0 / M_sys_lambda_max) if M_sys_lambda_max > 1e-14 else np.inf
 
-    # Global stability: α_eff · λ_max(M_sys) < 2 for α_eff = max(α_i)
-    alpha_eff = max(alpha_list)
-    globally_stable = (alpha_eff * M_sys_lambda_max < 2.0)
+    # Global stability: λ_max(M_sys) < 2 (alpha absorbed into g_w)
+    globally_stable = (M_sys_lambda_max < 2.0)
 
     all_diag_dom = all(zr.diagonally_dominant for zr in zone_results)
 
@@ -1529,13 +1523,12 @@ def analyse_multi_zone_stability(
             f"Bottleneck: {wname} (row sum = {worst.lyapunov_row_sum:.4f})."
         )
 
-        # Suggest adjusting step size if rho_i is the dominant term
+        # Suggest increasing g_w if rho_i is the dominant term
         if worst.rho_i > 0.5 * worst.lyapunov_row_sum:
-            direction = "Decrease" if alpha_list[worst_idx] > worst.alpha_i_opt else "Increase"
             recommendations.append(
                 f"  -> {wname}: rho_i = {worst.rho_i:.4f} dominates. "
-                f"{direction} alpha_{worst.zone_id} from {alpha_list[worst_idx]:.4g} "
-                f"toward alpha* = {worst.alpha_i_opt:.4g} (optimal rho* = {worst.rho_i_opt:.4f})."
+                f"Increase g_w in this zone to improve contraction "
+                f"(optimal rho* = {worst.rho_i_opt:.4f})."
             )
 
         # Suggest increasing g_w for zones with high condition number
@@ -1553,8 +1546,7 @@ def analyse_multi_zone_stability(
                 if sig > 0.3:
                     recommendations.append(
                         f"  -> sigma_{zr.zone_id},{j} = {sig:.4f} is large. "
-                        f"Increase g_w in {zone_names[i_idx]} to reduce ||M_{zr.zone_id},{j}||_2, "
-                        f"or reduce alpha_{zr.zone_id}."
+                        f"Increase g_w in {zone_names[i_idx]} to reduce ||M_{zr.zone_id},{j}||_2."
                     )
 
     if small_gain_stable and not small_gain_stable_opt:
@@ -1569,15 +1561,7 @@ def analyse_multi_zone_stability(
             f"Small-gain condition satisfied (gamma = {small_gain_gamma:.4f}). "
             f"At optimal step sizes: gamma* = {small_gain_gamma_opt:.4f}."
         )
-        # Suggest moving toward optimal step sizes if there's room
-        for i_idx, zr in enumerate(zone_results):
-            ratio = alpha_list[i_idx] / zr.alpha_i_opt if zr.alpha_i_opt > 1e-14 else 0.0
-            if ratio < 0.7 or ratio > 1.5:
-                recommendations.append(
-                    f"  -> {zone_names[i_idx]}: alpha_{zr.zone_id} = {alpha_list[i_idx]:.4g}, "
-                    f"alpha* = {zr.alpha_i_opt:.4g} (ratio {ratio:.2f}). "
-                    f"{'Increase' if ratio < 1 else 'Decrease'} alpha for faster convergence."
-                )
+        # (alpha removed: no per-zone step-size recommendations)
 
     # Pairwise violation recommendations
     for (zi, zj), ok in pairwise_sg.items():
@@ -1618,7 +1602,7 @@ def analyse_multi_zone_stability(
     )
 
     if verbose:
-        _print_multi_zone_report(result, zone_names, alpha_list,
+        _print_multi_zone_report(result, zone_names,
                                  H_blocks, Q_obj_list, G_w_list,
                                  actuator_counts)
 
@@ -1628,7 +1612,6 @@ def analyse_multi_zone_stability(
 def _print_multi_zone_report(
     result: "MultiZoneStabilityResult",
     zone_names: List[str],
-    alpha_list: List[float],
     H_blocks: Optional[Dict[Tuple[int, int], NDArray[np.float64]]] = None,
     Q_obj_list: Optional[List[NDArray[np.float64]]] = None,
     G_w_list: Optional[List[NDArray[np.float64]]] = None,
@@ -1648,8 +1631,7 @@ def _print_multi_zone_report(
     sep  = "=" * 86
     thin = "-" * 86
     n_zones = len(result.zones)
-    alpha_eff = max(alpha_list) if alpha_list else 0.0
-    spectral_metric = alpha_eff * result.M_sys_lambda_max
+    spectral_metric = result.M_sys_lambda_max
 
     print(sep)
     print("  Multi-Zone OFO Stability Summary")
@@ -1657,7 +1639,7 @@ def _print_multi_zone_report(
 
     # Per-zone compact table: one row per zone with the most load-bearing
     # numbers (alpha, eigenspectrum, coupling, contraction rate, row sum).
-    header = (f"  {'Zone':<10s} {'alpha':>9s} {'lam_max':>9s} {'kappa':>9s} "
+    header = (f"  {'Zone':<10s} {'lam_max':>9s} {'kappa':>9s} "
               f"{'Sum||Mij||':>11s} {'rho_i':>7s} {'row_sum':>9s} {'Status':>9s}")
     print(header)
     print(thin)
@@ -1672,7 +1654,6 @@ def _print_multi_zone_report(
         kappa_str = "inf" if zr.kappa_Mii >= 1e6 else f"{zr.kappa_Mii:>9.3g}"
         print(
             f"  {zone_names[i_idx]:<10s} "
-            f"{alpha_list[i_idx]:>9.4g} "
             f"{zr.lambda_max_Mii:>9.3g} "
             f"{kappa_str:>9s} "
             f"{zr.coupling_sum:>11.4g} "
@@ -1685,7 +1666,6 @@ def _print_multi_zone_report(
     # Global spectral bound (necessary-and-sufficient)
     global_tag = "STABLE" if result.globally_stable else "VIOLATED"
     print(f"  Global spectral:  lam_max(M_sys) = {result.M_sys_lambda_max:.4g}   "
-          f"alpha_eff*lam_sys = {spectral_metric:.4f}   "
           f"[{global_tag}]")
 
     # Small-gain (sufficient only)

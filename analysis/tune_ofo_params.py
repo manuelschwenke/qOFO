@@ -2,35 +2,31 @@
 Auto-Tuning for Multi-Zone OFO Controller Parameters
 =====================================================
 
-Computes per-actuator g_w weights and step sizes alpha that satisfy a
-stability condition for the multi-zone (multi-TSO, multi-DSO) OFO
-controller hierarchy.
+Computes per-actuator g_w weights that satisfy a stability condition for
+the multi-zone (multi-TSO, multi-DSO) OFO controller hierarchy.
+
+The step-size parameter alpha has been removed (absorbed into g_w).
+The OFO update is now u^{k+1} = u^k + sigma^k with alpha=1.
 
 Theory
 ------
-The OFO iteration u^{k+1} = u^k + alpha * sigma^k contracts iff all
-eigenvalues of the preconditioned curvature matrix
+The OFO iteration contracts iff all eigenvalues of the preconditioned
+curvature matrix
 
     M = G_w^{-1/2} H^T Q_obj H G_w^{-1/2}
 
-satisfy  0 < alpha * lambda_i(M) < 2.
+satisfy  0 < lambda_i(M) < 2.
 
 Two stability bounds are available for the multi-zone case:
 
 1. ROW-SUM (sufficient, conservative):
        gamma = max_i { rho_i + sum_{j!=i} sigma_ij } < 1
-   where rho_i = max|1 - alpha_i * lambda_l(M_ii)| and
-   sigma_ij = alpha_i * ||M_ij||_2.
+   where rho_i = max|1 - lambda_l(M_ii)| and
+   sigma_ij = ||M_ij||_2.
 
 2. SPECTRAL (necessary & sufficient, much tighter):
-       alpha_eff * lambda_max(M_sys) < 2
-   where M_sys = [[M_TSO,ij]] is the full block matrix and
-   alpha_eff = max_i alpha_i.
-
-For systems with non-negligible cross-coupling the row-sum bound is
-typically 2x-10x more conservative than the spectral one, and the
-row-sum target gamma < 0.8 may be infeasible even when the system is
-strictly stable in the spectral sense.
+       lambda_max(M_sys) < 2
+   where M_sys = [[M_TSO,ij]] is the full block matrix.
 
 Functions
 ---------
@@ -38,8 +34,8 @@ compute_optimal_gw
     Phase 1 -- per-actuator Gershgorin preconditioning (fast, local).
 
 tune_multi_zone
-    Phase 2 -- joint alpha + g_w optimisation supporting either the
-    spectral objective (default) or the row-sum objective.
+    Phase 2 -- g_w optimisation supporting either the spectral
+    objective (default) or the row-sum objective.
 
 tune_dso
     Per-actuator g_w tuning for DSO controllers with cascade margin
@@ -54,7 +50,6 @@ from typing import Dict, List, Literal, Optional, Tuple
 import numpy as np
 from numpy.typing import NDArray
 
-from core.cascade_config import CascadeConfig
 from analysis.stability_analysis import (
     analyse_multi_zone_stability,
     MultiZoneStabilityResult,
@@ -70,9 +65,6 @@ class ZoneTuningResult:
     """Tuning result for a single zone."""
     zone_id: int
     g_w: NDArray[np.float64]
-    alpha: float
-    alpha_max_local: float
-    alpha_max_coupled: float
     rho: float
     kappa: float
     lambda_min: float
@@ -95,10 +87,6 @@ class TuningResult:
     def gw_vectors(self) -> List[NDArray[np.float64]]:
         """Return list of per-zone g_w vectors (same order as zones)."""
         return [z.g_w for z in self.zones]
-
-    def alpha_dict(self) -> Dict[int, float]:
-        """Return {zone_id: alpha} mapping."""
-        return {z.zone_id: z.alpha for z in self.zones}
 
 
 # =============================================================================
@@ -206,27 +194,6 @@ def _build_actuator_labels(actuator_counts: Dict[str, int]) -> List[str]:
     return labels
 
 
-def _optimal_alpha_for_zone(
-    C_ii: NDArray[np.float64],
-    g_w: NDArray[np.float64],
-    alpha_fallback: float,
-) -> float:
-    """Compute optimal alpha for a zone given C_ii and g_w.
-
-    Returns alpha* = 2 / (lambda_min + lambda_max) of the preconditioned
-    curvature M_ii, which minimises the contraction rate rho_i.
-    """
-    gw_inv_sqrt = 1.0 / np.sqrt(np.maximum(g_w, 1e-12))
-    M_ii = (gw_inv_sqrt[:, None] * C_ii) * gw_inv_sqrt[None, :]
-    _, active, _ = _effective_eigenspectrum(M_ii)
-    if len(active) >= 2:
-        l_min, l_max = float(active[0]), float(active[-1])
-        return 2.0 / (l_min + l_max)
-    elif len(active) == 1:
-        return 1.0 / float(active[0])
-    return alpha_fallback
-
-
 def _effective_eigenspectrum(
     M: NDArray[np.float64],
     null_tol_factor: float = 1e-12,
@@ -274,7 +241,6 @@ def _zone_index_ranges(n_per_zone: List[int]) -> List[Tuple[int, int]]:
 # =============================================================================
 
 def compute_optimal_gw(
-    config: CascadeConfig,
     H_blocks: Dict[Tuple[int, int], NDArray[np.float64]],
     Q_obj_list: List[NDArray[np.float64]],
     actuator_counts: List[Dict[str, int]],
@@ -289,18 +255,15 @@ def compute_optimal_gw(
 
     For each zone i and each actuator k:
 
-        g_w[k] = safety_factor * alpha * C_ii[k,k] / 2
+        g_w[k] = safety_factor * C_ii[k,k] / 2
 
     where C_ii = H_ii^T Q_obj,i H_ii is the local curvature.
 
     This satisfies the per-actuator Gershgorin necessary condition
-    g_w[k] > alpha * C_ii[k,k] / 2 with the specified safety factor.
+    g_w[k] > C_ii[k,k] / 2 with the specified safety factor.
 
     Parameters
     ----------
-    config :
-        CascadeConfig providing alpha (gw_tso_v_gen is ignored here -- use
-        ``min_gw_gen`` instead).
     H_blocks :
         Dict mapping (zone_i, zone_i) to diagonal sensitivity blocks H_ii.
     Q_obj_list :
@@ -310,10 +273,7 @@ def compute_optimal_gw(
     safety_factor :
         Multiplier on the theoretical Gershgorin bound. Default 2.0.
     min_gw_der, min_gw_pcc, min_gw_gen, min_gw_oltc :
-        Per-actuator-type minimum g_w floors.  V_gen is treated as a
-        floor (not a hard override) so the tuner may push the weight
-        higher if needed; the default ``min_gw_gen=1e4`` preserves the
-        safe pre-refactor behaviour.
+        Per-actuator-type minimum g_w floors.
 
     Returns
     -------
@@ -338,8 +298,8 @@ def compute_optimal_gw(
         # Per-actuator curvature diagonal
         c_diag = _compute_curvature_diagonal(H_ii, q_obj)
 
-        # Gershgorin-based g_w
-        g_w = safety_factor * config.alpha * c_diag / 2.0
+        # Gershgorin-based g_w (alpha=1, absorbed into g_w)
+        g_w = safety_factor * c_diag / 2.0
 
         # Apply per-type floors
         g_w = _apply_gw_floors(g_w, counts, floors, _TSO_COLUMN_ORDER)
@@ -458,7 +418,6 @@ def tune_multi_zone(
     H_blocks: Dict[Tuple[int, int], NDArray[np.float64]],
     Q_obj_list: List[NDArray[np.float64]],
     actuator_counts: List[Dict[str, int]],
-    alpha_init: Optional[Dict[int, float]] = None,
     *,
     zone_ids: Optional[List[int]] = None,
     safety_factor: float = 4.0,
@@ -468,69 +427,41 @@ def tune_multi_zone(
     min_gw_oltc: float = 40.0,
     objective: Literal["spectral", "row_sum"] = "spectral",
     spectral_target: float = 1.8,
-    spectral_safety: float = 0.9,
     gamma_target: float = 0.9,
-    coupled_alpha_safety: float = 0.9,
     max_iterations: int = 30,
     verbose: bool = True,
 ) -> TuningResult:
-    """Jointly tune g_w and alpha for a multi-zone TSO-DSO OFO system.
+    """Tune g_w for a multi-zone TSO-DSO OFO system (alpha=1, absorbed).
 
     Two objectives are supported:
 
     * ``objective='spectral'`` (default, recommended):
-        Target  alpha_eff * lambda_max(M_sys) < spectral_target  (default 1.8,
-        i.e. 10% margin below the necessary-and-sufficient bound 2.0).
+        Target  lambda_max(M_sys) < spectral_target  (default 1.8,
+        i.e. 10% margin below the stability bound 2.0).
         g_w boost direction is read off the dominant eigenvector of M_sys
         so that exactly the actuators participating in the worst global
-        mode are preconditioned.  Per-zone alphas are pinned to a fraction
-        of the global cap each iter.
+        mode are preconditioned.
 
     * ``objective='row_sum'``:
         Target  gamma = max_i {rho_i + sum sigma_ij} < gamma_target.
         For the bottleneck row i, g_w is boosted on the *column zone* j
-        contributing the most to sigma_ij.  This is the structurally
-        correct direction: sigma_ij ~ sqrt(g_w_i / g_w_j), so growing
-        g_w_i (the old algorithm) increases the row sum, while growing
-        g_w_j decreases it.
-
-    Both objectives unconditionally re-set every zone's alpha each iter
-    via  alpha_i = min(alpha_local_opt, coupled_alpha_safety * alpha_max_coupled,
-    spectral_safety * 2/lambda_max(M_sys))  so that no zone is "frozen" by
-    a one-way clamp.
-
-    The iteration prints both metrics every iter so the user can see when
-    the row-sum target is unreachable but the spectral target is met.
+        contributing the most to sigma_ij.
 
     Parameters
     ----------
     H_blocks, Q_obj_list, actuator_counts, zone_ids :
         Same as analyse_multi_zone_stability.
-    alpha_init :
-        Initial step sizes per zone {zone_id: alpha}.
     safety_factor :
         Phase-1 Gershgorin safety multiplier.
     min_gw_der, min_gw_pcc, min_gw_gen, min_gw_oltc :
-        Per-actuator-type minimum g_w floors.  V_gen is a floor (not a
-        hard override), so the tuner is free to push it higher when
-        necessary; the default ``min_gw_gen=1e5`` preserves the safe
-        pre-refactor behaviour.
+        Per-actuator-type minimum g_w floors.
     objective :
         'spectral' (default) or 'row_sum'.
     spectral_target :
-        Convergence target for alpha_eff * lambda_max(M_sys).  Default 1.8
-        (10% margin below the stability bound 2.0).
-    spectral_safety :
-        Fraction of ``spectral_target`` that the per-zone alpha cap aims
-        for.  Default 0.9 -- alpha is capped so that
-        ``alpha_eff * lambda_max(M_sys) <= spectral_safety * spectral_target``,
-        which keeps the iterate strictly below the user's convergence
-        target with a configurable margin.
+        Convergence target for lambda_max(M_sys).  Default 1.8.
     gamma_target :
         Convergence target for the row-sum metric (only used when
         objective='row_sum').
-    coupled_alpha_safety :
-        Per-zone alpha is at most coupled_alpha_safety * alpha_max_coupled.
     max_iterations :
         Cap on the inner refinement loop.
     verbose :
@@ -538,8 +469,8 @@ def tune_multi_zone(
 
     Returns
     -------
-    TuningResult with per-zone g_w vectors, alpha values, both stability
-    metrics, and feasibility warnings.
+    TuningResult with per-zone g_w vectors, stability metrics, and
+    feasibility warnings.
     """
     # ── Resolve zone ids ─────────────────────────────────────────────────────
     if zone_ids is None:
@@ -558,11 +489,7 @@ def tune_multi_zone(
         'oltc': min_gw_oltc,
     }
 
-    # ── Phase 1: Gershgorin initialisation ───────────────────────────────────
-    alpha_list: List[float] = [
-        float((alpha_init or {}).get(z, 1.0)) for z in zone_ids
-    ]
-
+    # ── Phase 1: Gershgorin initialisation (alpha=1, absorbed into g_w) ─────
     C_matrices: List[NDArray[np.float64]] = []
     gw_list: List[NDArray[np.float64]] = []
 
@@ -575,22 +502,15 @@ def tune_multi_zone(
         C_matrices.append(C_ii)
 
         c_diag = np.diag(C_ii)
-        g_w = safety_factor * alpha_list[idx] * c_diag / 2.0
+        g_w = safety_factor * c_diag / 2.0
         g_w = _apply_gw_floors(g_w, counts, floors, _TSO_COLUMN_ORDER)
         gw_list.append(g_w)
-
-    # Phase 1b: per-zone local-optimal alpha (refined inside the loop)
-    for idx in range(n_zones):
-        alpha_list[idx] = _optimal_alpha_for_zone(
-            C_matrices[idx], gw_list[idx], alpha_list[idx],
-        )
 
     # ── Early infeasibility check (#5) ───────────────────────────────────────
     stab0 = analyse_multi_zone_stability(
         H_blocks=H_blocks,
         Q_obj_list=Q_obj_list,
         G_w_list=gw_list,
-        alpha_list=alpha_list,
         zone_ids=zone_ids,
         actuator_counts=actuator_counts,
         verbose=False,
@@ -617,22 +537,18 @@ def tune_multi_zone(
             H_blocks=H_blocks,
             Q_obj_list=Q_obj_list,
             G_w_list=gw_list,
-            alpha_list=alpha_list,
             zone_ids=zone_ids,
             actuator_counts=actuator_counts,
             verbose=False,
         )
         gamma = stab.small_gain_gamma
         lam_sys = stab.M_sys_lambda_max
-        alpha_eff = max(alpha_list)
-        spectral_metric = alpha_eff * lam_sys
+        spectral_metric = lam_sys  # alpha=1
 
         if verbose:
-            alpha_str = ", ".join(f"{a:.4g}" for a in alpha_list)
             print(f"  [tune] iter {iteration:2d}: "
                   f"gamma = {gamma:.4f}  "
-                  f"alpha_eff*lam_sys = {spectral_metric:.4f}  "
-                  f"alpha = [{alpha_str}]")
+                  f"lam_sys = {spectral_metric:.4f}")
 
         # Convergence check (#1)
         if objective == "spectral":
@@ -750,75 +666,23 @@ def tune_multi_zone(
                     floors, _TSO_COLUMN_ORDER,
                 )
 
-        # ── Refresh stability with the updated g_w (so the alpha cap
-        #    below uses fresh coupling info, not the stale snapshot) ────
-        stab_fresh = analyse_multi_zone_stability(
-            H_blocks=H_blocks,
-            Q_obj_list=Q_obj_list,
-            G_w_list=gw_list,
-            alpha_list=alpha_list,
-            zone_ids=zone_ids,
-            actuator_counts=actuator_counts,
-            verbose=False,
-        )
-        lam_sys_fresh = stab_fresh.M_sys_lambda_max
-        # Cap alpha so that  alpha_eff * lam_sys_fresh  stays at
-        #    spectral_safety * spectral_target
-        # i.e. we stay strictly below the user's target by a factor
-        # ``spectral_safety`` (default 0.9).  Prior versions tied the cap
-        # to the absolute stability bound 2.0, which made any
-        # spectral_target < 2*spectral_safety structurally unreachable.
-        alpha_global_cap = (
-            spectral_safety * spectral_target / lam_sys_fresh
-            if lam_sys_fresh > 1e-14 else np.inf
-        )
+        # (alpha refresh removed: alpha is absorbed into g_w)
 
-        # ── Uniform alpha refresh for ALL zones (#3) ────────────────────
-        for i_idx in range(n_zones):
-            zr = stab_fresh.zones[i_idx]
-            alpha_local = _optimal_alpha_for_zone(
-                C_matrices[i_idx], gw_list[i_idx], alpha_list[i_idx],
-            )
-            alpha_coupled = coupled_alpha_safety * zr.alpha_max_coupled
-            alpha_list[i_idx] = float(np.minimum(
-                np.minimum(alpha_local, alpha_coupled),
-                alpha_global_cap,
-            ))
-
-    # ── Fallback: if not converged, scale alpha down by the residual ────
-    if not converged:
-        if objective == "spectral":
-            alpha_eff = max(alpha_list)
-            spectral_metric = alpha_eff * (stab.M_sys_lambda_max if stab else 0.0)
-            if spectral_metric > spectral_target and spectral_metric > 0.0:
-                reduction = spectral_target / spectral_metric
-                alpha_list = [a * reduction for a in alpha_list]
-                if verbose:
-                    print(f"  [tune] not converged after {max_iterations} "
-                          f"iterations.  Spectral fallback: alpha *= "
-                          f"{reduction:.4f}.")
-        else:
-            gamma = stab.small_gain_gamma if stab else np.inf
-            if gamma > gamma_target and gamma > 0.0:
-                reduction = gamma_target / gamma
-                alpha_list = [a * reduction for a in alpha_list]
-                if verbose:
-                    print(f"  [tune] not converged after {max_iterations} "
-                          f"iterations.  Row-sum fallback: alpha *= "
-                          f"{reduction:.4f}.")
+    # ── Fallback: if not converged, log a warning (no alpha to reduce) ────
+    if not converged and verbose:
+        print(f"  [tune] not converged after {max_iterations} iterations.  "
+              f"Increase g_w or adjust floors.")
 
     # ── Final validation ─────────────────────────────────────────────────────
     stab_final = analyse_multi_zone_stability(
         H_blocks=H_blocks,
         Q_obj_list=Q_obj_list,
         G_w_list=gw_list,
-        alpha_list=alpha_list,
         zone_ids=zone_ids,
         actuator_counts=actuator_counts,
         verbose=verbose,
     )
-    final_alpha_eff = max(alpha_list)
-    final_spectral = final_alpha_eff * stab_final.M_sys_lambda_max
+    final_spectral = stab_final.M_sys_lambda_max  # alpha=1
 
     if objective == "spectral":
         converged_final = final_spectral < spectral_target
@@ -831,9 +695,6 @@ def tune_multi_zone(
         zone_results.append(ZoneTuningResult(
             zone_id=zone_ids[idx],
             g_w=gw_list[idx],
-            alpha=alpha_list[idx],
-            alpha_max_local=zr.alpha_max_local,
-            alpha_max_coupled=zr.alpha_max_coupled,
             rho=zr.rho_i,
             kappa=zr.kappa_Mii,
             lambda_min=zr.lambda_min_Mii,
@@ -884,7 +745,6 @@ def tune_dso(
     n_der: int,
     n_oltc: int,
     n_shunt: int = 0,
-    alpha: float = 1.0,
     *,
     safety_factor: float = 2.0,
     min_gw_der: float = 0.01,
@@ -907,7 +767,7 @@ def tune_dso(
     Two phases:
 
     1. **Phase 1 (always run):** per-actuator Gershgorin preconditioning
-       ``g_w = safety_factor * alpha * diag(C_dso) / 2``, then per-type
+       ``g_w = safety_factor * diag(C_dso) / 2``, then per-type
        floors via ``_apply_gw_floors``.  This produces sensible per-MVA
        (DER) and per-tap (OLTC) regularisation values that match the
        physical scale of the controlled outputs.
@@ -932,8 +792,6 @@ def tune_dso(
         Per-output objective weight vector.
     n_der, n_oltc, n_shunt :
         Actuator counts (column order: ``[DER | OLTC | shunt]``).
-    alpha :
-        DSO step size.
     safety_factor :
         Phase-1 Gershgorin safety multiplier.
     min_gw_der, min_gw_oltc, min_gw_shunt :
@@ -972,7 +830,7 @@ def tune_dso(
     }
 
     # ── Phase 1: Gershgorin per-actuator preconditioning + per-type floors
-    g_w = safety_factor * alpha * c_diag / 2.0
+    g_w = safety_factor * c_diag / 2.0
     g_w = _apply_gw_floors(g_w, counts, floors, _DSO_COLUMN_ORDER)
     g_w_phase1 = g_w.copy()  # remembered for the per-call growth cap
 

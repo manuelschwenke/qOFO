@@ -2531,7 +2531,7 @@ def main() -> None:
         dso_alpha=0.1,
         g_v=150000.0,
         g_q=2,
-        dso_g_v=1000.0,
+        dso_g_v=2000.0,
         g_w_der=0.5,
         g_w_gen=5e4,
         g_w_pcc=0.5,
@@ -2541,12 +2541,12 @@ def main() -> None:
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
-        auto_tune_gw=True,
+        auto_tune_gw=False,
         verbose=1,
         live_plot=True,
         add_tso_ders=True,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 8, 0),
+        start_time=datetime(2016, 1, 7, 6, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[

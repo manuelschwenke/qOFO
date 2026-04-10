@@ -479,25 +479,43 @@ class BaseOFOController(ABC):
                 if problem.n_integer > 0:
                     _w_full[problem.n_continuous:] = result.w_integer
                 _Hw = problem.H_tilde @ _w_full
+                # Also compute what the solver's constraint actually was
+                _Hc = problem.H_tilde[:, :problem.n_continuous]
+                _Hi = problem.H_tilde[:, problem.n_continuous:]
+                _Hw_solver = problem.alpha * (_Hc @ result.w_continuous)
+                if problem.n_integer > 0:
+                    _Hw_solver += _Hi @ result.w_integer.astype(np.float64)
                 # Check which outputs are near their bounds
-                _margin_up = y_err_up - _Hw   # positive = headroom
-                _margin_lo = _Hw - y_err_lo   # positive = headroom
+                _margin_up = y_err_up - _Hw_solver
+                _margin_lo = _Hw_solver - y_err_lo
                 _z = result.z
                 _binding_up = _margin_up < 1e-4
                 _binding_lo = _margin_lo < 1e-4
                 _n_bind = int(np.sum(_binding_up) + np.sum(_binding_lo))
+                # H matrix stats for voltage-constraint outputs
+                _v_mask = _gz_diag > 0
+                _H_v = problem.H_tilde[_v_mask, :]
                 print(f"  [{self.controller_id} iter {self.iteration}] "
-                      f"MIQP diag: |w|={np.max(np.abs(_w_full)):.4f}, "
-                      f"|Hw|_max={np.max(np.abs(_Hw)):.4f}, "
-                      f"z_max={np.max(_z):.2e}, "
+                      f"MIQP: status={result.status}, "
+                      f"alpha={problem.alpha}, "
+                      f"n_u={problem.n_total} ({problem.n_continuous}c+{problem.n_integer}i), "
+                      f"n_y={problem.n_outputs}")
+                print(f"    H_voltage: shape={_H_v.shape}, "
+                      f"|H|_max={np.max(np.abs(_H_v)):.4f}, "
+                      f"|H|_mean={np.mean(np.abs(_H_v)):.4f}")
+                print(f"    w: max={np.max(_w_full):.4f}, min={np.min(_w_full):.4f}, "
+                      f"|w|_sum={np.sum(np.abs(_w_full)):.2f}")
+                print(f"    Hw_diag={np.max(np.abs(_Hw)):.4f}, "
+                      f"Hw_solver={np.max(np.abs(_Hw_solver)):.4f}, "
+                      f"diff={np.max(np.abs(_Hw - _Hw_solver)):.2e}")
+                print(f"    z_max={np.max(_z):.2e}, "
                       f"margin_up_min={np.min(_margin_up):.4f}, "
-                      f"margin_lo_min={np.min(_margin_lo):.4f}, "
                       f"n_binding={_n_bind}")
-                if _n_bind > 0:
-                    for i in range(len(_Hw)):
+                if _n_bind > 0 and _n_bind <= 5:
+                    for i in range(len(_Hw_solver)):
                         if _binding_up[i] or _binding_lo[i]:
                             print(f"    out[{i}]: y={problem.y_current[i]:.4f}, "
-                                  f"Hw={_Hw[i]:.4f}, "
+                                  f"Hw={_Hw_solver[i]:.4f}, "
                                   f"bounds=[{problem.y_lower[i]:.4f}, {problem.y_upper[i]:.4f}], "
                                   f"z={_z[i]:.2e}, g_z={_gz_diag[i]:.1e}")
 

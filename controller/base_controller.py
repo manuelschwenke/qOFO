@@ -510,6 +510,24 @@ class BaseOFOController(ABC):
                                   f"Hw={_Hw_solver[i]:.4f}, "
                                   f"bounds=[{problem.y_lower[i]:.4f}, {problem.y_upper[i]:.4f}], "
                                   f"z={_z[i]:.2e}, g_z={_gz_diag[i]:.1e}")
+                # ── g_w recommendation: what g_w keeps Hw within bounds? ──
+                # For each voltage output i: |H_v[i] @ grad| / (2 * g_w) ≤ headroom_i
+                # → g_w_min = max_i |H_v[i] @ grad| / (2 * headroom_i)
+                # Use the ORIGINAL (pre-reorder) grad and H for this.
+                _headroom = np.minimum(y_err_up[_v_mask], -y_err_lo[_v_mask])
+                _headroom = np.maximum(_headroom, 0.01)  # avoid /0
+                # H_v is already reordered; grad_f in problem is reordered too
+                _Hv_grad = np.abs(_H_v @ problem.grad_f)  # |H_v @ grad| per voltage output
+                _gw_needed = _Hv_grad / (2.0 * _headroom)
+                _gw_max_needed = float(np.max(_gw_needed))
+                _gw_diag = np.diag(problem.G_w)
+                _gw_cont = _gw_diag[:problem.n_continuous]
+                _gw_current_mean = float(np.mean(_gw_cont)) if len(_gw_cont) > 0 else 0
+                _scale_factor = _gw_max_needed / _gw_current_mean if _gw_current_mean > 0 else 0
+                print(f"    ── g_w recommendation ──")
+                print(f"    g_w_current (cont. mean)={_gw_current_mean:.1f}, "
+                      f"g_w_needed={_gw_max_needed:.1f}, "
+                      f"scale={_scale_factor:.1f}x")
 
         # Step 8: Reassemble sigma in original (unreordered) variable
         # order using the precomputed continuous/integer index arrays.

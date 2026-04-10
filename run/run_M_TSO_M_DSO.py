@@ -1549,6 +1549,7 @@ def _run_delayed_stability_analysis(
             'n_pcc':  len(zone_defs[z].pcc_trafo_indices),
             'n_gen':  len(zone_defs[z].gen_indices),
             'n_oltc': len(zone_defs[z].oltc_trafo_indices),
+            'n_shunt': len(zone_defs[z].shunt_bus_indices),
         }
         for z in zone_ids_sorted
     ]
@@ -1563,6 +1564,9 @@ def _run_delayed_stability_analysis(
         actuator_counts=actuator_counts,
         alpha=alpha_tso,
         verbose=(verbose >= 1),
+        # Dwell-time analysis parameters
+        configured_cooldown=config.int_cooldown,
+        int_max_step=config.int_max_step,
     )
 
     # Write markdown report + machine-readable JSON snapshot

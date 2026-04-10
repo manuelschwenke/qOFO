@@ -147,6 +147,7 @@ class MultiTSOLivePlotter:
         sub_minute: bool = False,
         update_every: int = 1,
         tso_update_every: int = 1,
+        add_tso_ders: bool = True,
     ) -> None:
         plt.ion()
 
@@ -200,10 +201,11 @@ class MultiTSOLivePlotter:
         self._dso_trafo_q_actual_t: Dict[str, List[float]] = {}
         self._dso_trafo_tap_t: Dict[str, List[float]] = {}
 
+        self._add_tso_ders = add_tso_ders
+
         # ── Build TSO figure ──────────────────────────────────────────────────
-        # * **Figure 1 (TSO)**: Zone voltage bands, DER Q, generator AVR setpoints,
-        #   generator Q injection, and machine transformer tap positions.
-        _n_tso_rows = 5
+        # Subplots: Voltage | [DER Q if enabled] | V_gen | Q_gen | OLTC taps
+        _n_tso_rows = 5 if add_tso_ders else 4
         self._fig_tso, self._axes_tso = plt.subplots(
             _n_tso_rows, 1,
             figsize=(11, 2.6 * _n_tso_rows),
@@ -213,41 +215,46 @@ class MultiTSOLivePlotter:
         self._fig_tso.suptitle("Multi-TSO Controller (live)", fontweight="bold")
         self._fig_tso.set_constrained_layout_pads(h_pad=0.05, hspace=0.05)
 
-        ax = self._axes_tso[0]
+        _row = 0
+        ax = self._axes_tso[_row]
         ax.set_ylabel("Voltage [p.u.]")
         ax.set_title("Zone Bus Voltages (V_min / V_mean / V_max bands)")
         ax.axhline(self._v_set, color="k", ls="--", lw=1.0, label=f"V_set={self._v_set:.3f}")
-        #ax.axhline(self._v_min, color="r", ls=":", lw=0.8, alpha=0.7)
-        #ax.axhline(self._v_max, color="r", ls=":", lw=0.8, alpha=0.7)
         ax.grid(True, alpha=0.3)
         self._ax_v = ax
 
-        ax = self._axes_tso[1]
-        ax.set_ylabel(r"$Q_\mathrm{DER}$ [Mvar]")
-        ax.set_title("TSO DER Reactive Power per Zone")
-        ax.grid(True, alpha=0.3)
-        self._ax_qder = ax
+        self._ax_qder = None
+        if add_tso_ders:
+            _row += 1
+            ax = self._axes_tso[_row]
+            ax.set_ylabel(r"$Q_\mathrm{DER}$ [Mvar]")
+            ax.set_title("TSO DER Reactive Power per Zone")
+            ax.grid(True, alpha=0.3)
+            self._ax_qder = ax
 
-        ax = self._axes_tso[2]
+        _row += 1
+        ax = self._axes_tso[_row]
         ax.set_ylabel(r"$V_\mathrm{gen}$ [p.u.]")
         ax.set_title("Generator AVR Setpoints per Zone")
         ax.grid(True, alpha=0.3)
         self._ax_vgen = ax
 
-        ax = self._axes_tso[3]
+        _row += 1
+        ax = self._axes_tso[_row]
         ax.set_ylabel(r"$Q_\mathrm{gen}$ [Mvar]")
         ax.set_title("Generator Reactive Power Injection per Zone")
         ax.grid(True, alpha=0.3)
         self._ax_qgen = ax
 
-        ax = self._axes_tso[4]
+        _row += 1
+        ax = self._axes_tso[_row]
         ax.set_ylabel("Tap pos.")
         ax.set_title("TSO Machine Transformer Tap Positions")
         ax.grid(True, alpha=0.3)
         self._ax_tso_oltc = ax
 
         # Preserved but inactive for now:
-        self._ax_tso_obj = None # Use this if we want to toggle back
+        self._ax_tso_obj = None
         
         self._axes_tso[-1].set_xlabel(
             "Time [s]" if sub_minute else "Time [min]"
@@ -519,26 +526,27 @@ class MultiTSOLivePlotter:
             ax.plot(t_arr, v_max_arr, lw=0.6, color=col, ls="--", alpha=0.6)
         ax.legend(fontsize=7, ncol=4, loc="upper left")
 
-        # ── TSO DER Q ────────────────────────────────────────────────────────
-        ax = self._ax_qder
-        ax.clear()
-        ax.set_ylabel(r"$Q_\mathrm{DER}$ [Mvar]")
-        ax.set_title("TSO DER Reactive Power per Zone")
-        ax.grid(True, alpha=0.3)
-        _apply_x_fmt(ax, self._sub_minute)
+        # ── TSO DER Q (only when TSO DERs are present) ──────────────────────
+        if self._ax_qder is not None:
+            ax = self._ax_qder
+            ax.clear()
+            ax.set_ylabel(r"$Q_\mathrm{DER}$ [Mvar]")
+            ax.set_title("TSO DER Reactive Power per Zone")
+            ax.grid(True, alpha=0.3)
+            _apply_x_fmt(ax, self._sub_minute)
 
-        for zi, z in enumerate(self._zone_ids):
-            q_list = self._zone_q_der[z]
-            if not q_list:
-                continue
-            q_arr = np.array(q_list)
-            t_arr = tso_t[:len(q_arr)]
-            for j in range(q_arr.shape[1]):
-                lbl = f"Z{z}-DER{j}" if j == 0 else f"_Z{z}-DER{j}"
-                ax.plot(t_arr, q_arr[:, j], lw=0.9,
-                        color=_c(zi * 4 + j), alpha=0.85, label=lbl)
-        if any(self._zone_q_der[z] for z in self._zone_ids):
-            ax.legend(fontsize=7, ncol=4, loc="upper left")
+            for zi, z in enumerate(self._zone_ids):
+                q_list = self._zone_q_der[z]
+                if not q_list:
+                    continue
+                q_arr = np.array(q_list)
+                t_arr = tso_t[:len(q_arr)]
+                for j in range(q_arr.shape[1]):
+                    lbl = f"Z{z}-DER{j}" if j == 0 else f"_Z{z}-DER{j}"
+                    ax.plot(t_arr, q_arr[:, j], lw=0.9,
+                            color=_c(zi * 4 + j), alpha=0.85, label=lbl)
+            if any(self._zone_q_der[z] for z in self._zone_ids):
+                ax.legend(fontsize=7, ncol=4, loc="upper left")
 
         # ── Generator AVR setpoints ──────────────────────────────────────────
         ax = self._ax_vgen

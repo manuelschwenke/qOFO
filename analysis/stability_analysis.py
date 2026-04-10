@@ -1077,19 +1077,18 @@ def _print_report(
     q_obj_dso: NDArray[np.float64],
 ) -> None:
     """Print a formatted stability report to stdout."""
-    sep  = '=' * 72
-    thin = '-' * 72
-    print(sep)
-    print('  Cascaded OFO Stability Analysis Report')
-    print('  (Hauswirth contraction condition,  alpha lam_max(M) < 2)')
-    print(sep)
+    W = 76
+    sep  = '=' * W
+    thin = '-' * W
     tso_s = config.effective_tso_period_s
     dso_s = config.effective_dso_period_s
     def _fmt(s: float) -> str:
         return f'{int(s // 60)} min' if s >= 60 and s % 60 == 0 else f'{s:.1f} s'
-    print(f'  alpha = {config.alpha}   T_TSO = {_fmt(tso_s)}   '
-          f'T_DSO = {_fmt(dso_s)}')
     print()
+    print(sep)
+    print('  CASCADE STABILITY ANALYSIS')
+    print(f'  alpha = {config.alpha},  T_TSO = {_fmt(tso_s)},  T_DSO = {_fmt(dso_s)}')
+    print(sep)
 
     for layer_name, r, q_obj in (
         ('TSO', result.tso, q_obj_tso),
@@ -2165,58 +2164,53 @@ def _print_multi_zone_report(
     displayed is still available on ``MultiZoneStabilityResult`` if
     programmatic access is needed.
     """
-    sep  = "=" * 86
-    thin = "-" * 86
+    W = 80
+    sep  = "=" * W
+    thin = "-" * W
     n_zones = len(result.zones)
-    spectral_metric = result.M_sys_lambda_max
 
+    # ── Header ──────────────────────────────────────────────────────────
+    print()
     print(sep)
-    print("  Multi-Zone OFO Stability Summary")
-    print(thin)
+    print("  MULTI-ZONE STABILITY ANALYSIS")
+    print(sep)
 
-    # Per-zone compact table: one row per zone with the most load-bearing
-    # numbers (alpha, eigenspectrum, coupling, contraction rate, row sum).
-    header = (f"  {'Zone':<10s} {'lam_max':>9s} {'kappa':>9s} "
-              f"{'Sum||Mij||':>11s} {'rho_i':>7s} {'row_sum':>9s} {'Status':>9s}")
+    # ── Per-zone table ──────────────────────────────────────────────────
+    header = (f"  {'Zone':<10s} {'lam_max':>8s} {'kappa':>8s} "
+              f"{'coupling':>9s} {'rho_i':>7s} {'row_sum':>8s} {'diag_dom':>9s}")
     print(header)
-    print(thin)
+    print(f"  {thin[2:]}")
 
     n_diag_dom = 0
     for i_idx, zr in enumerate(result.zones):
         if zr.diagonally_dominant:
             n_diag_dom += 1
-            status = "OK"
+            dd_str = "pass"
         else:
-            status = "VIOLATED"
-        kappa_str = "inf" if zr.kappa_Mii >= 1e6 else f"{zr.kappa_Mii:>9.3g}"
+            dd_str = "FAIL"
+        kappa_str = "inf" if zr.kappa_Mii >= 1e6 else f"{zr.kappa_Mii:>8.1f}"
         print(
             f"  {zone_names[i_idx]:<10s} "
-            f"{zr.lambda_max_Mii:>9.3g} "
-            f"{kappa_str:>9s} "
-            f"{zr.coupling_sum:>11.4g} "
+            f"{zr.lambda_max_Mii:>8.3f} "
+            f"{kappa_str:>8s} "
+            f"{zr.coupling_sum:>9.3f} "
             f"{zr.rho_i:>7.4f} "
-            f"{zr.lyapunov_row_sum:>9.4f} "
-            f"{status:>9s}"
+            f"{zr.lyapunov_row_sum:>8.4f} "
+            f"{dd_str:>9s}"
         )
-    print(thin)
+    print(f"  {thin[2:]}")
 
-    # Global spectral bound (necessary-and-sufficient)
-    global_tag = "STABLE" if result.globally_stable else "VIOLATED"
-    rho_str = f", rho(I-alpha*M) = {result.M_sys_spectral_radius:.4f}" if result.M_sys_spectral_radius > 0 else ""
-    print(f"  Global spectral:  lam_max(M_sys) = {result.M_sys_lambda_max:.4g}{rho_str}   "
-          f"[{global_tag}]")
+    # ── Global stability conditions ─────────────────────────────────────
+    rho_sys = result.M_sys_spectral_radius
+    rho_tag = "STABLE" if result.globally_stable else "UNSTABLE"
+    sg_tag  = "pass" if result.small_gain_stable else "FAIL"
 
-    # Small-gain (sufficient only)
-    sg_tag = "SATISFIED" if result.small_gain_stable else "VIOLATED"
-    print(f"  Small-gain:       gamma = {result.small_gain_gamma:.4f}   "
-          f"[{sg_tag}]")
+    print(f"  Spectral radius   rho(I - alpha*M_sys) = {rho_sys:.4f}     [{rho_tag}]")
+    print(f"  Small-gain        gamma = {result.small_gain_gamma:.4f}              [{sg_tag}]")
+    print(f"  Diag. dominance   {n_diag_dom}/{n_zones} zones pass")
 
-    # Diagonal-dominance count
-    print(f"  Diag. dominance:  {n_diag_dom}/{n_zones} zones pass")
-
-    # Dwell-time (two lines: single-actuator and aggregate)
+    # ── Dwell-time ──────────────────────────────────────────────────────
     if result.global_T_dwell_single is not None:
-        rho_used = result.M_sys_spectral_radius
         sample_dt = next(
             (zr.dwell_time for zr in result.zones if zr.dwell_time is not None),
             None,
@@ -2225,18 +2219,15 @@ def _print_multi_zone_report(
         Ta = result.global_T_dwell
         Ts_str = str(Ts) if Ts < _DWELL_TIME_CAP else "inf"
         Ta_str = str(Ta) if Ta < _DWELL_TIME_CAP else "inf"
-        cooldown_info = ""
+        cd_str = ""
         if sample_dt is not None and sample_dt.configured_cooldown is not None:
             cd = sample_dt.configured_cooldown
             ok = cd >= Ts
-            cooldown_info = (f"  [configured: {cd}, "
-                             f"{'OK' if ok else 'INSUFFICIENT'}]")
-        print(f"  Dwell-time:       T_dwell(single) = {Ts_str}, "
-              f"T_dwell(all) = {Ta_str} iterations "
-              f"(rho_sys = {rho_used:.4f}){cooldown_info}")
+            cd_str = f"  (configured: {cd}, {'OK' if ok else 'INSUFFICIENT'})"
+        print(f"  Dwell-time        single={Ts_str}, "
+              f"aggregate={Ta_str} iterations{cd_str}")
 
-    # Warnings (collected across all zones).  The recommendations block is
-    # intentionally removed per the compact-report design.
+    # ── Warnings (compact) ──────────────────────────────────────────────
     all_warnings = []
     for i_idx, zr in enumerate(result.zones):
         for w in zr.warnings:
@@ -2247,3 +2238,4 @@ def _print_multi_zone_report(
             print(f"  ! {w}")
 
     print(sep)
+    print()

@@ -108,31 +108,6 @@ def _dso_cascade_decay(
     return rho_D, cascade_decay, alpha_opt
 
 
-def _dso_actual_decay(
-    H: NDArray[np.float64],
-    q_obj_diag: NDArray[np.float64],
-    g_w: NDArray[np.float64],
-    n_inner: int,
-) -> Tuple[float, float, float]:
-    """Return ``(rho_d, cascade_decay, lam_max)`` for one DSO.
-
-    ``rho_d = max_l |1 - lambda_l(M_dso)|``.
-    """
-    C = _compute_curvature_matrix(H, q_obj_diag)
-    gw_inv_sqrt = 1.0 / np.sqrt(np.maximum(g_w, 1e-12))
-    M = (gw_inv_sqrt[:, None] * C) * gw_inv_sqrt[None, :]
-    _, active, _ = _effective_eigenspectrum(M)
-
-    if len(active) == 0:
-        return 0.0, 0.0, 0.0
-
-    l_max = float(active[-1])
-    l_min = float(active[0]) if len(active) >= 2 else l_max
-    rho_d = max(abs(1.0 - l_max), abs(1.0 - l_min))
-    cascade_decay = rho_d ** max(int(n_inner), 1)
-    return rho_d, cascade_decay, l_max
-
-
 # =============================================================================
 #  Alpha computation
 # =============================================================================

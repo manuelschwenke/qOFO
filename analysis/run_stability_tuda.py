@@ -30,7 +30,7 @@ import pandapower as pp
 
 warnings.filterwarnings("ignore", category=UserWarning, module=r"mosek")
 
-from analysis.stability_analysis import analyse_stability, recommend_gw_min
+from analysis.stability_analysis import analyse_stability
 from core.cascade_config import CascadeConfig
 from core.profiles import DEFAULT_PROFILES_CSV, apply_profiles, load_profiles, snapshot_base_values
 from network.build_tuda_net import build_tuda_net

@@ -278,16 +278,18 @@ class MultiTSOConfig:
     alpha_dso when set."""
 
     # ── Gershgorin safety factors (Phase 1 preconditioning) ─────────────
-    safety_factor_continuous: float = 3.0
+    safety_factor_continuous: float = 5.0
     """g_w = sf * C_ii/2 for continuous actuators (DER, PCC, V_gen).
-    sf=3 compresses the eigenvalue spread (lowers kappa) so the
-    contraction rate rho is well below 1, yielding practical dwell
-    times for discrete actuators.  sf=1 gives bare Gershgorin
-    (rho ~0.99, T_dwell ~900); sf=3 targets rho ~0.85, T_dwell ~20."""
+    Higher sf compresses the eigenvalue spread (lowers kappa) and
+    reduces cross-coupling norms, improving both per-zone contraction
+    rate rho_i and the small-gain condition.  Approximate effects:
+      sf=3: rho ~0.97, T_dwell ~200-700, fast response
+      sf=5: rho ~0.90, T_dwell ~30-80, moderate response
+      sf=8: rho ~0.80, T_dwell ~8-20, conservative response"""
 
-    safety_factor_discrete: float = 5.0
+    safety_factor_discrete: float = 8.0
     """g_w = sf * C_ii/2 for discrete actuators (OLTC, shunt).
-    Anti-oscillation: sf=5 gives g_w=2.5*C_ii, preventing gradient
+    Anti-oscillation: sf=8 gives g_w=4*C_ii, preventing gradient
     reversal after a single tap step and reducing the perturbation
     bound delta_a in the dwell-time analysis."""
 

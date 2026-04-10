@@ -247,6 +247,11 @@ class MultiTSOConfig:
 
     # ── Auto-tune g_w based on local curvature ────────────────────────────────
     auto_tune_gw: bool = False  # If True, calculates per-actuator g_w at t=0
+    tune_alpha_only: bool = False
+    """When True alongside auto_tune_gw, the eigenvector pump computes
+    alpha (step size) but does NOT overwrite the hand-tuned g_w values.
+    This preserves controller responsiveness while ensuring alpha is
+    small enough for rho(I - alpha*M_sys) < 1."""
 
     # ── PSO joint tuning ─────────────────────────────────────────────────────
     # When auto_tune_gw=True the runner calls the PSO tuner instead of the
@@ -1488,11 +1493,13 @@ def _tune_and_apply_gw(
         eff_alpha_tso = (config.alpha_tso_override
                          if config.alpha_tso_override is not None
                          else result.alpha_tso)
+        alpha_only = config.tune_alpha_only
         for idx, z in enumerate(zone_ids_sorted):
+            replacements: dict = {"alpha": eff_alpha_tso}
+            if not alpha_only:
+                replacements["g_w"] = result.gw_tso[idx]
             tso_controllers[z].params = dataclasses.replace(
-                tso_controllers[z].params,
-                g_w=result.gw_tso[idx],
-                alpha=eff_alpha_tso,
+                tso_controllers[z].params, **replacements,
             )
         eff_alpha_dso_list = []
         for d_idx, (dso_id_key, dso_ctrl) in enumerate(dso_controllers.items()):
@@ -1501,10 +1508,11 @@ def _tune_and_apply_gw(
                            else (result.alpha_dso[d_idx]
                                  if d_idx < len(result.alpha_dso) else 1.0))
             eff_alpha_dso_list.append(eff_alpha_d)
+            dso_replacements: dict = {"alpha": eff_alpha_d}
+            if not alpha_only:
+                dso_replacements["g_w"] = result.gw_dso[d_idx]
             dso_ctrl.params = dataclasses.replace(
-                dso_ctrl.params,
-                g_w=result.gw_dso[d_idx],
-                alpha=eff_alpha_d,
+                dso_ctrl.params, **dso_replacements,
             )
         coordinator._last_pump_result = result  # type: ignore[attr-defined]
         if verbose >= 1:
@@ -2617,6 +2625,7 @@ def main() -> None:
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
         auto_tune_gw=True,
+        tune_alpha_only=True,   # keep hand-tuned g_w, only compute alpha
         verbose=1,
         live_plot=True,
         add_tso_ders=True,

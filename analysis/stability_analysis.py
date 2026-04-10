@@ -1652,16 +1652,19 @@ def analyse_multi_zone_stability(
             # Contraction rate with alpha
             rho_i = max(abs(1.0 - alpha * lam) for lam in eig_ii_active)
 
-        if n_effective == 0:
+        if n_active == 0:
             kappa = 1.0
             alpha_max_local = np.inf
             alpha_i_opt = 1.0
             rho_i_opt = 0.0
         else:
-            l_max_eff = float(eig_ii_eff[-1])
-            l_min_eff = float(eig_ii_eff[0])
-            alpha_max_local = 2.0 / l_max_eff if l_max_eff > 1e-14 else np.inf
-            kappa = l_max_eff / l_min_eff if l_min_eff > 1e-14 else np.inf
+            # Use ACTIVE eigenvalues (1% threshold) for kappa — effective
+            # eigenvalues include slow modes (1e-12 threshold) that inflate
+            # kappa to inf even though they are benign.
+            l_max_act = float(eig_ii_active[-1])
+            l_min_act = float(eig_ii_active[0])
+            alpha_max_local = 2.0 / l_max_act if l_max_act > 1e-14 else np.inf
+            kappa = l_max_act / l_min_act if l_min_act > 1e-14 else np.inf
             alpha_i_opt = 1.0   # alpha removed; kept for backward compat
             rho_i_opt = (kappa - 1.0) / (kappa + 1.0) if kappa < np.inf else 1.0
 
@@ -2006,13 +2009,37 @@ def analyse_multi_zone_stability(
             f"This indicates oscillatory coupling modes between zones."
         )
 
-    # ── Step 6: Global dwell-time aggregation ──────────────────────────────
+    # ── Step 6: Global dwell-time using system spectral radius ──────────────
+    #
+    # The per-zone dwell-time uses rho_i (ignoring cross-coupling).  When
+    # the small-gain condition is violated, the per-zone bound is not
+    # rigorous.  The global spectral radius rho(I - alpha*M_sys) accounts
+    # for coupling and is the correct contraction rate for the dwell-time
+    # formula in the coupled case.
     zone_dwells = [zr.dwell_time for zr in zone_results if zr.dwell_time is not None]
     global_T_dwell: Optional[int] = None
     global_delta_max: Optional[float] = None
-    if zone_dwells:
-        global_T_dwell = max(dt.T_dwell for dt in zone_dwells)
-        global_delta_max = max(dt.delta_max for dt in zone_dwells)
+    if zone_dwells and spectral_radius < 1.0:
+        # Aggregate delta_max: sum of all per-zone perturbation bounds
+        # (conservative — assumes all zones switch simultaneously)
+        global_delta_max = sum(dt.delta_max for dt in zone_dwells)
+        eps = zone_dwells[0].epsilon
+
+        if global_delta_max < 1e-15:
+            global_T_dwell = 1
+        else:
+            numerator_arg = global_delta_max / ((1.0 - spectral_radius) * eps)
+            if numerator_arg <= 1.0:
+                global_T_dwell = 1
+            else:
+                global_T_dwell = int(math.ceil(
+                    math.log(numerator_arg) / math.log(1.0 / spectral_radius)
+                ))
+                global_T_dwell = min(max(global_T_dwell, 1), _DWELL_TIME_CAP)
+    elif zone_dwells:
+        # rho >= 1: continuous system doesn't contract globally
+        global_T_dwell = _DWELL_TIME_CAP
+        global_delta_max = sum(dt.delta_max for dt in zone_dwells)
 
     # ── Build summary string ──────────────────────────────────────────────────
     g_status = "STABLE" if globally_stable else "UNSTABLE"
@@ -2023,7 +2050,7 @@ def analyse_multi_zone_stability(
     dwell_note = ""
     if global_T_dwell is not None:
         T_str = str(global_T_dwell) if global_T_dwell < _DWELL_TIME_CAP else "inf"
-        dwell_note = f"  T_dwell_max = {T_str}."
+        dwell_note = f"  T_dwell(rho_sys={spectral_radius:.4f}) = {T_str}."
     summary = (
         f"Multi-zone stability: {g_status}.  "
         f"lam_max(M_sys) = {M_sys_lambda_max:.4g}, "
@@ -2139,7 +2166,6 @@ def _print_multi_zone_report(
         T_str = (str(result.global_T_dwell)
                  if result.global_T_dwell < _DWELL_TIME_CAP else "inf")
         cooldown_info = ""
-        # Check if configured cooldown is available from any zone
         sample_dt = next(
             (zr.dwell_time for zr in result.zones if zr.dwell_time is not None),
             None,
@@ -2150,7 +2176,10 @@ def _print_multi_zone_report(
                 f"  [configured: {sample_dt.configured_cooldown}, "
                 f"{'OK' if ok else 'INSUFFICIENT'}]"
             )
-        print(f"  Dwell-time:       T_dwell_max = {T_str} iterations{cooldown_info}")
+        rho_used = result.M_sys_spectral_radius
+        delta_str = f", delta_max = {result.global_delta_max:.4g}" if result.global_delta_max else ""
+        print(f"  Dwell-time:       T_dwell = {T_str} iterations "
+              f"(rho_sys = {rho_used:.4f}{delta_str}){cooldown_info}")
 
     # Warnings (collected across all zones).  The recommendations block is
     # intentionally removed per the compact-report design.

@@ -11,6 +11,7 @@ from analysis.stability_analysis import (
     recommend_gw_min,
     CascadeStabilityResult,
     ControllerStabilityResult,
+    DwellTimeResult,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     'recommend_gw_min',
     'CascadeStabilityResult',
     'ControllerStabilityResult',
+    'DwellTimeResult',
 ]

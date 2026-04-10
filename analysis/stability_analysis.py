@@ -73,6 +73,7 @@ Author: Manuel Schwenke, TU Darmstadt
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -148,6 +149,63 @@ class ControllerStabilityResult:
     warnings: list = field(default_factory=list)
     """Human-readable warning strings."""
 
+    # Dwell-time analysis for discrete actuators
+    dwell_time: Optional["DwellTimeResult"] = None
+    """Dwell-time stability analysis for discrete (integer) actuators.
+    None if no discrete actuators are present in this layer."""
+
+
+@dataclass
+class DwellTimeResult:
+    """Dwell-time stability analysis for discrete (integer) actuators.
+
+    Between discrete switch events the continuous OFO sub-problem contracts
+    at rate ρ.  Each discrete switch perturbs the equilibrium by at most
+    δ_max.  The error across switch events satisfies the affine recursion
+
+        E(n+1) ≤ ρ^T_dwell · E(n) + δ_max
+
+    which converges to E* = δ_max / (1 − ρ^T_dwell) provided ρ^T_dwell < 1.
+    """
+
+    rho_continuous: float
+    """Spectral contraction rate of the continuous sub-problem (active modes)."""
+
+    per_actuator_delta: Dict[str, float]
+    """Per discrete actuator perturbation bound δ_a.
+    δ_a = α · ‖G_w_cont^{-1/2} H_cont^T Q_obj H_a Δs_a‖₂."""
+
+    delta_max: float
+    """Conservative aggregate bound: Σ_a δ_a (all switch simultaneously)."""
+
+    T_dwell: int
+    """Required minimum iterations between any discrete switch event.
+    T_dwell = ⌈log(δ_max / ((1−ρ)·ε)) / log(1/ρ)⌉."""
+
+    epsilon: float
+    """Convergence tolerance used in the dwell-time formula."""
+
+    ultimate_bound: float
+    """Steady-state error bound E* = δ_max / (1 − ρ^T_dwell)."""
+
+    contraction_per_dwell: float
+    """ρ^T_dwell: effective contraction factor per dwell period."""
+
+    configured_cooldown: Optional[int] = None
+    """The int_cooldown value from the controller config, if available."""
+
+    cooldown_sufficient: Optional[bool] = None
+    """True iff configured_cooldown ≥ T_dwell."""
+
+    cooldown_margin: Optional[int] = None
+    """configured_cooldown − T_dwell.  Positive = safe."""
+
+    n_discrete_actuators: int = 0
+    """Number of discrete actuators in this layer."""
+
+    warnings: list = field(default_factory=list)
+    """Human-readable warnings specific to dwell-time analysis."""
+
 
 @dataclass
 class CascadeStabilityResult:
@@ -212,6 +270,11 @@ def _analyse_layer(
     n_q_integral: int = 0,
     g_qi: float = 0.0,
     lambda_qi: float = 0.0,
+    # Dwell-time analysis parameters
+    integer_column_indices: Optional[list[int]] = None,
+    integer_step_sizes: Optional[NDArray[np.float64]] = None,
+    dwell_time_epsilon: float = 0.01,
+    configured_cooldown: Optional[int] = None,
 ) -> ControllerStabilityResult:
     """Compute stability bounds for one controller layer.
 
@@ -529,6 +592,38 @@ def _analyse_layer(
     if augmented_rho is not None and augmented_rho >= 1.0:
         stable = False
 
+    # ── Dwell-time analysis for discrete actuators ───────────────────────────
+    dwell_time_result = None
+    if integer_column_indices is not None and len(integer_column_indices) > 0:
+        # Determine the contraction rate for the continuous sub-problem.
+        # Prefer the already-computed DSO convergence rate (active-mode
+        # filtered); fall back to computing from M eigenvalues directly.
+        rho_for_dwell = dso_convergence_rate
+        if rho_for_dwell is None and M_max > 0:
+            rel_threshold_dw = max(M_max * 0.01, 1e-10)
+            M_eig_active_dw = M_eig[M_eig > rel_threshold_dw]
+            if len(M_eig_active_dw) > 0:
+                rho_for_dwell = float(
+                    np.max(np.abs(1.0 - alpha * M_eig_active_dw))
+                )
+        if rho_for_dwell is None:
+            rho_for_dwell = 1.0  # degenerate: cannot contract
+
+        if integer_step_sizes is None:
+            integer_step_sizes = np.ones(len(integer_column_indices))
+
+        dwell_time_result = _compute_dwell_time(
+            H=H, alpha=alpha, q_obj_diag=q_obj_diag,
+            gw_vector=gw_vector, gu_vector=gu_vector,
+            actuator_names=actuator_names,
+            rho_continuous=rho_for_dwell,
+            integer_column_indices=integer_column_indices,
+            integer_step_sizes=integer_step_sizes,
+            epsilon=dwell_time_epsilon,
+            configured_cooldown=configured_cooldown,
+        )
+        warnings.extend(dwell_time_result.warnings)
+
     return ControllerStabilityResult(
         sigma_max=sigma_max,
         sigma_min=sigma_min,
@@ -545,6 +640,164 @@ def _analyse_layer(
         stable=stable,
         marginal=marginal,
         warnings=warnings,
+        dwell_time=dwell_time_result,
+    )
+
+
+# ─── Dwell-time stability analysis ────────────────────────────────────────────
+
+_DWELL_TIME_CAP = 10_000  # practical upper bound on T_dwell
+
+
+def _compute_dwell_time(
+    H: NDArray[np.float64],
+    alpha: float,
+    q_obj_diag: NDArray[np.float64],
+    gw_vector: NDArray[np.float64],
+    gu_vector: NDArray[np.float64],
+    actuator_names: list[str],
+    rho_continuous: float,
+    integer_column_indices: list[int],
+    integer_step_sizes: NDArray[np.float64],
+    epsilon: float = 0.01,
+    configured_cooldown: Optional[int] = None,
+) -> DwellTimeResult:
+    """Compute dwell-time stability bounds for discrete actuators.
+
+    When a discrete actuator switches by Δs_a, the continuous equilibrium
+    shifts.  The perturbation to the preconditioned continuous error is:
+
+        δ_a = α · ‖G_w_cont^{-½} · H_cont^T · Q_obj · H_a · Δs_a‖₂
+
+    The aggregate bound δ_max = Σ_a δ_a assumes all discrete actuators
+    could switch simultaneously (conservative but trivially correct).
+
+    The minimum dwell time satisfying E* ≤ ε is:
+
+        T_dwell = ⌈log(δ_max / ((1 − ρ) · ε)) / log(1/ρ)⌉
+
+    Parameters
+    ----------
+    H : Full sensitivity matrix (n_y × n_u), continuous + discrete columns.
+    alpha : OFO step-size gain.
+    q_obj_diag : Per-output objective weight vector (length n_y).
+    gw_vector, gu_vector : Per-actuator g_w and g_u vectors (length n_u).
+    actuator_names : Names matching column order of H.
+    rho_continuous : Contraction rate of the continuous sub-problem.
+    integer_column_indices : Column indices of discrete actuators in H.
+    integer_step_sizes : Step size per discrete actuator (typically 1).
+    epsilon : Target convergence tolerance for dwell-time bound.
+    configured_cooldown : Configured int_cooldown for comparison.
+    """
+    n_y, n_u = H.shape
+    n_int = len(integer_column_indices)
+    int_set = set(integer_column_indices)
+
+    # Continuous column mask and sub-matrices
+    cont_mask = np.array([j not in int_set for j in range(n_u)])
+    n_cont = int(np.sum(cont_mask))
+
+    dwell_warnings: list[str] = []
+
+    # ── Compute per-actuator perturbation δ_a ────────────────────────────
+    per_actuator_delta: Dict[str, float] = {}
+
+    if n_cont == 0:
+        # No continuous actuators → no continuous error to perturb
+        for k, j in enumerate(integer_column_indices):
+            per_actuator_delta[actuator_names[j]] = 0.0
+    else:
+        H_cont = H[:, cont_mask]  # (n_y, n_cont)
+        gw_total_cont = (gw_vector + gu_vector)[cont_mask]
+        gw_cont_inv_sqrt = 1.0 / np.sqrt(np.maximum(gw_total_cont, 1e-12))
+
+        # Precompute Q^{1/2} H_cont  (reused for every discrete actuator)
+        q_sqrt = np.sqrt(np.maximum(q_obj_diag, 0.0))
+        QH_cont = q_sqrt[:, None] * H_cont  # (n_y, n_cont)
+
+        for k, j in enumerate(integer_column_indices):
+            ds = float(integer_step_sizes[k])
+            H_a = H[:, j]  # (n_y,)
+            QH_a = q_sqrt * H_a * ds  # (n_y,)
+
+            # Cross-curvature: H_cont^T Q_obj H_a Δs_a
+            cross = QH_cont.T @ QH_a  # (n_cont,)
+
+            # Preconditioned perturbation norm
+            precond_cross = gw_cont_inv_sqrt * cross  # (n_cont,)
+            delta_a = alpha * float(np.linalg.norm(precond_cross))
+            per_actuator_delta[actuator_names[j]] = delta_a
+
+    delta_max = sum(per_actuator_delta.values())
+
+    # ── Compute T_dwell ──────────────────────────────────────────────────
+    rho = rho_continuous
+
+    if rho >= 1.0:
+        T_dwell = _DWELL_TIME_CAP
+        contraction_per_dwell = 1.0
+        ultimate_bound = math.inf
+        dwell_warnings.append(
+            'rho_continuous >= 1.0: continuous sub-problem does not contract. '
+            'Dwell-time analysis requires rho < 1.'
+        )
+    elif rho <= 0.0 or delta_max < 1e-15:
+        # Perfect contraction or no perturbation
+        T_dwell = 1
+        contraction_per_dwell = rho ** 1 if rho > 0.0 else 0.0
+        ultimate_bound = (
+            delta_max / (1.0 - contraction_per_dwell)
+            if contraction_per_dwell < 1.0 else 0.0
+        )
+    else:
+        # T_dwell = ceil(log(delta_max / ((1 - rho) * epsilon)) / log(1/rho))
+        numerator_arg = delta_max / ((1.0 - rho) * epsilon)
+        if numerator_arg <= 1.0:
+            T_dwell = 1
+        else:
+            T_dwell = int(math.ceil(
+                math.log(numerator_arg) / math.log(1.0 / rho)
+            ))
+            T_dwell = max(T_dwell, 1)
+
+        if T_dwell > _DWELL_TIME_CAP:
+            T_dwell = _DWELL_TIME_CAP
+            dwell_warnings.append(
+                f'T_dwell capped at {_DWELL_TIME_CAP} (rho = {rho:.6f}, '
+                f'delta_max = {delta_max:.4g}, epsilon = {epsilon:.4g}).  '
+                f'Continuous contraction is too slow relative to discrete '
+                f'perturbation size.'
+            )
+
+        contraction_per_dwell = rho ** T_dwell
+        ultimate_bound = delta_max / (1.0 - contraction_per_dwell)
+
+    # ── Compare against configured cooldown ──────────────────────────────
+    cooldown_sufficient: Optional[bool] = None
+    cooldown_margin: Optional[int] = None
+    if configured_cooldown is not None:
+        cooldown_sufficient = configured_cooldown >= T_dwell
+        cooldown_margin = configured_cooldown - T_dwell
+        if not cooldown_sufficient:
+            dwell_warnings.append(
+                f'Configured int_cooldown = {configured_cooldown} is below '
+                f'required T_dwell = {T_dwell}.  Increase int_cooldown to '
+                f'at least {T_dwell} for guaranteed stability.'
+            )
+
+    return DwellTimeResult(
+        rho_continuous=rho,
+        per_actuator_delta=per_actuator_delta,
+        delta_max=delta_max,
+        T_dwell=T_dwell,
+        epsilon=epsilon,
+        ultimate_bound=ultimate_bound,
+        contraction_per_dwell=contraction_per_dwell,
+        configured_cooldown=configured_cooldown,
+        cooldown_sufficient=cooldown_sufficient,
+        cooldown_margin=cooldown_margin,
+        n_discrete_actuators=n_int,
+        warnings=dwell_warnings,
     )
 
 
@@ -669,6 +922,24 @@ def analyse_stability(
         # Legacy fallback: uniform weight
         q_obj_dso = np.full(H_dso.shape[0], config.g_q)
 
+    # ── Integer column indices for dwell-time analysis ──────────────────────────
+    # TSO column order: [Q_DER | Q_PCC | V_gen | OLTC | Shunt]
+    n_tso_cont = n_tso_der + n_tso_pcc + n_tso_gen
+    n_tso_int = n_tso_oltc + n_tso_shunt
+    tso_int_indices = (
+        list(range(n_tso_cont, n_tso_cont + n_tso_int))
+        if n_tso_int > 0 else None
+    )
+    # DSO column order: [Q_DER | OLTC | Shunt]
+    n_dso_int = n_dso_oltc + n_dso_shunt
+    dso_int_indices = (
+        list(range(n_dso_der, n_dso_der + n_dso_int))
+        if n_dso_int > 0 else None
+    )
+    dwell_eps = getattr(config, 'dwell_time_epsilon', 0.01)
+    int_cooldown = getattr(config, 'int_cooldown', None)
+    int_max_step = getattr(config, 'int_max_step', 1)
+
     # ── Analyse each layer ────────────────────────────────────────────────────────
     tso_result = _analyse_layer(
         layer_name='TSO',
@@ -678,6 +949,13 @@ def analyse_stability(
         gw_vector=gw_tso,
         actuator_names=tso_actuator_names,
         gu_vector=gu_tso,
+        integer_column_indices=tso_int_indices,
+        integer_step_sizes=(
+            np.full(n_tso_int, int_max_step, dtype=float)
+            if tso_int_indices else None
+        ),
+        dwell_time_epsilon=dwell_eps,
+        configured_cooldown=int_cooldown,
     )
 
     tso_period_s = config.effective_tso_period_s
@@ -697,6 +975,13 @@ def analyse_stability(
         n_q_integral=n_dso_q_out,
         g_qi=config.g_qi,
         lambda_qi=config.lambda_qi,
+        integer_column_indices=dso_int_indices,
+        integer_step_sizes=(
+            np.full(n_dso_int, int_max_step, dtype=float)
+            if dso_int_indices else None
+        ),
+        dwell_time_epsilon=dwell_eps,
+        configured_cooldown=int_cooldown,
     )
 
     cascade_stable = tso_result.stable and dso_result.stable
@@ -724,6 +1009,16 @@ def analyse_stability(
         )
     if dso_result.augmented_rho is not None:
         summary += f'  rho_aug(PI) = {dso_result.augmented_rho:.4f}.'
+
+    # Dwell-time summary
+    for lbl, lr in (('TSO', tso_result), ('DSO', dso_result)):
+        if lr.dwell_time is not None:
+            dt = lr.dwell_time
+            T_str = str(dt.T_dwell) if dt.T_dwell < _DWELL_TIME_CAP else 'inf'
+            summary += f'  T_dwell({lbl}) = {T_str}'
+            if dt.cooldown_sufficient is not None:
+                summary += f' [{"OK" if dt.cooldown_sufficient else "INSUFFICIENT"}]'
+            summary += '.'
 
     result = CascadeStabilityResult(
         tso=tso_result,
@@ -846,6 +1141,30 @@ def _print_report(
                     print(f'    Cascade margin   1 - rho_aug^{ratio} = '
                           f'{r.augmented_cascade_margin:.4f}  '
                           f'({"OK" if r.augmented_cascade_margin > 0 else "INSUFFICIENT"})')
+            print()
+
+        # ── Dwell-time analysis ────────────────────────────────────────────
+        if r.dwell_time is not None:
+            dt = r.dwell_time
+            print(f'  Dwell-time analysis  ({dt.n_discrete_actuators} discrete actuators, '
+                  f'epsilon = {dt.epsilon:.4g}):')
+            print(f'    rho_continuous (active modes) = {dt.rho_continuous:.4f}')
+            if dt.per_actuator_delta:
+                print(f'    Per-actuator perturbation delta_a:')
+                for aname, delta_val in dt.per_actuator_delta.items():
+                    print(f'      {aname:<22s}  delta = {delta_val:.4g}')
+            print(f'    delta_max (aggregate)         = {dt.delta_max:.4g}')
+            T_str = str(dt.T_dwell) if dt.T_dwell < _DWELL_TIME_CAP else 'inf'
+            print(f'    T_dwell (required cooldown)   = {T_str} iterations')
+            if dt.T_dwell < _DWELL_TIME_CAP:
+                print(f'    rho^T_dwell                  = {dt.contraction_per_dwell:.6f}')
+                print(f'    Ultimate error bound E*      = {dt.ultimate_bound:.4g}')
+            if dt.configured_cooldown is not None:
+                ok_str = 'OK' if dt.cooldown_sufficient else 'INSUFFICIENT'
+                margin_str = (f'+{dt.cooldown_margin}' if dt.cooldown_margin >= 0
+                              else str(dt.cooldown_margin))
+                print(f'    Configured int_cooldown      = {dt.configured_cooldown}  '
+                      f'[{ok_str}, margin = {margin_str}]')
             print()
 
         if r.warnings:
@@ -1085,6 +1404,9 @@ class ZoneStabilityResult:
     lyapunov_row_sum_opt: float = 1.0
     """ρ*_i + Σ_{j≠i} σ*_ij at optimal step size."""
 
+    dwell_time: Optional[DwellTimeResult] = None
+    """Dwell-time stability result for this zone's discrete actuators."""
+
 
 @dataclass
 class MultiZoneStabilityResult:
@@ -1159,6 +1481,12 @@ class MultiZoneStabilityResult:
     M_sys_has_complex_eigenvalues: bool = False
     """True if M_sys has eigenvalues with |imag| > 1e-8."""
 
+    global_T_dwell: Optional[int] = None
+    """Maximum T_dwell across all zones (binding dwell-time requirement)."""
+
+    global_delta_max: Optional[float] = None
+    """Maximum per-zone delta_max across all zones."""
+
 
 def analyse_multi_zone_stability(
     H_blocks:    Dict[Tuple[int, int], NDArray[np.float64]],
@@ -1170,6 +1498,10 @@ def analyse_multi_zone_stability(
     actuator_counts: Optional[List[Dict[str, int]]] = None,
     alpha:       float = 1.0,
     verbose:     bool = True,
+    # Dwell-time analysis parameters
+    dwell_time_epsilon: float = 0.01,
+    configured_cooldown: Optional[int] = None,
+    int_max_step: int = 1,
 ) -> "MultiZoneStabilityResult":
     """
     Offline stability analysis for a multi-zone TSO-DSO OFO system.
@@ -1279,6 +1611,8 @@ def analyse_multi_zone_stability(
     for i_idx, i in enumerate(zone_ids):
         H_ii  = H_blocks[(i, i)]
         M_ii  = M_blocks[(i, i)]
+        q_obj_i = Q_obj_list[i_idx]
+        gw_i    = G_w_list[i_idx]
         n_y_i, n_u_i = H_ii.shape
 
         # SVD of raw H_ii
@@ -1430,6 +1764,42 @@ def analyse_multi_zone_stability(
                         m['_slowest_active'] = True
                         ev_diag.append(m)
 
+        # ── Per-zone dwell-time analysis ─────────────────────────────────
+        zone_dwell = None
+        ac = actuator_counts[i_idx] if actuator_counts else {}
+        n_cont_z = ac.get('n_der', 0) + ac.get('n_pcc', 0) + ac.get('n_gen', 0)
+        n_oltc_z = ac.get('n_oltc', 0)
+        n_shunt_z = ac.get('n_shunt', 0)
+        n_int_z = n_oltc_z + n_shunt_z
+
+        if n_int_z > 0 and n_u_i > 0:
+            int_indices_z = list(range(n_cont_z, n_cont_z + n_int_z))
+            # Build actuator names matching the H_ii column order
+            zone_a_names = (
+                [f'Q_DER_{k}' for k in range(ac.get('n_der', 0))] +
+                [f'Q_PCC_{k}' for k in range(ac.get('n_pcc', 0))] +
+                [f'V_gen_{k}' for k in range(ac.get('n_gen', 0))] +
+                [f'OLTC_{k}'  for k in range(n_oltc_z)] +
+                [f'Shunt_{k}' for k in range(n_shunt_z)]
+            )
+            if len(zone_a_names) < n_u_i:
+                zone_a_names += [f'u_{k}' for k in range(len(zone_a_names), n_u_i)]
+
+            # G_u is typically zero for multi-zone TSO analysis
+            gu_i = np.zeros_like(gw_i)
+
+            zone_dwell = _compute_dwell_time(
+                H=H_ii, alpha=alpha, q_obj_diag=q_obj_i,
+                gw_vector=gw_i, gu_vector=gu_i,
+                actuator_names=zone_a_names,
+                rho_continuous=rho_i,
+                integer_column_indices=int_indices_z,
+                integer_step_sizes=np.full(n_int_z, int_max_step, dtype=float),
+                epsilon=dwell_time_epsilon,
+                configured_cooldown=configured_cooldown,
+            )
+            warnings.extend(zone_dwell.warnings)
+
         zone_results.append(ZoneStabilityResult(
             zone_id=i,
             n_controls=n_u_i,
@@ -1456,6 +1826,7 @@ def analyse_multi_zone_stability(
             sigma_ij_opt=sigma_ij_optimal,
             lyapunov_row_sum=lyap_row,
             lyapunov_row_sum_opt=lyap_row_opt,
+            dwell_time=zone_dwell,
         ))
 
     # ── Step 3: Assemble full M_sys and global eigenvalue analysis ────────────
@@ -1618,12 +1989,23 @@ def analyse_multi_zone_stability(
             f"This indicates oscillatory coupling modes between zones."
         )
 
+    # ── Step 6: Global dwell-time aggregation ──────────────────────────────
+    zone_dwells = [zr.dwell_time for zr in zone_results if zr.dwell_time is not None]
+    global_T_dwell: Optional[int] = None
+    global_delta_max: Optional[float] = None
+    if zone_dwells:
+        global_T_dwell = max(dt.T_dwell for dt in zone_dwells)
+        global_delta_max = max(dt.delta_max for dt in zone_dwells)
+
     # ── Build summary string ──────────────────────────────────────────────────
     g_status = "STABLE" if globally_stable else "UNSTABLE"
     d_status = "satisfied" if all_diag_dom else "VIOLATED for some zones"
     sg_status = "satisfied" if small_gain_stable else "VIOLATED"
     asym_note = f"  M_sys asymmetry = {M_sys_asymmetry:.4g}." if M_sys_asymmetry > 1e-6 else ""
-    alpha_note = f"  alpha = {alpha:.4g}." if alpha < 1.0 - 1e-6 else ""
+    dwell_note = ""
+    if global_T_dwell is not None:
+        T_str = str(global_T_dwell) if global_T_dwell < _DWELL_TIME_CAP else "inf"
+        dwell_note = f"  T_dwell_max = {T_str}."
     summary = (
         f"Multi-zone stability: {g_status}.  "
         f"lam_max(M_sys) = {M_sys_lambda_max:.4g}, "
@@ -1632,7 +2014,7 @@ def analyse_multi_zone_stability(
         f"Diagonal-dominance condition {d_status}.  "
         f"Small-gain condition {sg_status} (gamma = {small_gain_gamma:.4f}).  "
         f"N_zones = {n_zones}, N_controls_total = {n_total}."
-        f"{asym_note}"
+        f"{asym_note}{dwell_note}"
     )
 
     result = MultiZoneStabilityResult(
@@ -1654,6 +2036,8 @@ def analyse_multi_zone_stability(
         M_sys_asymmetry=M_sys_asymmetry,
         M_sys_spectral_radius=spectral_radius,
         M_sys_has_complex_eigenvalues=has_complex,
+        global_T_dwell=global_T_dwell,
+        global_delta_max=global_delta_max,
     )
 
     if verbose:
@@ -1731,6 +2115,24 @@ def _print_multi_zone_report(
 
     # Diagonal-dominance count
     print(f"  Diag. dominance:  {n_diag_dom}/{n_zones} zones pass")
+
+    # Dwell-time (one line if any zone has discrete actuators)
+    if result.global_T_dwell is not None:
+        T_str = (str(result.global_T_dwell)
+                 if result.global_T_dwell < _DWELL_TIME_CAP else "inf")
+        cooldown_info = ""
+        # Check if configured cooldown is available from any zone
+        sample_dt = next(
+            (zr.dwell_time for zr in result.zones if zr.dwell_time is not None),
+            None,
+        )
+        if sample_dt is not None and sample_dt.configured_cooldown is not None:
+            ok = sample_dt.configured_cooldown >= result.global_T_dwell
+            cooldown_info = (
+                f"  [configured: {sample_dt.configured_cooldown}, "
+                f"{'OK' if ok else 'INSUFFICIENT'}]"
+            )
+        print(f"  Dwell-time:       T_dwell_max = {T_str} iterations{cooldown_info}")
 
     # Warnings (collected across all zones).  The recommendations block is
     # intentionally removed per the compact-report design.

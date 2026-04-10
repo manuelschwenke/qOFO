@@ -577,6 +577,44 @@ def _delete_loads_at_bus(net: pp.pandapowerNet, bus: int) -> None:
         net.load.drop(index=net.load.index[mask], inplace=True)
 
 
+def _reduce_loads_at_bus(
+    net: pp.pandapowerNet,
+    bus: int,
+    p_remove_mw: float,
+    q_remove_mvar: float,
+) -> None:
+    """Reduce load at *bus* by (p_remove, q_remove), keeping the remainder.
+
+    If the removal equals or exceeds the existing load, the load is deleted
+    entirely.  Otherwise the load's P and Q are reduced in place.
+    """
+    mask = net.load["bus"] == bus
+    if not mask.any():
+        return
+    existing_p = float(net.load.loc[mask, "p_mw"].sum())
+    existing_q = float(net.load.loc[mask, "q_mvar"].sum())
+
+    remaining_p = existing_p - p_remove_mw
+    remaining_q = existing_q - q_remove_mvar
+
+    if remaining_p <= 0.01 and remaining_q <= 0.01:
+        # Nothing left — remove entirely
+        net.load.drop(index=net.load.index[mask], inplace=True)
+    else:
+        # Scale down existing loads proportionally
+        idx = net.load.index[mask]
+        if len(idx) == 1:
+            net.load.at[idx[0], "p_mw"] = max(remaining_p, 0.0)
+            net.load.at[idx[0], "q_mvar"] = max(remaining_q, 0.0)
+        else:
+            # Multiple loads at same bus: scale all proportionally
+            scale_p = max(remaining_p, 0.0) / max(existing_p, 1e-6)
+            scale_q = max(remaining_q, 0.0) / max(existing_q, 1e-6)
+            for i in idx:
+                net.load.at[i, "p_mw"] *= scale_p
+                net.load.at[i, "q_mvar"] *= scale_q
+
+
 def _create_hv_subnetwork(
     net: pp.pandapowerNet,
     net_id: str,
@@ -842,10 +880,19 @@ def _wire_ehv_profiles(net: pp.pandapowerNet) -> None:
 
 def _compute_reference_loads(
     net: pp.pandapowerNet,
+    *,
+    coupler_sn_mva: float = 300.0,
+    n_couplers: int = 3,
 ) -> Dict[str, Tuple[float, float]]:
     """
-    Compute the reference (total_p_mw, total_q_mvar) for each sub-network
-    by summing the IEEE loads at the coupling buses.
+    Compute the reference (total_p_mw, total_q_mvar) for each sub-network,
+    capped at the aggregate coupling transformer capacity.
+
+    Each HV sub-network connects to the TN via *n_couplers* 3-winding
+    transformers rated at *coupler_sn_mva* each.  The DN load is capped at
+    ``n_couplers * coupler_sn_mva`` (apparent power).  Any excess remains
+    at the TN coupling buses as a separate load — see
+    ``_reduce_loads_at_bus``.
 
     For buses without a load, the average of the buses that DO have loads
     in the same 3-bus set is used.  DSO_3 is special: it uses the average
@@ -855,41 +902,32 @@ def _compute_reference_loads(
     -------
     dict : net_id -> (total_p_mw, total_q_mvar)
     """
-    ref: Dict[str, Tuple[float, float]] = {}
+    max_s_mva = n_couplers * coupler_sn_mva          # 900 MVA default
+    n_nets = len(_SUBNET_DEFS)
 
+    # ── Step 1: Pool all real loads at ALL coupling buses ───────────────
+    pool_p = 0.0
+    pool_q = 0.0
     for sdef in _SUBNET_DEFS:
-        net_id = sdef["net_id"]
-        ieee_0idx = [b - 1 for b in sdef["ieee_1idx"]]
+        for b1 in sdef["ieee_1idx"]:
+            p, q = _get_load_at_bus(net, b1 - 1)
+            pool_p += p
+            pool_q += q
 
-        # Read loads at each coupling bus
-        bus_loads = []
-        for b in ieee_0idx:
-            p, q = _get_load_at_bus(net, b)
-            bus_loads.append((p, q, p != 0.0 or q != 0.0))
+    # ── Step 2: Distribute equally, cap per network ────────────────────
+    share_p = pool_p / n_nets if n_nets > 0 else 0.0
+    share_q = pool_q / n_nets if n_nets > 0 else 0.0
 
-        # Buses with load
-        loaded = [(p, q) for p, q, has in bus_loads if has]
+    # Cap each share at coupler capacity (preserving power factor)
+    share_s = (share_p ** 2 + share_q ** 2) ** 0.5
+    if share_s > max_s_mva and share_s > 0:
+        cap_scale = max_s_mva / share_s
+        share_p *= cap_scale
+        share_q *= cap_scale
 
-        if loaded:
-            avg_p = sum(p for p, q in loaded) / len(loaded)
-            avg_q = sum(q for p, q in loaded) / len(loaded)
-            total_p = sum(
-                p if has else avg_p for p, q, has in bus_loads
-            )
-            total_q = sum(
-                q if has else avg_q for p, q, has in bus_loads
-            )
-        else:
-            # No loads at any coupling bus -- will be overridden for DSO_3
-            total_p, total_q = 0.0, 0.0
-
-        ref[net_id] = (total_p, total_q)
-
-    # DSO_3 special case: use average of DSO_1 and DSO_2
-    if "DSO_3" in ref and ref["DSO_3"] == (0.0, 0.0):
-        p1, q1 = ref.get("DSO_1", (0.0, 0.0))
-        p2, q2 = ref.get("DSO_2", (0.0, 0.0))
-        ref["DSO_3"] = ((p1 + p2) / 2.0, (q1 + q2) / 2.0)
+    ref: Dict[str, Tuple[float, float]] = {}
+    for sdef in _SUBNET_DEFS:
+        ref[sdef["net_id"]] = (share_p, share_q)
 
     return ref
 
@@ -1011,20 +1049,50 @@ def add_hv_networks(
             print(f"  {net_id}: P={p:.1f} MW, Q={q:.1f} Mvar")
 
     # =====================================================================
-    # 2. Delete IEEE loads at all coupling buses (they are replaced by HV nets)
+    # 2. Reduce IEEE loads at coupling buses by the amount moved to DN
     # =====================================================================
+    # The total DN load (pooled across all DSOs) was distributed equally
+    # among the HV networks.  We now reduce the original TN loads at the
+    # coupling buses by a total of (n_nets × share) = pool.  The reduction
+    # is distributed proportionally across all loaded coupling buses.
     all_coupling_buses_0idx = set()
+
+    # Collect all coupling buses and their original loads
+    _original_bus_loads: Dict[int, Tuple[float, float]] = {}
     for sdef in _SUBNET_DEFS:
         for b1 in sdef["ieee_1idx"]:
             b0 = b1 - 1
             all_coupling_buses_0idx.add(b0)
+            if b0 not in _original_bus_loads:
+                _original_bus_loads[b0] = _get_load_at_bus(net, b0)
+
+    # Total load at all coupling buses (= pool) and total DN load
+    pool_p = sum(p for p, q in _original_bus_loads.values())
+    pool_q = sum(q for p, q in _original_bus_loads.values())
+    n_nets = len(_SUBNET_DEFS)
+    total_dn_p = sum(p for p, q in ref_loads.values())
+    total_dn_q = sum(q for p, q in ref_loads.values())
+
+    # Reduce each loaded coupling bus proportionally
+    for b in sorted(all_coupling_buses_0idx):
+        bp, bq = _original_bus_loads[b]
+        if bp == 0.0 and bq == 0.0:
+            continue
+        frac_p = bp / pool_p if pool_p > 0 else 0.0
+        frac_q = bq / pool_q if pool_q > 0 else 0.0
+        remove_p = total_dn_p * frac_p
+        remove_q = total_dn_q * frac_q
+        _reduce_loads_at_bus(net, b, remove_p, remove_q)
 
     if verbose:
-        print("[add_hv_networks] Deleting IEEE loads at coupling buses "
+        print("[add_hv_networks] Reduced IEEE loads at coupling buses "
               f"(0-idx): {sorted(all_coupling_buses_0idx)}")
-
-    for b in all_coupling_buses_0idx:
-        _delete_loads_at_bus(net, b)
+        for b in sorted(all_coupling_buses_0idx):
+            orig_p, orig_q = _original_bus_loads[b]
+            now_p, now_q = _get_load_at_bus(net, b)
+            if orig_p > 0 or orig_q > 0:
+                print(f"  Bus {b}: {orig_p:.1f} -> {now_p:.1f} MW "
+                      f"(kept {now_p:.1f} MW at TN)")
 
     # Also remove TN-DER sgens at coupling buses (they were placed before
     # HV sub-networks replaced the loads).

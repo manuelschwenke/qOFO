@@ -194,7 +194,10 @@ def build_ieee39_net(
     # pandapower.networks.case39() returns the standard New England test system.
     # All buses are at 345 kV; generators at buses 30, 31, …, 38, 39 (1-indexed).
     net = pn.case39()
-    #net.gen["vm_pu"] = 1.05
+    # Set all PV generators to the same voltage setpoint as the slack so
+    # the reactive power burden is distributed evenly.  The case39 defaults
+    # range from 0.984 to 1.064 which concentrates Q at the slack.
+    net.gen["vm_pu"] = ext_grid_vm_pu
 
     # Adjust slack voltage
     net.ext_grid.at[net.ext_grid.index[0], "vm_pu"] = ext_grid_vm_pu

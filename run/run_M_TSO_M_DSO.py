@@ -270,15 +270,15 @@ class MultiTSOConfig:
     # ── Manual alpha overrides ──────────────────────────────────────────
     # When set (not None), these override the pump-computed alpha values.
     # Use for manual experiments or when auto_tune_gw is disabled.
-    alpha_tso_override:    Optional[float] = None
+    alpha_tso_override:    Optional[float] = 1
     """Manual TSO step-size.  Overrides pump-computed alpha_tso when set."""
 
-    alpha_dso_override:    Optional[float] = None
+    alpha_dso_override:    Optional[float] = 1
     """Manual DSO step-size (applied to ALL DSOs).  Overrides pump-computed
     alpha_dso when set."""
 
     # ── Gershgorin safety factors (Phase 1 preconditioning) ─────────────
-    safety_factor_continuous: float = 10.0
+    safety_factor_continuous: float = 1.0
     """g_w = sf * C_ii/2 for continuous actuators (DER, PCC, V_gen).
     Higher sf compresses the eigenvalue spread (lowers kappa) and
     reduces cross-coupling norms, improving both per-zone contraction
@@ -287,7 +287,7 @@ class MultiTSOConfig:
       sf=5: rho ~0.90, T_dwell ~30-80, moderate response
       sf=8: rho ~0.80, T_dwell ~8-20, conservative response"""
 
-    safety_factor_discrete: float = 15.0
+    safety_factor_discrete: float = 2.0
     """g_w = sf * C_ii/2 for discrete actuators (OLTC, shunt).
     Anti-oscillation: sf=8 gives g_w=4*C_ii, preventing gradient
     reversal after a single tap step and reducing the perturbation
@@ -300,7 +300,7 @@ class MultiTSOConfig:
     #               when g_z is very large, e.g. 1e12)
     # Note: as long as ANY output has g_z > 0, the solver creates slack
     # variables.  Outputs with g_z = 0 then have free slack = unconstrained.
-    g_z_voltage:           float = 1E9
+    g_z_voltage:           float = 1E-9
     """Nearly-hard voltage constraint penalty.  Very large so the solver
     keeps predicted voltages within [v_min, v_max] up to ~1e-12 p.u."""
     g_z_current:           float = 0.0
@@ -323,17 +323,24 @@ class MultiTSOConfig:
     variables (avoids infeasibility from hard constraints)."""
 
     # ── Stability analysis ─────────────────────────────────────────────────────
+    exclude_from_stability: frozenset = field(default_factory=frozenset)
+    """Actuator types to exclude from the eigenvector pump and stability
+    eigenanalysis (but NOT from the MIQP controller).  Excluded actuators
+    keep their user-configured g_w unchanged.  Example: ``frozenset({'gen'})``
+    removes V_gen columns from H_blocks before eigenanalysis, eliminating
+    the near-zero eigenvalue from the heavily-regularised generator direction."""
+
     run_stability_analysis:       bool = True
     # When (in simulated seconds) to run the stability analysis.  The
     # default is 60 min: at t=0 the controller still has large tracking
     # gradients, so the analysis is misleading.  After one simulated hour
     # the setpoints have largely equilibrated and the H/C matrices reflect
     # a representative operating point.  Set to 0 to run at t=0 (legacy).
-    stability_analysis_at_s:      float = 600.0
+    stability_analysis_at_s:      float = 900.0
     sensitivity_update_interval:  int  = 1E6  # recompute H_ij every N TSO steps
 
     # ── Output ────────────────────────────────────────────────────────────────
-    verbose:        int   = 1
+    verbose:        int   = 0
     result_dir:     str   = "results"
 
     # ── Live plot ─────────────────────────────────────────────────────────────
@@ -1365,13 +1372,32 @@ def _tune_and_apply_gw(
         'shunt': config.min_gw_dso_shunt,
     }
 
+    # ── Exclude frozen actuator types from stability eigenanalysis ─────
+    excl = config.exclude_from_stability
+    keep_masks: List[np.ndarray] = []
+    if excl:
+        from analysis.tune_ofo_params import (
+            filter_stability_inputs,
+            expand_gw_with_excluded,
+        )
+        (H_blocks_tune, gw_tso_init_filt, actuator_counts_filt, keep_masks
+         ) = filter_stability_inputs(
+            H_blocks_tune, gw_tso_init, actuator_counts,
+            zone_ids_sorted, excl,
+        )
+        if verbose >= 1:
+            print(f"  [exclude_from_stability] Excluded types: {excl}")
+    else:
+        gw_tso_init_filt = gw_tso_init
+        actuator_counts_filt = actuator_counts
+
     result = tune_gw(
         H_blocks=H_blocks_tune,
         Q_obj_list=Q_obj_list,
-        actuator_counts=actuator_counts,
+        actuator_counts=actuator_counts_filt,
         zone_ids=zone_ids_sorted,
         dso_inputs=dso_inputs,
-        gw_tso_init=gw_tso_init,
+        gw_tso_init=gw_tso_init_filt,
         gw_dso_init=gw_dso_init,
         floors_tso=floors_tso,
         floors_dso=floors_dso,
@@ -1382,6 +1408,18 @@ def _tune_and_apply_gw(
         safety_factor_discrete=config.safety_factor_discrete,
         verbose=(verbose >= 1),
     )
+
+    # Re-expand tuned g_w to full actuator vector (re-insert excluded types)
+    if excl and keep_masks:
+        from analysis.tune_ofo_params import expand_gw_with_excluded
+        result = dataclasses.replace(
+            result,
+            gw_tso=[
+                expand_gw_with_excluded(result.gw_tso[idx], orig, mask)
+                for idx, (orig, mask) in enumerate(
+                    zip(gw_tso_init, keep_masks))
+            ],
+        )
 
     # ── Comparison table ────────────────────────────────────────────────
     if verbose >= 1:
@@ -1571,6 +1609,15 @@ def _run_delayed_stability_analysis(
         }
         for z in zone_ids_sorted
     ]
+
+    # Exclude frozen actuator types (same filter as eigenvector pump)
+    excl = config.exclude_from_stability
+    if excl:
+        from analysis.tune_ofo_params import filter_stability_inputs
+        H_blocks_stab, G_w_list, actuator_counts, _ = filter_stability_inputs(
+            H_blocks_stab, G_w_list, actuator_counts,
+            zone_ids_sorted, excl,
+        )
 
     alpha_tso = tso_controllers[zone_ids_sorted[0]].params.alpha
     stab_result = analyse_multi_zone_stability(
@@ -2660,22 +2707,23 @@ def main() -> None:
         dso_period_s=20.0 * 1,    # DSO every 20 seconds
         g_v=5000.0,
         g_q=10,
-        dso_g_v=1000.0,
-        g_w_der=1,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_gen=1e6,           # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
-        g_w_pcc=5,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_tso_oltc=2,       # unchanged (was at alpha=1)
-        g_w_dso_der=50,      # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
-        g_w_dso_oltc=10,      # unchanged (was at alpha=1)
+        dso_g_v=5000.0,
+        g_w_der=10,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        g_w_gen=1e8,  # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
+        g_w_pcc=5,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        g_w_tso_oltc=1,  # unchanged (was at alpha=1)
+        g_w_dso_der=150,  # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
+        g_w_dso_oltc=10,  # unchanged (was at alpha=1)
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
-        auto_tune_gw=True,
+        auto_tune_gw=False,
+        exclude_from_stability=frozenset({'gen'}),
         verbose=1,
         live_plot=True,
         add_tso_ders=True,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 6, 0),
+        start_time=datetime(2016, 1, 6, 8, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[

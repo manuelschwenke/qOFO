@@ -219,7 +219,7 @@ class MultiTSOConfig:
 
     # ── Integer switching logic ──────────────────────────────────────────────
     int_max_step:   int = 1         # max tap/shunt change per iteration
-    int_cooldown:   int = 1         # iterations to lock after switching
+    int_cooldown:   int = 5         # iterations to lock after switching
 
     # ── DSO OLTC initialisation ──────────────────────────────────────────────
     oltc_init_v_target_pu: float = 1.0
@@ -278,14 +278,18 @@ class MultiTSOConfig:
     alpha_dso when set."""
 
     # ── Gershgorin safety factors (Phase 1 preconditioning) ─────────────
-    safety_factor_continuous: float = 1.0
+    safety_factor_continuous: float = 3.0
     """g_w = sf * C_ii/2 for continuous actuators (DER, PCC, V_gen).
-    Preconditioning only; alpha handles stability.  Default 1.0."""
+    sf=3 compresses the eigenvalue spread (lowers kappa) so the
+    contraction rate rho is well below 1, yielding practical dwell
+    times for discrete actuators.  sf=1 gives bare Gershgorin
+    (rho ~0.99, T_dwell ~900); sf=3 targets rho ~0.85, T_dwell ~20."""
 
-    safety_factor_discrete: float = 3.0
+    safety_factor_discrete: float = 5.0
     """g_w = sf * C_ii/2 for discrete actuators (OLTC, shunt).
-    Anti-oscillation: sf=3 gives g_w=1.5*C_ii, preventing gradient
-    reversal after a single tap step.  Default 3.0."""
+    Anti-oscillation: sf=5 gives g_w=2.5*C_ii, preventing gradient
+    reversal after a single tap step and reducing the perturbation
+    bound delta_a in the dwell-time analysis."""
 
     # ── Slack variable penalty (g_z) ─────────────────────────────────────
     # Per-output-type penalty for the slack variable z in the MIQP:

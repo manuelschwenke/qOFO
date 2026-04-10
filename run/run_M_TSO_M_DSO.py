@@ -2178,6 +2178,19 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # Re-converge with found tap positions (no control)
     pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
+    # ── Slack bus diagnostic after OLTC init ──────────────────────────────
+    if verbose >= 1:
+        _slack_idx = net.ext_grid.index[0]
+        _slack_p = float(net.res_ext_grid.at[_slack_idx, "p_mw"])
+        _slack_q = float(net.res_ext_grid.at[_slack_idx, "q_mvar"])
+        print(f"  Slack bus: P = {_slack_p:.1f} MW, Q = {_slack_q:.1f} Mvar")
+        # Warn on extreme machine trafo taps
+        for tidx in meta.machine_trafo_indices:
+            tap = int(net.trafo.at[tidx, "tap_pos"])
+            if abs(tap) >= 7:
+                hv_bus = int(net.trafo.at[tidx, "hv_bus"])
+                print(f"  WARNING: Machine trafo {tidx} at tap {tap:+d} (bus {hv_bus})")
+
     # ── Voltage feasibility check after OLTC init ──────────────────────
     # Always print the voltage range for each DSO/zone so the user can
     # see how close voltages are to the constraint boundaries [0.9, 1.1].

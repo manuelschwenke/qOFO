@@ -160,7 +160,7 @@ class IEEE39NetworkMeta:
 
 def build_ieee39_net(
     *,
-    ext_grid_vm_pu: float = 1.04,
+    ext_grid_vm_pu: float = 1.03,
     der_mva_fraction: float = 0.20,
     der_p_mw_fraction: float = 0.30,
     add_der_at_gen_buses: bool = True,

@@ -64,11 +64,11 @@ class CascadeConfig:
     """
 
     # ── Simulation timing & environment ────────────────────────────────────
-    v_setpoint_pu: float = 1.05
+    v_setpoint_pu: float = 1.03
     """TSO voltage setpoint for transmission-level monitored buses [p.u.].
     Also used for ext_grid vm_pu and generator AVR initialisation."""
 
-    dso_v_setpoint_pu: Optional[float] = 1.05
+    dso_v_setpoint_pu: Optional[float] = 1.03
     """DSO voltage setpoint for distribution-level monitored buses [p.u.].
     If ``None`` (default), the TSO value ``v_setpoint_pu`` is used for
     both controllers (backward-compatible behaviour)."""

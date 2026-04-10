@@ -196,7 +196,7 @@ class MultiTSOConfig:
     dso_period_s:   float = 60.0 * 1.0  # DSO fires every 1 minute
 
     # ── Voltage setpoint ──────────────────────────────────────────────────────
-    v_setpoint_pu:  float = 1.05     # nominal voltage target for all zones
+    v_setpoint_pu:  float = 1.03     # nominal voltage target for all zones
 
     # ── Objective weights ─────────────────────────────────────────────────────
     g_v:            float = 50000.0      # TSO voltage tracking weight
@@ -222,12 +222,12 @@ class MultiTSOConfig:
     int_cooldown:   int = 5         # iterations to lock after switching
 
     # ── DSO OLTC initialisation ──────────────────────────────────────────────
-    oltc_init_v_target_pu: float = 1.0
+    oltc_init_v_target_pu: float = 1.03
     """Voltage target for DiscreteTapControl at OLTC init.  Separate from
     v_setpoint_pu (the OFO tracking target) to allow headroom below the
     output constraint upper bound (1.1 p.u.).  Default 1.0 centres the
     initial DN voltages in the [0.9, 1.1] band."""
-    dso_oltc_init_tol_pu: float = 0.02
+    dso_oltc_init_tol_pu: float = 0.01
     """Voltage deadband half-width for the initial DiscreteTapControl run
     that sets coupling-transformer tap positions before OFO starts."""
 
@@ -278,7 +278,7 @@ class MultiTSOConfig:
     alpha_dso when set."""
 
     # ── Gershgorin safety factors (Phase 1 preconditioning) ─────────────
-    safety_factor_continuous: float = 5.0
+    safety_factor_continuous: float = 10.0
     """g_w = sf * C_ii/2 for continuous actuators (DER, PCC, V_gen).
     Higher sf compresses the eigenvalue spread (lowers kappa) and
     reduces cross-coupling norms, improving both per-zone contraction
@@ -287,7 +287,7 @@ class MultiTSOConfig:
       sf=5: rho ~0.90, T_dwell ~30-80, moderate response
       sf=8: rho ~0.80, T_dwell ~8-20, conservative response"""
 
-    safety_factor_discrete: float = 8.0
+    safety_factor_discrete: float = 15.0
     """g_w = sf * C_ii/2 for discrete actuators (OLTC, shunt).
     Anti-oscillation: sf=8 gives g_w=4*C_ii, preventing gradient
     reversal after a single tap step and reducing the perturbation
@@ -300,7 +300,7 @@ class MultiTSOConfig:
     #               when g_z is very large, e.g. 1e12)
     # Note: as long as ANY output has g_z > 0, the solver creates slack
     # variables.  Outputs with g_z = 0 then have free slack = unconstrained.
-    g_z_voltage:           float = 0.0000001
+    g_z_voltage:           float = 1E9
     """Nearly-hard voltage constraint penalty.  Very large so the solver
     keeps predicted voltages within [v_min, v_max] up to ~1e-12 p.u."""
     g_z_current:           float = 0.0
@@ -317,7 +317,7 @@ class MultiTSOConfig:
     controller can stabilise without output constraints.  After the
     warmup, g_z switches to the configured values above.  Set to 0
     to disable warmup (use configured g_z from the start)."""
-    g_z_warmup_value:      float = 1e-9
+    g_z_warmup_value:      float = 1E-9
     """g_z value used during warmup (effectively disables output
     constraints).  Must be > 0 so the solver still creates slack
     variables (avoids infeasibility from hard constraints)."""
@@ -329,7 +329,7 @@ class MultiTSOConfig:
     # gradients, so the analysis is misleading.  After one simulated hour
     # the setpoints have largely equilibrated and the H/C matrices reflect
     # a representative operating point.  Set to 0 to run at t=0 (legacy).
-    stability_analysis_at_s:      float = 0.0
+    stability_analysis_at_s:      float = 600.0
     sensitivity_update_interval:  int  = 1E6  # recompute H_ij every N TSO steps
 
     # ── Output ────────────────────────────────────────────────────────────────
@@ -1671,7 +1671,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         print("[1] Building IEEE 39-bus network ...")
 
     net, meta = build_ieee39_net(
-        ext_grid_vm_pu=v_set,
+        ext_grid_vm_pu=1.03, #v_set
         add_der_at_gen_buses=config.add_tso_ders,
     )
 
@@ -1712,10 +1712,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                   f"{n_gen_z} generators, {n_load_z} loads")
 
     # =========================================================================
-    # STEP 3: Attach 5 HV sub-networks (110 kV, TUDA topology)
+    # STEP 3: Attach 3 HV sub-networks (110 kV, TUDA topology)
     # =========================================================================
     if verbose >= 1:
-        print("[3] Attaching 5 HV sub-networks (DSO_1..DSO_5) ...")
+        print("[3] Attaching 3 HV sub-networks (DSO_1..DSO_3) ...")
 
     meta = add_hv_networks(net, meta, verbose=(verbose >= 2))
 
@@ -2179,6 +2179,14 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     pp.runpp(net, run_control=True, calculate_voltage_angles=True)
     if verbose >= 2:
         print("[7c] OLTC tap initialisation (DiscreteTapControl):")
+        # Machine Transformer initialisation
+        for tidx, gidx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+            tap = int(net.trafo.at[tidx, "tap_pos"])
+            hv_bus = int(net.trafo.at[tidx, "hv_bus"])
+            vm = float(net.res_bus.at[hv_bus, "vm_pu"])
+            print(f"    trafo {tidx} (gen {gidx}): tap_pos={tap:+d}, "
+                  f"V_hv={vm:.4f} p.u.")
+        # Couple Transformer initialisation
         for hv in meta.hv_networks:
             for t3w in hv.coupling_trafo_indices:
                 tap = int(net.trafo3w.at[t3w, "tap_pos"])
@@ -2186,13 +2194,6 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 vm = float(net.res_bus.at[mv_bus, "vm_pu"])
                 print(f"  {hv.net_id} trafo3w {t3w}: tap_pos={tap:+d}, "
                       f"V_mv={vm:.4f} p.u.")
-        print("  Machine transformer tap initialisation:")
-        for tidx, gidx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
-            tap = int(net.trafo.at[tidx, "tap_pos"])
-            hv_bus = int(net.trafo.at[tidx, "hv_bus"])
-            vm = float(net.res_bus.at[hv_bus, "vm_pu"])
-            print(f"    trafo {tidx} (gen {gidx}): tap_pos={tap:+d}, "
-                  f"V_hv={vm:.4f} p.u.")
     # Remove pandapower controllers so they don't interfere with OFO
     if hasattr(net, "controller") and len(net.controller) > 0:
         net.controller.drop(net.controller.index, inplace=True)
@@ -2350,8 +2351,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             zone_ids=sorted(zone_defs.keys()),
             dso_ids=dso_ids,
             v_setpoint_pu=config.v_setpoint_pu,
-            v_min_pu=0.95,
-            v_max_pu=1.05,
+            v_min_pu=0.9,
+            v_max_pu=1.1,
             sub_minute=False,
             update_every=1,
             tso_update_every=1,
@@ -2657,15 +2658,15 @@ def main() -> None:
         n_total_s=60.0 * 720,      # 720-minute simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0 * 1,    # DSO every 20 seconds
-        g_v=1000.0,
-        g_q=1,
-        dso_g_v=200.0,
-        g_w_der=0.1,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_gen=1e4,           # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
-        g_w_pcc=0.1,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_tso_oltc=1,       # unchanged (was at alpha=1)
-        g_w_dso_der=1,      # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
-        g_w_dso_oltc=2,      # unchanged (was at alpha=1)
+        g_v=5000.0,
+        g_q=10,
+        dso_g_v=1000.0,
+        g_w_der=1,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        g_w_gen=1e6,           # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
+        g_w_pcc=5,          # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        g_w_tso_oltc=2,       # unchanged (was at alpha=1)
+        g_w_dso_der=50,      # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
+        g_w_dso_oltc=10,      # unchanged (was at alpha=1)
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -2674,7 +2675,7 @@ def main() -> None:
         live_plot=True,
         add_tso_ders=True,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 6, 6, 0),
+        start_time=datetime(2016, 1, 5, 6, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[

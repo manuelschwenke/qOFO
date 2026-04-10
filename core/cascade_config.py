@@ -251,7 +251,7 @@ class CascadeConfig:
     1.0 = full reset to measured Q (recommended), 0.0 = disabled."""
 
     # ── Dwell-time stability analysis ────────────────────────────────────
-    dwell_time_epsilon: float = 0.01
+    dwell_time_epsilon: float = 1
     """Convergence tolerance for the dwell-time stability formula.
     Used to compute the minimum cooldown T_dwell such that the
     continuous sub-problem contracts the discrete perturbation

@@ -162,7 +162,7 @@ def build_ieee39_net(
     *,
     ext_grid_vm_pu: float = 1.03,
     der_mva_fraction: float = 0.20,
-    der_p_mw_fraction: float = 0.30,
+    der_p_mw_fraction: float = 1,
     add_der_at_gen_buses: bool = True,
 ) -> Tuple[pp.pandapowerNet, IEEE39NetworkMeta]:
     """
@@ -198,6 +198,7 @@ def build_ieee39_net(
     # the reactive power burden is distributed evenly.  The case39 defaults
     # range from 0.984 to 1.064 which concentrates Q at the slack.
     net.gen["vm_pu"] = ext_grid_vm_pu
+    net.ext_grid["vm_pu"] = ext_grid_vm_pu
 
     # Adjust slack voltage
     net.ext_grid.at[net.ext_grid.index[0], "vm_pu"] = ext_grid_vm_pu
@@ -419,7 +420,7 @@ def build_ieee39_net(
         for i, bus in enumerate(load_buses_pq):
             # Default DER rating: 200 MVA. Scale with p_mw fraction (default 0.3)
             # for a small active component (solar / wind).
-            sn_mva = 200.0
+            sn_mva = 100.0
             p_mw   = sn_mva * der_p_mw_fraction
             
             # Select profile from rotation
@@ -549,7 +550,7 @@ _SUBNET_DEFS: List[dict] = [
     dict(net_id="DSO_1", zone=2,
          ieee_1idx=(7, 8, 5),    hv_buses=(3, 0, 8), scale=0.75, gen="mixed"),
     dict(net_id="DSO_2", zone=2,
-         ieee_1idx=(14, 4, 3),   hv_buses=(3, 0, 8), scale=1.50, gen="mixed"),
+         ieee_1idx=(14, 4, 3),   hv_buses=(3, 0, 8), scale=1.00, gen="mixed"), # 1.5
     dict(net_id="DSO_3", zone=2,
          ieee_1idx=(11, 10, 13), hv_buses=(3, 0, 8), scale=0.75, gen="mixed"),
     # dict(net_id="DSO_4", zone=3,

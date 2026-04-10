@@ -281,7 +281,7 @@ def _analyse_layer(
     # Dwell-time analysis parameters
     integer_column_indices: Optional[list[int]] = None,
     integer_step_sizes: Optional[NDArray[np.float64]] = None,
-    dwell_time_epsilon: float = 0.01,
+    dwell_time_epsilon: float = 1,
     configured_cooldown: Optional[int] = None,
 ) -> ControllerStabilityResult:
     """Compute stability bounds for one controller layer.
@@ -667,7 +667,7 @@ def _compute_dwell_time(
     rho_continuous: float,
     integer_column_indices: list[int],
     integer_step_sizes: NDArray[np.float64],
-    epsilon: float = 0.01,
+    epsilon: float = 1,
     configured_cooldown: Optional[int] = None,
 ) -> DwellTimeResult:
     """Compute dwell-time stability bounds for discrete actuators.
@@ -971,7 +971,7 @@ def analyse_stability(
         list(range(n_dso_der, n_dso_der + n_dso_int))
         if n_dso_int > 0 else None
     )
-    dwell_eps = getattr(config, 'dwell_time_epsilon', 0.01)
+    dwell_eps = getattr(config, 'dwell_time_epsilon', 1)
     int_cooldown = getattr(config, 'int_cooldown', None)
     int_max_step = getattr(config, 'int_max_step', 1)
 

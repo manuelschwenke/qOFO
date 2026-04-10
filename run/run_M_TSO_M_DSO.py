@@ -1376,109 +1376,115 @@ def _tune_and_apply_gw(
         verbose=(verbose >= 1),
     )
 
-    # ── Comparison table ────────────────────────────────────────────────
+    # ── Tuning summary ──────────────────────────────────────────────────
     if verbose >= 1:
+        alpha_only = config.tune_alpha_only
         feasible_str = "FEASIBLE" if result.spectral_feasible else "INFEASIBLE"
-        print(f"\n  {'=' * 66}")
-        print(f"    Eigenvector Pump: g_w + alpha tuning results")
-        print(f"  {'─' * 66}")
-        print(f"    Global: lam_max(M_sys) = {result.lam_max_sys:.4f}  "
-              f"(target < {config.spectral_target:.2f})   {feasible_str}")
-        print(f"    alpha_tso = {result.alpha_tso:.6f}  "
-              f"(alpha*lam = {result.alpha_tso * result.lam_max_sys:.4f})")
+        mode_str = "alpha-only (g_w preserved)" if alpha_only else "g_w + alpha"
+        rho_str = ""
         if result.stability_result is not None:
             sr = result.stability_result
-            if sr.M_sys_asymmetry > 1e-6:
-                print(f"    M_sys asymmetry = {sr.M_sys_asymmetry:.4f}"
-                      f"{'  ⚠ NON-SYMMETRIC' if sr.M_sys_asymmetry > 0.01 else ''}")
-            if sr.M_sys_has_complex_eigenvalues:
-                print(f"    M_sys has complex eigenvalues, "
-                      f"rho(I-M) = {sr.M_sys_spectral_radius:.4f}")
-        print(f"  {'─' * 66}")
+            rho_str = f", rho(I-alpha*M) = {sr.M_sys_spectral_radius:.4f}"
+        print(f"  [T] Tuning ({mode_str}): "
+              f"alpha_tso = {result.alpha_tso:.4f}, "
+              f"lam_max = {result.lam_max_sys:.4f}{rho_str}  "
+              f"[{feasible_str}]")
 
-        def _fmt_gw(v: float) -> str:
-            if v >= 1e4 or (v > 0 and v < 0.01):
-                return f"{v:>11.4e}"
-            return f"{v:>11.4f}"
+        # Per-DSO alpha (compact)
+        dso_alphas = []
+        for d_idx, (dso_id_key, _) in enumerate(dso_controllers.items()):
+            alpha_d = result.alpha_dso[d_idx] if d_idx < len(result.alpha_dso) else 1.0
+            dso_alphas.append(f"{dso_id_key}={alpha_d:.4f}")
+        if dso_alphas:
+            print(f"       alpha_dso: {', '.join(dso_alphas)}")
 
-        def _change_str(old: float, new: float) -> str:
-            if abs(old) < 1e-30:
-                return "  (new)"
-            ratio = new / old
-            if abs(ratio - 1.0) < 0.005:
-                return "  (unchanged)"
-            return f"  x{ratio:.1f}"
+        # Full per-actuator g_w table only when g_w was actually tuned
+        if not alpha_only:
+            print(f"  {'─' * 72}")
 
-        for idx, z in enumerate(zone_ids_sorted):
-            zd = zone_defs[z]
-            gw_old = gw_tso_init[idx]
-            gw_new = result.gw_tso[idx]
-            kappa = result.per_zone_kappa[idx] if idx < len(result.per_zone_kappa) else float('nan')
-            print(f"    TSO Zone {z}   [kappa = {kappa:.1f}]")
-            print(f"      {'Actuator':<30s} {'Type':<6s}  {'g_w (init)':>11s}  {'g_w (tuned)':>11s}  Change")
+            def _fmt_gw(v: float) -> str:
+                if v >= 1e4 or (v > 0 and v < 0.01):
+                    return f"{v:>11.4e}"
+                return f"{v:>11.4f}"
 
-            off = 0
-            for k, s_idx in enumerate(zd.tso_der_indices):
-                nm = net.sgen.at[s_idx, 'name'] or f"SGen_{s_idx}"
-                print(f"      {str(nm)[:30]:<30s} {'DER':<6s}  "
-                      f"{_fmt_gw(gw_old[off+k])}  {_fmt_gw(gw_new[off+k])}"
-                      f"{_change_str(gw_old[off+k], gw_new[off+k])}")
-            off += len(zd.tso_der_indices)
-            for k, t_idx in enumerate(zd.pcc_trafo_indices):
-                nm, _ = _lookup_trafo_name_bus(net, int(t_idx), prefer_3w=True)
-                print(f"      {str(nm)[:30]:<30s} {'PCC':<6s}  "
-                      f"{_fmt_gw(gw_old[off+k])}  {_fmt_gw(gw_new[off+k])}"
-                      f"{_change_str(gw_old[off+k], gw_new[off+k])}")
-            off += len(zd.pcc_trafo_indices)
-            for k, g_idx in enumerate(zd.gen_indices):
-                nm = net.gen.at[g_idx, 'name'] or f"Gen_{g_idx}"
-                print(f"      {str(nm)[:30]:<30s} {'V_gen':<6s}  "
-                      f"{_fmt_gw(gw_old[off+k])}  {_fmt_gw(gw_new[off+k])}"
-                      f"{_change_str(gw_old[off+k], gw_new[off+k])}")
-            off += len(zd.gen_indices)
-            for k, t_idx in enumerate(zd.oltc_trafo_indices):
-                nm, _ = _lookup_trafo_name_bus(net, int(t_idx), prefer_3w=False)
-                print(f"      {str(nm)[:30]:<30s} {'OLTC':<6s}  "
-                      f"{_fmt_gw(gw_old[off+k])}  {_fmt_gw(gw_new[off+k])}"
-                      f"{_change_str(gw_old[off+k], gw_new[off+k])}")
-            off += len(zd.oltc_trafo_indices)
+            def _change_str(old: float, new: float) -> str:
+                if abs(old) < 1e-30:
+                    return "  (new)"
+                ratio = new / old
+                if abs(ratio - 1.0) < 0.005:
+                    return "  (unchanged)"
+                return f"  x{ratio:.1f}"
 
-        for d_idx, (dso_id_key, dso_ctrl) in enumerate(dso_controllers.items()):
-            parent_zone = (hv_info_map[dso_id_key].zone
-                           if dso_id_key in hv_info_map else "?")
-            lam_d = result.per_dso_lam_max[d_idx] if d_idx < len(result.per_dso_lam_max) else float('nan')
-            alpha_d = result.alpha_dso[d_idx] if d_idx < len(result.alpha_dso) else float('nan')
-            print(f"    DSO {dso_id_key} (Zone {parent_zone})   "
-                  f"[lam_max = {lam_d:.4f}, alpha_dso = {alpha_d:.6f}]")
-            print(f"      {'Actuator':<30s} {'Type':<6s}  {'g_w (init)':>11s}  {'g_w (tuned)':>11s}  Change")
+            for idx, z in enumerate(zone_ids_sorted):
+                zd = zone_defs[z]
+                gw_old = gw_tso_init[idx]
+                gw_new = result.gw_tso[idx]
+                kappa = result.per_zone_kappa[idx] if idx < len(result.per_zone_kappa) else float('nan')
+                print(f"    TSO Zone {z}   [kappa = {kappa:.1f}]")
+                print(f"      {'Actuator':<30s} {'Type':<6s}  {'g_w (init)':>11s}  {'g_w (tuned)':>11s}  Change")
 
-            gw_old_d = gw_dso_init[d_idx]
-            gw_new_d = result.gw_dso[d_idx]
-            dso_cfg = dso_ctrl.config
-            off_d = 0
-            for k, s_idx in enumerate(dso_cfg.der_indices):
-                nm = net.sgen.at[s_idx, 'name'] or f"SGen_{s_idx}"
-                print(f"      {str(nm)[:30]:<30s} {'DER':<6s}  "
-                      f"{_fmt_gw(gw_old_d[off_d+k])}  {_fmt_gw(gw_new_d[off_d+k])}"
-                      f"{_change_str(gw_old_d[off_d+k], gw_new_d[off_d+k])}")
-            off_d += len(dso_cfg.der_indices)
-            for k, t_idx in enumerate(dso_cfg.interface_trafo_indices):
-                nm, _ = _lookup_trafo_name_bus(net, int(t_idx), prefer_3w=True)
-                print(f"      {str(nm)[:30]:<30s} {'OLTC':<6s}  "
-                      f"{_fmt_gw(gw_old_d[off_d+k])}  {_fmt_gw(gw_new_d[off_d+k])}"
-                      f"{_change_str(gw_old_d[off_d+k], gw_new_d[off_d+k])}")
-            off_d += len(dso_cfg.interface_trafo_indices)
-            for k, sb_idx in enumerate(dso_cfg.shunt_bus_indices):
-                print(f"      {'Shunt_' + str(sb_idx):<30s} {'Shunt':<6s}  "
-                      f"{_fmt_gw(gw_old_d[off_d+k])}  {_fmt_gw(gw_new_d[off_d+k])}"
-                      f"{_change_str(gw_old_d[off_d+k], gw_new_d[off_d+k])}")
-            off_d += len(dso_cfg.shunt_bus_indices)
+                off = 0
+                for k, s_idx in enumerate(zd.tso_der_indices):
+                    nm = net.sgen.at[s_idx, 'name'] or f"SGen_{s_idx}"
+                    print(f"      {str(nm)[:30]:<30s} {'DER':<6s}  "
+                          f"{_fmt_gw(gw_old[off+k])}  {_fmt_gw(gw_new[off+k])}"
+                          f"{_change_str(gw_old[off+k], gw_new[off+k])}")
+                off += len(zd.tso_der_indices)
+                for k, t_idx in enumerate(zd.pcc_trafo_indices):
+                    nm, _ = _lookup_trafo_name_bus(net, int(t_idx), prefer_3w=True)
+                    print(f"      {str(nm)[:30]:<30s} {'PCC':<6s}  "
+                          f"{_fmt_gw(gw_old[off+k])}  {_fmt_gw(gw_new[off+k])}"
+                          f"{_change_str(gw_old[off+k], gw_new[off+k])}")
+                off += len(zd.pcc_trafo_indices)
+                for k, g_idx in enumerate(zd.gen_indices):
+                    nm = net.gen.at[g_idx, 'name'] or f"Gen_{g_idx}"
+                    print(f"      {str(nm)[:30]:<30s} {'V_gen':<6s}  "
+                          f"{_fmt_gw(gw_old[off+k])}  {_fmt_gw(gw_new[off+k])}"
+                          f"{_change_str(gw_old[off+k], gw_new[off+k])}")
+                off += len(zd.gen_indices)
+                for k, t_idx in enumerate(zd.oltc_trafo_indices):
+                    nm, _ = _lookup_trafo_name_bus(net, int(t_idx), prefer_3w=False)
+                    print(f"      {str(nm)[:30]:<30s} {'OLTC':<6s}  "
+                          f"{_fmt_gw(gw_old[off+k])}  {_fmt_gw(gw_new[off+k])}"
+                          f"{_change_str(gw_old[off+k], gw_new[off+k])}")
+                off += len(zd.oltc_trafo_indices)
 
-        print(f"  {'=' * 66}")
+            for d_idx, (dso_id_key, dso_ctrl) in enumerate(dso_controllers.items()):
+                parent_zone = (hv_info_map[dso_id_key].zone
+                               if dso_id_key in hv_info_map else "?")
+                lam_d = result.per_dso_lam_max[d_idx] if d_idx < len(result.per_dso_lam_max) else float('nan')
+                alpha_d = result.alpha_dso[d_idx] if d_idx < len(result.alpha_dso) else float('nan')
+                print(f"    DSO {dso_id_key} (Zone {parent_zone})   "
+                      f"[lam_max = {lam_d:.4f}, alpha_dso = {alpha_d:.6f}]")
+                print(f"      {'Actuator':<30s} {'Type':<6s}  {'g_w (init)':>11s}  {'g_w (tuned)':>11s}  Change")
 
-    # ── User prompt ─────────────────────────────────────────────────────
+                gw_old_d = gw_dso_init[d_idx]
+                gw_new_d = result.gw_dso[d_idx]
+                dso_cfg = dso_ctrl.config
+                off_d = 0
+                for k, s_idx in enumerate(dso_cfg.der_indices):
+                    nm = net.sgen.at[s_idx, 'name'] or f"SGen_{s_idx}"
+                    print(f"      {str(nm)[:30]:<30s} {'DER':<6s}  "
+                          f"{_fmt_gw(gw_old_d[off_d+k])}  {_fmt_gw(gw_new_d[off_d+k])}"
+                          f"{_change_str(gw_old_d[off_d+k], gw_new_d[off_d+k])}")
+                off_d += len(dso_cfg.der_indices)
+                for k, t_idx in enumerate(dso_cfg.interface_trafo_indices):
+                    nm, _ = _lookup_trafo_name_bus(net, int(t_idx), prefer_3w=True)
+                    print(f"      {str(nm)[:30]:<30s} {'OLTC':<6s}  "
+                          f"{_fmt_gw(gw_old_d[off_d+k])}  {_fmt_gw(gw_new_d[off_d+k])}"
+                          f"{_change_str(gw_old_d[off_d+k], gw_new_d[off_d+k])}")
+                off_d += len(dso_cfg.interface_trafo_indices)
+                for k, sb_idx in enumerate(dso_cfg.shunt_bus_indices):
+                    print(f"      {'Shunt_' + str(sb_idx):<30s} {'Shunt':<6s}  "
+                          f"{_fmt_gw(gw_old_d[off_d+k])}  {_fmt_gw(gw_new_d[off_d+k])}"
+                          f"{_change_str(gw_old_d[off_d+k], gw_new_d[off_d+k])}")
+                off_d += len(dso_cfg.shunt_bus_indices)
+
+            print(f"  {'─' * 72}")
+
+    # ── User prompt (skip when alpha-only — nothing to decide) ──────────
     apply = True
-    if verbose >= 1:
+    if verbose >= 1 and not config.tune_alpha_only:
         try:
             if sys.stdin.isatty():
                 answer = input("  Apply tuned g_w? [Y/n]: ").strip().lower()
@@ -2202,49 +2208,29 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 print(f"  WARNING: Machine trafo {tidx} at tap {tap:+d} (bus {hv_bus})")
 
     # ── Voltage feasibility check after OLTC init ──────────────────────
-    # Always print the voltage range for each DSO/zone so the user can
-    # see how close voltages are to the constraint boundaries [0.9, 1.1].
-    # Even if all buses are "within bounds", voltages near 1.1 leave no
-    # headroom for the MIQP output constraint H·w ≤ (y_upper − y_current).
     _v_violations_found = False
     if verbose >= 1:
-        print("[7c] Voltage ranges after OLTC init (constraints [0.9, 1.1]):")
-    for hv in meta.hv_networks:
-        v_buses = list(hv.bus_indices)
-        vm_pu = net.res_bus.loc[v_buses, "vm_pu"].to_numpy(dtype=float)
-        vm_min = float(np.min(vm_pu))
-        vm_max = float(np.max(vm_pu))
-        n_below = int(np.sum(vm_pu < 0.9))
-        n_above = int(np.sum(vm_pu > 1.1))
-        headroom_up = 1.1 - vm_max
-        headroom_dn = vm_min - 0.9
-        status = "✓" if (n_below == 0 and n_above == 0) else "⚠"
-        if verbose >= 1:
-            print(f"  {status} {hv.net_id}: {len(v_buses)} buses, "
-                  f"V ∈ [{vm_min:.4f}, {vm_max:.4f}] p.u.  "
-                  f"(headroom: ↑{headroom_up:.4f}, ↓{headroom_dn:.4f})")
-        if n_below > 0 or n_above > 0:
-            _v_violations_found = True
-            print(f"     {n_below} below 0.9, {n_above} above 1.1")
-        elif headroom_up < 0.02 or headroom_dn < 0.02:
-            print(f"     ⚠ Low headroom — MIQP output constraints may bite hard")
-    for z, zd in zone_defs.items():
-        vm_pu = net.res_bus.loc[zd.v_bus_indices, "vm_pu"].to_numpy(dtype=float)
-        vm_min = float(np.min(vm_pu))
-        vm_max = float(np.max(vm_pu))
-        n_below = int(np.sum(vm_pu < 0.9))
-        n_above = int(np.sum(vm_pu > 1.1))
-        headroom_up = 1.1 - vm_max
-        headroom_dn = vm_min - 0.9
-        status = "✓" if (n_below == 0 and n_above == 0) else "⚠"
-        if verbose >= 1:
-            print(f"  {status} TSO zone {z}: {len(zd.v_bus_indices)} buses, "
-                  f"V ∈ [{vm_min:.4f}, {vm_max:.4f}] p.u.  "
-                  f"(headroom: ↑{headroom_up:.4f}, ↓{headroom_dn:.4f})")
-        if n_below > 0 or n_above > 0:
-            _v_violations_found = True
+        print(f"  {'Network':<12s} {'V_min':>7s} {'V_max':>7s} {'Headroom':>10s}")
+        _items: list = []
+        for hv in meta.hv_networks:
+            v_buses = list(hv.bus_indices)
+            vm_pu = net.res_bus.loc[v_buses, "vm_pu"].to_numpy(dtype=float)
+            _items.append((hv.net_id, vm_pu))
+        for z, zd in zone_defs.items():
+            vm_pu = net.res_bus.loc[zd.v_bus_indices, "vm_pu"].to_numpy(dtype=float)
+            _items.append((f"TSO Zone {z}", vm_pu))
+        for label, vm_pu in _items:
+            vm_min = float(np.min(vm_pu))
+            vm_max = float(np.max(vm_pu))
+            headroom = min(1.1 - vm_max, vm_min - 0.9)
+            n_viol = int(np.sum(vm_pu < 0.9) + np.sum(vm_pu > 1.1))
+            flag = "⚠" if n_viol > 0 or headroom < 0.02 else " "
+            if n_viol > 0:
+                _v_violations_found = True
+            print(f"  {flag}{label:<11s} {vm_min:>7.4f} {vm_max:>7.4f} "
+                  f"{headroom:>+9.4f} p.u.")
     if _v_violations_found:
-        print("  ⚠ Voltage violations found — MIQP will be infeasible with hard constraints.")
+        print("  ⚠ Voltage violations — MIQP may be infeasible with hard constraints.")
 
     # Re-initialise all controllers so _u_current reflects the updated
     # operating point (profiles + correct tap positions).

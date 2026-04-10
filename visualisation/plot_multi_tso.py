@@ -714,15 +714,15 @@ class MultiTSOLivePlotter:
                 line, = ax.plot(t_line, q_arr, lw=1.3, color=col, label=str(g))
                 line_handles.append(line)
 
-                # Shaded capability band where bound data is available.
-                m = min(len(q_arr), len(q_min), len(q_max))
-                if m > 0:
-                    t_band = dso_t[:m]
-                    ax.fill_between(
-                        t_band, q_min[:m], q_max[:m],
-                        color=col, alpha=0.15, linewidth=0.0,
-                    )
-                    has_band = True
+                # Shaded capability band where bound data is available. # ToDo: band was deactivated for now
+                # m = min(len(q_arr), len(q_min), len(q_max))
+                # if m > 0:
+                #     t_band = dso_t[:m]
+                #     ax.fill_between(
+                #         t_band, q_min[:m], q_max[:m],
+                #         color=col, alpha=0.15, linewidth=0.0,
+                #     )
+                #     has_band = True
 
         if line_handles:
             handles: List = list(line_handles)

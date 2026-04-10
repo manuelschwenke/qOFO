@@ -652,8 +652,8 @@ class MultiTSOCoordinator:
             # ── Diagonal-dominance criterion with alpha ─────────────────────
             # Get alpha from the first zone's controller (same for all TSO zones)
             _alpha = 1.0
-            if self.tso_controllers:
-                first_ctrl = next(iter(self.tso_controllers.values()), None)
+            if self._controllers:
+                first_ctrl = next(iter(self._controllers.values()), None)
                 if first_ctrl is not None:
                     _alpha = getattr(first_ctrl.params, 'alpha', 1.0)
             contraction_lhs = _alpha * (lambda_max + coupling_sum)

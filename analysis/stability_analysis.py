@@ -200,6 +200,14 @@ class DwellTimeResult:
     cooldown_margin: Optional[int] = None
     """configured_cooldown − T_dwell.  Positive = safe."""
 
+    per_actuator_T_dwell: Dict[str, int] = field(default_factory=dict)
+    """Per-actuator dwell time: if ONLY this actuator switches, how many
+    iterations are needed?  Uses the same rho and epsilon as the aggregate
+    bound but with δ_a instead of δ_max.  Much less conservative."""
+
+    T_dwell_worst_single: int = 0
+    """max over per-actuator T_dwell: the binding single-actuator bound."""
+
     n_discrete_actuators: int = 0
     """Number of discrete actuators in this layer."""
 
@@ -772,17 +780,42 @@ def _compute_dwell_time(
         contraction_per_dwell = rho ** T_dwell
         ultimate_bound = delta_max / (1.0 - contraction_per_dwell)
 
+    # ── Per-actuator T_dwell (single-switch bound) ────────────────────────
+    # If only ONE actuator switches, the perturbation is δ_a (not Σ δ_a).
+    # This is the realistic bound for independent cooldown timers.
+    per_actuator_T_dwell: Dict[str, int] = {}
+    log_inv_rho = math.log(1.0 / rho) if 0 < rho < 1 else 0.0
+
+    for aname, delta_a in per_actuator_delta.items():
+        if rho >= 1.0 or rho <= 0.0:
+            per_actuator_T_dwell[aname] = _DWELL_TIME_CAP
+        elif delta_a < 1e-15:
+            per_actuator_T_dwell[aname] = 1
+        else:
+            num_a = delta_a / ((1.0 - rho) * epsilon)
+            if num_a <= 1.0:
+                per_actuator_T_dwell[aname] = 1
+            else:
+                t_a = int(math.ceil(math.log(num_a) / log_inv_rho))
+                per_actuator_T_dwell[aname] = min(max(t_a, 1), _DWELL_TIME_CAP)
+
+    T_dwell_worst_single = (
+        max(per_actuator_T_dwell.values()) if per_actuator_T_dwell else 0
+    )
+
     # ── Compare against configured cooldown ──────────────────────────────
     cooldown_sufficient: Optional[bool] = None
     cooldown_margin: Optional[int] = None
     if configured_cooldown is not None:
-        cooldown_sufficient = configured_cooldown >= T_dwell
-        cooldown_margin = configured_cooldown - T_dwell
+        # Use the single-actuator bound (realistic) for sufficiency check
+        cooldown_sufficient = configured_cooldown >= T_dwell_worst_single
+        cooldown_margin = configured_cooldown - T_dwell_worst_single
         if not cooldown_sufficient:
             dwell_warnings.append(
                 f'Configured int_cooldown = {configured_cooldown} is below '
-                f'required T_dwell = {T_dwell}.  Increase int_cooldown to '
-                f'at least {T_dwell} for guaranteed stability.'
+                f'required T_dwell (single actuator) = {T_dwell_worst_single}.  '
+                f'Increase int_cooldown to at least {T_dwell_worst_single} '
+                f'for guaranteed stability.'
             )
 
     return DwellTimeResult(
@@ -796,6 +829,8 @@ def _compute_dwell_time(
         configured_cooldown=configured_cooldown,
         cooldown_sufficient=cooldown_sufficient,
         cooldown_margin=cooldown_margin,
+        per_actuator_T_dwell=per_actuator_T_dwell,
+        T_dwell_worst_single=T_dwell_worst_single,
         n_discrete_actuators=n_int,
         warnings=dwell_warnings,
     )
@@ -1150,21 +1185,25 @@ def _print_report(
                   f'epsilon = {dt.epsilon:.4g}):')
             print(f'    rho_continuous (active modes) = {dt.rho_continuous:.4f}')
             if dt.per_actuator_delta:
-                print(f'    Per-actuator perturbation delta_a:')
-                for aname, delta_val in dt.per_actuator_delta.items():
-                    print(f'      {aname:<22s}  delta = {delta_val:.4g}')
-            print(f'    delta_max (aggregate)         = {dt.delta_max:.4g}')
-            T_str = str(dt.T_dwell) if dt.T_dwell < _DWELL_TIME_CAP else 'inf'
-            print(f'    T_dwell (required cooldown)   = {T_str} iterations')
-            if dt.T_dwell < _DWELL_TIME_CAP:
-                print(f'    rho^T_dwell                  = {dt.contraction_per_dwell:.6f}')
-                print(f'    Ultimate error bound E*      = {dt.ultimate_bound:.4g}')
+                print(f'    Per-actuator perturbation and dwell time (single-switch):')
+                for aname in dt.per_actuator_delta:
+                    d_a = dt.per_actuator_delta[aname]
+                    t_a = dt.per_actuator_T_dwell.get(aname, 0)
+                    t_str = str(t_a) if t_a < _DWELL_TIME_CAP else 'inf'
+                    print(f'      {aname:<22s}  delta = {d_a:.4g},  '
+                          f'T_dwell = {t_str}')
+            T_ws = dt.T_dwell_worst_single
+            T_ws_str = str(T_ws) if T_ws < _DWELL_TIME_CAP else 'inf'
+            T_agg_str = str(dt.T_dwell) if dt.T_dwell < _DWELL_TIME_CAP else 'inf'
+            print(f'    Worst single-actuator T_dwell = {T_ws_str} iterations')
+            print(f'    Aggregate T_dwell (all switch) = {T_agg_str} iterations  '
+                  f'(delta_max = {dt.delta_max:.4g})')
             if dt.configured_cooldown is not None:
                 ok_str = 'OK' if dt.cooldown_sufficient else 'INSUFFICIENT'
                 margin_str = (f'+{dt.cooldown_margin}' if dt.cooldown_margin >= 0
                               else str(dt.cooldown_margin))
                 print(f'    Configured int_cooldown      = {dt.configured_cooldown}  '
-                      f'[{ok_str}, margin = {margin_str}]')
+                      f'[{ok_str} vs single-actuator bound, margin = {margin_str}]')
             print()
 
         if r.warnings:
@@ -1482,10 +1521,13 @@ class MultiZoneStabilityResult:
     """True if M_sys has eigenvalues with |imag| > 1e-8."""
 
     global_T_dwell: Optional[int] = None
-    """Maximum T_dwell across all zones (binding dwell-time requirement)."""
+    """Aggregate T_dwell using rho_sys: all discrete actuators switch simultaneously."""
+
+    global_T_dwell_single: Optional[int] = None
+    """Single-actuator T_dwell using rho_sys: only the worst actuator switches."""
 
     global_delta_max: Optional[float] = None
-    """Maximum per-zone delta_max across all zones."""
+    """Sum of all per-zone delta_max (aggregate perturbation bound)."""
 
 
 def analyse_multi_zone_stability(
@@ -2018,28 +2060,36 @@ def analyse_multi_zone_stability(
     # formula in the coupled case.
     zone_dwells = [zr.dwell_time for zr in zone_results if zr.dwell_time is not None]
     global_T_dwell: Optional[int] = None
+    global_T_dwell_single: Optional[int] = None
     global_delta_max: Optional[float] = None
-    if zone_dwells and spectral_radius < 1.0:
-        # Aggregate delta_max: sum of all per-zone perturbation bounds
-        # (conservative — assumes all zones switch simultaneously)
-        global_delta_max = sum(dt.delta_max for dt in zone_dwells)
+
+    def _t_dwell_from(rho_val: float, delta_val: float, eps_val: float) -> int:
+        """Compute T_dwell from rho, delta, epsilon."""
+        if rho_val >= 1.0 or rho_val <= 0.0:
+            return _DWELL_TIME_CAP
+        if delta_val < 1e-15:
+            return 1
+        num = delta_val / ((1.0 - rho_val) * eps_val)
+        if num <= 1.0:
+            return 1
+        t = int(math.ceil(math.log(num) / math.log(1.0 / rho_val)))
+        return min(max(t, 1), _DWELL_TIME_CAP)
+
+    if zone_dwells:
         eps = zone_dwells[0].epsilon
 
-        if global_delta_max < 1e-15:
-            global_T_dwell = 1
-        else:
-            numerator_arg = global_delta_max / ((1.0 - spectral_radius) * eps)
-            if numerator_arg <= 1.0:
-                global_T_dwell = 1
-            else:
-                global_T_dwell = int(math.ceil(
-                    math.log(numerator_arg) / math.log(1.0 / spectral_radius)
-                ))
-                global_T_dwell = min(max(global_T_dwell, 1), _DWELL_TIME_CAP)
-    elif zone_dwells:
-        # rho >= 1: continuous system doesn't contract globally
-        global_T_dwell = _DWELL_TIME_CAP
+        # Aggregate: all discrete actuators switch simultaneously
         global_delta_max = sum(dt.delta_max for dt in zone_dwells)
+        global_T_dwell = _t_dwell_from(spectral_radius, global_delta_max, eps)
+
+        # Single-actuator: worst-case single switch across all zones
+        worst_single_delta = max(
+            (max(dt.per_actuator_delta.values()) if dt.per_actuator_delta else 0.0)
+            for dt in zone_dwells
+        )
+        global_T_dwell_single = _t_dwell_from(
+            spectral_radius, worst_single_delta, eps
+        )
 
     # ── Build summary string ──────────────────────────────────────────────────
     g_status = "STABLE" if globally_stable else "UNSTABLE"
@@ -2048,9 +2098,11 @@ def analyse_multi_zone_stability(
     asym_note = f"  M_sys asymmetry = {M_sys_asymmetry:.4g}." if M_sys_asymmetry > 1e-6 else ""
     null_note = f"  ({n_sys_null} null-space modes filtered)." if n_sys_null > 0 else ""
     dwell_note = ""
-    if global_T_dwell is not None:
-        T_str = str(global_T_dwell) if global_T_dwell < _DWELL_TIME_CAP else "inf"
-        dwell_note = f"  T_dwell(rho_sys={spectral_radius:.4f}) = {T_str}."
+    if global_T_dwell_single is not None:
+        Ts_str = str(global_T_dwell_single) if global_T_dwell_single < _DWELL_TIME_CAP else "inf"
+        Ta_str = str(global_T_dwell) if global_T_dwell < _DWELL_TIME_CAP else "inf"
+        dwell_note = (f"  T_dwell(single) = {Ts_str}, "
+                      f"T_dwell(all) = {Ta_str}.")
     summary = (
         f"Multi-zone stability: {g_status}.  "
         f"lam_max(M_sys) = {M_sys_lambda_max:.4g}, "
@@ -2082,6 +2134,7 @@ def analyse_multi_zone_stability(
         M_sys_spectral_radius=spectral_radius,
         M_sys_has_complex_eigenvalues=has_complex,
         global_T_dwell=global_T_dwell,
+        global_T_dwell_single=global_T_dwell_single,
         global_delta_max=global_delta_max,
     )
 
@@ -2161,25 +2214,26 @@ def _print_multi_zone_report(
     # Diagonal-dominance count
     print(f"  Diag. dominance:  {n_diag_dom}/{n_zones} zones pass")
 
-    # Dwell-time (one line if any zone has discrete actuators)
-    if result.global_T_dwell is not None:
-        T_str = (str(result.global_T_dwell)
-                 if result.global_T_dwell < _DWELL_TIME_CAP else "inf")
-        cooldown_info = ""
+    # Dwell-time (two lines: single-actuator and aggregate)
+    if result.global_T_dwell_single is not None:
+        rho_used = result.M_sys_spectral_radius
         sample_dt = next(
             (zr.dwell_time for zr in result.zones if zr.dwell_time is not None),
             None,
         )
+        Ts = result.global_T_dwell_single
+        Ta = result.global_T_dwell
+        Ts_str = str(Ts) if Ts < _DWELL_TIME_CAP else "inf"
+        Ta_str = str(Ta) if Ta < _DWELL_TIME_CAP else "inf"
+        cooldown_info = ""
         if sample_dt is not None and sample_dt.configured_cooldown is not None:
-            ok = sample_dt.configured_cooldown >= result.global_T_dwell
-            cooldown_info = (
-                f"  [configured: {sample_dt.configured_cooldown}, "
-                f"{'OK' if ok else 'INSUFFICIENT'}]"
-            )
-        rho_used = result.M_sys_spectral_radius
-        delta_str = f", delta_max = {result.global_delta_max:.4g}" if result.global_delta_max else ""
-        print(f"  Dwell-time:       T_dwell = {T_str} iterations "
-              f"(rho_sys = {rho_used:.4f}{delta_str}){cooldown_info}")
+            cd = sample_dt.configured_cooldown
+            ok = cd >= Ts
+            cooldown_info = (f"  [configured: {cd}, "
+                             f"{'OK' if ok else 'INSUFFICIENT'}]")
+        print(f"  Dwell-time:       T_dwell(single) = {Ts_str}, "
+              f"T_dwell(all) = {Ta_str} iterations "
+              f"(rho_sys = {rho_used:.4f}){cooldown_info}")
 
     # Warnings (collected across all zones).  The recommendations block is
     # intentionally removed per the compact-report design.

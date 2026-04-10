@@ -1869,16 +1869,33 @@ def analyse_multi_zone_stability(
     max_imag = float(np.max(np.abs(sys_eigs_all.imag)))
     has_complex = max_imag > 1e-8
 
-    # Stability metric: spectral radius rho(I - alpha*M_sys) = max|1 - alpha*lambda_i|
-    spectral_radius = float(np.max(np.abs(1.0 - alpha * sys_eigs_all)))
-
-    # For lambda_max reporting: use max real part of eigenvalues
-    # Filter near-zero eigenvalues (null-space directions)
+    # Filter null-space eigenvalues of M_sys before computing the stability
+    # metric.  Co-located DERs (identical H columns) and generators with
+    # very large g_w produce near-zero eigenvalues where |1 − α·0| = 1
+    # regardless of α.  These directions are benign (zero gradient, zero
+    # error), so they must not inflate the spectral radius.
+    #
+    # Threshold: 1% of the largest eigenvalue magnitude, matching the
+    # per-zone active-mode filter and consistent with the alpha tuner
+    # in pso_tune_ofo.py which uses 1e-6 * max(|λ|).
     sys_eigs_real = sys_eigs_all.real
-    sys_eig_tol = 1e-10 * max(float(np.max(np.abs(sys_eigs_real))), 1e-14)
-    active_mask = np.abs(sys_eigs_real) > sys_eig_tol
+    sys_eig_max_abs = max(float(np.max(np.abs(sys_eigs_all))), 1e-14)
+    sys_eig_active_tol = 0.01 * sys_eig_max_abs
+    active_mask = np.abs(sys_eigs_all) > sys_eig_active_tol
     sys_eigs_active = sys_eigs_all[active_mask]
-    M_sys_lambda_max = float(np.max(sys_eigs_real[active_mask])) if np.any(active_mask) else 0.0
+    n_sys_null = int(np.sum(~active_mask))
+
+    # Stability metric: spectral radius rho(I - alpha*M_sys) on active modes
+    if len(sys_eigs_active) > 0:
+        spectral_radius = float(np.max(np.abs(1.0 - alpha * sys_eigs_active)))
+    else:
+        spectral_radius = 0.0
+
+    # Lambda_max for reporting
+    M_sys_lambda_max = (
+        float(np.max(sys_eigs_real[active_mask]))
+        if np.any(active_mask) else 0.0
+    )
     alpha_max_global = (2.0 / M_sys_lambda_max) if M_sys_lambda_max > 1e-14 else np.inf
 
     # Global stability: rho(I - alpha*M_sys) < 1 (true contraction condition)
@@ -2002,6 +2019,7 @@ def analyse_multi_zone_stability(
     d_status = "satisfied" if all_diag_dom else "VIOLATED for some zones"
     sg_status = "satisfied" if small_gain_stable else "VIOLATED"
     asym_note = f"  M_sys asymmetry = {M_sys_asymmetry:.4g}." if M_sys_asymmetry > 1e-6 else ""
+    null_note = f"  ({n_sys_null} null-space modes filtered)." if n_sys_null > 0 else ""
     dwell_note = ""
     if global_T_dwell is not None:
         T_str = str(global_T_dwell) if global_T_dwell < _DWELL_TIME_CAP else "inf"
@@ -2014,7 +2032,7 @@ def analyse_multi_zone_stability(
         f"Diagonal-dominance condition {d_status}.  "
         f"Small-gain condition {sg_status} (gamma = {small_gain_gamma:.4f}).  "
         f"N_zones = {n_zones}, N_controls_total = {n_total}."
-        f"{asym_note}{dwell_note}"
+        f"{null_note}{asym_note}{dwell_note}"
     )
 
     result = MultiZoneStabilityResult(

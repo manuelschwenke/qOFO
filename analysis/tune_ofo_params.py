@@ -194,6 +194,114 @@ def _build_actuator_labels(actuator_counts: Dict[str, int]) -> List[str]:
     return labels
 
 
+# ---------------------------------------------------------------------------
+#  Stability-analysis exclusion helpers
+# ---------------------------------------------------------------------------
+
+def build_exclusion_mask(
+    actuator_counts: Dict[str, int],
+    col_order: Tuple[str, ...],
+    exclude_types: set,
+) -> NDArray[np.bool_]:
+    """Boolean mask over the control vector: ``True`` = keep, ``False`` = exclude.
+
+    Parameters
+    ----------
+    actuator_counts :
+        Per-type counts (e.g. ``{'n_der': 2, 'n_gen': 1, ...}``).
+    col_order :
+        Column ordering tuple (e.g. ``_TSO_COLUMN_ORDER``).
+    exclude_types :
+        Set of type names to exclude (e.g. ``{'gen'}``).
+    """
+    segments: List[NDArray[np.bool_]] = []
+    for atype in col_order:
+        count_key = _TYPE_TO_COUNT_KEY.get(atype, f'n_{atype}')
+        n = int(actuator_counts.get(count_key, 0))
+        if n > 0:
+            segments.append(np.full(n, atype not in exclude_types))
+    return np.concatenate(segments) if segments else np.array([], dtype=bool)
+
+
+def filter_stability_inputs(
+    H_blocks: Dict[Tuple[int, int], NDArray[np.float64]],
+    G_w_list: List[NDArray[np.float64]],
+    actuator_counts: List[Dict[str, int]],
+    zone_ids: List[int],
+    exclude_types: set,
+    col_order: Tuple[str, ...] = _TSO_COLUMN_ORDER,
+) -> Tuple[
+    Dict[Tuple[int, int], NDArray[np.float64]],
+    List[NDArray[np.float64]],
+    List[Dict[str, int]],
+    List[NDArray[np.bool_]],
+]:
+    """Remove excluded actuator columns from stability-analysis inputs.
+
+    Returns
+    -------
+    H_blocks_filtered, G_w_filtered, counts_filtered, keep_masks
+        *keep_masks* is a per-zone boolean array for re-expanding g_w later.
+    """
+    if not exclude_types:
+        masks = [np.ones(len(gw), dtype=bool) for gw in G_w_list]
+        return H_blocks, G_w_list, actuator_counts, masks
+
+    # Per-zone masks (indexed by position in zone_ids, not by zone id)
+    masks: List[NDArray[np.bool_]] = []
+    for idx in range(len(zone_ids)):
+        masks.append(build_exclusion_mask(
+            actuator_counts[idx], col_order, exclude_types,
+        ))
+
+    # Map zone_id -> positional index for column masking
+    zid_to_idx = {z: idx for idx, z in enumerate(zone_ids)}
+
+    # Filter H_blocks columns (zone j determines column mask)
+    H_filtered: Dict[Tuple[int, int], NDArray[np.float64]] = {}
+    for (i, j), H_ij in H_blocks.items():
+        j_idx = zid_to_idx.get(j)
+        if j_idx is None:
+            H_filtered[(i, j)] = H_ij
+            continue
+        H_filtered[(i, j)] = H_ij[:, masks[j_idx]]
+
+    # Filter G_w
+    G_w_filtered = [gw[m] for gw, m in zip(G_w_list, masks)]
+
+    # Filtered actuator counts
+    counts_filtered: List[Dict[str, int]] = []
+    for idx in range(len(zone_ids)):
+        new_counts = dict(actuator_counts[idx])
+        for atype in exclude_types:
+            count_key = _TYPE_TO_COUNT_KEY.get(atype, f'n_{atype}')
+            new_counts[count_key] = 0
+        counts_filtered.append(new_counts)
+
+    return H_filtered, G_w_filtered, counts_filtered, masks
+
+
+def expand_gw_with_excluded(
+    gw_filtered: NDArray[np.float64],
+    gw_original: NDArray[np.float64],
+    keep_mask: NDArray[np.bool_],
+) -> NDArray[np.float64]:
+    """Re-insert original g_w values at excluded positions.
+
+    Parameters
+    ----------
+    gw_filtered :
+        Tuned g_w for kept actuators only (length = sum(keep_mask)).
+    gw_original :
+        Original full g_w vector (length = len(keep_mask)).
+    keep_mask :
+        Boolean mask from :func:`build_exclusion_mask`.
+    """
+    result = gw_original.copy()
+    result[keep_mask] = gw_filtered
+    return result
+
+
 def _effective_eigenspectrum(
     M: NDArray[np.float64],
     null_tol_factor: float = 1e-12,

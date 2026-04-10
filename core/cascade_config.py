@@ -250,6 +250,21 @@ class CascadeConfig:
     """Achieved-Value Tracking factor for TSO PCC-Q reset.
     1.0 = full reset to measured Q (recommended), 0.0 = disabled."""
 
+    # ── Dwell-time stability analysis ────────────────────────────────────
+    dwell_time_epsilon: float = 0.01
+    """Convergence tolerance for the dwell-time stability formula.
+    Used to compute the minimum cooldown T_dwell such that the
+    continuous sub-problem contracts the discrete perturbation
+    below epsilon."""
+
+    int_cooldown: int = 6
+    """Number of OFO iterations a discrete actuator is locked after switching.
+    Used both by the controller (BaseOFOController) and the stability
+    analysis (compared against the theoretically required T_dwell)."""
+
+    int_max_step: int = 1
+    """Maximum discrete step per OFO iteration (e.g. 1 tap for OLTCs)."""
+
     # ── Contingency events ────────────────────────────────────────────────
     contingencies: List = field(default_factory=list)
     """List of ContingencyEvent objects to inject during simulation.

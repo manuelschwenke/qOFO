@@ -1551,6 +1551,7 @@ def _run_delayed_stability_analysis(
     import os
 
     if verbose >= 1:
+        print()
         print(f"[9] Running multi-zone stability analysis at t = {time_s/60.0:.1f} min ...")
 
     # Refresh the coordinator's cross-sensitivity blocks so the analysis
@@ -1717,6 +1718,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # STEP 3: Attach 5 HV sub-networks (110 kV, TUDA topology)
     # =========================================================================
     if verbose >= 1:
+        print()
         print("[3] Attaching 5 HV sub-networks (DSO_1..DSO_5) ...")
 
     meta = add_hv_networks(net, meta, verbose=(verbose >= 2))
@@ -1731,6 +1733,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # STEP 4: Build ZoneDefinitions and TSOControllerConfigs
     # =========================================================================
     if verbose >= 1:
+        print()
         print("[4] Building zone definitions and controller configs ...")
 
     # ── Partition generator indices per zone ──────────────────────────────────
@@ -1864,6 +1867,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # STEP 5: Initialise TSOControllers (one per zone)
     # =========================================================================
     if verbose >= 1:
+        print()
         print("[5] Initialising TSOControllers ...")
 
     ns0 = _network_state(net)  # initial network state snapshot
@@ -1974,6 +1978,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # STEP 6: Initialise DSO controllers (one per HV sub-network, all zones)
     # =========================================================================
     if verbose >= 1:
+        print()
         print("[6] Initialising DSO controllers (5 HV sub-networks) ...")
 
     dso_controllers: Dict[str, DSOController] = {}
@@ -2091,6 +2096,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # STEP 7: Initialise MultiTSOCoordinator
     # =========================================================================
     if verbose >= 1:
+        print()
         print("[7] Initialising MultiTSOCoordinator ...")
 
     coordinator = MultiTSOCoordinator(
@@ -2309,6 +2315,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     if verbose >= 1:
         n_steps = int(config.n_total_s / config.dt_s)
         dur_str = f"start={start_time:%d.%m.%Y %H:%M}  " if use_profiles else ""
+        print()
         print(f"[8] Starting simulation: {n_steps} steps  "
               f"({dur_str}dt={config.dt_s:.0f}s, TSO/{config.tso_period_s/60:.0f}min, "
               f"DSO/{config.dso_period_s/60:.0f}min)")
@@ -2329,6 +2336,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             sub_minute=False,
             update_every=1,
             tso_update_every=1,
+            add_tso_ders=config.add_tso_ders,
         )
 
     def _is_period_hit(time_s: float, period_s: float) -> bool:

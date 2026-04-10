@@ -300,6 +300,18 @@ class MultiTSOConfig:
     """DSO interface-Q outputs unconstrained (z free).  Set > 0 to
     enable soft Q-interface limits."""
 
+    # ── g_z warmup ───────────────────────────────────────────────────────
+    g_z_warmup_s:          float = 900.0
+    """Duration [s] of the g_z warmup phase.  During warmup, all g_z
+    values are replaced by ``g_z_warmup_value`` (very small) so the
+    controller can stabilise without output constraints.  After the
+    warmup, g_z switches to the configured values above.  Set to 0
+    to disable warmup (use configured g_z from the start)."""
+    g_z_warmup_value:      float = 1e-9
+    """g_z value used during warmup (effectively disables output
+    constraints).  Must be > 0 so the solver still creates slack
+    variables (avoids infeasibility from hard constraints)."""
+
     # ── Stability analysis ─────────────────────────────────────────────────────
     run_stability_analysis:       bool = True
     # When (in simulated seconds) to run the stability analysis.  The
@@ -1812,11 +1824,15 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
         # ── G_w diagonal for this zone's u vector ────────────────────────────
         gw_diag = zd.gw_diagonal()
-        gz_diag = np.concatenate([
+        gz_diag_target = np.concatenate([
             np.full(len(zd.v_bus_indices), config.g_z_voltage),   # voltage slacks
             np.full(len(zd.line_indices),  config.g_z_current),   # current slacks
         ])
-        # g_z = 0 → hard output constraints; g_z > 0 → soft (nearly hard when large)
+        # During warmup use a tiny g_z; after warmup switch to gz_diag_target
+        if config.g_z_warmup_s > 0:
+            gz_diag = np.where(gz_diag_target > 0, config.g_z_warmup_value, 0.0)
+        else:
+            gz_diag = gz_diag_target
 
         ofo_params = OFOParameters(
             g_w=gw_diag,    # 1-D vector; alpha absorbed into g_w
@@ -1982,11 +1998,15 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         n_iface = len(interface_trafos)
         n_v = len(v_buses)
         n_i = len(hv_lines)
-        dso_gz = np.concatenate([
+        dso_gz_target = np.concatenate([
             np.full(n_iface, config.g_z_interface),   # interface-Q slacks
             np.full(n_v,     config.g_z_voltage),     # voltage slacks
             np.full(n_i,     config.g_z_current),     # current slacks
         ])
+        if config.g_z_warmup_s > 0:
+            dso_gz = np.where(dso_gz_target > 0, config.g_z_warmup_value, 0.0)
+        else:
+            dso_gz = dso_gz_target
         dso_ofo = OFOParameters(
             g_w=dso_gw_diag,
             g_z=dso_gz,
@@ -2282,11 +2302,44 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
     tso_step_count = 0  # count TSO steps for sensitivity refresh logic
 
+    # ── g_z warmup: build target g_z vectors for the switch ──────────────
+    _gz_warmup_done = (config.g_z_warmup_s <= 0)
+    _gz_targets_tso: Dict[int, NDArray[np.float64]] = {}
+    _gz_targets_dso: Dict[str, NDArray[np.float64]] = {}
+    if not _gz_warmup_done:
+        for z, zd in zone_defs.items():
+            _gz_targets_tso[z] = np.concatenate([
+                np.full(len(zd.v_bus_indices), config.g_z_voltage),
+                np.full(len(zd.line_indices),  config.g_z_current),
+            ])
+        for dso_id_tmp, dso_ctrl_tmp in dso_controllers.items():
+            cfg_tmp = dso_ctrl_tmp.config
+            n_iface_tmp = len(cfg_tmp.interface_trafo_indices)
+            n_v_tmp = len(cfg_tmp.voltage_bus_indices)
+            n_i_tmp = len(cfg_tmp.current_line_indices)
+            _gz_targets_dso[dso_id_tmp] = np.concatenate([
+                np.full(n_iface_tmp, config.g_z_interface),
+                np.full(n_v_tmp,     config.g_z_voltage),
+                np.full(n_i_tmp,     config.g_z_current),
+            ])
+
     n_steps = int(config.n_total_s / config.dt_s)
     for step in range(1, n_steps + 1):
         time_s  = step * config.dt_s
         run_tso = (step == 1) or _is_period_hit(time_s, config.tso_period_s)
         run_dso = _is_period_hit(time_s, config.dso_period_s)
+
+        # ── g_z warmup → activate output constraints ─────────────────────
+        if not _gz_warmup_done and time_s >= config.g_z_warmup_s:
+            _gz_warmup_done = True
+            for z, ctrl in tso_controllers.items():
+                ctrl.update_g_z(_gz_targets_tso[z])
+            for did, dctrl in dso_controllers.items():
+                dctrl.update_g_z(_gz_targets_dso[did])
+            if verbose >= 1:
+                print(f"  ── g_z warmup complete at t={time_s:.0f}s: "
+                      f"output constraints activated "
+                      f"(g_z_voltage={config.g_z_voltage:.0e}) ──")
 
         rec = MultiTSOIterationRecord(
             step=step, time_s=time_s, tso_active=run_tso, dso_active=run_dso

@@ -356,6 +356,14 @@ class BaseOFOController(ABC):
         # Use g_z > 0 for transient robustness when the problem may be
         # temporarily infeasible (e.g., after large disturbances).
 
+    def update_g_z(self, g_z: Union[float, NDArray[np.float64]]) -> None:
+        """Replace g_z in the OFO parameters (e.g. for g_z warmup).
+
+        Creates a new frozen OFOParameters instance with the updated g_z.
+        """
+        import dataclasses
+        self.params = dataclasses.replace(self.params, g_z=g_z)
+
     def step(self, measurement: Measurement) -> ControllerOutput:
         """
         Execute one OFO iteration.

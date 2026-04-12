@@ -90,7 +90,13 @@ from analysis.stability_analysis import (
     analyse_multi_zone_stability,
     MultiZoneStabilityResult,
 )
-from analysis.tune_ofo_params import tune_multi_zone
+from analysis.auto_tune import (
+    auto_tune as _auto_tune,
+    filter_stability_inputs,
+    expand_gw_with_excluded,
+    DSOTuneInput,
+    TuningResult,
+)
 from controller.base_controller import OFOParameters
 from controller.dso_controller import DSOController, DSOControllerConfig
 from controller.multi_tso_coordinator import MultiTSOCoordinator, ZoneDefinition
@@ -260,7 +266,7 @@ class MultiTSOConfig:
     # BEFORE the simulation to ensure lambda_max(M_sys) < spectral_target.
     # The user's g_w config values (g_w_der, g_w_gen, etc.) are the FLOOR:
     # the pump can only increase g_w, never decrease.
-    spectral_target:       float = 2
+    spectral_target:       float = 1.8
     """Hard cap on ``lam_max(M_sys)``.  Default 1.9 leaves a 5% margin
     below the absolute stability bound 2.0."""
     # Per-actuator-type floors for the pump (used by _apply_gw_floors).
@@ -283,7 +289,7 @@ class MultiTSOConfig:
     alpha_dso when set."""
 
     # ── Gershgorin safety factors (Phase 1 preconditioning) ─────────────
-    safety_factor_continuous: float = 3
+    safety_factor_continuous: float = 2.0
     """g_w = sf * C_ii/2 for continuous actuators (DER, PCC, V_gen).
     Higher sf compresses the eigenvalue spread (lowers kappa) and
     reduces cross-coupling norms, improving both per-zone contraction
@@ -292,7 +298,7 @@ class MultiTSOConfig:
       sf=5: rho ~0.90, T_dwell ~30-80, moderate response
       sf=8: rho ~0.80, T_dwell ~8-20, conservative response"""
 
-    safety_factor_discrete: float = 5.0
+    safety_factor_discrete: float = 2.0
     """g_w = sf * C_ii/2 for discrete actuators (OLTC, shunt).
     Anti-oscillation: sf=8 gives g_w=4*C_ii, preventing gradient
     reversal after a single tap step and reducing the perturbation
@@ -305,9 +311,9 @@ class MultiTSOConfig:
     #               when g_z is very large, e.g. 1e12)
     # Note: as long as ANY output has g_z > 0, the solver creates slack
     # variables.  Outputs with g_z = 0 then have free slack = unconstrained.
-    g_z_voltage:           float = 1E-9
+    g_z_voltage:           float = 1E-12
     """Nearly-hard voltage constraint penalty.  Very large so the solver
-    keeps predicted voltages within [v_min, v_max] up to ~1e-12 p.u."""
+    keeps predicted voltages within [v_min, v_max] up to ~1e12 p.u."""
     g_z_current:           float = 0.0
     """Current outputs unconstrained (z free).  Set > 0 to enable soft
     current limits."""
@@ -322,7 +328,7 @@ class MultiTSOConfig:
     controller can stabilise without output constraints.  After the
     warmup, g_z switches to the configured values above.  Set to 0
     to disable warmup (use configured g_z from the start)."""
-    g_z_warmup_value:      float = 1E-9
+    g_z_warmup_value:      float = 1E-12
     """g_z value used during warmup (effectively disables output
     constraints).  Must be > 0 so the solver still creates slack
     variables (avoids infeasibility from hard constraints)."""
@@ -897,11 +903,15 @@ def _write_tuned_params_json(
     }
 
     if stab_result is not None:
+        c2 = stab_result.c2_continuous
+        c3 = stab_result.c3_discrete
         payload["global_metrics"] = {
-            "lambda_max_M_sys": float(stab_result.M_sys_lambda_max),
-            "spectral_metric": float(stab_result.M_sys_lambda_max),
-            "small_gain_gamma": float(stab_result.small_gain_gamma),
-            "globally_stable": bool(stab_result.globally_stable),
+            "c1_satisfied": bool(stab_result.c1_satisfied),
+            "c2_rho": float(c2.spectral_radius),
+            "c2_satisfied": bool(stab_result.c2_satisfied),
+            "c3_rho_gamma": float(c3.Gamma_spectral_radius),
+            "c3_satisfied": bool(stab_result.c3_satisfied),
+            "stable": bool(stab_result.stable),
         }
 
     # ── TSO zones ───────────────────────────────────────────────────────
@@ -941,9 +951,11 @@ def _write_tuned_params_json(
     if pump_result is not None:
         try:
             payload["pump_meta"] = {
-                "pump_iterations_tso": int(getattr(pump_result, "pump_iterations_tso", 0)),
-                "lam_max_sys":         float(getattr(pump_result, "lam_max_sys", float("nan"))),
-                "spectral_feasible":   bool(getattr(pump_result, "spectral_feasible", False)),
+                "alpha_tso":       float(getattr(pump_result, "alpha_tso", float("nan"))),
+                "c1_feasible":     bool(getattr(pump_result, "c1_feasible", False)),
+                "c2_feasible":     bool(getattr(pump_result, "c2_feasible", False)),
+                "c3_feasible":     bool(getattr(pump_result, "c3_feasible", False)),
+                "feasible":        bool(getattr(pump_result, "feasible", False)),
             }
         except Exception:
             pass
@@ -1149,62 +1161,95 @@ def _write_stability_analysis_markdown(
 
     os.makedirs(os.path.dirname(md_path) or ".", exist_ok=True)
 
-    lam_sys   = float(stab_result.M_sys_lambda_max)
     n_zones = len(stab_result.zones)
-    n_diag_dom = sum(1 for zr in stab_result.zones if zr.diagonally_dominant)
-    global_tag = "STABLE" if stab_result.globally_stable else "VIOLATED"
-    sg_tag     = "SATISFIED" if stab_result.small_gain_stable else "VIOLATED"
+    global_tag = "STABLE" if stab_result.stable else "UNSTABLE"
+    c2 = stab_result.c2_continuous
+    c3 = stab_result.c3_discrete
 
     lines: List[str] = []
-    lines.append("# Multi-Zone OFO Stability Analysis")
+    lines.append("# Multi-Zone OFO Stability Analysis (Theorem 3.3)")
     lines.append("")
     lines.append(f"- **Written at:** {_dt.now().isoformat(timespec='seconds')}")
     lines.append(f"- **Simulation time:** {time_s/60.0:.1f} min ({time_s:.0f} s)")
-    lines.append(f"- **Global spectral bound:** `lam_max(M_sys) = {lam_sys:.4f}`  "
-                 f"[{global_tag}]")
-    lines.append(f"- **Row-sum small-gain:** `gamma = {stab_result.small_gain_gamma:.4f}`  "
-                 f"[{sg_tag}]")
-    lines.append(f"- **Diagonal dominance:** {n_diag_dom} / {n_zones} zones pass")
+    lines.append(f"- **Verdict:** {global_tag}")
+    lines.append(f"- **C1 (DSO inner loops):** {'pass' if stab_result.c1_satisfied else 'FAIL'}")
+    lines.append(f"- **C2 (continuous):** rho(M_full^c) = {c2.spectral_radius:.4f}  "
+                 f"[{'pass' if stab_result.c2_satisfied else 'FAIL'}]")
+    lines.append(f"- **C3 (discrete):** rho(Gamma) = {c3.Gamma_spectral_radius:.4f}  "
+                 f"[{'pass' if stab_result.c3_satisfied else 'FAIL'}]")
     lines.append("")
 
-    # -- Global metrics table -----------------------------------------------
-    lines.append("## Global metrics")
+    # -- C1: DSO results ----------------------------------------------------
+    lines.append("## C1 -- DSO Inner-Loop Stability")
     lines.append("")
-    lines.append("| Metric | Value | Status |")
-    lines.append("|---|---|---|")
-    lines.append(f"| `lambda_max(M_sys)` | {lam_sys:.4g} | {global_tag} |")
-    lines.append(f"| `gamma` (row-sum) | {stab_result.small_gain_gamma:.4f} | {sg_tag} |")
-    lines.append(f"| Diagonal dominance count | {n_diag_dom}/{n_zones} | — |")
+    if stab_result.c1_dso:
+        lines.append("| DSO | rho(M_cont) | Cascade margin | N_inner | Status |")
+        lines.append("|---|---|---|---|---|")
+        for r in stab_result.c1_dso:
+            st = "pass" if r.stable else "FAIL"
+            lines.append(f"| {r.dso_id} | {r.M_cont_spectral_radius:.4f} "
+                         f"| {r.cascade_margin:.4f} | {r.N_inner:.0f} | {st} |")
+    else:
+        lines.append("No DSO data provided.")
     lines.append("")
 
-    # -- Per-zone compact stability table -----------------------------------
-    lines.append("## Per-zone stability summary")
+    # -- C2: Continuous stability -------------------------------------------
+    lines.append("## C2 -- Multi-Zone Continuous Stability")
     lines.append("")
-    lines.append("| Zone | lam_max(Mii) | kappa | Sum M_ij | rho_i | row_sum | Status |")
-    lines.append("|---|---|---|---|---|---|---|")
-    for i_idx, zr in enumerate(stab_result.zones):
-        status = "OK" if zr.diagonally_dominant else "VIOLATED"
-        kappa_str = "inf" if zr.kappa_Mii >= 1e6 else f"{zr.kappa_Mii:.3g}"
+    lines.append("| Zone | lam_max(M_ii^c) | kappa | rho_c | coupling | Status |")
+    lines.append("|---|---|---|---|---|---|")
+    for zr in stab_result.zones:
+        kappa_str = ("inf" if c2.per_zone_kappa.get(zr.zone_id, np.inf) >= 1e6
+                     else f"{c2.per_zone_kappa.get(zr.zone_id, 1.0):.3g}")
         lines.append(
             f"| Zone {zr.zone_id} "
-            f"| {zr.lambda_max_Mii:.3g} "
+            f"| {zr.lambda_max_c:.3g} "
             f"| {kappa_str} "
-            f"| {zr.coupling_sum:.4g} "
-            f"| {zr.rho_i:.4f} "
-            f"| {zr.lyapunov_row_sum:.4f} "
-            f"| {status} |"
+            f"| {zr.rho_c:.4f} "
+            f"| {zr.coupling_sum_c:.4g} "
+            f"| {'pass' if zr.rho_c < 1 else 'FAIL'} |"
         )
     lines.append("")
+    lines.append(f"Global: rho(M_full^c) = {c2.spectral_radius:.4f}, "
+                 f"small-gain gamma = {c2.small_gain_gamma:.4f}")
+    lines.append("")
 
-    # -- Warnings (if any) --------------------------------------------------
-    all_warnings = []
-    for zr in stab_result.zones:
-        all_warnings.extend(zr.warnings)
+    # -- C3: Discrete small-gain -------------------------------------------
+    lines.append("## C3 -- Discrete Small-Gain")
+    lines.append("")
+    lines.append(f"rho(Gamma) = {c3.Gamma_spectral_radius:.4f}  "
+                 f"[{'pass' if c3.stable else 'FAIL'}]")
+    lines.append("")
+    if c3.g_min_required:
+        lines.append("### G Sizing Rule (Corollary 3.2)")
+        lines.append("")
+        lines.append("| Zone | Actuator | g_w (current) | g_w (min) | Margin |")
+        lines.append("|---|---|---|---|---|")
+        for zi in sorted(c3.g_min_required.keys()):
+            for name in sorted(c3.g_min_required[zi].keys()):
+                g_cur = c3.g_current.get(zi, {}).get(name, 0.0)
+                g_min = c3.g_min_required[zi][name]
+                margin = c3.g_margin.get(zi, {}).get(name, 0.0)
+                status = "OK" if margin >= 0 else "**VIOLATION**"
+                lines.append(f"| Zone {zi} | {name} | {g_cur:.2f} "
+                             f"| {g_min:.2f} | {margin:.2f} {status} |")
+        lines.append("")
+
+    # -- Warnings / Recommendations ----------------------------------------
+    all_warnings = c2.warnings + c3.warnings
+    for r in stab_result.c1_dso:
+        all_warnings.extend(r.warnings)
     if all_warnings:
         lines.append("### Warnings")
         lines.append("")
         for w in all_warnings:
             lines.append(f"- {w}")
+        lines.append("")
+    if stab_result.recommendations:
+        lines.append("### Recommendations")
+        lines.append("")
+        for rec in stab_result.recommendations:
+            lines.append(f"- {rec}")
         lines.append("")
 
     # -- Per-TSO-zone actuator tables ---------------------------------------
@@ -1302,9 +1347,9 @@ def _tune_and_apply_gw(
     """
     import dataclasses
     import sys
-    from analysis.pso_tune_ofo import DSOTuneInput, tune_gw
 
     if verbose >= 1:
+        print()
         print("[T] Eigenvector-pump g_w tuning ...")
 
     # Refresh cross-sensitivities
@@ -1381,10 +1426,7 @@ def _tune_and_apply_gw(
     excl = config.exclude_from_stability
     keep_masks: List[np.ndarray] = []
     if excl:
-        from analysis.tune_ofo_params import (
-            filter_stability_inputs,
-            expand_gw_with_excluded,
-        )
+        pass  # filter_stability_inputs imported at module level
         (H_blocks_tune, gw_tso_init_filt, actuator_counts_filt, keep_masks
          ) = filter_stability_inputs(
             H_blocks_tune, gw_tso_init, actuator_counts,
@@ -1396,7 +1438,7 @@ def _tune_and_apply_gw(
         gw_tso_init_filt = gw_tso_init
         actuator_counts_filt = actuator_counts
 
-    result = tune_gw(
+    result = _auto_tune(
         H_blocks=H_blocks_tune,
         Q_obj_list=Q_obj_list,
         actuator_counts=actuator_counts_filt,
@@ -1406,7 +1448,6 @@ def _tune_and_apply_gw(
         gw_dso_init=gw_dso_init,
         floors_tso=floors_tso,
         floors_dso=floors_dso,
-        spectral_target=config.spectral_target,
         tso_period_s=config.tso_period_s,
         dso_period_s=config.dso_period_s,
         safety_factor_continuous=config.safety_factor_continuous,
@@ -1416,11 +1457,10 @@ def _tune_and_apply_gw(
 
     # Re-expand tuned g_w to full actuator vector (re-insert excluded types)
     if excl and keep_masks:
-        from analysis.tune_ofo_params import expand_gw_with_excluded
         result = dataclasses.replace(
             result,
-            gw_tso=[
-                expand_gw_with_excluded(result.gw_tso[idx], orig, mask)
+            gw_tso_list=[
+                expand_gw_with_excluded(result.gw_tso_list[idx], orig, mask)
                 for idx, (orig, mask) in enumerate(
                     zip(gw_tso_init, keep_masks))
             ],
@@ -1429,21 +1469,19 @@ def _tune_and_apply_gw(
     # ── Tuning summary ──────────────────────────────────────────────────
     if verbose >= 1:
         alpha_only = config.tune_alpha_only
-        feasible_str = "FEASIBLE" if result.spectral_feasible else "INFEASIBLE"
+        feasible_str = "FEASIBLE" if result.feasible else "INFEASIBLE"
         mode_str = "alpha-only (g_w preserved)" if alpha_only else "g_w + alpha"
-        rho_str = ""
-        if result.stability_result is not None:
-            sr = result.stability_result
-            rho_str = f", rho(I-alpha*M) = {sr.M_sys_spectral_radius:.4f}"
         print(f"  [T] Tuning ({mode_str}): "
-              f"alpha_tso = {result.alpha_tso:.4f}, "
-              f"lam_max = {result.lam_max_sys:.4f}{rho_str}  "
-              f"[{feasible_str}]")
+              f"alpha_tso = {result.alpha_tso:.4f}  "
+              f"[{feasible_str}]"
+              f"  C1={'ok' if result.c1_feasible else 'X'}"
+              f"  C2={'ok' if result.c2_feasible else 'X'}"
+              f"  C3={'ok' if result.c3_feasible else 'X'}")
 
         # Per-DSO alpha (compact)
         dso_alphas = []
         for d_idx, (dso_id_key, _) in enumerate(dso_controllers.items()):
-            alpha_d = result.alpha_dso[d_idx] if d_idx < len(result.alpha_dso) else 1.0
+            alpha_d = result.alpha_dso_list[d_idx] if d_idx < len(result.alpha_dso_list) else 1.0
             dso_alphas.append(f"{dso_id_key}={alpha_d:.4f}")
         if dso_alphas:
             print(f"       alpha_dso: {', '.join(dso_alphas)}")
@@ -1468,8 +1506,8 @@ def _tune_and_apply_gw(
             for idx, z in enumerate(zone_ids_sorted):
                 zd = zone_defs[z]
                 gw_old = gw_tso_init[idx]
-                gw_new = result.gw_tso[idx]
-                kappa = result.per_zone_kappa[idx] if idx < len(result.per_zone_kappa) else float('nan')
+                gw_new = result.gw_tso_list[idx]
+                kappa = float('nan')  # kappa available from stability result
                 print(f"    TSO Zone {z}   [kappa = {kappa:.1f}]")
                 print(f"      {'Actuator':<30s} {'Type':<6s}  {'g_w (init)':>11s}  {'g_w (tuned)':>11s}  Change")
 
@@ -1502,14 +1540,14 @@ def _tune_and_apply_gw(
             for d_idx, (dso_id_key, dso_ctrl) in enumerate(dso_controllers.items()):
                 parent_zone = (hv_info_map[dso_id_key].zone
                                if dso_id_key in hv_info_map else "?")
-                lam_d = result.per_dso_lam_max[d_idx] if d_idx < len(result.per_dso_lam_max) else float('nan')
-                alpha_d = result.alpha_dso[d_idx] if d_idx < len(result.alpha_dso) else float('nan')
+                lam_d = float('nan')
+                alpha_d = result.alpha_dso_list[d_idx] if d_idx < len(result.alpha_dso_list) else float('nan')
                 print(f"    DSO {dso_id_key} (Zone {parent_zone})   "
                       f"[lam_max = {lam_d:.4f}, alpha_dso = {alpha_d:.6f}]")
                 print(f"      {'Actuator':<30s} {'Type':<6s}  {'g_w (init)':>11s}  {'g_w (tuned)':>11s}  Change")
 
                 gw_old_d = gw_dso_init[d_idx]
-                gw_new_d = result.gw_dso[d_idx]
+                gw_new_d = result.gw_dso_list[d_idx]
                 dso_cfg = dso_ctrl.config
                 off_d = 0
                 for k, s_idx in enumerate(dso_cfg.der_indices):
@@ -1553,7 +1591,7 @@ def _tune_and_apply_gw(
         for idx, z in enumerate(zone_ids_sorted):
             replacements: dict = {"alpha": eff_alpha_tso}
             if not alpha_only:
-                replacements["g_w"] = result.gw_tso[idx]
+                replacements["g_w"] = result.gw_tso_list[idx]
             tso_controllers[z].params = dataclasses.replace(
                 tso_controllers[z].params, **replacements,
             )
@@ -1561,12 +1599,12 @@ def _tune_and_apply_gw(
         for d_idx, (dso_id_key, dso_ctrl) in enumerate(dso_controllers.items()):
             eff_alpha_d = (config.alpha_dso_override
                            if config.alpha_dso_override is not None
-                           else (result.alpha_dso[d_idx]
-                                 if d_idx < len(result.alpha_dso) else 1.0))
+                           else (result.alpha_dso_list[d_idx]
+                                 if d_idx < len(result.alpha_dso_list) else 1.0))
             eff_alpha_dso_list.append(eff_alpha_d)
             dso_replacements: dict = {"alpha": eff_alpha_d}
             if not alpha_only:
-                dso_replacements["g_w"] = result.gw_dso[d_idx]
+                dso_replacements["g_w"] = result.gw_dso_list[d_idx]
             dso_ctrl.params = dataclasses.replace(
                 dso_ctrl.params, **dso_replacements,
             )
@@ -1628,11 +1666,37 @@ def _run_delayed_stability_analysis(
     # Exclude frozen actuator types (same filter as eigenvector pump)
     excl = config.exclude_from_stability
     if excl:
-        from analysis.tune_ofo_params import filter_stability_inputs
         H_blocks_stab, G_w_list, actuator_counts, _ = filter_stability_inputs(
             H_blocks_stab, G_w_list, actuator_counts,
             zone_ids_sorted, excl,
         )
+
+    # Build DSO data for C1 analysis
+    dso_data_list = []
+    for dso_id_key, dso_ctrl in dso_controllers.items():
+        dso_cfg_local = dso_ctrl.config
+        n_interfaces = len(dso_cfg_local.interface_trafo_indices)
+        n_voltage    = len(dso_cfg_local.voltage_bus_indices)
+        n_current    = len(dso_cfg_local.current_line_indices)
+        q_obj_dso = np.zeros(n_interfaces + n_voltage + n_current)
+        q_obj_dso[:n_interfaces] = float(config.g_q)
+        if dso_cfg_local.v_setpoints_pu is not None and n_voltage > 0:
+            q_obj_dso[n_interfaces:n_interfaces + n_voltage] = float(config.dso_g_v)
+        try:
+            H_bus_dso = dso_ctrl._build_sensitivity_matrix()
+            H_dso = dso_ctrl._expand_H_to_der_level(H_bus_dso)
+        except Exception:
+            continue
+        dso_data_list.append({
+            'H': H_dso, 'Q': q_obj_dso,
+            'G_w': np.asarray(dso_ctrl.params.g_w).ravel(),
+            'id': dso_id_key,
+            'actuator_counts': {
+                'n_der': len(dso_cfg_local.der_indices),
+                'n_oltc': len(dso_cfg_local.interface_trafo_indices),
+                'n_shunt': len(dso_cfg_local.shunt_bus_indices),
+            },
+        })
 
     alpha_tso = tso_controllers[zone_ids_sorted[0]].params.alpha
     stab_result = analyse_multi_zone_stability(
@@ -1644,9 +1708,9 @@ def _run_delayed_stability_analysis(
         actuator_counts=actuator_counts,
         alpha=alpha_tso,
         verbose=(verbose >= 1),
-        # Dwell-time analysis parameters
-        configured_cooldown=config.int_cooldown,
-        int_max_step=config.int_max_step,
+        dso_data=dso_data_list,
+        tso_period_s=config.tso_period_s,
+        dso_period_s=config.dso_period_s,
     )
 
     # Write markdown report + machine-readable JSON snapshot
@@ -1690,6 +1754,7 @@ def _run_delayed_stability_analysis(
             print(f"  Tuned params snapshot:       {json_path}")
             print(f"  (set config.load_tuned_params_path to this file "
                   f"to skip auto-tune next run)")
+            print()
     except Exception as exc:
         if verbose >= 1:
             print(f"  WARNING: failed to write tuned params JSON to {json_path}: {exc}")
@@ -1747,6 +1812,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # =========================================================================
     if config.use_fixed_zones:
         if verbose >= 1:
+            print()
             print("[2] Fixed 3-area zone partition (literature) ...")
         zone_map, bus_zone = fixed_zone_partition_ieee39(
             net, verbose=(verbose >= 2)
@@ -2187,6 +2253,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     if use_profiles:
         profiles_csv = config.profiles_csv or DEFAULT_PROFILES_CSV
         if verbose >= 1:
+            print()
             print(f"[7b] Loading profiles from {profiles_csv}")
             print(f"     start_time = {start_time:%d.%m.%Y %H:%M}")
 
@@ -2706,16 +2773,16 @@ def main() -> None:
     cfg = MultiTSOConfig(
         n_total_s=60.0 * 720,      # 720-minute simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
-        dso_period_s=10.0 * 1,    # DSO every 20 seconds
+        dso_period_s=20.0 * 1,    # DSO every 20 seconds
         g_v=5000.0,
-        g_q=15,
+        g_q=20,
         dso_g_v=10000.0,
-        g_w_der=2,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_gen=1e5,  # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
-        g_w_pcc=2,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        g_w_der=5,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        g_w_gen=1e6,  # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
+        g_w_pcc=5,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
         g_w_tso_oltc=2,  # unchanged (was at alpha=1)
         g_w_dso_der=50,  # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
-        g_w_dso_oltc=30,  # unchanged (was at alpha=1)
+        g_w_dso_oltc=20,  # unchanged (was at alpha=1)
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -2726,7 +2793,7 @@ def main() -> None:
         live_plot=True,
         add_tso_ders=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 8, 0),
+        start_time=datetime(2016, 1, 6, 0, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[

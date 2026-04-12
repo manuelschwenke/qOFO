@@ -347,7 +347,7 @@ class MultiTSOConfig:
     # gradients, so the analysis is misleading.  After one simulated hour
     # the setpoints have largely equilibrated and the H/C matrices reflect
     # a representative operating point.  Set to 0 to run at t=0 (legacy).
-    stability_analysis_at_s:      float = 900.0
+    stability_analysis_at_s:      float = 0.0
     sensitivity_update_interval:  int  = 1E6  # recompute H_ij every N TSO steps
 
     # ── Output ────────────────────────────────────────────────────────────────
@@ -1713,6 +1713,124 @@ def _run_delayed_stability_analysis(
         dso_period_s=config.dso_period_s,
     )
 
+    # ── Re-tune if any condition is violated ──────────────────────────────
+    if not stab_result.stable and config.auto_tune_gw:
+        import dataclasses as _dc
+
+        if verbose >= 1:
+            print(f"\n  Stability conditions violated -- re-tuning g_w ...")
+
+        # Build DSO tune inputs
+        _dso_tune_inputs: List[DSOTuneInput] = []
+        _gw_dso_init: List[np.ndarray] = []
+        for dd in dso_data_list:
+            _dso_tune_inputs.append(DSOTuneInput(
+                dso_id=dd['id'], H=dd['H'], q_obj_diag=dd['Q'],
+                n_der=dd['actuator_counts']['n_der'],
+                n_oltc=dd['actuator_counts']['n_oltc'],
+                n_shunt=dd['actuator_counts']['n_shunt'],
+            ))
+            _gw_dso_init.append(dd['G_w'].copy())
+
+        _gw_tso_init = [np.asarray(gw).ravel().copy() for gw in G_w_list]
+
+        _floors_tso = {
+            'der':  getattr(config, 'min_gw_tso_der', 0.0),
+            'pcc':  getattr(config, 'min_gw_tso_pcc', 0.0),
+            'gen':  getattr(config, 'min_gw_tso_gen', 0.0),
+            'oltc': getattr(config, 'min_gw_tso_oltc', 0.0),
+            'shunt': getattr(config, 'min_gw_tso_shunt', 0.0),
+        }
+        _floors_dso = {
+            'der':   getattr(config, 'min_gw_dso_der', 0.0),
+            'oltc':  getattr(config, 'min_gw_dso_oltc', 0.0),
+            'shunt': getattr(config, 'min_gw_dso_shunt', 0.0),
+        }
+
+        try:
+            tune_result = _auto_tune(
+                H_blocks=H_blocks_stab,
+                Q_obj_list=Q_obj_list,
+                actuator_counts=actuator_counts,
+                zone_ids=zone_ids_sorted,
+                gw_tso_init=_gw_tso_init,
+                dso_inputs=_dso_tune_inputs,
+                gw_dso_init=_gw_dso_init,
+                floors_tso=_floors_tso,
+                floors_dso=_floors_dso,
+                tso_period_s=config.tso_period_s,
+                dso_period_s=config.dso_period_s,
+                safety_factor_continuous=getattr(config, 'safety_factor_continuous', 2.0),
+                safety_factor_discrete=getattr(config, 'safety_factor_discrete', 1.5),
+                verbose=(verbose >= 1),
+            )
+
+            # Apply tuned TSO g_w + alpha
+            eff_alpha = (config.alpha_tso_override
+                         if getattr(config, 'alpha_tso_override', None) is not None
+                         else tune_result.alpha_tso)
+            for idx, z in enumerate(zone_ids_sorted):
+                tso_controllers[z].params = _dc.replace(
+                    tso_controllers[z].params,
+                    alpha=eff_alpha,
+                    g_w=tune_result.gw_tso_list[idx],
+                )
+
+            # Apply tuned DSO g_w + alpha
+            for d_idx, (dso_id_key, dso_ctrl) in enumerate(dso_controllers.items()):
+                if d_idx < len(tune_result.gw_dso_list):
+                    eff_alpha_d = (getattr(config, 'alpha_dso_override', None)
+                                   or tune_result.alpha_dso_list[d_idx])
+                    dso_ctrl.params = _dc.replace(
+                        dso_ctrl.params,
+                        alpha=eff_alpha_d,
+                        g_w=tune_result.gw_dso_list[d_idx],
+                    )
+
+            coordinator._last_pump_result = tune_result
+
+            if verbose >= 1:
+                tag = "FEASIBLE" if tune_result.feasible else "INFEASIBLE"
+                print(f"  Re-tune complete [{tag}]: alpha_tso = {eff_alpha:.4f}"
+                      f"  C1={'ok' if tune_result.c1_feasible else 'X'}"
+                      f"  C2={'ok' if tune_result.c2_feasible else 'X'}"
+                      f"  C3={'ok' if tune_result.c3_feasible else 'X'}")
+
+            # Re-run stability analysis with tuned params for the report
+            G_w_list_tuned = [
+                np.asarray(tso_controllers[z].params.g_w).ravel()
+                for z in zone_ids_sorted
+            ]
+            dso_data_tuned = []
+            for dd in dso_data_list:
+                dso_id_key = dd['id']
+                if dso_id_key in dso_controllers:
+                    dd_copy = dict(dd)
+                    dd_copy['G_w'] = np.asarray(dso_controllers[dso_id_key].params.g_w).ravel()
+                    dso_data_tuned.append(dd_copy)
+                else:
+                    dso_data_tuned.append(dd)
+
+            stab_result = analyse_multi_zone_stability(
+                H_blocks=H_blocks_stab,
+                Q_obj_list=Q_obj_list,
+                G_w_list=G_w_list_tuned,
+                zone_ids=zone_ids_sorted,
+                zone_names=[f"Zone {z}" for z in zone_ids_sorted],
+                actuator_counts=actuator_counts,
+                alpha=eff_alpha,
+                verbose=(verbose >= 1),
+                dso_data=dso_data_tuned,
+                tso_period_s=config.tso_period_s,
+                dso_period_s=config.dso_period_s,
+            )
+
+        except Exception as _exc:
+            if verbose >= 1:
+                import traceback
+                print(f"  WARNING: re-tuning failed: {_exc}")
+                traceback.print_exc()
+
     # Write markdown report + machine-readable JSON snapshot
     minutes = int(round(time_s / 60.0))
     md_path = os.path.join(config.result_dir,
@@ -2787,7 +2905,7 @@ def main() -> None:
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
         auto_tune_gw=True,
-        tune_alpha_only=True,   # keep hand-tuned g_w, only compute alpha
+        tune_alpha_only=False,   # keep hand-tuned g_w, only compute alpha
         exclude_from_stability=frozenset({'gen'}),
         verbose=1,
         live_plot=True,

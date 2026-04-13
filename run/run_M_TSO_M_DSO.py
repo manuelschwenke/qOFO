@@ -94,6 +94,7 @@ from analysis.auto_tune import (
     auto_tune as _auto_tune,
     filter_stability_inputs,
     expand_gw_with_excluded,
+    recommend_dso_weights,
     DSOTuneInput,
     TuningResult,
 )
@@ -1405,10 +1406,15 @@ def _tune_and_apply_gw(
             n_der=len(dso_cfg_local.der_indices),
             n_oltc=len(dso_cfg_local.interface_trafo_indices),
             n_shunt=len(dso_cfg_local.shunt_bus_indices),
+            n_interfaces=n_interfaces,
         ))
         gw_dso_init.append(
             np.asarray(dso_ctrl.params.g_w).ravel().copy()
         )
+
+    # ── DSO weight diagnostic ───────────────────────────────────────────
+    if verbose >= 1 and dso_inputs:
+        recommend_dso_weights(dso_inputs)
 
     floors_tso = {
         'der':  config.min_gw_tso_der,

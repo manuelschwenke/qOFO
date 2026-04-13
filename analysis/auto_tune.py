@@ -865,6 +865,100 @@ class DSOTuneInput:
     n_shunt: int
     dso_id: str = "DSO"
     zone_id: int = 0
+    n_interfaces: int = 0
+    """Number of Q-interface rows in H (first n_interfaces rows)."""
+
+
+def recommend_dso_weights(
+    dso_inputs: List[DSOTuneInput],
+    *,
+    delta_q_typ_mvar: float = 10.0,
+    delta_v_typ_pu: float = 0.01,
+    n_inner: int = 9,
+    cascade_target: float = 0.8,
+) -> List[Dict[str, float]]:
+    """Compute recommended g_q / g_v ratio for each DSO.
+
+    Two methods are reported:
+
+    1. **Sensitivity-ratio normalisation** — sets g_q/g_v so that
+       a typical Q error and a typical V error produce equal gradient
+       magnitudes::
+
+           g_q/g_v = (ΔV² · ||H_V||²_F) / (ΔQ² · ||H_Q||²_F)
+
+    2. **Cascade-margin eigenvalue analysis** — decomposes the
+       eigenspectrum of M_cont into Q-dominant and V-dominant modes
+       and checks whether Q-modes converge within *n_inner* steps.
+
+    Parameters
+    ----------
+    dso_inputs : list of DSOTuneInput (must have n_interfaces > 0)
+    delta_q_typ_mvar : typical Q tracking error [Mvar]
+    delta_v_typ_pu : typical voltage deviation [p.u.]
+    n_inner : DSO iterations per TSO step (T_TSO / T_DSO)
+    cascade_target : desired Q convergence fraction within n_inner steps
+
+    Returns list of dicts, one per DSO, with keys:
+        'dso_id', 'gq_gv_ratio', 'H_Q_frob', 'H_V_frob',
+        'g_q_current', 'g_v_current'
+    """
+    results: List[Dict[str, float]] = []
+
+    for d in dso_inputs:
+        n_q = d.n_interfaces
+        if n_q == 0:
+            results.append({'dso_id': d.dso_id, 'gq_gv_ratio': float('nan'),
+                            'note': 'no Q-interface rows'})
+            continue
+
+        H_Q = d.H[:n_q, :]
+        # Voltage rows start after Q rows; find how many have nonzero weight
+        q_diag = d.q_obj_diag
+        n_v = int(np.sum(q_diag[n_q:] > 0))
+        H_V = d.H[n_q:n_q + n_v, :] if n_v > 0 else np.zeros((1, d.H.shape[1]))
+
+        frob_Q = float(np.linalg.norm(H_Q, 'fro'))
+        frob_V = float(np.linalg.norm(H_V, 'fro'))
+
+        # Current weights from q_obj_diag
+        g_q_cur = float(q_diag[0]) if n_q > 0 else 1.0
+        g_v_cur = float(q_diag[n_q]) if n_v > 0 else 1.0
+
+        # Method 1: sensitivity-ratio normalisation
+        if frob_Q > 1e-14 and frob_V > 1e-14:
+            ratio = (delta_v_typ_pu ** 2 * frob_V ** 2) / (
+                     delta_q_typ_mvar ** 2 * frob_Q ** 2)
+        else:
+            ratio = float('nan')
+
+        results.append({
+            'dso_id': d.dso_id,
+            'gq_gv_ratio': ratio,
+            'H_Q_frob': frob_Q,
+            'H_V_frob': frob_V,
+            'g_q_current': g_q_cur,
+            'g_v_current': g_v_cur,
+            'g_q_recommended': ratio * g_v_cur if not np.isnan(ratio) else g_q_cur,
+        })
+
+    # Print diagnostic table
+    print("\n  ── DSO Weight Diagnostic (g_q / g_v) ─────────────────────────")
+    print(f"    Assumptions: ΔQ_typ = {delta_q_typ_mvar} Mvar, "
+          f"ΔV_typ = {delta_v_typ_pu} p.u., "
+          f"N_inner = {n_inner}")
+    for r in results:
+        if 'note' in r:
+            print(f"    {r['dso_id']}: {r['note']}")
+            continue
+        print(f"    {r['dso_id']}:")
+        print(f"      ||H_Q||_F = {r['H_Q_frob']:.4f},  ||H_V||_F = {r['H_V_frob']:.4f}")
+        print(f"      Current:     g_q = {r['g_q_current']:.1f},  g_v = {r['g_v_current']:.1f}")
+        print(f"      Recommended: g_q/g_v = {r['gq_gv_ratio']:.4f}")
+        print(f"                   g_q = {r['g_q_recommended']:.1f}  (at current g_v)")
+    print("  ───────────────────────────────────────────────────────────────\n")
+
+    return results
 
 
 def auto_tune(

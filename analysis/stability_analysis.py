@@ -325,11 +325,14 @@ def _filter_active_eigenvalues(
     return active, len(eigs) - len(active)
 
 
-def _spectral_radius_iteration(eigs_active: NDArray[np.float64]) -> float:
-    """Compute rho = max |1 - lambda_i| on active eigenvalues."""
+def _spectral_radius_iteration(
+    eigs_active: NDArray[np.float64],
+    alpha: float = 1.0,
+) -> float:
+    """Compute rho = max |1 - alpha*lambda_i| on active eigenvalues."""
     if len(eigs_active) == 0:
         return 0.0
-    return float(np.max(np.abs(1.0 - eigs_active)))
+    return float(np.max(np.abs(1.0 - alpha * eigs_active)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -344,6 +347,7 @@ def analyse_dso_stability(
     *,
     dso_id: str = "DSO",
     actuator_counts: Optional[Dict[str, int]] = None,
+    alpha: float = 1.0,
     tso_period_s: float = 180.0,
     dso_period_s: float = 20.0,
 ) -> DSOStabilityResult:
@@ -399,7 +403,7 @@ def analyse_dso_stability(
 
     eigs_all = np.linalg.eigvalsh(M_c)
     eigs_active, n_filt = _filter_active_eigenvalues(eigs_all)
-    rho = _spectral_radius_iteration(eigs_active)
+    rho = _spectral_radius_iteration(eigs_active, alpha=alpha)
     stable = rho < 1.0
 
     # Cascade margin
@@ -460,6 +464,7 @@ def analyse_continuous_stability(
     *,
     zone_ids: Optional[List[int]] = None,
     actuator_counts: Optional[List[Dict[str, int]]] = None,
+    alpha: float = 1.0,
 ) -> ContinuousStabilityResult:
     """Multi-zone continuous stability (Theorem 3.1).
 
@@ -563,7 +568,7 @@ def analyse_continuous_stability(
     if n_total_c > 0:
         eigs_all = np.linalg.eigvals(M_full_c)
         eigs_active, n_filt = _filter_active_eigenvalues(eigs_all)
-        rho_global = _spectral_radius_iteration(eigs_active)
+        rho_global = _spectral_radius_iteration(eigs_active, alpha=alpha)
     else:
         eigs_active = np.array([])
         n_filt = 0
@@ -586,7 +591,7 @@ def analyse_continuous_stability(
         eig_ii = np.linalg.eigvalsh(M_ii)
         eig_act, _ = _filter_active_eigenvalues(eig_ii)
         if len(eig_act) > 0:
-            per_zone_rho[i] = _spectral_radius_iteration(eig_act)
+            per_zone_rho[i] = _spectral_radius_iteration(eig_act, alpha=alpha)
             per_zone_lmax[i] = float(eig_act[-1])
             lmin = float(eig_act[0])
             per_zone_kappa[i] = per_zone_lmax[i] / lmin if lmin > 1e-14 else np.inf
@@ -604,13 +609,13 @@ def analyse_continuous_stability(
             else:
                 coupling_norms[(i, j)] = 0.0
 
-    # Small-gain: gamma = max_i {rho_i + sum_{j!=i} ||M_ij^c||_2}
+    # Small-gain: gamma = max_i {rho_i + sum_{j!=i} alpha * ||M_ij^c||_2}
     gamma = 0.0
     for i_idx, i in enumerate(zone_ids):
         row_sum = per_zone_rho[i]
         for j in zone_ids:
             if j != i:
-                row_sum += coupling_norms.get((i, j), 0.0)
+                row_sum += alpha * coupling_norms.get((i, j), 0.0)
         gamma = max(gamma, row_sum)
 
     warnings: List[str] = []
@@ -874,6 +879,7 @@ def analyse_multi_zone_stability(
                 G_u_dso=dd.get('G_u'),
                 dso_id=dd.get('id', 'DSO'),
                 actuator_counts=dd.get('actuator_counts'),
+                alpha=dd.get('alpha', 1.0),
                 tso_period_s=tso_period_s,
                 dso_period_s=dso_period_s,
             )
@@ -889,6 +895,7 @@ def analyse_multi_zone_stability(
         G_u_list=G_u_list,
         zone_ids=zone_ids,
         actuator_counts=actuator_counts,
+        alpha=alpha,
     )
     c2_ok = c2_result.stable
 

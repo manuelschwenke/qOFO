@@ -1691,6 +1691,7 @@ def _run_delayed_stability_analysis(
             'H': H_dso, 'Q': q_obj_dso,
             'G_w': np.asarray(dso_ctrl.params.g_w).ravel(),
             'id': dso_id_key,
+            'alpha': float(dso_ctrl.params.alpha),
             'actuator_counts': {
                 'n_der': len(dso_cfg_local.der_indices),
                 'n_oltc': len(dso_cfg_local.interface_trafo_indices),

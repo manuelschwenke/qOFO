@@ -2995,18 +2995,18 @@ def main() -> None:
         python run/run_M_TSO_M_DSO.py
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 720,      # 720-minute full simulation
+        n_total_s=60.0 * 720,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=5.0,    # DSO every 5 seconds (more inner iterations)
-        g_v=5000.0,
+        g_v=10000.0,  # was 5000; needed for machine OLTCs to respond
         g_q=100,  # was 30; Q-interface is DSO primary objective
-        dso_g_v=100.0,  # was 1000; soft V-tracking secondary, g_z handles limits
+        dso_g_v=10000.0,  # needed for OLTC to step at V~1.08; balanced with g_q=100
         g_w_der=10,
         g_w_gen=1e7,
-        g_w_pcc=20,
-        g_w_tso_oltc=10,  # stability C3 needs >= 6.54
-        g_w_dso_der=650,  # was 350 (rho~1.5-1.7), scaling up for g_q=100
-        g_w_dso_oltc=50,
+        g_w_pcc=50,  # was 20; compensate for g_v=10000 in C2
+        g_w_tso_oltc=14,  # C3 sizing rule needs >= 13.08 for Zone 2 OLTC_0
+        g_w_dso_der=2300,  # 2000: DSO_2 rho=1.13, need slightly more
+        g_w_dso_oltc=50,  # back to 50; 20 caused tap oscillation
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps

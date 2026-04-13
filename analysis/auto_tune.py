@@ -79,11 +79,11 @@ class TuningConfig:
     dso_safety_factor_discrete: float = 2.0
     """Safety factor for DSO discrete actuators."""
 
-    dso_gersh_floor_fraction: float = 0.2
+    dso_gersh_floor_fraction: float = 1.0
     """Fraction of Gershgorin bound used as floor for DSO g_w."""
 
     # ── TSO (C2) ──────────────────────────────────────────────────────────
-    tso_kappa_target: float = 20.0
+    tso_kappa_target: float = 50.0
     """Condition-number target for TSO pump."""
 
     tso_rho_target: float = 0.95
@@ -98,7 +98,7 @@ class TuningConfig:
     tso_safety_factor_discrete: float = 3.0
     """Safety factor for TSO discrete actuators."""
 
-    tso_gersh_floor_fraction: float = 0.3
+    tso_gersh_floor_fraction: float = 1.0
     """Fraction of Gershgorin bound used as floor for TSO g_w."""
 
     # ── C3 discrete ───────────────────────────────────────────────────────
@@ -112,7 +112,7 @@ class TuningConfig:
     lambda_max_alpha_target: float = 1.8
     """Pump guard: alpha * lambda_max must stay below this."""
 
-    pump_max_iters: int = 50
+    pump_max_iters: int = 20
     """Maximum conditioning-pump iterations."""
 
 
@@ -275,10 +275,10 @@ def _conditioning_pump(
     gw: NDArray[np.float64],
     M_builder,
     *,
-    kappa_target: float = 20.0,
+    kappa_target: float = 50.0,
     alpha_target: float = 0.5,
     lambda_max_alpha_target: float = 1.8,
-    max_iters: int = 50,
+    max_iters: int = 20,
     boost_factor: float = 1.3,
 ) -> Tuple[NDArray[np.float64], float, int]:
     """Improve conditioning of M by boosting g_w for the fastest mode.
@@ -374,6 +374,7 @@ def _eigenvalue_init_gw(
     M_builder,
     gw_init: NDArray[np.float64],
     lambda_target: float = 1.5,
+    max_boost: float = 10.0,
 ) -> NDArray[np.float64]:
     """Boost g_w for actuators participating in eigenvalues above lambda_target.
 
@@ -381,11 +382,16 @@ def _eigenvalue_init_gw(
     collinear sensitivities), this uses the actual eigenspectrum to
     selectively inflate only the actuators that drive lambda_max.
 
+    The per-actuator boost is capped at ``max_boost`` to prevent extreme
+    inflation when the starting g_w is far from the curvature scale.
+    The conditioning pump handles the remainder iteratively.
+
     Parameters
     ----------
     M_builder : callable(gw) -> (M, eigs)
     gw_init : starting g_w vector
     lambda_target : desired lambda_max(M) after adjustment
+    max_boost : maximum per-actuator multiplicative boost (default 10x)
 
     Returns g_w_new (never decreases any entry).
     """
@@ -412,6 +418,7 @@ def _eigenvalue_init_gw(
 
     overshoot = lam_max / lambda_target
     boost = 1.0 + (overshoot - 1.0) * participation / p_max
+    boost = np.minimum(boost, max_boost)  # cap per-actuator boost
     return gw_init * boost
 
 
@@ -534,14 +541,14 @@ def tune_continuous_gw(
     zone_ids: Optional[List[int]] = None,
     actuator_counts: Optional[List[Dict[str, int]]] = None,
     safety_factor: float = 2.0,
-    gersh_floor_fraction: float = 0.3,
+    gersh_floor_fraction: float = 1.0,
     floors: Optional[Dict[str, float]] = None,
     rho_target: float = 0.95,
-    kappa_target: float = 20.0,
+    kappa_target: float = 50.0,
     alpha_target: float = 0.5,
     lambda_target: float = 1.5,
     lambda_max_alpha_target: float = 1.8,
-    max_pump_iters: int = 50,
+    max_pump_iters: int = 20,
     warnings_list: Optional[List[str]] = None,
     verbose: bool = False,
 ) -> Tuple[List[NDArray[np.float64]], float]:

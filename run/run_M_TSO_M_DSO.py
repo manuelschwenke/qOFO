@@ -2582,6 +2582,70 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
 
     # =========================================================================
+    # STEP 7d: Q-tracking capacity diagnostic
+    # =========================================================================
+    if verbose >= 1:
+        import math as _math
+        print()
+        print("[7d] Q-tracking capacity diagnostic")
+        # DER Q capacity (VDE-AR-N 4120 v2)
+        for did, hv in hv_info_map.items():
+            sgens = net.sgen.loc[list(hv.sgen_indices)]
+            res_sg = net.res_sgen.loc[list(hv.sgen_indices)]
+            tot_qmin, tot_qmax, tot_qact = 0.0, 0.0, 0.0
+            for idx in hv.sgen_indices:
+                sn = net.sgen.at[idx, "sn_mva"]
+                p_act = abs(net.res_sgen.at[idx, "p_mw"])
+                p_ratio = p_act / sn if sn > 0 else 0
+                if p_ratio < 0.1:
+                    qmin, qmax = 0.0, 0.0
+                elif p_ratio < 0.2:
+                    t = (p_ratio - 0.1) / 0.1
+                    qmin = (-0.10 + t * (-0.23)) * sn
+                    qmax = ( 0.10 + t * ( 0.31)) * sn
+                else:
+                    qmin, qmax = -0.33 * sn, 0.41 * sn
+                tot_qmin += qmin; tot_qmax += qmax
+                tot_qact += net.res_sgen.at[idx, "q_mvar"]
+            # Load Q
+            q_load = net.res_load.loc[list(hv.load_indices), "q_mvar"].sum()
+            p_load = net.res_load.loc[list(hv.load_indices), "p_mw"].sum()
+            # Line Q losses
+            q_line_loss = net.res_line.loc[list(hv.line_indices), "ql_mvar"].sum()
+            # Interface Q
+            q_iface = sum(net.res_trafo3w.at[t, "q_hv_mvar"]
+                          for t in hv.coupling_trafo_indices)
+            print(f"  {did}:")
+            print(f"    DER Q capacity:  [{tot_qmin:+.0f}, {tot_qmax:+.0f}] Mvar  "
+                  f"(actual: {tot_qact:+.1f} Mvar)")
+            print(f"    Load Q:          {q_load:+.0f} Mvar  "
+                  f"(P={p_load:.0f} MW)")
+            print(f"    Line Q losses:   {q_line_loss:+.1f} Mvar")
+            print(f"    Interface Q(HV): {q_iface:+.1f} Mvar")
+            print(f"    Required DER Q for Q_iface=0: "
+                  f"{q_load + q_line_loss:.0f} Mvar (to compensate loads+losses)")
+
+        # IEEE 39-bus line lengths between coupling buses
+        print()
+        print("  Transmission line lengths between coupling buses:")
+        for did, hv in hv_info_map.items():
+            cbs = list(hv.coupling_ieee_buses)
+            for i, b1 in enumerate(cbs):
+                for b2 in cbs[i+1:]:
+                    mask = ((net.line.from_bus == b1) & (net.line.to_bus == b2)) | \
+                           ((net.line.from_bus == b2) & (net.line.to_bus == b1))
+                    if mask.any():
+                        for lidx in net.line.index[mask]:
+                            L = net.line.at[lidx, "length_km"]
+                            print(f"    {did}: TN line {b1}-{b2}: {L:.1f} km (345 kV)")
+        print("  HV sub-network line lengths:")
+        for did, hv in hv_info_map.items():
+            lines = net.line.loc[list(hv.line_indices)]
+            print(f"    {did} (scale={hv.line_length_scale}): "
+                  f"range [{lines.length_km.min():.1f}, {lines.length_km.max():.1f}] km, "
+                  f"total={lines.length_km.sum():.0f} km (110 kV)")
+
+    # =========================================================================
     # STEP 8: Main simulation loop
     # =========================================================================
     if verbose >= 1:
@@ -2935,13 +2999,13 @@ def main() -> None:
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=5.0,    # DSO every 5 seconds (more inner iterations)
         g_v=5000.0,
-        g_q=30,
-        dso_g_v=1000.0,  # was 2000, further reducing; g_z_voltage enforces limits
+        g_q=100,  # was 30; Q-interface is DSO primary objective
+        dso_g_v=100.0,  # was 1000; soft V-tracking secondary, g_z handles limits
         g_w_der=10,
         g_w_gen=1e7,
         g_w_pcc=20,
         g_w_tso_oltc=10,  # stability C3 needs >= 6.54
-        g_w_dso_der=350,  # 300 -> DSO_2 rho=1.026, bumping up slightly
+        g_w_dso_der=650,  # was 350 (rho~1.5-1.7), scaling up for g_q=100
         g_w_dso_oltc=50,
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,

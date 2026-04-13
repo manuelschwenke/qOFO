@@ -442,13 +442,16 @@ def tune_dso_gw(
     actuator_counts: Optional[Dict[str, int]] = None,
     rho_target: float = 0.95,
     alpha_min: float = 0.1,
+    n_interfaces: int = 0,
 ) -> Tuple[NDArray[np.float64], float]:
     """Tune DSO to satisfy C1: rho(I - alpha*M_cont) < 1.
 
-    **Alpha-first with fallback**: try the user's g_w first.  If the
-    resulting alpha is below ``alpha_min`` (i.e. the user's g_w is too
-    small relative to curvature), switch to Gershgorin preconditioning
-    so that eigenvalues are brought into a range where alpha >= alpha_min.
+    When ``n_interfaces > 0``, alpha is sized for **Q-tracking curvature
+    only** (the cascade-critical objective), then verified against the
+    full objective.  This prevents the voltage weight g_v from dominating
+    the Hessian and forcing a tiny alpha.
+
+    Falls back to Gershgorin preconditioning when alpha < ``alpha_min``.
 
     Returns (g_w_tuned_full, alpha_dso).
     """
@@ -476,60 +479,61 @@ def tune_dso_gw(
         return gw_full, 1.0
 
     K_c = H_dso[:, cont_idx]
-    QK_c = Q_sqrt[:, None] * K_c
 
-    def _build_M_cont(gw_c):
+    # Full Q-weighted sensitivity (Q + V + I rows)
+    QK_c_full = Q_sqrt[:, None] * K_c
+
+    # Q-tracking-only sensitivity (first n_interfaces rows)
+    # This is the cascade-critical part; voltage is secondary.
+    if n_interfaces > 0:
+        Q_sqrt_q = Q_sqrt.copy()
+        Q_sqrt_q[n_interfaces:] = 0.0  # zero out V and I rows
+        QK_c_q = Q_sqrt_q[:, None] * K_c
+    else:
+        QK_c_q = QK_c_full
+
+    def _build_M_cont(gw_c, qk=None):
+        if qk is None:
+            qk = QK_c_full
         gi = 1.0 / np.sqrt(np.maximum(gw_c, 1e-12))
-        Phi_c = 2.0 * (QK_c.T @ QK_c)
+        Phi_c = 2.0 * (qk.T @ qk)
         M_c = (gi[:, None] * Phi_c) * gi[None, :]
         eigs = np.linalg.eigvalsh(M_c)
         return M_c, eigs
 
-    # --- Step 1: Try alpha from user's g_w ---
-    _, eigs_init = _build_M_cont(gw_full[cont_idx])
-    eig_max = max(float(np.max(np.abs(eigs_init))), 1e-14)
-    active = eigs_init[eigs_init > 0.01 * eig_max]
+    # --- Step 1: Compute alpha from Q-tracking curvature ---
+    # Size alpha for the cascade-critical Q rows, not the full objective.
+    _, eigs_q = _build_M_cont(gw_full[cont_idx], QK_c_q)
+    eig_max = max(float(np.max(np.abs(eigs_q))), 1e-14)
+    active = eigs_q[eigs_q > 0.01 * eig_max]
     alpha = _find_alpha_for_target_rho(
         active.astype(np.complex128), rho_target=rho_target,
     )
 
-    # --- Step 2: If alpha too small, use Gershgorin preconditioning ---
-    c_diag_cont = np.sum(QK_c ** 2, axis=0)
-    Phi_diag = 2.0 * c_diag_cont
+    # --- Step 2: If alpha too small, Gershgorin on Q-tracking curvature ---
+    c_diag_q = np.sum(QK_c_q ** 2, axis=0)
 
     if alpha < alpha_min:
-        # User's g_w gives a tiny alpha — the eigenvalues are too large.
-        # Use Gershgorin-based g_w to bring them into range.
-        gw_gersh = safety_factor_continuous * c_diag_cont / 2.0
+        gw_gersh = safety_factor_continuous * c_diag_q / 2.0
+        gw_gersh = np.maximum(gw_gersh, 1e-6)  # avoid zero for V-only actuators
         gw_cont = np.maximum(gw_full[cont_idx], gw_gersh)
         gw_full[cont_idx] = gw_cont
 
-        # Recompute alpha
-        _, eigs_gersh = _build_M_cont(gw_full[cont_idx])
+        _, eigs_gersh = _build_M_cont(gw_full[cont_idx], QK_c_q)
         eig_max = max(float(np.max(np.abs(eigs_gersh))), 1e-14)
         active = eigs_gersh[eigs_gersh > 0.01 * eig_max]
         alpha = _find_alpha_for_target_rho(
             active.astype(np.complex128), rho_target=rho_target,
         )
-    else:
-        # Alpha is acceptable — only inflate if Gershgorin necessary
-        # condition is violated at this alpha
-        gw_gersh_min = alpha * Phi_diag / 2.0
-        gw_cont = gw_full[cont_idx].copy()
-        adjusted = False
-        for k in range(n_cont):
-            if gw_cont[k] < gw_gersh_min[k]:
-                gw_cont[k] = gw_gersh_min[k] * 1.1
-                adjusted = True
 
-        if adjusted:
-            gw_full[cont_idx] = gw_cont
-            _, eigs_adj = _build_M_cont(gw_full[cont_idx])
-            eig_max = max(float(np.max(np.abs(eigs_adj))), 1e-14)
-            active = eigs_adj[eigs_adj > 0.01 * eig_max]
-            alpha = _find_alpha_for_target_rho(
-                active.astype(np.complex128), rho_target=rho_target,
-            )
+    # --- Step 3: Verify full-objective stability at this alpha ---
+    # The alpha was sized for Q-only. Check the full M (Q+V) doesn't
+    # have eigenvalues that make alpha*lambda > 2 (instability).
+    _, eigs_full = _build_M_cont(gw_full[cont_idx], QK_c_full)
+    eig_max_full = float(np.max(np.abs(eigs_full)))
+    if alpha * eig_max_full >= 1.95:
+        # Full objective would be unstable — reduce alpha to safe value
+        alpha = min(alpha, 1.9 / max(eig_max_full, 1e-14))
 
     # --- Step 3: Discrete g_w (safety-factored curvature) ---
     if disc_idx:
@@ -1103,6 +1107,7 @@ def auto_tune(
             floors=floors_dso,
             actuator_counts=ac,
             rho_target=tc.dso_rho_target,
+            n_interfaces=d.n_interfaces,
         )
         gw_dso_tuned.append(gw)
         alpha_dso_list.append(alpha)

@@ -301,10 +301,13 @@ class TestTuningConfig:
         assert tc.dso_kappa_target == 10.0
         assert tc.lambda_target == 1.5
         assert tc.pump_max_iters == 20
+        assert tc.dso_alpha_min == 0.1
+        assert tc.eigenvalue_init_max_boost == 10.0
+        assert tc.sensitivity_filter_frac == 0.01
+        assert tc.alpha_dso_boost == 1.0
 
     def test_custom_values(self):
         tc = TuningConfig(tso_kappa_target=15.0, lambda_target=2.0)
         assert tc.tso_kappa_target == 15.0
         assert tc.lambda_target == 2.0
-        # Other defaults unchanged
         assert tc.dso_kappa_target == 10.0

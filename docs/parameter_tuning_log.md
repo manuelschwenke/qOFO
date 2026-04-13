@@ -181,7 +181,24 @@ dominated the gradient, leaving persistent Q error.  Since voltage limits are al
 enforced by the hard constraint (g_z_voltage = 1e-12), the dso_g_v term is redundant
 for safety -- it only controls how aggressively V tracks V_set within the safe band.
 
-### Fix: rebalance g_q / dso_g_v ratio
+### Fix: shift DSO objective toward Q-tracking
+
+The weights g_q and dso_g_v are NOT comparable at face value because their
+outputs live on different physical scales.  Typical deviations are ~0.02 p.u.
+for voltage and ~10 Mvar for Q.  The per-output cost contributions scale as:
+
+    J_v ~ g_v * (0.02)^2 = g_v * 4e-4       (per bus)
+    J_q ~ g_q * (10)^2   = g_q * 100         (per interface)
+
+With the old g_v=1000, g_q=30: J_v ~ 0.4 per bus (x10 buses = 4.0) vs
+J_q ~ 3000 per interface (x3 = 9000).  Q already dominated numerically,
+but the voltage term was still large enough to bias the gradient at small
+V errors, creating ~10 Mvar steady-state Q error.
+
+Setting g_v=100 effectively removes the soft voltage objective.  Voltage
+control now relies entirely on the hard output constraint (g_z_voltage)
+and the DSO OLTCs.  This is acceptable because the DSO's primary mandate
+is Q-interface tracking; voltage is a constraint, not an objective.
 
 | Parameter    | Before | After | Ratio change |
 |--------------|--------|-------|-------------|
@@ -220,13 +237,16 @@ cfg = MultiTSOConfig(
 
 ## Network realism observations
 
-1. **TN line lengths:** IEEE 39-bus lines between coupling buses are 1.0 km
-   (345 kV).  These are per-unit placeholders, not physical distances.  A realistic
-   EHV network would have 30--100+ km inter-substation distances.
+1. **TN line lengths:** IEEE 39-bus lines use 1.0 km with inflated ohm/km values
+   to encode the standard per-unit impedances.  The actual impedances correspond
+   to realistic EHV distances (16--135 km equivalent at 0.32 ohm/km for 345 kV
+   overhead lines).  Example: line 2--3 has x=25.4 ohm total, equivalent to 79 km;
+   line 7--8 has x=43.2 ohm, equivalent to 135 km.
 
 2. **HV/MV substation Q:** At the initial operating point, aggregated loads consume
    only -6 Mvar (slightly capacitive) at P = 96 MW.  Real substations would draw
-   20--30 Mvar inductive at this power level (cos_phi ~ 0.95).
+   20--30 Mvar inductive at this power level (cos_phi ~ 0.95).  This is a
+   consequence of the simbench ``mv_rural_qload`` profile at this timestep.
 
 3. **DSO_2 impedance asymmetry:** DSO_2 uses line_length_scale = 1.0 vs 0.75 for
    DSO_1/DSO_3.  This 33% higher impedance attenuates Q sensitivity and explains

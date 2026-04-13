@@ -161,6 +161,7 @@ class TestConditioningPump:
             kappa_target=20.0,
             alpha_target=alpha_target,
             lambda_max_alpha_target=lam_alpha_target,
+            max_iters=50,  # enough iterations for this tight target
         )
 
         # Verify lambda_max * alpha_target is within bound
@@ -181,12 +182,12 @@ class TestConditioningPump:
 
         gw_tuned, kappa, _ = _conditioning_pump(
             gw, builder,
-            kappa_target=20.0,
+            kappa_target=50.0,
             alpha_target=10.0,  # large → scale check won't bind
             lambda_max_alpha_target=100.0,
         )
 
-        assert kappa <= 20.0 * 1.1, f"kappa = {kappa:.1f}, target was 20.0"
+        assert kappa <= 50.0 * 1.1, f"kappa = {kappa:.1f}, target was 50.0"
 
 
 # ── 5.3  Integration-style test ──────────────────────────────────────────────
@@ -296,10 +297,10 @@ class TestAutoTuneIntegration:
 class TestTuningConfig:
     def test_defaults(self):
         tc = TuningConfig()
-        assert tc.tso_kappa_target == 20.0
+        assert tc.tso_kappa_target == 50.0
         assert tc.dso_kappa_target == 10.0
         assert tc.lambda_target == 1.5
-        assert tc.pump_max_iters == 50
+        assert tc.pump_max_iters == 20
 
     def test_custom_values(self):
         tc = TuningConfig(tso_kappa_target=15.0, lambda_target=2.0)

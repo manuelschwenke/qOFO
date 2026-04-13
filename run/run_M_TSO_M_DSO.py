@@ -290,7 +290,7 @@ class MultiTSOConfig:
     alpha_dso when set."""
 
     # ── Gershgorin safety factors (Phase 1 preconditioning) ─────────────
-    safety_factor_continuous: float = 2.0
+    safety_factor_continuous: float = 1.0
     """g_w = sf * C_ii/2 for continuous actuators (DER, PCC, V_gen).
     Higher sf compresses the eigenvalue spread (lowers kappa) and
     reduces cross-coupling norms, improving both per-zone contraction
@@ -299,7 +299,7 @@ class MultiTSOConfig:
       sf=5: rho ~0.90, T_dwell ~30-80, moderate response
       sf=8: rho ~0.80, T_dwell ~8-20, conservative response"""
 
-    safety_factor_discrete: float = 2.0
+    safety_factor_discrete: float = 1.0
     """g_w = sf * C_ii/2 for discrete actuators (OLTC, shunt).
     Anti-oscillation: sf=8 gives g_w=4*C_ii, preventing gradient
     reversal after a single tap step and reducing the perturbation
@@ -1459,6 +1459,7 @@ def _tune_and_apply_gw(
         safety_factor_continuous=config.safety_factor_continuous,
         safety_factor_discrete=config.safety_factor_discrete,
         verbose=(verbose >= 1),
+        alpha_dso_boost=1.0,
     )
 
     # Re-expand tuned g_w to full actuator vector (re-insert excluded types)
@@ -2047,6 +2048,20 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # Extend zone bus indices to include HV sub-network buses (for dispatch / ownership)
     for hv in meta.hv_networks:
         zone_map[hv.zone] = sorted(set(zone_map[hv.zone]) | set(hv.bus_indices))
+
+    # Extend zone map with machine transformer LV buses so that
+    # compute_zonal_gen_dispatch() can assign generators on LV terminal
+    # buses (e.g. 10.5 kV) to the correct zone via the HV (grid) bus.
+    for tidx, gidx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+        if gidx < 0:
+            continue
+        lv_bus = int(net.trafo.at[tidx, "lv_bus"])
+        hv_bus = int(net.trafo.at[tidx, "hv_bus"])
+        for z, buses in zone_map.items():
+            if hv_bus in set(buses):
+                if lv_bus not in set(buses):
+                    zone_map[z] = sorted(set(zone_map[z]) | {lv_bus})
+                break
 
     # HV-network lookup for DSO controller init
     hv_info_map: Dict[str, HVNetworkInfo] = {hv.net_id: hv for hv in meta.hv_networks}
@@ -2898,16 +2913,16 @@ def main() -> None:
     cfg = MultiTSOConfig(
         n_total_s=60.0 * 720,      # 720-minute simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
-        dso_period_s=20.0 * 1,    # DSO every 20 seconds
+        dso_period_s=10.0 * 1,    # DSO every 20 seconds
         g_v=5000.0,
-        g_q=20,
+        g_q=30,
         dso_g_v=10000.0,
-        g_w_der=5,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_gen=1e6,  # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
-        g_w_pcc=5,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        g_w_der=10,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
+        g_w_gen=1e7,  # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
+        g_w_pcc=20,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
         g_w_tso_oltc=2,  # unchanged (was at alpha=1)
-        g_w_dso_der=50,  # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
-        g_w_dso_oltc=20,  # unchanged (was at alpha=1)
+        g_w_dso_der=10,  # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
+        g_w_dso_oltc=100,  # unchanged (was at alpha=1)
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -2918,13 +2933,13 @@ def main() -> None:
         live_plot=True,
         add_tso_ders=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 6, 0, 0),
+        start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
             # Example: trip line 0 at t=30 min, restore at t=60 min
-            ContingencyEvent(minute=90, element_type="gen", element_index=2, action="trip"),
-            ContingencyEvent(minute=240, element_type="gen", element_index=2, action="restore"),
+            ContingencyEvent(minute=120, element_type="gen", element_index=2, action="trip"),
+            ContingencyEvent(minute=300, element_type="gen", element_index=2, action="restore"),
             # ContingencyEvent(minute=360, element_type="line", element_index=7, action="trip"),
             # ContingencyEvent(minute=480, element_type="line", element_index=7, action="restore"),
         ],

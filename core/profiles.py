@@ -117,15 +117,19 @@ def compute_zonal_gen_dispatch(
     *,
     gen_p_min_mw: float = 0.0,
 ) -> pd.DataFrame:
-    """Pre-compute generator active-power dispatch from zonal residual load.
+    """Pre-compute generator active-power dispatch from system-wide residual load.
 
-    For every timestep in *profiles* and every zone the function computes:
+    For every timestep in *profiles* the function computes the **system-wide**
+    residual:
 
-        residual_load = sum(load_P) - sum(sgen_P)
+        residual = sum(all load_P) - sum(all sgen_P)
 
-    and distributes the residual equally among all ``net.gen`` units in that
-    zone.  The slack generator (``net.ext_grid``) is excluded — it will absorb
-    any remaining system-wide mismatch during the power flow.
+    and distributes it among all ``net.gen`` units **proportionally to each
+    generator's rated capacity** (``gen_p_max``).  An iterative clipping pass
+    redistributes any shortfall from generators hitting their limits.
+
+    The slack generator (``net.ext_grid``) is excluded — it absorbs only
+    network losses and any small residual from generator limit clipping.
 
     The result is a DataFrame indexed by the profile timestamps with one column
     per generator index, containing the dispatched P [MW] at each timestep.
@@ -228,38 +232,70 @@ def compute_zonal_gen_dispatch(
         dtype=np.float64,
     )
 
+    # Total generator capacity for proportional sharing
+    total_gen_capacity = sum(gen_p_max.get(gi, 0.0) for gi in all_gen_indices)
+
     for idx in profiles.index:
         row = profiles.loc[idx]
 
+        # ── Phase 1: System-wide load and sgen totals ──────────────────────
+        system_load = 0.0
+        system_sgen = 0.0
+
         for z in zone_map:
-            # Total zone load at this timestep
-            total_load_p = 0.0
             for base_p, prof in zone_loads[z]:
                 scale = float(row[prof]) if (prof and prof in row.index and not np.isnan(row[prof])) else 1.0
-                total_load_p += base_p * scale
+                system_load += base_p * scale
 
-            # Total zone sgen at this timestep
-            total_sgen_p = 0.0
             for base_p, prof in zone_sgens[z]:
                 scale = float(row[prof]) if (prof and prof in row.index and not np.isnan(row[prof])) else 1.0
-                total_sgen_p += base_p * scale
+                system_sgen += base_p * scale
 
-            residual = total_load_p - total_sgen_p
+        # ── Phase 2: System-wide residual (what generators must cover) ─────
+        system_residual = max(system_load - system_sgen, 0.0)
 
-            # Distribute equally among generators in this zone
-            gens_in_zone = zone_gens[z]
-            if not gens_in_zone:
-                continue
+        # ── Phase 3: Proportional-to-capacity initial dispatch ─────────────
+        if total_gen_capacity > 0.0 and system_residual > 0.0:
+            for gi in all_gen_indices:
+                share = gen_p_max.get(gi, 0.0) / total_gen_capacity
+                dispatch.at[idx, gi] = np.clip(
+                    system_residual * share,
+                    gen_p_min_mw, gen_p_max.get(gi, 9999.0),
+                )
+        else:
+            for gi in all_gen_indices:
+                dispatch.at[idx, gi] = gen_p_min_mw
 
-            per_gen = residual / len(gens_in_zone)
-            for gi in gens_in_zone:
-                p_clipped = np.clip(per_gen, gen_p_min_mw, gen_p_max.get(gi, 9999.0))
-                dispatch.at[idx, gi] = p_clipped
+        # ── Phase 4: Iterative redistribution of clipping residual ─────────
+        for _ in range(5):
+            total_dispatched = sum(dispatch.at[idx, gi] for gi in all_gen_indices)
+            shortfall = system_residual - total_dispatched
+            if abs(shortfall) < 0.01:
+                break
 
-    # Print summary
+            if shortfall > 0:
+                free = [gi for gi in all_gen_indices
+                        if dispatch.at[idx, gi] < gen_p_max.get(gi, 9999.0) - 0.01]
+            else:
+                free = [gi for gi in all_gen_indices
+                        if dispatch.at[idx, gi] > gen_p_min_mw + 0.01]
+
+            if not free:
+                break
+            free_cap = sum(gen_p_max.get(gi, 0.0) for gi in free)
+            if free_cap < 0.01:
+                break
+
+            for gi in free:
+                new_p = dispatch.at[idx, gi] + shortfall * gen_p_max.get(gi, 0.0) / free_cap
+                dispatch.at[idx, gi] = np.clip(
+                    new_p, gen_p_min_mw, gen_p_max.get(gi, 9999.0),
+                )
+
+    # ── Print summary ──────────────────────────────────────────────────────
     print()
     print("=" * 72)
-    print("  Zonal Generator Dispatch (residual load balancing)")
+    print("  Zonal Generator Dispatch (system-wide residual-load balancing)")
     print("=" * 72)
     for z in sorted(zone_map.keys()):
         n_loads = len(zone_loads[z])
@@ -274,6 +310,13 @@ def compute_zonal_gen_dispatch(
                   f"  ->  P_gen range [{p_min_val:.1f}, {p_max_val:.1f}] MW, mean {p_mean:.1f} MW")
         else:
             print(f"  Zone {z}: {n_loads} loads, {n_sgens} sgens, {n_gens} gens (no dispatch)")
+    print("-" * 72)
+    total_disp = dispatch[all_gen_indices].sum(axis=1)
+    total_cap = sum(gen_p_max.get(gi, 0) for gi in all_gen_indices)
+    print(f"  System gen dispatch: [{total_disp.min():.1f}, {total_disp.max():.1f}] MW, "
+          f"mean {total_disp.mean():.1f} MW")
+    print(f"  Generators: {len(all_gen_indices)}, total Pmax: {total_cap:.1f} MW")
+    print("  (Slack absorbs losses + unresolved clipping residual only)")
     print("=" * 72)
     print()
 

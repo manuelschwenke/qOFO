@@ -316,14 +316,15 @@ def tune_dso_gw(
     actuator_counts: Optional[Dict[str, int]] = None,
     rho_target: float = 0.95,
 ) -> Tuple[NDArray[np.float64], float]:
-    """Tune DSO g_w to satisfy C1: rho(I - alpha*M_cont) < 1.
+    """Tune DSO to satisfy C1: rho(I - alpha*M_cont) < 1.
 
-    g_w controls CONDITIONING (relative scaling between actuators).
-    alpha controls STABILITY (overall step size).
+    **Alpha-first approach**: keep user's g_w, find optimal alpha from
+    eigenspectrum.  Only adjust g_w if the Gershgorin necessary condition
+    is violated at the computed alpha.
 
-    Phase 1: Gershgorin preconditioning -- normalise curvature diagonal.
-    Phase 2: Conditioning pump -- reduce kappa if too high.
-    Phase 3: Compute alpha from eigenspectrum of M_cont.
+    This preserves the user's intended actuator speed.  The DSO may not
+    fully converge within one TSO step (partial convergence), which is
+    acceptable when Achieved-Value Tracking is active at the TSO level.
 
     Returns (g_w_tuned_full, alpha_dso).
     """
@@ -345,20 +346,53 @@ def tune_dso_gw(
 
     n_cont = len(cont_idx)
     Q_sqrt = np.sqrt(np.maximum(Q_dso, 0.0))
-
-    # --- Phase 1: Gershgorin on CONTINUOUS columns ---
     gw_full = G_w_dso_init.copy()
 
-    if n_cont > 0:
-        K_c = H_dso[:, cont_idx]
-        QK_c = Q_sqrt[:, None] * K_c
-        c_diag_cont = np.sum(QK_c ** 2, axis=0)
+    if n_cont == 0:
+        return gw_full, 1.0
 
-        gw_cont = safety_factor_continuous * c_diag_cont / 2.0
-        gw_cont = np.maximum(gw_cont, G_w_dso_init[cont_idx])
+    K_c = H_dso[:, cont_idx]
+    QK_c = Q_sqrt[:, None] * K_c
+
+    def _build_M_cont(gw_c):
+        gi = 1.0 / np.sqrt(np.maximum(gw_c, 1e-12))
+        Phi_c = 2.0 * (QK_c.T @ QK_c)
+        M_c = (gi[:, None] * Phi_c) * gi[None, :]
+        eigs = np.linalg.eigvalsh(M_c)
+        return M_c, eigs
+
+    # --- Step 1: Compute alpha from user's g_w ---
+    _, eigs_init = _build_M_cont(gw_full[cont_idx])
+    eig_max = max(float(np.max(np.abs(eigs_init))), 1e-14)
+    active = eigs_init[eigs_init > 0.01 * eig_max]
+    alpha = _find_alpha_for_target_rho(
+        active.astype(np.complex128), rho_target=rho_target,
+    )
+
+    # --- Step 2: Check Gershgorin at computed alpha ---
+    # Only inflate g_w if necessary condition is violated
+    c_diag_cont = np.sum(QK_c ** 2, axis=0)
+    Phi_diag = 2.0 * c_diag_cont
+    gw_gersh_min = alpha * Phi_diag / 2.0  # minimum g_w at this alpha
+
+    gw_cont = gw_full[cont_idx].copy()
+    adjusted = False
+    for k in range(n_cont):
+        if gw_cont[k] < gw_gersh_min[k]:
+            gw_cont[k] = gw_gersh_min[k] * 1.1  # small margin
+            adjusted = True
+
+    if adjusted:
         gw_full[cont_idx] = gw_cont
+        # Recompute alpha with adjusted g_w
+        _, eigs_adj = _build_M_cont(gw_full[cont_idx])
+        eig_max = max(float(np.max(np.abs(eigs_adj))), 1e-14)
+        active = eigs_adj[eigs_adj > 0.01 * eig_max]
+        alpha = _find_alpha_for_target_rho(
+            active.astype(np.complex128), rho_target=rho_target,
+        )
 
-    # Discrete: safety-factored curvature
+    # --- Step 3: Discrete g_w (safety-factored curvature) ---
     if disc_idx:
         K_d = H_dso[:, disc_idx]
         QK_d = Q_sqrt[:, None] * K_d
@@ -370,33 +404,6 @@ def tune_dso_gw(
     # Apply floors
     if actuator_counts is not None:
         gw_full = _apply_gw_floors(gw_full, actuator_counts, floors, _DSO_COLUMN_ORDER)
-
-    # --- Phase 2: Conditioning pump on continuous M_cont ---
-    if n_cont > 0:
-        QK_c = Q_sqrt[:, None] * H_dso[:, cont_idx]
-
-        def _build_M_cont(gw_c):
-            gi = 1.0 / np.sqrt(np.maximum(gw_c, 1e-12))
-            Phi_c = 2.0 * (QK_c.T @ QK_c)
-            M_c = (gi[:, None] * Phi_c) * gi[None, :]
-            eigs = np.linalg.eigvalsh(M_c)
-            return M_c, eigs
-
-        gw_cont_pumped, kappa, _ = _conditioning_pump(
-            gw_full[cont_idx], _build_M_cont, kappa_target=50.0,
-        )
-        gw_full[cont_idx] = gw_cont_pumped
-
-    # --- Phase 3: Compute alpha from M_cont eigenspectrum ---
-    if n_cont > 0:
-        _, eigs_cont = _build_M_cont(gw_full[cont_idx])
-        eig_max = max(float(np.max(np.abs(eigs_cont))), 1e-14)
-        active = eigs_cont[eigs_cont > 0.01 * eig_max]
-        alpha = _find_alpha_for_target_rho(
-            active.astype(np.complex128), rho_target=rho_target,
-        )
-    else:
-        alpha = 1.0
 
     return gw_full, alpha
 

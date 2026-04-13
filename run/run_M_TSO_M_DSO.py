@@ -3006,7 +3006,7 @@ def main() -> None:
         g_w_pcc=50,  # was 20; compensate for g_v=10000 in C2
         g_w_tso_oltc=14,  # C3 sizing rule needs >= 13.08 for Zone 2 OLTC_0
         g_w_dso_der=2300,  # 2000: DSO_2 rho=1.13, need slightly more
-        g_w_dso_oltc=50,  # back to 50; 20 caused tap oscillation
+        g_w_dso_oltc=500,  # 50 still oscillated; heavy penalty to prevent hunting
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps

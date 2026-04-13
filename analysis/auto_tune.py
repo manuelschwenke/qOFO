@@ -2,39 +2,58 @@
 Auto-Tuning for the Three-Condition Stability Framework
 ========================================================
 
-Tunes g_w parameters to satisfy all three conditions of Theorem 3.3:
+Tunes g_w (actuator weights) and alpha (step size) to satisfy all three
+conditions of Theorem 3.3:
 
-    C1: DSO inner loops  --  Gershgorin preconditioning
-    C2: TSO continuous   --  Gershgorin + eigenvector-pump
+    C1: DSO inner loops  --  Q-only curvature sizing, Gershgorin fallback
+    C2: TSO continuous   --  Gershgorin floor + eigenvalue init + pump
     C3: TSO discrete     --  G sizing rule (Corollary 3.2, closed-form)
+
+All tuning parameters are centralised in the ``TuningConfig`` dataclass.
 
 Functions
 ---------
 auto_tune
-    Main entry point.  Orchestrates DSO -> continuous TSO -> discrete TSO.
-
-tune_continuous_gw
-    Phase 2: Spectral-condition tuning for continuous actuators.
-
-tune_discrete_gw
-    Corollary 3.2: closed-form lower bound on discrete g_w.
+    Main entry point.  Orchestrates DSO (C1) -> continuous TSO (C2) ->
+    discrete TSO (C3), then verifies all conditions.
 
 tune_dso_gw
-    Per-DSO g_w tuning with cascade-margin enforcement.
+    C1: per-DSO g_w + alpha.  Sizes alpha from Q-tracking curvature
+    (not full objective) to decouple cascade speed from voltage weight.
+
+tune_continuous_gw
+    C2: multi-zone continuous g_w + alpha.  Filters inert actuators,
+    applies eigenvalue-based init, conditioning pump, then alpha search.
+
+tune_discrete_gw
+    C3: discrete g_w via Corollary 3.2 (closed-form lower bound).
+
+recommend_dso_weights
+    Diagnostic: recommended g_q / g_v ratio from sensitivity norms.
 
 Author: Manuel Schwenke, TU Darmstadt
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
 
+from analysis.stability_analysis import (
+    analyse_dso_stability,
+    analyse_multi_zone_stability,
+)
+
+_log = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
+
+_EIG_ACTIVE_FRAC = 0.01
+"""Eigenvalues below this fraction of lambda_max are treated as null-space."""
 
 # Default TSO column order (matches ZoneDefinition.gw_diagonal())
 _TSO_COLUMN_ORDER = ('der', 'pcc', 'gen', 'oltc', 'shunt')
@@ -79,8 +98,8 @@ class TuningConfig:
     dso_safety_factor_discrete: float = 2.0
     """Safety factor for DSO discrete actuators."""
 
-    dso_gersh_floor_fraction: float = 1.0
-    """Fraction of Gershgorin bound used as floor for DSO g_w."""
+    dso_alpha_min: float = 0.1
+    """If alpha-first gives alpha below this, fall back to Gershgorin."""
 
     # ── TSO (C2) ──────────────────────────────────────────────────────────
     tso_kappa_target: float = 50.0
@@ -114,6 +133,13 @@ class TuningConfig:
 
     pump_max_iters: int = 20
     """Maximum conditioning-pump iterations."""
+
+    eigenvalue_init_max_boost: float = 10.0
+    """Max per-actuator boost in eigenvalue-based g_w init."""
+
+    sensitivity_filter_frac: float = 0.01
+    """Actuators with Q-weighted column norm below this fraction of max
+    are excluded from eigenanalysis (prevents spurious small eigenvalues)."""
 
     # ── Post-tuning boost ─────────────────────────────────────────────
     alpha_dso_boost: float = 1.0
@@ -163,26 +189,6 @@ class TuningResult:
 #  Private Helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _curvature_diagonal(
-    H: NDArray[np.float64],
-    q_obj_diag: NDArray[np.float64],
-) -> NDArray[np.float64]:
-    """Return diag(H^T Q H) without forming the full matrix."""
-    q_sqrt = np.sqrt(np.maximum(q_obj_diag, 0.0))
-    QH = q_sqrt[:, None] * H
-    return np.sum(QH ** 2, axis=0)
-
-
-def _curvature_matrix(
-    H: NDArray[np.float64],
-    q_obj_diag: NDArray[np.float64],
-) -> NDArray[np.float64]:
-    """Return C = H^T Q H."""
-    q_sqrt = np.sqrt(np.maximum(q_obj_diag, 0.0))
-    QH = q_sqrt[:, None] * H
-    return QH.T @ QH
-
-
 def _apply_gw_floors(
     g_w: NDArray[np.float64],
     actuator_counts: Dict[str, int],
@@ -219,7 +225,7 @@ def _find_alpha_for_target_rho(
 
     # Filter near-zero eigenvalues
     eig_max_abs = max(float(np.max(np.abs(eigs))), 1e-14)
-    tol = 0.01 * eig_max_abs
+    tol = _EIG_ACTIVE_FRAC * eig_max_abs
     active = eigs[np.abs(eigs) > tol]
     if len(active) == 0:
         return 1.0
@@ -304,7 +310,7 @@ def _conditioning_pump(
 
         # Filter active eigenvalues
         eig_max_abs = max(float(np.max(np.abs(eigs))), 1e-14)
-        active_mask = np.abs(eigs) > 0.01 * eig_max_abs
+        active_mask = np.abs(eigs) > _EIG_ACTIVE_FRAC * eig_max_abs
         eigs_active = eigs[active_mask].real if np.isrealobj(eigs) else eigs[active_mask]
 
         if len(eigs_active) < 2:
@@ -345,7 +351,7 @@ def _conditioning_pump(
     # Final kappa
     _, eigs_final = M_builder(gw)
     eig_max_abs = max(float(np.max(np.abs(eigs_final))), 1e-14)
-    active = eigs_final[np.abs(eigs_final) > 0.01 * eig_max_abs]
+    active = eigs_final[np.abs(eigs_final) > _EIG_ACTIVE_FRAC * eig_max_abs]
     if len(active) >= 2:
         lmax = float(np.max(active.real))
         lmin = float(np.min(active.real))
@@ -353,26 +359,6 @@ def _conditioning_pump(
     else:
         kappa_final = 1.0
     return gw, kappa_final, max_iters
-
-
-def _optimal_alpha(eigs_active: NDArray, safety: float = 0.95) -> float:
-    """Compute optimal alpha from eigenspectrum.
-
-    alpha_opt = 2 / (lambda_max + lambda_min) gives rho* = (kappa-1)/(kappa+1).
-    Apply safety factor to stay away from the boundary.
-    """
-    if len(eigs_active) == 0:
-        return 1.0
-    lam_max = float(np.max(eigs_active.real))
-    lam_min_pos = eigs_active.real[eigs_active.real > 1e-14 * max(lam_max, 1e-14)]
-    if len(lam_min_pos) == 0:
-        lam_min = 1e-14
-    else:
-        lam_min = float(np.min(lam_min_pos))
-    if lam_max <= 1e-14:
-        return 1.0
-    alpha_opt = 2.0 / (lam_max + lam_min)
-    return alpha_opt * safety
 
 
 def _eigenvalue_init_gw(
@@ -505,7 +491,7 @@ def tune_dso_gw(
     # Size alpha for the cascade-critical Q rows, not the full objective.
     _, eigs_q = _build_M_cont(gw_full[cont_idx], QK_c_q)
     eig_max = max(float(np.max(np.abs(eigs_q))), 1e-14)
-    active = eigs_q[eigs_q > 0.01 * eig_max]
+    active = eigs_q[eigs_q > _EIG_ACTIVE_FRAC * eig_max]
     alpha = _find_alpha_for_target_rho(
         active.astype(np.complex128), rho_target=rho_target,
     )
@@ -521,7 +507,7 @@ def tune_dso_gw(
 
         _, eigs_gersh = _build_M_cont(gw_full[cont_idx], QK_c_q)
         eig_max = max(float(np.max(np.abs(eigs_gersh))), 1e-14)
-        active = eigs_gersh[eigs_gersh > 0.01 * eig_max]
+        active = eigs_gersh[eigs_gersh > _EIG_ACTIVE_FRAC * eig_max]
         alpha = _find_alpha_for_target_rho(
             active.astype(np.complex128), rho_target=rho_target,
         )
@@ -535,7 +521,7 @@ def tune_dso_gw(
         # Full objective would be unstable — reduce alpha to safe value
         alpha = min(alpha, 1.9 / max(eig_max_full, 1e-14))
 
-    # --- Step 3: Discrete g_w (safety-factored curvature) ---
+    # --- Step 4: Discrete g_w (safety-factored curvature) ---
     if disc_idx:
         K_d = H_dso[:, disc_idx]
         QK_d = Q_sqrt[:, None] * K_d
@@ -571,6 +557,8 @@ def tune_continuous_gw(
     lambda_target: float = 1.5,
     lambda_max_alpha_target: float = 1.8,
     max_pump_iters: int = 20,
+    eigenvalue_init_max_boost: float = 10.0,
+    sensitivity_filter_frac: float = 0.01,
     warnings_list: Optional[List[str]] = None,
     verbose: bool = False,
 ) -> Tuple[List[NDArray[np.float64]], float]:
@@ -579,7 +567,8 @@ def tune_continuous_gw(
     g_w controls CONDITIONING.  alpha controls STABILITY.
 
     Phase 1: Gershgorin as FLOOR on continuous curvature (user init trusted).
-    Phase 1b: Eigenvalue-based selective boost for dominant modes.
+    Phase 1b: Sensitivity filter — exclude near-zero actuators.
+    Phase 1c: Eigenvalue-based selective boost for dominant modes.
     Phase 2: Conditioning pump on M_full^c to reduce kappa AND lambda_max.
     Phase 3: Compute alpha from M_full^c eigenspectrum.
 
@@ -672,7 +661,7 @@ def tune_continuous_gw(
         off += len(ci)
 
     norm_max = max(float(np.max(col_norms)), 1e-14)
-    sens_threshold = 0.01 * norm_max  # 1% of max column norm
+    sens_threshold = sensitivity_filter_frac * norm_max
     active_mask = col_norms > sens_threshold
     n_active = int(np.sum(active_mask))
     n_inert = n_total_c - n_active
@@ -738,7 +727,9 @@ def tune_continuous_gw(
     if n_active > 0:
         gw_active = gw_c_flat[active_indices].copy()
         gw_active = _eigenvalue_init_gw(
-            _active_M_builder, gw_active, lambda_target=lambda_target,
+            _active_M_builder, gw_active,
+            lambda_target=lambda_target,
+            max_boost=eigenvalue_init_max_boost,
         )
         gw_c_flat[active_indices] = gw_active
 
@@ -767,13 +758,10 @@ def tune_continuous_gw(
     # --- Phase 3: Compute alpha from M_full^c ---
     _, eigs_c = _build_M_full_c(gw_c_tuned)
     eig_max = max(float(np.max(np.abs(eigs_c))), 1e-14)
-    active_c = eigs_c[np.abs(eigs_c) > 0.01 * eig_max]
+    active_c = eigs_c[np.abs(eigs_c) > _EIG_ACTIVE_FRAC * eig_max]
     alpha_tso = _find_alpha_for_target_rho(active_c, rho_target=rho_target)
 
     # --- Alpha divergence warning ---
-    import logging
-    _log = logging.getLogger(__name__)
-
     if alpha_tso > 3.0 * alpha_target:
         msg = (f"alpha_tso={alpha_tso:.3f} >> alpha_target={alpha_target:.3f}. "
                f"g_w is likely over-inflated — actuators will be sluggish.")
@@ -788,7 +776,7 @@ def tune_continuous_gw(
     if verbose:
         rho_at = float(np.max(np.abs(1.0 - alpha_tso * active_c))) if len(active_c) > 0 else 0.0
         lam_max = float(np.max(active_c.real)) if len(active_c) > 0 else 0.0
-        lam_min = float(np.min(active_c.real[active_c.real > 0.01 * max(lam_max, 1e-14)])) if len(active_c) > 0 else 0.0
+        lam_min = float(np.min(active_c.real[active_c.real > _EIG_ACTIVE_FRAC * max(lam_max, 1e-14)])) if len(active_c) > 0 else 0.0
         print(f"  [C2 tune] kappa = {kappa:.1f} after {n_iters} pump iters, "
               f"lam = [{lam_min:.4f}, {lam_max:.4f}], "
               f"alpha_tso = {alpha_tso:.4f}, rho = {rho_at:.4f}")
@@ -1040,18 +1028,11 @@ def auto_tune(
     actuator_counts: List[Dict[str, int]],
     zone_ids: List[int],
     gw_tso_init: List[NDArray[np.float64]],
-    # DSO data
     dso_inputs: Optional[List[DSOTuneInput]] = None,
     gw_dso_init: Optional[List[NDArray[np.float64]]] = None,
-    # Tuning config (preferred)
-    tuning_config: Optional[TuningConfig] = None,
-    # Legacy parameters (used if tuning_config is None)
-    safety_factor_continuous: float = 2.0,
-    safety_factor_discrete: float = 1.5,
-    rho_target: float = 0.95,
+    tuning_config: TuningConfig = TuningConfig(),
     floors_tso: Optional[Dict[str, float]] = None,
     floors_dso: Optional[Dict[str, float]] = None,
-    # Cascade
     tso_period_s: float = 180.0,
     dso_period_s: float = 20.0,
     verbose: bool = False,
@@ -1062,14 +1043,17 @@ def auto_tune(
 
     Parameters
     ----------
-    H_blocks : TSO sensitivity blocks.
-    Q_obj_list : Per-zone Q_obj diagonals.
-    actuator_counts : Per-zone actuator count dicts.
-    zone_ids : Zone integer IDs.
-    gw_tso_init : Initial per-zone TSO g_w (user hand-tuned, used as floor).
-    dso_inputs : List of DSOTuneInput.
-    gw_dso_init : Initial per-DSO g_w vectors.
-    tuning_config : Structured tuning parameters (overrides legacy kwargs).
+    H_blocks : dict[(i,j)] -> H_ij sensitivity blocks.
+    Q_obj_list : per-zone Q_obj diagonals (g_q / g_v weights).
+    actuator_counts : per-zone actuator count dicts.
+    zone_ids : zone integer IDs.
+    gw_tso_init : initial per-zone TSO g_w (user hand-tuned, used as floor).
+    dso_inputs : list of DSOTuneInput (one per DSO).
+    gw_dso_init : initial per-DSO g_w vectors.
+    tuning_config : all tuning parameters (TuningConfig dataclass).
+    floors_tso, floors_dso : per-actuator-type minimum g_w.
+    tso_period_s, dso_period_s : cascade timing for margin computation.
+    verbose : print tuning tables.
     """
     if floors_tso is None:
         floors_tso = {}
@@ -1080,15 +1064,7 @@ def auto_tune(
     if gw_dso_init is None:
         gw_dso_init = []
 
-    # Resolve config: prefer TuningConfig, fall back to legacy kwargs
-    tc = tuning_config or TuningConfig(
-        dso_safety_factor_continuous=safety_factor_continuous,
-        dso_safety_factor_discrete=safety_factor_discrete * 2,
-        dso_rho_target=rho_target,
-        tso_safety_factor_continuous=safety_factor_continuous,
-        tso_rho_target=rho_target,
-        c3_safety_factor=safety_factor_discrete,
-    )
+    tc = tuning_config
 
     warnings: List[str] = []
 
@@ -1107,6 +1083,7 @@ def auto_tune(
             floors=floors_dso,
             actuator_counts=ac,
             rho_target=tc.dso_rho_target,
+            alpha_min=tc.dso_alpha_min,
             n_interfaces=d.n_interfaces,
         )
         gw_dso_tuned.append(gw)
@@ -1117,8 +1094,6 @@ def auto_tune(
 
     # ── Apply DSO alpha boost (speed up tracking, then verify) ───────
     if tc.alpha_dso_boost != 1.0 and alpha_dso_list:
-        from analysis.stability_analysis import analyse_dso_stability
-
         for d_idx, d in enumerate(dso_inputs):
             alpha_base = alpha_dso_list[d_idx]
             alpha_boosted = alpha_base * tc.alpha_dso_boost
@@ -1162,6 +1137,8 @@ def auto_tune(
         lambda_target=tc.lambda_target,
         lambda_max_alpha_target=tc.lambda_max_alpha_target,
         max_pump_iters=tc.pump_max_iters,
+        eigenvalue_init_max_boost=tc.eigenvalue_init_max_boost,
+        sensitivity_filter_frac=tc.sensitivity_filter_frac,
         warnings_list=warnings,
         verbose=verbose,
     )
@@ -1178,11 +1155,6 @@ def auto_tune(
     )
 
     # ── Verify ────────────────────────────────────────────────────────────
-    from analysis.stability_analysis import (
-        analyse_multi_zone_stability,
-        analyse_dso_stability,
-    )
-
     # Verify C1 (with tuned alpha)
     for d_idx, d in enumerate(dso_inputs):
         ac = {'n_der': d.n_der, 'n_oltc': d.n_oltc, 'n_shunt': d.n_shunt}
@@ -1216,9 +1188,6 @@ def auto_tune(
         warnings.append("C3: discrete small-gain not achieved after tuning")
 
     # ── Post-tuning feasibility: check effective actuator speed ───────────
-    import logging
-    _log = logging.getLogger(__name__)
-
     for i_idx, i in enumerate(zone_ids):
         ci, _ = _partition_indices(actuator_counts[i_idx])
         if not ci:

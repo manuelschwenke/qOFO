@@ -36,7 +36,6 @@ Author: Manuel Schwenke, TU Darmstadt
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -46,7 +45,6 @@ from numpy.typing import NDArray
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-_EIG_NULL_TOL_FRAC = 1e-12   # null-space threshold relative to lambda_max
 _EIG_ACTIVE_TOL_FRAC = 0.01  # active-mode threshold relative to lambda_max
 
 
@@ -837,11 +835,7 @@ def analyse_multi_zone_stability(
     dso_period_s: float = 20.0,
     # Display
     verbose: bool = True,
-    # Legacy compatibility (unused, kept for call-site compat)
     alpha: float = 1.0,
-    configured_cooldown: Optional[int] = None,
-    int_max_step: int = 1,
-    dwell_time_epsilon: float = 0.01,
 ) -> MultiZoneStabilityResult:
     """Three-condition stability analysis (Theorem 3.3).
 
@@ -1156,17 +1150,3 @@ def _print_report(result: MultiZoneStabilityResult, zone_names: List[str]) -> No
     print()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Legacy compatibility helpers
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def recommend_gw_min(
-    H: NDArray[np.float64],
-    q_obj_diag: NDArray[np.float64],
-    alpha: float = 1.0,
-) -> float:
-    """Conservative scalar g_w lower bound (Gershgorin diagonal)."""
-    Q_sqrt = np.sqrt(np.maximum(q_obj_diag, 0.0))
-    QH = Q_sqrt[:, None] * H
-    C_diag = np.sum(QH ** 2, axis=0)
-    return float(alpha * np.max(C_diag) / 2.0)

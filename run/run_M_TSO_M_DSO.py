@@ -96,6 +96,7 @@ from analysis.auto_tune import (
     expand_gw_with_excluded,
     recommend_dso_weights,
     DSOTuneInput,
+    TuningConfig,
     TuningResult,
 )
 from controller.base_controller import OFOParameters
@@ -1456,8 +1457,6 @@ def _tune_and_apply_gw(
         floors_dso=floors_dso,
         tso_period_s=config.tso_period_s,
         dso_period_s=config.dso_period_s,
-        safety_factor_continuous=config.safety_factor_continuous,
-        safety_factor_discrete=config.safety_factor_discrete,
         verbose=(verbose >= 1),
     )
 
@@ -1767,8 +1766,6 @@ def _run_delayed_stability_analysis(
                 floors_dso=_floors_dso,
                 tso_period_s=config.tso_period_s,
                 dso_period_s=config.dso_period_s,
-                safety_factor_continuous=getattr(config, 'safety_factor_continuous', 2.0),
-                safety_factor_discrete=getattr(config, 'safety_factor_discrete', 1.5),
                 verbose=(verbose >= 1),
             )
 

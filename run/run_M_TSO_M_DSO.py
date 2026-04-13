@@ -2998,14 +2998,14 @@ def main() -> None:
         n_total_s=60.0 * 720,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=5.0,    # DSO every 5 seconds (more inner iterations)
-        g_v=10000.0,  # was 5000; needed for machine OLTCs to respond
-        g_q=100,  # was 30; Q-interface is DSO primary objective
-        dso_g_v=10000.0,  # needed for OLTC to step at V~1.08; balanced with g_q=100
+        g_v=20000.0,  # was 10000; more responsive TSO voltage tracking
+        g_q=200,  # was 100; more aggressive DSO Q-tracking
+        dso_g_v=10000.0,  # OLTC activation at V~1.08
         g_w_der=10,
         g_w_gen=1e7,
-        g_w_pcc=50,  # was 20; compensate for g_v=10000 in C2
-        g_w_tso_oltc=14,  # C3 sizing rule needs >= 13.08 for Zone 2 OLTC_0
-        g_w_dso_der=2300,  # 2000: DSO_2 rho=1.13, need slightly more
+        g_w_pcc=60,  # 50 broke C3, 80 too slow
+        g_w_tso_oltc=12,  # 10 broke C3 sizing, 14 too slow
+        g_w_dso_der=2800,  # DSO_2 rho=1.065 at 2500, nudge up
         g_w_dso_oltc=500,  # 50 still oscillated; heavy penalty to prevent hunting
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,

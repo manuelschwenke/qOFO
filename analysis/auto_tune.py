@@ -436,16 +436,14 @@ def tune_dso_gw(
     floors: Optional[Dict[str, float]] = None,
     actuator_counts: Optional[Dict[str, int]] = None,
     rho_target: float = 0.95,
+    alpha_min: float = 0.1,
 ) -> Tuple[NDArray[np.float64], float]:
     """Tune DSO to satisfy C1: rho(I - alpha*M_cont) < 1.
 
-    **Alpha-first approach**: keep user's g_w, find optimal alpha from
-    eigenspectrum.  Only adjust g_w if the Gershgorin necessary condition
-    is violated at the computed alpha.
-
-    This preserves the user's intended actuator speed.  The DSO may not
-    fully converge within one TSO step (partial convergence), which is
-    acceptable when Achieved-Value Tracking is active at the TSO level.
+    **Alpha-first with fallback**: try the user's g_w first.  If the
+    resulting alpha is below ``alpha_min`` (i.e. the user's g_w is too
+    small relative to curvature), switch to Gershgorin preconditioning
+    so that eigenvalues are brought into a range where alpha >= alpha_min.
 
     Returns (g_w_tuned_full, alpha_dso).
     """
@@ -482,7 +480,7 @@ def tune_dso_gw(
         eigs = np.linalg.eigvalsh(M_c)
         return M_c, eigs
 
-    # --- Step 1: Compute alpha from user's g_w ---
+    # --- Step 1: Try alpha from user's g_w ---
     _, eigs_init = _build_M_cont(gw_full[cont_idx])
     eig_max = max(float(np.max(np.abs(eigs_init))), 1e-14)
     active = eigs_init[eigs_init > 0.01 * eig_max]
@@ -490,28 +488,43 @@ def tune_dso_gw(
         active.astype(np.complex128), rho_target=rho_target,
     )
 
-    # --- Step 2: Check Gershgorin at computed alpha ---
-    # Only inflate g_w if necessary condition is violated
+    # --- Step 2: If alpha too small, use Gershgorin preconditioning ---
     c_diag_cont = np.sum(QK_c ** 2, axis=0)
     Phi_diag = 2.0 * c_diag_cont
-    gw_gersh_min = alpha * Phi_diag / 2.0  # minimum g_w at this alpha
 
-    gw_cont = gw_full[cont_idx].copy()
-    adjusted = False
-    for k in range(n_cont):
-        if gw_cont[k] < gw_gersh_min[k]:
-            gw_cont[k] = gw_gersh_min[k] * 1.1  # small margin
-            adjusted = True
-
-    if adjusted:
+    if alpha < alpha_min:
+        # User's g_w gives a tiny alpha — the eigenvalues are too large.
+        # Use Gershgorin-based g_w to bring them into range.
+        gw_gersh = safety_factor_continuous * c_diag_cont / 2.0
+        gw_cont = np.maximum(gw_full[cont_idx], gw_gersh)
         gw_full[cont_idx] = gw_cont
-        # Recompute alpha with adjusted g_w
-        _, eigs_adj = _build_M_cont(gw_full[cont_idx])
-        eig_max = max(float(np.max(np.abs(eigs_adj))), 1e-14)
-        active = eigs_adj[eigs_adj > 0.01 * eig_max]
+
+        # Recompute alpha
+        _, eigs_gersh = _build_M_cont(gw_full[cont_idx])
+        eig_max = max(float(np.max(np.abs(eigs_gersh))), 1e-14)
+        active = eigs_gersh[eigs_gersh > 0.01 * eig_max]
         alpha = _find_alpha_for_target_rho(
             active.astype(np.complex128), rho_target=rho_target,
         )
+    else:
+        # Alpha is acceptable — only inflate if Gershgorin necessary
+        # condition is violated at this alpha
+        gw_gersh_min = alpha * Phi_diag / 2.0
+        gw_cont = gw_full[cont_idx].copy()
+        adjusted = False
+        for k in range(n_cont):
+            if gw_cont[k] < gw_gersh_min[k]:
+                gw_cont[k] = gw_gersh_min[k] * 1.1
+                adjusted = True
+
+        if adjusted:
+            gw_full[cont_idx] = gw_cont
+            _, eigs_adj = _build_M_cont(gw_full[cont_idx])
+            eig_max = max(float(np.max(np.abs(eigs_adj))), 1e-14)
+            active = eigs_adj[eigs_adj > 0.01 * eig_max]
+            alpha = _find_alpha_for_target_rho(
+                active.astype(np.complex128), rho_target=rho_target,
+            )
 
     # --- Step 3: Discrete g_w (safety-factored curvature) ---
     if disc_idx:

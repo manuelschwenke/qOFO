@@ -203,27 +203,28 @@ def _partition_indices(ac: Dict[str, int]) -> Tuple[List[int], List[int]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Eigenvector-pump iteration (shared by C1 and C2)
+#  Conditioning pump (improves kappa, does NOT brute-force stability)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _eigenvector_pump_gw(
+def _conditioning_pump(
     gw: NDArray[np.float64],
     M_builder,
     *,
-    rho_target: float = 0.95,
-    max_iters: int = 30,
-    boost_factor: float = 1.5,
+    kappa_target: float = 50.0,
+    max_iters: int = 15,
+    boost_factor: float = 1.3,
 ) -> Tuple[NDArray[np.float64], float, int]:
-    """Iteratively boost g_w entries along dominant eigenvector of M.
+    """Improve conditioning of M by boosting g_w for the fastest mode.
 
-    M_builder(gw) -> (M, eigs):
-        Callable that builds the preconditioned matrix from g_w and
-        returns (M_matrix, eigenvalues).
+    The goal is to reduce kappa = lambda_max / lambda_min so that the
+    optimal alpha gives a better contraction rate rho* = (kappa-1)/(kappa+1).
 
-    Returns (gw_tuned, rho_achieved, n_iters).
+    Only boosts g_w for actuators that participate in the LARGEST eigenvalue
+    (the one that limits alpha).  Never touches slow modes.
+
+    Returns (gw_tuned, kappa_achieved, n_iters).
     """
     gw = gw.copy()
-    n = len(gw)
 
     for it in range(max_iters):
         M, eigs = M_builder(gw)
@@ -231,49 +232,73 @@ def _eigenvector_pump_gw(
         # Filter active eigenvalues
         eig_max_abs = max(float(np.max(np.abs(eigs))), 1e-14)
         active_mask = np.abs(eigs) > 0.01 * eig_max_abs
-        eigs_active = eigs[active_mask]
+        eigs_active = eigs[active_mask].real if np.isrealobj(eigs) else eigs[active_mask]
 
-        if len(eigs_active) == 0:
-            return gw, 0.0, it
+        if len(eigs_active) < 2:
+            return gw, 1.0, it
 
-        rho = float(np.max(np.abs(1.0 - eigs_active)))
-        if rho <= rho_target:
-            return gw, rho, it
+        lam_max = float(np.max(eigs_active.real))
+        lam_min = float(np.min(eigs_active.real))
+        if lam_min <= 1e-14:
+            lam_min = 1e-14
+        kappa = lam_max / lam_min
 
-        # Find dominant eigenvalue (largest |1 - lambda|)
-        contraction = np.abs(1.0 - eigs)
-        dom_idx = int(np.argmax(contraction))
-        lam_dom = float(eigs[dom_idx].real)
+        if kappa <= kappa_target:
+            return gw, kappa, it
 
-        # Get eigenvector for direction
+        # Find eigenvector of LARGEST eigenvalue (the bottleneck)
         if M.shape[0] == M.shape[1]:
-            # Check symmetry for solver choice
             asym = float(np.linalg.norm(M - M.T, 'fro'))
             if asym < 1e-10 * max(float(np.linalg.norm(M, 'fro')), 1e-14):
-                _, vecs = np.linalg.eigh(M)
-                v = vecs[:, -1]  # eigenvector of largest eigenvalue
+                all_eigs, vecs = np.linalg.eigh(M)
+                v = vecs[:, -1]  # eigenvector of lambda_max
             else:
-                all_eigs_full, vecs = np.linalg.eig(M)
-                idx = int(np.argmax(all_eigs_full.real))
+                all_eigs, vecs = np.linalg.eig(M)
+                idx = int(np.argmax(all_eigs.real))
                 v = np.abs(vecs[:, idx].real)
         else:
-            v = np.ones(n)
+            v = np.ones(len(gw))
 
-        # Squared participation weights
+        # Boost g_w for actuators that participate in the fast mode.
+        # Increasing g_w for these actuators reduces lambda_max without
+        # affecting lambda_min (which involves different actuators).
         v_sq = v ** 2
         v_sq = v_sq / max(np.sum(v_sq), 1e-14)
 
-        # Boost g_w proportional to participation
-        # Actuators that participate most in the dominant mode get boosted
         boost = 1.0 + (boost_factor - 1.0) * v_sq / max(np.max(v_sq), 1e-14)
         gw = gw * boost
 
-    # Final check
+    # Final kappa
     _, eigs_final = M_builder(gw)
     eig_max_abs = max(float(np.max(np.abs(eigs_final))), 1e-14)
     active = eigs_final[np.abs(eigs_final) > 0.01 * eig_max_abs]
-    rho_final = float(np.max(np.abs(1.0 - active))) if len(active) > 0 else 0.0
-    return gw, rho_final, max_iters
+    if len(active) >= 2:
+        lmax = float(np.max(active.real))
+        lmin = float(np.min(active.real))
+        kappa_final = lmax / max(lmin, 1e-14)
+    else:
+        kappa_final = 1.0
+    return gw, kappa_final, max_iters
+
+
+def _optimal_alpha(eigs_active: NDArray, safety: float = 0.95) -> float:
+    """Compute optimal alpha from eigenspectrum.
+
+    alpha_opt = 2 / (lambda_max + lambda_min) gives rho* = (kappa-1)/(kappa+1).
+    Apply safety factor to stay away from the boundary.
+    """
+    if len(eigs_active) == 0:
+        return 1.0
+    lam_max = float(np.max(eigs_active.real))
+    lam_min_pos = eigs_active.real[eigs_active.real > 1e-14 * max(lam_max, 1e-14)]
+    if len(lam_min_pos) == 0:
+        lam_min = 1e-14
+    else:
+        lam_min = float(np.min(lam_min_pos))
+    if lam_max <= 1e-14:
+        return 1.0
+    alpha_opt = 2.0 / (lam_max + lam_min)
+    return alpha_opt * safety
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -291,17 +316,16 @@ def tune_dso_gw(
     actuator_counts: Optional[Dict[str, int]] = None,
     rho_target: float = 0.95,
 ) -> Tuple[NDArray[np.float64], float]:
-    """Tune DSO g_w to satisfy C1: rho(M_cont) < 1.
+    """Tune DSO g_w to satisfy C1: rho(I - alpha*M_cont) < 1.
 
-    Targets the CONTINUOUS-ONLY M_cont = I - (G_c)^{-1} Phi_c,
-    not the full DSO M.
+    g_w controls CONDITIONING (relative scaling between actuators).
+    alpha controls STABILITY (overall step size).
 
-    Phase 1: Gershgorin preconditioning on continuous curvature.
-    Phase 2: Eigenvector pump if Gershgorin alone doesn't achieve target.
+    Phase 1: Gershgorin preconditioning -- normalise curvature diagonal.
+    Phase 2: Conditioning pump -- reduce kappa if too high.
+    Phase 3: Compute alpha from eigenspectrum of M_cont.
 
-    Returns (g_w_tuned_full, alpha_dso).  The full g_w vector (continuous
-    + discrete) is returned; discrete entries keep their init values
-    boosted by safety_factor_discrete.
+    Returns (g_w_tuned_full, alpha_dso).
     """
     if floors is None:
         floors = {}
@@ -320,35 +344,21 @@ def tune_dso_gw(
         disc_idx = []
 
     n_cont = len(cont_idx)
-
-    # --- Phase 1: Gershgorin on CONTINUOUS columns only ---
-    K_c = H_dso[:, cont_idx]
     Q_sqrt = np.sqrt(np.maximum(Q_dso, 0.0))
 
-    # Continuous curvature diagonal: diag((K_c)^T Q K_c)
-    QK_c = Q_sqrt[:, None] * K_c
-    c_diag_cont = np.sum(QK_c ** 2, axis=0)  # Phi_c diagonal (ignoring R)
-
-    gw_cont = safety_factor_continuous * c_diag_cont / 2.0
-    gw_cont = np.maximum(gw_cont, G_w_dso_init[cont_idx])
-
-    # --- Phase 2: Eigenvector pump on M_cont ---
-    def _build_M_cont(gw_c):
-        gi = 1.0 / np.sqrt(np.maximum(gw_c, 1e-12))
-        Phi_c = 2.0 * (QK_c.T @ QK_c)
-        M_c = (gi[:, None] * Phi_c) * gi[None, :]
-        eigs = np.linalg.eigvalsh(M_c)
-        return M_c, eigs
-
-    if n_cont > 0:
-        gw_cont, rho, _ = _eigenvector_pump_gw(
-            gw_cont, _build_M_cont, rho_target=rho_target,
-        )
-
-    # --- Discrete: just use safety-factored curvature ---
+    # --- Phase 1: Gershgorin on CONTINUOUS columns ---
     gw_full = G_w_dso_init.copy()
+
     if n_cont > 0:
+        K_c = H_dso[:, cont_idx]
+        QK_c = Q_sqrt[:, None] * K_c
+        c_diag_cont = np.sum(QK_c ** 2, axis=0)
+
+        gw_cont = safety_factor_continuous * c_diag_cont / 2.0
+        gw_cont = np.maximum(gw_cont, G_w_dso_init[cont_idx])
         gw_full[cont_idx] = gw_cont
+
+    # Discrete: safety-factored curvature
     if disc_idx:
         K_d = H_dso[:, disc_idx]
         QK_d = Q_sqrt[:, None] * K_d
@@ -361,18 +371,38 @@ def tune_dso_gw(
     if actuator_counts is not None:
         gw_full = _apply_gw_floors(gw_full, actuator_counts, floors, _DSO_COLUMN_ORDER)
 
-    # Compute alpha from full DSO M (including discrete)
-    C_full = _curvature_matrix(H_dso, Q_dso)
-    gw_inv_sqrt_full = 1.0 / np.sqrt(np.maximum(gw_full, 1e-12))
-    M_full = (gw_inv_sqrt_full[:, None] * C_full) * gw_inv_sqrt_full[None, :]
-    eigs_full = np.linalg.eigvalsh(M_full).astype(np.complex128)
-    alpha = _find_alpha_for_target_rho(eigs_full, rho_target=rho_target)
+    # --- Phase 2: Conditioning pump on continuous M_cont ---
+    if n_cont > 0:
+        QK_c = Q_sqrt[:, None] * H_dso[:, cont_idx]
+
+        def _build_M_cont(gw_c):
+            gi = 1.0 / np.sqrt(np.maximum(gw_c, 1e-12))
+            Phi_c = 2.0 * (QK_c.T @ QK_c)
+            M_c = (gi[:, None] * Phi_c) * gi[None, :]
+            eigs = np.linalg.eigvalsh(M_c)
+            return M_c, eigs
+
+        gw_cont_pumped, kappa, _ = _conditioning_pump(
+            gw_full[cont_idx], _build_M_cont, kappa_target=50.0,
+        )
+        gw_full[cont_idx] = gw_cont_pumped
+
+    # --- Phase 3: Compute alpha from M_cont eigenspectrum ---
+    if n_cont > 0:
+        _, eigs_cont = _build_M_cont(gw_full[cont_idx])
+        eig_max = max(float(np.max(np.abs(eigs_cont))), 1e-14)
+        active = eigs_cont[eigs_cont > 0.01 * eig_max]
+        alpha = _find_alpha_for_target_rho(
+            active.astype(np.complex128), rho_target=rho_target,
+        )
+    else:
+        alpha = 1.0
 
     return gw_full, alpha
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  C2: Continuous g_w tuning (targets M_full^c, NOT full M_sys)
+#  C2: Continuous g_w tuning (targets M_full^c)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def tune_continuous_gw(
@@ -385,17 +415,16 @@ def tune_continuous_gw(
     safety_factor: float = 2.0,
     floors: Optional[Dict[str, float]] = None,
     rho_target: float = 0.95,
-    max_pump_iters: int = 30,
+    max_pump_iters: int = 15,
     verbose: bool = False,
 ) -> Tuple[List[NDArray[np.float64]], float]:
-    """Tune continuous g_w entries to satisfy C2: rho(M_full^c) < 1.
+    """Tune continuous g_w to satisfy C2: rho(I - alpha*M_full^c) < 1.
 
-    Targets the CONTINUOUS-ONLY system matrix M_full^c (Theorem 3.1).
-    Discrete columns of H are excluded.  Discrete g_w entries in the
-    returned vectors are copied from init (tuned separately in C3).
+    g_w controls CONDITIONING.  alpha controls STABILITY.
 
     Phase 1: Gershgorin preconditioning on continuous curvature.
-    Phase 2: Eigenvector pump on M_full^c until rho < rho_target.
+    Phase 2: Conditioning pump on M_full^c to reduce kappa.
+    Phase 3: Compute alpha from M_full^c eigenspectrum.
 
     Returns (gw_tuned_list, alpha_tso).
     """
@@ -432,21 +461,20 @@ def tune_continuous_gw(
         gw_cont = np.maximum(gw_cont, G_w_init_list[idx][ci])
         gw_list[idx][ci] = gw_cont
 
-    # Apply floors to full vectors
+    # Apply floors
     for idx in range(n_zones):
         if actuator_counts is not None:
             gw_list[idx] = _apply_gw_floors(
                 gw_list[idx], actuator_counts[idx], floors, _TSO_COLUMN_ORDER,
             )
 
-    # --- Phase 2: Eigenvector pump on M_full^c ---
+    # --- Phase 2: Conditioning pump on M_full^c ---
     n_c_per = [len(ci) for ci in cont_indices]
     n_total_c = sum(n_c_per)
 
     if n_total_c == 0:
         return gw_list, 1.0
 
-    # Flatten continuous g_w into a single vector for the pump
     gw_c_flat = np.concatenate([gw_list[k][cont_indices[k]] for k in range(n_zones)])
 
     # Precompute Q-weighted H blocks (continuous columns only)
@@ -466,9 +494,7 @@ def tune_continuous_gw(
                 QH_cache[('QH', i, j)] = Q_sqrt_i[:, None] * H_ij[:, ci_j]
 
     def _build_M_full_c(gw_c_flat_in):
-        """Build M_full^c from flattened continuous g_w."""
         M = np.zeros((n_total_c, n_total_c))
-        # Unflatten
         off_list = []
         off = 0
         for k in range(n_zones):
@@ -500,55 +526,31 @@ def tune_continuous_gw(
         eigs = np.linalg.eigvals(M)
         return M, eigs
 
-    gw_c_tuned, rho, n_iters = _eigenvector_pump_gw(
+    gw_c_tuned, kappa, n_iters = _conditioning_pump(
         gw_c_flat, _build_M_full_c,
-        rho_target=rho_target, max_iters=max_pump_iters,
+        kappa_target=50.0, max_iters=max_pump_iters,
     )
 
-    # Write tuned continuous g_w back into per-zone vectors
+    # Write back
     off = 0
     for k in range(n_zones):
         ci = cont_indices[k]
         gw_list[k][ci] = gw_c_tuned[off:off + n_c_per[k]]
         off += n_c_per[k]
 
-    # Compute alpha from the full system (all actuators)
-    n_per_zone = [len(gw) for gw in gw_list]
-    n_total = sum(n_per_zone)
-    M_sys = np.zeros((n_total, n_total))
-    row_off = 0
-    for i_idx, i in enumerate(zone_ids):
-        q_obj_i = Q_obj_list[i_idx]
-        gw_i = gw_list[i_idx]
-        gw_inv_sqrt_i = 1.0 / np.sqrt(np.maximum(gw_i, 1e-12))
-        Q_sqrt_i = np.sqrt(np.maximum(q_obj_i, 0.0))
-        H_ii = H_blocks.get((i, i))
-        if H_ii is None:
-            row_off += n_per_zone[i_idx]
-            continue
-        QH_ii = Q_sqrt_i[:, None] * H_ii
-        col_off = 0
-        for j_idx, j in enumerate(zone_ids):
-            gw_j = gw_list[j_idx]
-            gw_inv_sqrt_j = 1.0 / np.sqrt(np.maximum(gw_j, 1e-12))
-            H_ij = H_blocks.get((i, j))
-            if H_ij is not None:
-                QH_ij = Q_sqrt_i[:, None] * H_ij
-                C_ij = QH_ii.T @ QH_ij
-                M_ij = (gw_inv_sqrt_i[:, None] * C_ij) * gw_inv_sqrt_j[None, :]
-                nr, nc = n_per_zone[i_idx], n_per_zone[j_idx]
-                M_sys[row_off:row_off+nr, col_off:col_off+nc] = M_ij
-            col_off += n_per_zone[j_idx]
-        row_off += n_per_zone[i_idx]
-
-    sys_eigs = np.linalg.eigvals(M_sys)
-    alpha_tso = _find_alpha_for_target_rho(sys_eigs, rho_target=rho_target)
+    # --- Phase 3: Compute alpha from M_full^c ---
+    _, eigs_c = _build_M_full_c(gw_c_tuned)
+    eig_max = max(float(np.max(np.abs(eigs_c))), 1e-14)
+    active_c = eigs_c[np.abs(eigs_c) > 0.01 * eig_max]
+    alpha_tso = _find_alpha_for_target_rho(active_c, rho_target=rho_target)
 
     if verbose:
-        lam_max_re = float(np.max(sys_eigs.real)) if len(sys_eigs) > 0 else 0.0
-        rho_at = float(np.max(np.abs(1.0 - alpha_tso * sys_eigs))) if len(sys_eigs) > 0 else 0.0
-        print(f"  [C2 tune] rho(M_full^c) = {rho:.4f} after {n_iters} pump iters, "
-              f"alpha_tso = {alpha_tso:.6f}, rho(full) = {rho_at:.4f}")
+        rho_at = float(np.max(np.abs(1.0 - alpha_tso * active_c))) if len(active_c) > 0 else 0.0
+        lam_max = float(np.max(active_c.real)) if len(active_c) > 0 else 0.0
+        lam_min = float(np.min(active_c.real[active_c.real > 0.01 * max(lam_max, 1e-14)])) if len(active_c) > 0 else 0.0
+        print(f"  [C2 tune] kappa = {kappa:.1f} after {n_iters} pump iters, "
+              f"lam = [{lam_min:.4f}, {lam_max:.4f}], "
+              f"alpha_tso = {alpha_tso:.4f}, rho = {rho_at:.4f}")
 
     return gw_list, alpha_tso
 
@@ -771,25 +773,28 @@ def auto_tune(
         analyse_dso_stability,
     )
 
-    # Verify C1
+    # Verify C1 (with tuned alpha)
     for d_idx, d in enumerate(dso_inputs):
         ac = {'n_der': d.n_der, 'n_oltc': d.n_oltc, 'n_shunt': d.n_shunt}
+        alpha_d = alpha_dso_list[d_idx] if d_idx < len(alpha_dso_list) else 1.0
         r = analyse_dso_stability(
             H_dso=d.H, Q_dso=d.q_obj_diag, G_w_dso=gw_dso_tuned[d_idx],
-            dso_id=d.dso_id, actuator_counts=ac,
+            dso_id=d.dso_id, actuator_counts=ac, alpha=alpha_d,
             tso_period_s=tso_period_s, dso_period_s=dso_period_s,
         )
         if not r.stable:
             c1_ok = False
-            warnings.append(f"C1: {d.dso_id} still unstable after tuning")
+            warnings.append(f"C1: {d.dso_id} still unstable after tuning "
+                            f"(rho = {r.M_cont_spectral_radius:.4f})")
 
-    # Verify C2 + C3
+    # Verify C2 + C3 (with tuned alpha)
     stab = analyse_multi_zone_stability(
         H_blocks=H_blocks,
         Q_obj_list=Q_obj_list,
         G_w_list=gw_tso,
         zone_ids=zone_ids,
         actuator_counts=actuator_counts,
+        alpha=alpha_tso,
         verbose=False,
     )
     c2_ok = stab.c2_satisfied

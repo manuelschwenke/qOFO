@@ -115,6 +115,11 @@ class TuningConfig:
     pump_max_iters: int = 20
     """Maximum conditioning-pump iterations."""
 
+    # ── Post-tuning boost ─────────────────────────────────────────────
+    alpha_dso_boost: float = 1.0
+    """Multiply DSO alpha after tuning (>1 = faster tracking, less margin).
+    Stability is re-verified; the boost is backed off if C1 fails."""
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Result Dataclasses
@@ -1048,6 +1053,37 @@ def auto_tune(
 
         if verbose:
             print(f"  [C1] {d.dso_id}: alpha = {alpha:.4f}")
+
+    # ── Apply DSO alpha boost (speed up tracking, then verify) ───────
+    if tc.alpha_dso_boost != 1.0 and alpha_dso_list:
+        from analysis.stability_analysis import analyse_dso_stability
+
+        for d_idx, d in enumerate(dso_inputs):
+            alpha_base = alpha_dso_list[d_idx]
+            alpha_boosted = alpha_base * tc.alpha_dso_boost
+            ac = {'n_der': d.n_der, 'n_oltc': d.n_oltc, 'n_shunt': d.n_shunt}
+
+            r = analyse_dso_stability(
+                H_dso=d.H, Q_dso=d.q_obj_diag,
+                G_w_dso=gw_dso_tuned[d_idx],
+                dso_id=d.dso_id, actuator_counts=ac,
+                alpha=alpha_boosted,
+                tso_period_s=tso_period_s, dso_period_s=dso_period_s,
+            )
+            if r.stable:
+                alpha_dso_list[d_idx] = alpha_boosted
+                if verbose:
+                    print(f"  [C1 boost] {d.dso_id}: alpha {alpha_base:.4f} "
+                          f"x{tc.alpha_dso_boost:.1f} -> {alpha_boosted:.4f} "
+                          f"(rho = {r.M_cont_spectral_radius:.4f}) [ok]")
+            else:
+                warnings.append(
+                    f"C1 boost: {d.dso_id} x{tc.alpha_dso_boost:.1f} "
+                    f"rejected (rho = {r.M_cont_spectral_radius:.4f})")
+                if verbose:
+                    print(f"  [C1 boost] {d.dso_id}: x{tc.alpha_dso_boost:.1f} "
+                          f"rejected (rho = {r.M_cont_spectral_radius:.4f}), "
+                          f"keeping alpha = {alpha_base:.4f}")
 
     # ── C2: Continuous TSO tuning ─────────────────────────────────────────
     gw_tso, alpha_tso = tune_continuous_gw(

@@ -651,8 +651,46 @@ def tune_continuous_gw(
             if H_ij is not None and ci_j:
                 QH_cache[('QH', i, j)] = Q_sqrt_i[:, None] * H_ij[:, ci_j]
 
+    # --- Filter out near-zero-sensitivity actuators from eigenanalysis ---
+    # Actuators with negligible Q-weighted sensitivity columns create
+    # spurious near-zero eigenvalues that inflate kappa and alpha.
+    col_norms = np.zeros(n_total_c)
+    off = 0
+    for k_idx, k in enumerate(zone_ids):
+        ci = cont_indices[k_idx]
+        if not ci:
+            off += 0
+            continue
+        QH_kk = QH_cache.get(('QH_ii', k))
+        if QH_kk is not None:
+            for j_local in range(len(ci)):
+                col_norms[off + j_local] = float(np.linalg.norm(QH_kk[:, j_local]))
+        off += len(ci)
+
+    norm_max = max(float(np.max(col_norms)), 1e-14)
+    sens_threshold = 0.01 * norm_max  # 1% of max column norm
+    active_mask = col_norms > sens_threshold
+    n_active = int(np.sum(active_mask))
+    n_inert = n_total_c - n_active
+
+    if verbose and n_inert > 0:
+        print(f"  [C2 filter] {n_inert}/{n_total_c} continuous actuators "
+              f"have negligible sensitivity (< 1% of max) — excluded from "
+              f"eigenanalysis")
+
+    # Build active-only index mapping
+    active_indices = np.where(active_mask)[0]
+
     def _build_M_full_c(gw_c_flat_in):
-        M = np.zeros((n_total_c, n_total_c))
+        """Build M from ACTIVE actuators only."""
+        if n_active == 0:
+            return np.zeros((1, 1)), np.array([0.0])
+
+        # Extract active g_w
+        gw_active = gw_c_flat_in[active_indices]
+
+        # Build full M first, then extract active submatrix
+        M_full = np.zeros((n_total_c, n_total_c))
         off_list = []
         off = 0
         for k in range(n_zones):
@@ -679,23 +717,41 @@ def tune_continuous_gw(
                     continue
                 C_ij = 2.0 * (QH_ii.T @ QH_ij)
                 M_ij = (gi[:, None] * C_ij) * gj[None, :]
-                M[r0:r0+n_c_per[i_idx], c0:c0+n_c_per[j_idx]] = M_ij
+                M_full[r0:r0+n_c_per[i_idx], c0:c0+n_c_per[j_idx]] = M_ij
 
+        # Extract active-only submatrix
+        M = M_full[np.ix_(active_indices, active_indices)]
         eigs = np.linalg.eigvals(M)
         return M, eigs
 
     # --- Phase 1b: Eigenvalue-based g_w init (selective boost) ---
-    gw_c_flat = _eigenvalue_init_gw(
-        _build_M_full_c, gw_c_flat, lambda_target=lambda_target,
-    )
+    # Only boost active actuators; map back to full flat vector
+    def _active_M_builder(gw_active_in):
+        gw_full = gw_c_flat.copy()
+        gw_full[active_indices] = gw_active_in
+        return _build_M_full_c(gw_full)
 
-    gw_c_tuned, kappa, n_iters = _conditioning_pump(
-        gw_c_flat, _build_M_full_c,
-        kappa_target=kappa_target,
-        alpha_target=alpha_target,
-        lambda_max_alpha_target=lambda_max_alpha_target,
-        max_iters=max_pump_iters,
-    )
+    if n_active > 0:
+        gw_active = gw_c_flat[active_indices].copy()
+        gw_active = _eigenvalue_init_gw(
+            _active_M_builder, gw_active, lambda_target=lambda_target,
+        )
+        gw_c_flat[active_indices] = gw_active
+
+        # Pump on active actuators only
+        gw_active_tuned, kappa, n_iters = _conditioning_pump(
+            gw_c_flat[active_indices], _active_M_builder,
+            kappa_target=kappa_target,
+            alpha_target=alpha_target,
+            lambda_max_alpha_target=lambda_max_alpha_target,
+            max_iters=max_pump_iters,
+        )
+        gw_c_flat[active_indices] = gw_active_tuned
+    else:
+        kappa = 1.0
+        n_iters = 0
+
+    gw_c_tuned = gw_c_flat
 
     # Write back
     off = 0

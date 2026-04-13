@@ -2653,9 +2653,9 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             for did, dctrl in dso_controllers.items():
                 dctrl.update_g_z(_gz_targets_dso[did])
             if verbose >= 1:
-                print(f"  ── g_z warmup complete at t={time_s:.0f}s: "
+                print(f"  -- g_z warmup complete at t={time_s:.0f}s: "
                       f"output constraints activated "
-                      f"(g_z_voltage={config.g_z_voltage:.0e}) ──")
+                      f"(g_z_voltage={config.g_z_voltage:.0e}) --")
 
         rec = MultiTSOIterationRecord(
             step=step, time_s=time_s, tso_active=run_tso, dso_active=run_dso
@@ -2893,6 +2893,29 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             print(f"  Zone {z}: V_mean={v_mean:.4f} p.u.  |V - V_set|={v_err:.4f}")
         print("=" * 72)
 
+        # ── DSO tracking quality ─────────────────────────────────────────────
+        print()
+        print("=" * 72)
+        print("  DSO Q-TRACKING QUALITY")
+        print("=" * 72)
+        for dso_id in sorted(set().union(*(r.dso_q_set_mvar.keys() for r in log))):
+            q_sets = []
+            q_acts = []
+            for r in log:
+                qs = r.dso_q_set_mvar.get(dso_id)
+                qa = r.dso_q_actual_mvar.get(dso_id)
+                if qs is not None and qa is not None:
+                    q_sets.append(qs)
+                    q_acts.append(qa)
+            if q_sets:
+                errors = [abs(s - a) for s, a in zip(q_sets, q_acts)]
+                print(f"  {dso_id}: Q_set={q_sets[-1]:+8.2f} Mvar, "
+                      f"Q_act={q_acts[-1]:+8.2f} Mvar, "
+                      f"|err|={errors[-1]:.2f} Mvar, "
+                      f"mean|err|={np.mean(errors):.2f} Mvar, "
+                      f"max|err|={max(errors):.2f} Mvar")
+        print("=" * 72)
+
     return log
 
 
@@ -2908,26 +2931,26 @@ def main() -> None:
         python run/run_M_TSO_M_DSO.py
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 720,      # 720-minute simulation
+        n_total_s=60.0 * 720,      # 720-minute full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
-        dso_period_s=10.0 * 1,    # DSO every 20 seconds
+        dso_period_s=5.0,    # DSO every 5 seconds (more inner iterations)
         g_v=5000.0,
         g_q=30,
-        dso_g_v=10000.0,
-        g_w_der=10,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_gen=1e7,  # was 5e4 at alpha=0.01 → 5e4/0.01 = 5e6
-        g_w_pcc=20,  # was 0.5 at alpha=0.01 → 0.5/0.01 = 50
-        g_w_tso_oltc=2,  # unchanged (was at alpha=1)
-        g_w_dso_der=10,  # was 2.0 at dso_alpha=0.1 → 2/0.1 = 20
-        g_w_dso_oltc=100,  # unchanged (was at alpha=1)
+        dso_g_v=1000.0,  # was 2000, further reducing; g_z_voltage enforces limits
+        g_w_der=10,
+        g_w_gen=1e7,
+        g_w_pcc=20,
+        g_w_tso_oltc=10,  # stability C3 needs >= 6.54
+        g_w_dso_der=350,  # 300 -> DSO_2 rho=1.026, bumping up slightly
+        g_w_dso_oltc=50,
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
-        auto_tune_gw=True,
+        auto_tune_gw=False,
         tune_alpha_only=False,   # keep hand-tuned g_w, only compute alpha
         exclude_from_stability=frozenset({'gen'}),
         verbose=1,
-        live_plot=True,
+        live_plot=False,
         add_tso_ders=False,
         # ── Profile & contingency settings ───────────────────────────────
         start_time=datetime(2016, 1, 5, 8, 0),

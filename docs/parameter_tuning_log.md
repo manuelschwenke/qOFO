@@ -142,37 +142,105 @@ from [1.028, 1.037] to [1.020, 1.029] p.u. -- handled smoothly without oscillati
 Gen-2 restore at t = 300 min recovered voltages to [1.028, 1.037] within one TSO
 step.  No divergence or constraint violations during either transient.
 
+## Step 7: Diagnose structural Q-tracking barriers (runs 14--16)
+
+A diagnostic printout (Step 7d in the simulation) was added to reveal the
+underlying network quantities at t=0.
+
+### Finding 1: Transmission line lengths are unrealistic
+
+The IEEE 39-bus line lengths between coupling buses are **1.0 km** at 345 kV,
+essentially bus bars.  In a real EHV network, substations are 30--100+ km apart.
+The pandapower case39 uses per-unit impedances without meaningful physical
+distances.
+
+HV sub-network lines span 180--240 km total at 110 kV -- realistic for regional
+distribution, but the impedance ratio HV/TN is extreme.  DSO_2's higher impedance
+(scale=1.0 vs 0.75) explains its worse Q-tracking: the sensitivity dQ_interface/dQ_DER
+is attenuated by the longer electrical paths.
+
+### Finding 2: Load Q consumption is nearly zero
+
+Q_load = -6 Mvar at P = 96 MW (cos_phi ~ 0.998).  Real HV/MV substations
+aggregating distribution feeders typically have cos_phi ~ 0.95--0.97, consuming
+20--30 Mvar at this P level.  The nearly-unity power factor is a consequence of the
+simbench "mv_rural_qload" profile at this timestep.
+
+### Finding 3: Q-tracking limited by multi-objective trade-off, not capacity
+
+DER Q capacity is [-135, +168] Mvar per DSO.  Setpoints of 50--150 Mvar use only
+30--90% of the positive range -- ample capacity.
+
+The **root cause** of the ~10 Mvar steady-state tracking error was the DSO's
+multi-objective trade-off.  At MIQP equilibrium the gradient condition is:
+
+    g_q * H_q^T * e_q + g_v * H_v^T * e_v = 0
+
+With the old ratio dso_g_v / g_q = 1000 / 30 = 33:1, even small voltage deviations
+dominated the gradient, leaving persistent Q error.  Since voltage limits are already
+enforced by the hard constraint (g_z_voltage = 1e-12), the dso_g_v term is redundant
+for safety -- it only controls how aggressively V tracks V_set within the safe band.
+
+### Fix: rebalance g_q / dso_g_v ratio
+
+| Parameter    | Before | After | Ratio change |
+|--------------|--------|-------|-------------|
+| g_q          | 30     | 100   | 3.3x up     |
+| dso_g_v      | 1000   | 100   | 10x down    |
+| g_w_dso_der  | 350    | 650   | 1.9x up (for C1) |
+
+**Result** (720-min, gen trip/restore):
+
+| DSO   | Mean |err| old | Mean |err| new | Improvement |
+|-------|---------------------|---------------------|-------------|
+| DSO_1 | 9.3 Mvar            | 2.3 Mvar            | 4.0x        |
+| DSO_2 | 10.7 Mvar           | 2.1 Mvar            | 5.1x        |
+| DSO_3 | 5.8 Mvar            | 2.1 Mvar            | 2.8x        |
+
+DSO stability margins also improved: rho = 0.82--0.85 (was 0.95--0.98).
+
 ## Final tuned parameters
 
 ```python
 cfg = MultiTSOConfig(
     dso_period_s=5.0,          # 5 s (was 10 s)
     g_v=5000.0,                # unchanged
-    g_q=30,                    # unchanged
-    dso_g_v=1000.0,            # was 10000
+    g_q=100,                   # was 30
+    dso_g_v=100.0,             # was 10000
     g_w_der=10,                # unchanged
     g_w_gen=1e7,               # unchanged
     g_w_pcc=20,                # unchanged
     g_w_tso_oltc=10,           # was 2
-    g_w_dso_der=350,           # was 10
+    g_w_dso_der=650,           # was 10
     g_w_dso_oltc=50,           # was 100
     auto_tune_gw=False,        # was True
     live_plot=False,           # was True
 )
 ```
 
+## Network realism observations
+
+1. **TN line lengths:** IEEE 39-bus lines between coupling buses are 1.0 km
+   (345 kV).  These are per-unit placeholders, not physical distances.  A realistic
+   EHV network would have 30--100+ km inter-substation distances.
+
+2. **HV/MV substation Q:** At the initial operating point, aggregated loads consume
+   only -6 Mvar (slightly capacitive) at P = 96 MW.  Real substations would draw
+   20--30 Mvar inductive at this power level (cos_phi ~ 0.95).
+
+3. **DSO_2 impedance asymmetry:** DSO_2 uses line_length_scale = 1.0 vs 0.75 for
+   DSO_1/DSO_3.  This 33% higher impedance attenuates Q sensitivity and explains
+   DSO_2's systematically higher tracking errors at equal parameter settings.
+
 ## Open points
 
 1. **C2 condition number:** Zone 2 has kappa = 77.7, meaning one control direction
-   converges ~78x slower than the fastest.  This is driven by the smallest eigenvalue
-   of the Zone 2 TSO sub-problem (likely a weakly coupled Q_PCC direction).  Per-actuator
-   g_w scaling could improve this but requires individual sensitivity analysis.
+   converges ~78x slower than the fastest.  Per-actuator g_w scaling could improve
+   this but requires individual sensitivity analysis.
 
-2. **DSO Q-tracking ceiling:** With dso_g_v = 1000 and g_q = 30, the fundamental
-   trade-off between C1 stability (needs high g_w) and Q-tracking (needs low g_w)
-   limits the achievable steady-state tracking error to ~5--10 Mvar.  Further
-   improvement would require either a DSO step-size alpha < 1 (to decouple
-   convergence rate from g_w) or structural changes to the DSO controller.
-
-3. **Cold-start transient:** The ~48 Mvar max Q-tracking error during the first TSO
+2. **Cold-start transient:** The ~48 Mvar max Q-tracking error during the first TSO
    step could be reduced by a warmup phase that ramps Q setpoints gradually.
+
+3. **Load Q profiles:** The time-varying Q-load profile (mv_rural_qload) may create
+   periods with higher or lower Q demand that temporarily stress the Q-tracking
+   equilibrium.

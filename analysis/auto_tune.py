@@ -879,17 +879,15 @@ def recommend_dso_weights(
 ) -> List[Dict[str, float]]:
     """Compute recommended g_q / g_v ratio for each DSO.
 
-    Two methods are reported:
+    **Gradient-balance normalisation** — sets g_q/g_v so that a typical
+    Q error and a typical V error produce equal gradient magnitudes:
 
-    1. **Sensitivity-ratio normalisation** — sets g_q/g_v so that
-       a typical Q error and a typical V error produce equal gradient
-       magnitudes::
+        g_q · ΔQ_typ · ||H_Q||_F  =  g_v · ΔV_typ · ||H_V||_F
 
-           g_q/g_v = (ΔV² · ||H_V||²_F) / (ΔQ² · ||H_Q||²_F)
+        ⟹  g_q/g_v = (ΔV_typ · ||H_V||_F) / (ΔQ_typ · ||H_Q||_F)
 
-    2. **Cascade-margin eigenvalue analysis** — decomposes the
-       eigenspectrum of M_cont into Q-dominant and V-dominant modes
-       and checks whether Q-modes converge within *n_inner* steps.
+    If the current g_q is already above the balanced value, Q tracking
+    is already prioritised — the step-size problem is elsewhere (alpha/g_w).
 
     Parameters
     ----------
@@ -899,9 +897,7 @@ def recommend_dso_weights(
     n_inner : DSO iterations per TSO step (T_TSO / T_DSO)
     cascade_target : desired Q convergence fraction within n_inner steps
 
-    Returns list of dicts, one per DSO, with keys:
-        'dso_id', 'gq_gv_ratio', 'H_Q_frob', 'H_V_frob',
-        'g_q_current', 'g_v_current'
+    Returns list of dicts per DSO.
     """
     results: List[Dict[str, float]] = []
 
@@ -925,12 +921,14 @@ def recommend_dso_weights(
         g_q_cur = float(q_diag[0]) if n_q > 0 else 1.0
         g_v_cur = float(q_diag[n_q]) if n_v > 0 else 1.0
 
-        # Method 1: sensitivity-ratio normalisation
+        # Gradient-balance ratio (linear, not squared)
         if frob_Q > 1e-14 and frob_V > 1e-14:
-            ratio = (delta_v_typ_pu ** 2 * frob_V ** 2) / (
-                     delta_q_typ_mvar ** 2 * frob_Q ** 2)
+            ratio = (delta_v_typ_pu * frob_V) / (delta_q_typ_mvar * frob_Q)
         else:
             ratio = float('nan')
+
+        g_q_balanced = ratio * g_v_cur if not np.isnan(ratio) else g_q_cur
+        q_dominance = g_q_cur / g_q_balanced if g_q_balanced > 1e-14 else float('inf')
 
         results.append({
             'dso_id': d.dso_id,
@@ -939,7 +937,8 @@ def recommend_dso_weights(
             'H_V_frob': frob_V,
             'g_q_current': g_q_cur,
             'g_v_current': g_v_cur,
-            'g_q_recommended': ratio * g_v_cur if not np.isnan(ratio) else g_q_cur,
+            'g_q_balanced': g_q_balanced,
+            'q_dominance': q_dominance,
         })
 
     # Print diagnostic table
@@ -954,8 +953,16 @@ def recommend_dso_weights(
         print(f"    {r['dso_id']}:")
         print(f"      ||H_Q||_F = {r['H_Q_frob']:.4f},  ||H_V||_F = {r['H_V_frob']:.4f}")
         print(f"      Current:     g_q = {r['g_q_current']:.1f},  g_v = {r['g_v_current']:.1f}")
-        print(f"      Recommended: g_q/g_v = {r['gq_gv_ratio']:.4f}")
-        print(f"                   g_q = {r['g_q_recommended']:.1f}  (at current g_v)")
+        print(f"      Balanced:    g_q = {r['g_q_balanced']:.2f}  "
+              f"(g_q/g_v = {r['gq_gv_ratio']:.6f})")
+        dom = r['q_dominance']
+        if dom > 1.5:
+            print(f"      Status:      Q already dominant ({dom:.0f}x above balanced) "
+                  f"— step-size (alpha/g_w) is the bottleneck, not g_q/g_v")
+        elif dom < 0.5:
+            print(f"      Status:      V dominant — increase g_q to at least {r['g_q_balanced']:.1f}")
+        else:
+            print(f"      Status:      near balanced ({dom:.1f}x)")
     print("  ───────────────────────────────────────────────────────────────\n")
 
     return results

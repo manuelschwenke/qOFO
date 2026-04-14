@@ -15,8 +15,10 @@ where:
 Theory
 ------
 Part I  -- Single DSO (Theorem 1.2):
-    Continuous iteration matrix  M_cont = I - (G_c)^{-1} Phi_c
-    where Phi_c = 2 R_c + 2 (K_c)^T Q K_c  is the continuous Hessian.
+    Continuous iteration matrix  M_cont = I - alpha (G_c)^{-1} C_c
+    where C_c = R_c + (K_c)^T Q K_c  is the continuous curvature.
+    (The factor-2 from the Hessian cancels with the 1/2 from the MIQP
+    first-order condition: w* = -grad_f / (2 G_w).)
     Discrete variables settle finitely (Proposition 1.3).
 
 Part II -- Hierarchical TSO-DSO (Theorem 2.1):
@@ -25,11 +27,11 @@ Part II -- Hierarchical TSO-DSO (Theorem 2.1):
 
 Part III -- Multi-TSO/DSO (Theorem 3.3):
     C2: M_full^c = I - blkdiag(G_i^c)^{-1} Phi_full^c
-    C3: Gamma_ij = max_a (4/g_{i,a}) sum_b |[P_ij]_{ab}|
+    C3: Gamma_ij = max_a (2/g_{i,a}) sum_b |[P_ij]_{ab}|
         where P_ij = (K_ii^d)^T Q_i K_ij^d
 
     G sizing rule (Corollary 3.2):
-        g_{i,a} > 4 sum_{j!=i} ||[P_ij]_{a,.}||_1
+        g_{i,a} > 2 sum_{j!=i} ||[P_ij]_{a,.}||_1
 
 Author: Manuel Schwenke, TU Darmstadt
 """
@@ -73,7 +75,7 @@ class DSOStabilityResult:
     """Number of discrete control variables."""
 
     Phi_c_eigenvalues: NDArray[np.float64]
-    """Eigenvalues of the continuous Hessian Phi_c (active modes)."""
+    """Eigenvalues of the preconditioned curvature M_c = G^{-1/2} C_c G^{-1/2} (active modes)."""
 
     M_cont_spectral_radius: float
     """rho(M_cont) = max |1 - lambda_i(M_cont)| on active modes."""
@@ -389,15 +391,17 @@ def analyse_dso_stability(
     G_w_c = G_w_dso[cont_idx]          # (n_cont,)
     R_c = np.diag(G_u_dso[cont_idx])   # (n_cont, n_cont)
 
-    # Phi_c = 2*R_c + 2*(K_c)^T Q K_c
+    # C_c = R_c + (K_c)^T Q K_c  (curvature, NOT Hessian)
+    # The factor 2 from the Hessian (nabla^2 f = 2C) cancels with the
+    # 1/2 from the MIQP first-order condition (w* = -grad_f / (2 G_w)),
+    # giving iteration matrix I - alpha G_w^{-1} C_c.
     Q_sqrt = np.sqrt(np.maximum(Q_dso, 0.0))
     QK_c = Q_sqrt[:, None] * K_c       # (n_y, n_cont)
-    Phi_c = 2.0 * R_c + 2.0 * (QK_c.T @ QK_c)  # (n_cont, n_cont)
+    C_c = R_c + QK_c.T @ QK_c          # (n_cont, n_cont)
 
-    # M_cont = I - (G_c)^{-1} Phi_c
-    # Via similarity: M = G_c^{-1/2} Phi_c G_c^{-1/2}
+    # M_cont = G_c^{-1/2} C_c G_c^{-1/2}  (similarity transform of G^{-1} C)
     gw_inv_sqrt = 1.0 / np.sqrt(np.maximum(G_w_c, 1e-12))
-    M_c = (gw_inv_sqrt[:, None] * Phi_c) * gw_inv_sqrt[None, :]
+    M_c = (gw_inv_sqrt[:, None] * C_c) * gw_inv_sqrt[None, :]
 
     eigs_all = np.linalg.eigvalsh(M_c)
     eigs_active, n_filt = _filter_active_eigenvalues(eigs_all)
@@ -420,8 +424,8 @@ def analyse_dso_stability(
     margins = {}
     gw_min = {}
     for k in range(n_cont):
-        phi_kk = float(Phi_c[k, k])
-        threshold = phi_kk / 2.0
+        c_kk = float(C_c[k, k])
+        threshold = c_kk / 2.0  # Gershgorin: g_w > alpha * C_kk / 2
         margins[cont_names[k]] = float(G_w_c[k]) - threshold
         gw_min[cont_names[k]] = threshold
 
@@ -537,10 +541,10 @@ def analyse_continuous_stability(
             K_ij_c = H_ij[:, cont_indices[j_idx]]
             QK_ij_c = Q_sqrt_i[:, None] * K_ij_c
 
-            # C_ij^c = 2*(K_ii^c)^T Q_i K_ij^c  (+ 2*R_i^c for diagonal)
-            C_ij_c = 2.0 * (QK_ii_c.T @ QK_ij_c)
+            # C_ij^c = (K_ii^c)^T Q_i K_ij^c  (+ R_i^c for diagonal)
+            C_ij_c = QK_ii_c.T @ QK_ij_c
             if i == j:
-                C_ij_c += 2.0 * np.diag(gu_c_i)
+                C_ij_c += np.diag(gu_c_i)
 
             # M_ij^c = G_w,i^{-1/2} C_ij^c G_w,j^{-1/2}
             M_ij_c = (gw_inv_sqrt_i[:, None] * C_ij_c) * gw_inv_sqrt_j[None, :]
@@ -759,19 +763,24 @@ def analyse_discrete_small_gain(
             if P_ij is None or P_ij.size == 0:
                 continue
 
-            # Gamma_ij = max_a (4/g_{i,a}) sum_b |P_ij[a,b]|
+            # Gamma_ij = max_a (2/g_{i,a}) sum_b |P_ij[a,b]|
+            # Factor 2: the Hessian factor (∇f = 2C·e) cancels with the
+            # MIQP threshold (switch when |∇f_a| > g_w,a), leaving
+            # gain = |P_ij·Δu| / g_w (factor 1 per tap step).
+            # The factor 2 is a rounding-threshold margin:
+            # integer triggers when continuous relaxation |w| >= 0.5.
             row_l1 = np.sum(np.abs(P_ij), axis=1)  # (n_d_i,)
             ratios = np.zeros(n_d_i)
             for a in range(n_d_i):
                 g_ia = max(float(gw_d_i[a]), 1e-12)
-                ratios[a] = (4.0 / g_ia) * row_l1[a]
+                ratios[a] = (2.0 / g_ia) * row_l1[a]
             Gamma[i_idx, j_idx] = float(np.max(ratios)) if n_d_i > 0 else 0.0
 
             # G sizing rule: accumulate per-actuator minimum
             for a in range(n_d_i):
                 name = disc_names[a]
                 g_min_required[i][name] = (
-                    g_min_required[i].get(name, 0.0) + 4.0 * float(row_l1[a])
+                    g_min_required[i].get(name, 0.0) + 2.0 * float(row_l1[a])
                 )
 
         # Fill current values and margins
@@ -967,10 +976,10 @@ def analyse_multi_zone_stability(
                 K_ij_c = H_ij[:, cont_indices_all[j_idx]]
                 QK_ii_c = Q_sqrt_i[:, None] * K_ii_c
                 QK_ij_c = Q_sqrt_i[:, None] * K_ij_c
-                C_ij_c = 2.0 * (QK_ii_c.T @ QK_ij_c)
+                C_ij_c = QK_ii_c.T @ QK_ij_c
                 if i == j and G_u_list is not None:
                     gu_c_i = G_u_list[i_idx][cont_indices_all[i_idx]]
-                    C_ij_c += 2.0 * np.diag(gu_c_i)
+                    C_ij_c += np.diag(gu_c_i)
                 M_ij_c = (gw_inv_sqrt_i[:, None] * C_ij_c) * gw_inv_sqrt_j[None, :]
                 nr = n_c_per[i_idx]
                 nc = n_c_per[j_idx]

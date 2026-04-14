@@ -103,6 +103,12 @@ $$
 
 Efficiently computed as $(Q^{1/2} H)^\top (Q^{1/2} H)$.
 
+**Note:** The Hessian of $f$ is $\nabla^2 f = 2C$ (with the factor 2 from
+differentiation of the quadratic).  However, the MIQP solution
+$w^* = -\nabla f / (2 G_w)$ introduces a factor $1/2$ that **cancels** the
+Hessian's factor 2.  The effective iteration gain is therefore $\alpha G_w^{-1} C$,
+not $\alpha G_w^{-1} \cdot 2C$.  The analysis works with $C$ throughout.
+
 ### 3.2 Preconditioned Curvature
 
 The **preconditioned curvature matrix** accounts for $G_w$:
@@ -117,6 +123,9 @@ This is symmetric, so it has real eigenvalues $\lambda_1 \leq \cdots \leq \lambd
 
 The fixed-point iteration $u^{k+1} = u^k - (\alpha/2) G_w^{-1} \nabla f(u^k)$
 is a contraction iff all eigenvalues of $\alpha \, G_w^{-1} C$ lie in $(0, 2)$.
+
+**Derivation:** $\nabla f = 2C(u - u^*)$, so
+$u^{k+1} - u^* = (I - (\alpha/2) G_w^{-1} \cdot 2C)(u^k - u^*) = (I - \alpha G_w^{-1} C)(u^k - u^*)$.
 Through the similarity transform, this is equivalent to:
 
 $$

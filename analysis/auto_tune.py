@@ -482,7 +482,7 @@ def tune_dso_gw(
         if qk is None:
             qk = QK_c_full
         gi = 1.0 / np.sqrt(np.maximum(gw_c, 1e-12))
-        Phi_c = 2.0 * (qk.T @ qk)
+        Phi_c = qk.T @ qk
         M_c = (gi[:, None] * Phi_c) * gi[None, :]
         eigs = np.linalg.eigvalsh(M_c)
         return M_c, eigs
@@ -708,7 +708,7 @@ def tune_continuous_gw(
                 QH_ij = QH_cache.get(('QH', i, j))
                 if QH_ii is None or QH_ij is None:
                     continue
-                C_ij = 2.0 * (QH_ii.T @ QH_ij)
+                C_ij = QH_ii.T @ QH_ij
                 M_ij = (gi[:, None] * C_ij) * gj[None, :]
                 M_full[r0:r0+n_c_per[i_idx], c0:c0+n_c_per[j_idx]] = M_ij
 
@@ -878,7 +878,7 @@ def tune_discrete_gw(
 
             P_ij = QK_ii_d.T @ QK_ij_d  # (n_d_i, n_d_j)
             row_l1 = np.sum(np.abs(P_ij), axis=1)  # (n_d_i,)
-            g_min += 4.0 * row_l1
+            g_min += 2.0 * row_l1
 
         # Apply safety factor and update
         g_min_safe = safety_factor * g_min

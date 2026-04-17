@@ -2077,7 +2077,7 @@ def main() -> None:
         g_v=100000.0,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=200,  # DSO Q-tracking
         # ── DSO objective tuning ──
-        dso_g_v=3000.0,  # reduced to avoid competing with Q tracking
+        dso_g_v=5000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.9,  # leaky integrator decay
         dso_q_integral_max_mvar=50.0,  # anti-windup clamp
@@ -2088,8 +2088,8 @@ def main() -> None:
         g_w_pcc=50,   # 9 correlated PCCs; rho(C)=221 -> min 111
         g_w_tso_oltc=200,
         # ── DSO weights (alpha=1, rho(C_DER)=790 -> min 395) ──
-        g_w_dso_der=1000,  # 8 correlated DER; sf~2.5 for smooth tracking
-        g_w_dso_oltc=300,   # rho(C_OLTC)~1.1; higher for switching suppression
+        g_w_dso_der=1200,  # 8 correlated DER; sf~2.5 for smooth tracking
+        g_w_dso_oltc=100,   # rho(C_OLTC)~1.1; higher for switching suppression
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -2098,7 +2098,7 @@ def main() -> None:
         live_plot_load_balance=False,
         live_plot_hv_power=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 8, 0),
+        start_time=datetime(2016, 1, 5, 0, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[

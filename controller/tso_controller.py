@@ -45,7 +45,7 @@ Date: 2025-02-06
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Set, Tuple, Dict
 import numpy as np
 from numpy.typing import NDArray
 
@@ -126,6 +126,13 @@ class TSOControllerConfig:
     gen_bus_indices: List[int] = field(default_factory=list)
     gen_vm_min_pu: float = 0.95
     gen_vm_max_pu: float = 1.07
+
+    gen_oltc_map: Dict[int, int] = field(default_factory=dict)
+    """Maps generator position index (in gen_indices) to OLTC position
+    index (in oltc_trafo_indices).  Only generators with a dedicated
+    machine transformer are included.  Generators without an entry are
+    ignored for capability-based OLTC blocking.  Example: {0: 2} means
+    gen_indices[0] is connected to oltc_trafo_indices[2]."""
 
     k_t_avt: float = 0.0
     """Achieved-Value Tracking factor for PCC-Q reset.
@@ -279,9 +286,51 @@ class TSOController(BaseOFOController):
         # Achieved-Value Tracking verbosity (set from run_cascade)
         self._avt_verbose: int = 0
 
+        # Out-of-service masks for generators and OLTCs (contingency handling).
+        # True = element is out of service → freeze bounds, zero H columns.
+        n_gen = len(config.gen_indices)
+        n_oltc = len(config.oltc_trafo_indices)
+        self._oos_gen_mask: NDArray[np.bool_] = np.zeros(n_gen, dtype=np.bool_)
+        self._oos_oltc_mask: NDArray[np.bool_] = np.zeros(n_oltc, dtype=np.bool_)
+
     # =========================================================================
     # Public interface for cascaded hierarchy communication
     # =========================================================================
+
+    def update_outage_mask(
+        self,
+        oos_gen_indices: Set[int],
+        oos_oltc_indices: Set[int],
+    ) -> None:
+        """
+        Update out-of-service masks for generators and OLTCs.
+
+        Called after a contingency changes element ``in_service`` status.
+        Out-of-service actuators are frozen (bounds collapsed to current
+        value) and their sensitivity columns are zeroed so the MIQP
+        does not dispatch them.
+
+        Parameters
+        ----------
+        oos_gen_indices : Set[int]
+            ``net.gen`` indices that are currently out of service.
+        oos_oltc_indices : Set[int]
+            ``net.trafo`` indices of machine-transformer OLTCs that are
+            currently out of service.
+        """
+        changed = False
+        for k, g_idx in enumerate(self.config.gen_indices):
+            new_val = g_idx in oos_gen_indices
+            if self._oos_gen_mask[k] != new_val:
+                changed = True
+            self._oos_gen_mask[k] = new_val
+        for k, t_idx in enumerate(self.config.oltc_trafo_indices):
+            new_val = t_idx in oos_oltc_indices
+            if self._oos_oltc_mask[k] != new_val:
+                changed = True
+            self._oos_oltc_mask[k] = new_val
+        if changed:
+            self.invalidate_sensitivity_cache()
 
     def receive_capability(self, message: CapabilityMessage) -> None:
         """
@@ -717,11 +766,71 @@ class TSOController(BaseOFOController):
         u_lower[tap_start:tap_end] = tap_min.astype(np.float64)
         u_upper[tap_start:tap_end] = tap_max.astype(np.float64)
 
+        # --- Directional OLTC blocking from generator capability curve ---
+        # When a generator's Q is near its capability limit, block the
+        # machine-transformer OLTC in the direction that would push Q
+        # further toward (or beyond) the limit.
+        # Tap convention: tap_up → V_HV decreases → Q_gen decreases.
+        #   Near Q_max (overexcited): block tap DECREASE (tap down raises
+        #       V_HV and increases Q_gen).
+        #   Near Q_min (underexcited): block tap INCREASE (tap up lowers
+        #       V_HV and decreases Q_gen).
+        if (
+            self.actuator_bounds.gen_params is not None
+            and self._last_measurement is not None
+            and self._u_current is not None
+            and self.config.gen_oltc_map
+            and len(self._last_measurement.gen_p_mw) == n_gen
+            and len(self._last_measurement.gen_q_mvar) == n_gen
+        ):
+            meas = self._last_measurement
+            gen_p = meas.gen_p_mw
+            gen_v = meas.gen_vm_pu
+            gen_q_cur = meas.gen_q_mvar
+            gen_q_lo, gen_q_hi = self.actuator_bounds.compute_gen_q_bounds(
+                gen_p, gen_v,
+            )
+            cap_margin_frac = 0.1
+
+            for gen_k, oltc_k in self.config.gen_oltc_map.items():
+                if gen_k >= n_gen or oltc_k >= n_oltc:
+                    continue
+                q_range = gen_q_hi[gen_k] - gen_q_lo[gen_k]
+                if q_range <= 0:
+                    continue
+                margin_oltc = cap_margin_frac * q_range
+
+                if gen_q_cur[gen_k] >= gen_q_hi[gen_k] - margin_oltc:
+                    # Block tap decrease (which raises V_HV / Q_gen)
+                    u_lower[tap_start + oltc_k] = max(
+                        u_lower[tap_start + oltc_k],
+                        self._u_current[tap_start + oltc_k],
+                    )
+
+                if gen_q_cur[gen_k] <= gen_q_lo[gen_k] + margin_oltc:
+                    # Block tap increase (which lowers V_HV / Q_gen)
+                    u_upper[tap_start + oltc_k] = min(
+                        u_upper[tap_start + oltc_k],
+                        self._u_current[tap_start + oltc_k],
+                    )
+
         # --- Shunt state bounds (fixed: -1, 0, +1) ---
         state_min, state_max = self.actuator_bounds.get_shunt_state_bounds()
         shunt_start = tap_end
         u_lower[shunt_start:] = state_min.astype(np.float64)
         u_upper[shunt_start:] = state_max.astype(np.float64)
+
+        # --- Freeze OOS generators and OLTCs (contingency masking) ---
+        # Collapse bounds so the MIQP cannot move these actuators.
+        if self._u_current is not None:
+            for k in range(n_gen):
+                if self._oos_gen_mask[k]:
+                    u_lower[avr_start + k] = self._u_current[avr_start + k]
+                    u_upper[avr_start + k] = self._u_current[avr_start + k]
+            for k in range(n_oltc):
+                if self._oos_oltc_mask[k]:
+                    u_lower[tap_start + k] = self._u_current[tap_start + k]
+                    u_upper[tap_start + k] = self._u_current[tap_start + k]
 
         return u_lower, u_upper
 
@@ -906,11 +1015,19 @@ class TSOController(BaseOFOController):
         # sensitivity builder, since Q_PCC is not an output anymore.
         # However, we still pass trafo indices so the builder can
         # include them in the internal row mapping (may affect V/I rows).
+        # Only pass in-service OLTCs to the Jacobian builder.
+        # OOS machine trafos cause ValueError in compute_dV_ds_2w
+        # (disconnected branch → no admittance entry), and the builder
+        # silently skips them, producing fewer columns than expected.
+        is_oltc_indices = [
+            t for k, t in enumerate(self.config.oltc_trafo_indices)
+            if not self._oos_oltc_mask[k]
+        ]
         kw = dict(
             der_bus_indices=der_bus_indices,
             observation_bus_indices=self.config.voltage_bus_indices,
             line_indices=self.config.current_line_indices,
-            oltc_trafo_indices=self.config.oltc_trafo_indices,
+            oltc_trafo_indices=is_oltc_indices,
             shunt_bus_indices=self.config.shunt_bus_indices,
             shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
         )
@@ -918,13 +1035,14 @@ class TSOController(BaseOFOController):
             kw["trafo_indices"] = self.config.pcc_trafo_indices
         elif pcc_in_trafo3w:
             kw["trafo3w_indices"] = self.config.pcc_trafo_indices
+        n_oltc_is = len(is_oltc_indices)
 
         # build_sensitivity_matrix_H requires at least one physical input
-        # (DER / OLTC / shunt).  When all are absent (e.g. add_tso_ders=False
-        # and no machine OLTCs), skip the call — H_physical is all-zero.
+        # (DER / OLTC / shunt).  When all are absent, skip the call —
+        # H_physical is all-zero.
         has_physical_inputs = (
             len(der_bus_indices) > 0
-            or len(self.config.oltc_trafo_indices) > 0
+            or n_oltc_is > 0
             or len(self.config.shunt_bus_indices) > 0
         )
         mappings: dict = {}
@@ -1009,19 +1127,26 @@ class TSOController(BaseOFOController):
                             H[n_v + i_line, col] = -dI_dQ_pcc[i_line, j_jac]
 
         if has_physical_inputs:
-            # OLTC columns → target column n_der+n_pcc+n_gen..n_der+n_pcc+n_gen+n_oltc-1
-            col_oltc_phys = slice(n_der, n_der + n_oltc)
-            col_oltc_target = slice(n_der + n_pcc + n_gen, n_der + n_pcc + n_gen + n_oltc)
-            H[:n_v, col_oltc_target] = H_physical[
-                n_q_phys:n_q_phys + n_v, col_oltc_phys
-            ]
-            if n_i_copy > 0:
-                H[n_v:n_v + n_i_copy, col_oltc_target] = H_physical[
-                    n_q_phys + n_v:n_q_phys + n_v + n_i_copy, col_oltc_phys
-                ]
+            # OLTC columns: H_physical has n_oltc_is columns (only in-service
+            # OLTCs).  Map each back to the correct target column in H.
+            # OOS OLTC target columns stay zero.
+            is_pos = 0
+            for k, t_idx in enumerate(self.config.oltc_trafo_indices):
+                target_col = n_der + n_pcc + n_gen + k
+                if not self._oos_oltc_mask[k]:
+                    phys_col = n_der + is_pos
+                    H[:n_v, target_col] = H_physical[
+                        n_q_phys:n_q_phys + n_v, phys_col
+                    ]
+                    if n_i_copy > 0:
+                        H[n_v:n_v + n_i_copy, target_col] = H_physical[
+                            n_q_phys + n_v:n_q_phys + n_v + n_i_copy, phys_col
+                        ]
+                    is_pos += 1
 
-            # Shunt columns -> target column n_der+n_pcc+n_gen+n_oltc..end
-            col_sh_phys = slice(n_der + n_oltc, n_der + n_oltc + n_shunt)
+            # Shunt columns: shifted in H_physical because we only passed
+            # n_oltc_is OLTC columns instead of n_oltc.
+            col_sh_phys = slice(n_der + n_oltc_is, n_der + n_oltc_is + n_shunt)
             col_sh_target = slice(n_der + n_pcc + n_gen + n_oltc, n_controls)
             H[:n_v, col_sh_target] = H_physical[
                 n_q_phys:n_q_phys + n_v, col_sh_phys
@@ -1036,37 +1161,57 @@ class TSOController(BaseOFOController):
         gen_terminal_buses = [
             int(net.gen.at[g, "bus"]) for g in self.config.gen_indices
         ]
-        dV_dVgen, obs_map, gen_map = \
-            self.sensitivities.compute_dV_dVgen_matrix(
-                gen_bus_indices_pp=gen_terminal_buses,
-                observation_bus_indices=self.config.voltage_bus_indices,
-            )
-        for k, gen_bus_pp in enumerate(gen_terminal_buses):
-            col = avr_start + k
-            if gen_bus_pp in gen_map:
-                j_gen = gen_map.index(gen_bus_pp)
-                for i_obs, obs_bus in enumerate(obs_map):
-                    i_row = self.config.voltage_bus_indices.index(obs_bus)
-                    H[i_row, col] = dV_dVgen[i_obs, j_gen]
-
-        if self.config.current_line_indices:
-            dI_dVgen, line_map, gen_map_i = \
-                self.sensitivities.compute_dI_dVgen_matrix(
-                    line_indices=self.config.current_line_indices,
-                    gen_bus_indices_pp=gen_terminal_buses,
+        # Only query in-service generators — OOS gen terminal buses may be
+        # isolated (machine trafo tripped), causing the Jacobian to fail.
+        is_gen_buses = [
+            int(net.gen.at[g, "bus"])
+            for g, oos in zip(self.config.gen_indices, self._oos_gen_mask)
+            if not oos
+        ]
+        if is_gen_buses:
+            dV_dVgen, obs_map, gen_map = \
+                self.sensitivities.compute_dV_dVgen_matrix(
+                    gen_bus_indices_pp=is_gen_buses,
+                    observation_bus_indices=self.config.voltage_bus_indices,
                 )
             for k, gen_bus_pp in enumerate(gen_terminal_buses):
                 col = avr_start + k
-                if gen_bus_pp in gen_map_i:
-                    j_gen = gen_map_i.index(gen_bus_pp)
-                    for i_line, l_idx in enumerate(line_map):
-                        # The lines are mapped to the lower part of H (after voltages)
-                        H[n_v + i_line, col] = dI_dVgen[i_line, j_gen]
+                if gen_bus_pp in gen_map:
+                    j_gen = gen_map.index(gen_bus_pp)
+                    for i_obs, obs_bus in enumerate(obs_map):
+                        i_row = self.config.voltage_bus_indices.index(obs_bus)
+                        H[i_row, col] = dV_dVgen[i_obs, j_gen]
+
+            if self.config.current_line_indices:
+                dI_dVgen, line_map, gen_map_i = \
+                    self.sensitivities.compute_dI_dVgen_matrix(
+                        line_indices=self.config.current_line_indices,
+                        gen_bus_indices_pp=is_gen_buses,
+                    )
+                for k, gen_bus_pp in enumerate(gen_terminal_buses):
+                    col = avr_start + k
+                    if gen_bus_pp in gen_map_i:
+                        j_gen = gen_map_i.index(gen_bus_pp)
+                        for i_line, l_idx in enumerate(line_map):
+                            H[n_v + i_line, col] = dI_dVgen[i_line, j_gen]
 
         # NOTE: ∂Q_PCC / ∂V_gen entries are NOT filled here.
         # Q_PCC rows have been removed entirely. The sensitivity method
         # compute_dQtrafo3w_hv_dVgen_matrix() is available if Q_PCC
         # rows are re-enabled in the future.
+
+        # --- Zero out columns for OOS generators and OLTCs ---
+        # An out-of-service generator has no voltage control authority;
+        # an OOS machine-transformer OLTC has no tap-change effect.
+        # Zeroing the columns ensures the MIQP sees zero sensitivity
+        # for these actuators, complementing the frozen bounds.
+        for k in range(n_gen):
+            if self._oos_gen_mask[k]:
+                H[:, avr_start + k] = 0.0
+        col_oltc_start = n_der_bus + n_pcc + n_gen
+        for k in range(n_oltc):
+            if self._oos_oltc_mask[k]:
+                H[:, col_oltc_start + k] = 0.0
 
         if not np.all(np.isfinite(H)):
             nan_rows, nan_cols = np.where(~np.isfinite(H))

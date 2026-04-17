@@ -54,6 +54,9 @@ class GeneratorParameters:
         physical units.
     p_max_mw : float
         Maximum active power output [MW].  Equals the turbine rating.
+    p_min_mw : float
+        Minimum technical active power output [MW].  Turbine minimum load.
+        Typical: 30–40 % of p_max_mw for steam turbines.  Default 0.0.
     xd_pu : float
         Direct-axis synchronous reactance [p.u.].
         Typical: 1.0–1.8 for turbo-generators, 0.6–1.2 for salient-pole.
@@ -71,8 +74,9 @@ class GeneratorParameters:
     """
     s_rated_mva: float
     p_max_mw: float
-    xd_pu: float = 1.2
-    i_f_max_pu: float = 2.65
+    p_min_mw: float = 0.0
+    xd_pu: float = 1.8
+    i_f_max_pu: float = 2.7
     beta: float = 0.15
     q0_pu: float = 0.4
 
@@ -221,6 +225,7 @@ class ActuatorBounds:
         shunt_indices: NDArray[np.int64],
         shunt_q_mvar: NDArray[np.float64],
         gen_params: Optional[list[GeneratorParameters]] = None,
+        der_op_diagrams: Optional[list[str]] = None,
     ) -> None:
         """
         Initialise ActuatorBounds with static actuator parameters.
@@ -247,6 +252,13 @@ class ActuatorBounds:
             Per-generator physical parameters for the detailed capability
             curve.  If ``None`` (default), generator Q bounds are not
             available and :meth:`compute_gen_q_bounds` will raise.
+        der_op_diagrams : list[str] | None, optional
+            Operating diagram type per DER.  Supported values:
+            ``'VDE-AR-N-4120-v2'`` (default) — piecewise-linear with dead
+            zone below P/S_n = 0.1.
+            ``'STATCOM'`` — full circle diagram Q = ±sqrt(S_n² - P²),
+            no dead zone at P = 0.  Models Type-4 wind parks with
+            STATCOM-class full-converter capability.
         """
         self.der_indices = der_indices
         self.der_s_rated_mva = der_s_rated_mva
@@ -257,7 +269,12 @@ class ActuatorBounds:
         self.shunt_indices = shunt_indices
         self.shunt_q_mvar = shunt_q_mvar
         self.gen_params = gen_params
-    
+        n_der = len(der_indices)
+        if der_op_diagrams is not None:
+            self.der_op_diagrams = list(der_op_diagrams)
+        else:
+            self.der_op_diagrams = ['VDE-AR-N-4120-v2'] * n_der
+
     def compute_der_q_bounds(
         self,
         der_p_current_mw: NDArray[np.float64],
@@ -308,10 +325,12 @@ class ActuatorBounds:
             else:
                 p_ratio = 0.0
 
-            # Compute Q capability based on VDE-AR-N 4120 Variant 2 curve
+            # Compute Q capability based on operating diagram type
+            op_diag = self.der_op_diagrams[i]
             q_min, q_max = self._compute_single_der_q_capability(
                 p_ratio=p_ratio,
                 s_rated_mva=s_rated,
+                op_diagram=op_diag,
             )
 
             q_min_mvar[i] = q_min
@@ -323,13 +342,14 @@ class ActuatorBounds:
         self,
         p_ratio: float,
         s_rated_mva: float,
+        op_diagram: str = 'VDE-AR-N-4120-v2',
     ) -> tuple[float, float]:
         """
         Compute Q capability for a single DER based on its P ratio.
 
-        Implements VDE-AR-N 4120 Variant 2 (Teillastbetrieb) capability
-        curve for HV-connected generation units.  The curve is asymmetric
-        and piecewise-linear with three regions:
+        Supports two operating diagram types:
+
+        **VDE-AR-N-4120-v2** (default) — piecewise-linear with dead zone:
 
         ====== ================ ================
         P/Sn     Q_min/Sn         Q_max/Sn
@@ -340,12 +360,23 @@ class ActuatorBounds:
         >= 0.2   -0.33            +0.41
         ====== ================ ================
 
+        **STATCOM** — full circle diagram (no dead zone):
+
+            Q_max = +sqrt(S_n² - P²)
+            Q_min = -sqrt(S_n² - P²)
+
+        Models Type-4 (full converter) wind parks with STATCOM-class
+        grid-forming inverters.  Full rated apparent power is available
+        as reactive power when P = 0.
+
         Parameters
         ----------
         p_ratio : float
-            Ratio of current active power to installed capacity (P/P_inst).
+            Ratio of current active power to rated apparent power (P/S_n).
         s_rated_mva : float
             Rated apparent power of the DER in MVA.
+        op_diagram : str
+            Operating diagram type: ``'VDE-AR-N-4120-v2'`` or ``'STATCOM'``.
 
         Returns
         -------
@@ -354,6 +385,15 @@ class ActuatorBounds:
         q_max : float
             Maximum reactive power in Mvar (overexcited/inductive).
         """
+        if op_diagram == 'STATCOM':
+            # Full circle diagram: Q = ±sqrt(S_n² - P²)
+            # p_ratio = |P| / S_n, so P_pu² = p_ratio²
+            p_pu_sq = min(p_ratio ** 2, 1.0)
+            q_pu = math.sqrt(max(1.0 - p_pu_sq, 0.0))
+            q_max = q_pu * s_rated_mva
+            q_min = -q_pu * s_rated_mva
+            return q_min, q_max
+
         # VDE-AR-N 4120 Variant 2 breakpoints (p.u. of S_rated)
         #   P:     [0.0,  0.1,  0.2,  1.0]
         #   Q_min: [0.0, -0.10, -0.33, -0.33]

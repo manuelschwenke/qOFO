@@ -26,10 +26,13 @@ class TestMeasurement:
             interface_q_hv_side_mvar=np.array([10.0], dtype=np.float64),
             der_indices=np.array([0, 1], dtype=np.int64),
             der_q_mvar=np.array([5.0, -3.0], dtype=np.float64),
+            der_p_mw=np.array([20.0, 15.0], dtype=np.float64),
             oltc_indices=np.array([0], dtype=np.int64),
             oltc_tap_positions=np.array([0], dtype=np.int64),
             shunt_indices=np.array([0], dtype=np.int64),
             shunt_states=np.array([0], dtype=np.int64),
+            gen_indices=np.array([0, 1], dtype=np.int64),
+            gen_vm_pu=np.array([1.03, 1.02], dtype=np.float64),
         )
         
         assert measurement.iteration == 0
@@ -49,10 +52,13 @@ class TestMeasurement:
             interface_q_hv_side_mvar=np.array([], dtype=np.float64),
             der_indices=np.array([], dtype=np.int64),
             der_q_mvar=np.array([], dtype=np.float64),
+            der_p_mw=np.array([], dtype=np.float64),
             oltc_indices=np.array([], dtype=np.int64),
             oltc_tap_positions=np.array([], dtype=np.int64),
             shunt_indices=np.array([], dtype=np.int64),
             shunt_states=np.array([], dtype=np.int64),
+            gen_indices=np.array([], dtype=np.int64),
+            gen_vm_pu=np.array([], dtype=np.float64),
         )
         
         assert measurement.iteration == 5

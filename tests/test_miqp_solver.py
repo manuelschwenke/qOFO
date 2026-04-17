@@ -225,7 +225,7 @@ class TestMIQPSolver:
         """Test that solver can be initialised with default parameters."""
         solver = MIQPSolver()
         assert solver.verbose is False
-        assert solver.time_limit_s == 60.0
+        assert solver.time_limit_s == 30.0
         assert solver.mip_gap == 1e-4
     
     def test_solver_initialisation_with_params(self) -> None:

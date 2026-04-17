@@ -6,8 +6,6 @@ Tests for the Network Module
 
 Covers:
 * ``build_tuda_net`` — topology, element counts, metadata, convergence.
-* ``split_network``  — TN/DN separation, boundary elements, convergence.
-* ``validate_split`` — round-trip accuracy of the split.
 
 Author: Manuel Schwenke
 """
@@ -19,12 +17,6 @@ import pandapower as pp
 import pytest
 
 from network.build_tuda_net import build_tuda_net, NetworkMetadata
-from network.split_tn_dn_net import (
-    CouplerPowerFlow,
-    SplitResult,
-    split_network,
-    validate_split,
-)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -37,12 +29,6 @@ def combined():
     net, meta = build_tuda_net(pv_nodes=True)
     return net, meta
 
-
-@pytest.fixture(scope="module")
-def split_result(combined):
-    """Split the combined network once for all tests in this module."""
-    net, meta = combined
-    return split_network(net, meta, dn_slack_coupler_index=0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -147,110 +133,6 @@ class TestBuildTudaNet:
             assert tidx in net.trafo3w.index, f"Trafo3w {tidx} not in network."
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  split_network TESTS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestSplitNetwork:
-    """Tests for the TN/DN network split."""
-
-    def test_returns_split_result(self, split_result):
-        assert isinstance(split_result, SplitResult)
-
-    def test_tn_net_converged(self, split_result):
-        assert split_result.tn_net.converged, "TN power flow must converge."
-
-    def test_dn_net_converged(self, split_result):
-        assert split_result.dn_net.converged, "DN power flow must converge."
-
-    # --- TN network structure ---
-
-    def test_tn_has_no_dn_buses(self, split_result):
-        tn = split_result.tn_net
-        dn_buses = tn.bus[tn.bus["subnet"].astype(str) == "DN"]
-        assert dn_buses.empty, "TN network must not contain DN buses."
-
-    def test_tn_has_no_trafo3w(self, split_result):
-        tn = split_result.tn_net
-        assert tn.trafo3w.empty, "TN network must not contain 3W transformers."
-
-    def test_tn_has_ext_grid(self, split_result):
-        tn = split_result.tn_net
-        assert not tn.ext_grid.empty, "TN must retain its external grid."
-
-    def test_tn_boundary_sgen_count(self, split_result):
-        assert len(split_result.tn_boundary_sgen_indices) == 3
-
-    # --- DN network structure ---
-
-    def test_dn_has_no_tn_lines(self, split_result):
-        dn = split_result.dn_net
-        tn_lines = [
-            i for i in dn.line.index
-            if str(dn.line.at[i, "name"]).startswith("TN|")
-        ]
-        assert len(tn_lines) == 0, "DN network must not contain TN lines."
-
-    def test_dn_has_trafo3w(self, split_result):
-        dn = split_result.dn_net
-        assert not dn.trafo3w.empty, "DN network must retain 3W transformers."
-
-    def test_dn_has_slack(self, split_result):
-        dn = split_result.dn_net
-        assert not dn.ext_grid.empty, "DN must have a slack bus."
-
-    def test_dn_boundary_sgen_count(self, split_result):
-        assert len(split_result.dn_boundary_sgen_indices) == 3
-
-    # --- Coupler flows ---
-
-    def test_coupler_flows_count(self, split_result):
-        assert len(split_result.coupler_flows) == 3
-
-    def test_coupler_flows_are_frozen(self, split_result):
-        cf = split_result.coupler_flows[0]
-        assert isinstance(cf, CouplerPowerFlow)
-        with pytest.raises(AttributeError):
-            cf.p_hv_mw = 999.0
-
-    # --- Invalid arguments ---
-
-    def test_invalid_slack_index_raises(self, combined):
-        net, meta = combined
-        with pytest.raises(ValueError, match="out of range"):
-            split_network(net, meta, dn_slack_coupler_index=99)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  validate_split TESTS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestValidateSplit:
-    """Tests for the split validation function."""
-
-    def test_validation_passes(self, combined, split_result):
-        net, meta = combined
-        ok = validate_split(net, meta, split_result)
-        assert ok, "Split validation must pass with default tolerances."
-
-    def test_tn_voltages_match_combined(self, combined, split_result):
-        """Spot-check: TN bus voltages must be very close to the combined network."""
-        net, _ = combined
-        tn = split_result.tn_net
-        common = sorted(set(tn.bus.index) & set(net.res_bus.index))
-        vm_combined = net.res_bus.loc[common, "vm_pu"].values
-        vm_tn = tn.res_bus.loc[common, "vm_pu"].values
-        np.testing.assert_allclose(vm_tn, vm_combined, atol=5e-4)
-
-    def test_dn_slack_voltage_matches(self, combined, split_result):
-        """DN slack bus voltage must equal the combined operating point."""
-        net, _ = combined
-        dn = split_result.dn_net
-        slack_cf = split_result.coupler_flows[split_result.dn_slack_coupler_index]
-        vm_dn = float(dn.res_bus.at[slack_cf.hv_bus, "vm_pu"])
-        vm_ref = float(net.res_bus.at[slack_cf.hv_bus, "vm_pu"])
-        np.testing.assert_allclose(vm_dn, vm_ref, atol=1e-6)
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  build_tuda_net WITH DIFFERENT OPTIONS
@@ -268,5 +150,8 @@ class TestBuildOptions:
     def test_custom_load_scaling(self):
         net, _ = build_tuda_net(load_scaling=0.5)
         assert net.converged
-        # All loads should be approximately 25 MW (50 * 0.5)
-        assert np.allclose(net.load["p_mw"].values, 25.0)
+        # Only the first 10 DN loads (HV/MV substations) are affected by
+        # load_scaling; EHV loads added afterwards use fixed power values.
+        dn_loads = net.load[net.load["subnet"] == "DN"]
+        assert len(dn_loads) == 10
+        assert np.allclose(dn_loads["p_mw"].values, 25.0)

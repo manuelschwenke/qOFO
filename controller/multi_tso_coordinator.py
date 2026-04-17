@@ -80,7 +80,7 @@ Author: Manuel Schwenke / Claude Code
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandapower as pp
@@ -159,7 +159,14 @@ class ZoneDefinition:
         Regularisation penalty on generator AVR changes.
 
     g_w_pcc : float
-        Regularisation penalty on PCC setpoint changes (Zone 2 only).
+        Default regularisation penalty on PCC setpoint changes.
+        Used as a floor when ``g_w_pcc_per`` is not set.
+
+    g_w_pcc_per : Optional[NDArray[np.float64]]
+        Per-PCC regularisation weights (length = n_pcc).  When set,
+        overrides the uniform ``g_w_pcc`` for each PCC actuator.
+        Useful when PCC couplers have very different electrical
+        distances (and thus different voltage sensitivities).
 
     oltc_trafo_indices : List[int]
         Machine-transformer OLTC indices in ``net.trafo`` for this zone.
@@ -188,6 +195,7 @@ class ZoneDefinition:
     g_w_der:            float = 100.0
     g_w_gen:            float = 5e8
     g_w_pcc:            float = 100.0
+    g_w_pcc_per:        Optional[NDArray[np.float64]] = None
     g_w_oltc:           float = 10.0
 
     def n_controls(self) -> int:
@@ -223,14 +231,22 @@ class ZoneDefinition:
         Regularisation weight vector G_w (diagonal of G_w matrix) for this zone.
 
         Column ordering: [Q_DER | Q_PCC_set | V_gen | s_OLTC].
+
+        When ``g_w_pcc_per`` is set, each PCC actuator gets its own
+        weight (floored by ``g_w_pcc``).  Otherwise all PCCs use
+        the uniform ``g_w_pcc``.
         """
         n_der = len(self.tso_der_indices)
         n_pcc = len(self.pcc_trafo_indices)
         n_gen = len(self.gen_indices)
         n_oltc = len(self.oltc_trafo_indices)
+        if self.g_w_pcc_per is not None and len(self.g_w_pcc_per) == n_pcc:
+            pcc_weights = np.maximum(self.g_w_pcc_per, self.g_w_pcc)
+        else:
+            pcc_weights = np.full(n_pcc, self.g_w_pcc)
         return np.concatenate([
             np.full(n_der, self.g_w_der),
-            np.full(n_pcc, self.g_w_pcc),
+            pcc_weights,
             np.full(n_gen, self.g_w_gen),
             np.full(n_oltc, self.g_w_oltc),
         ])
@@ -469,66 +485,85 @@ class MultiTSOCoordinator:
                                         H_ij[row, col] = -dV_dQ_pcc[k_obs, k_pcc]
 
                 # ── AVR columns: ∂V_i / ∂V_gen_j ─────────────────────────────
+                # Skip OOS generators: their terminal bus may be isolated
+                # after the machine transformer is tripped, which would
+                # cause the Jacobian builder to fail or return NaN.
                 if n_gen_j > 0:
                     gen_terminal_buses_j = [
                         int(self.net.gen.at[g, "bus"])
                         for g in zj.gen_indices
                     ]
-                    dV_dVgen, obs_map_g, gen_map = jac.compute_dV_dVgen_matrix(
-                        gen_bus_indices_pp=gen_terminal_buses_j,
-                        observation_bus_indices=zi.v_bus_indices,
-                    )
-                    for k_obs, obs_bus in enumerate(obs_map_g):
-                        if obs_bus in zi.v_bus_indices:
-                            row = zi.v_bus_indices.index(obs_bus)
-                            for k_gen, gen_bus in enumerate(gen_map):
-                                if gen_bus in gen_terminal_buses_j:
-                                    col = n_der_j + n_pcc_j + gen_terminal_buses_j.index(gen_bus)
-                                    H_ij[row, col] = dV_dVgen[k_obs, k_gen]
-
-                    if n_li > 0:
-                        dI_dVgen, line_map_g, gen_map_i = \
-                            jac.compute_dI_dVgen_matrix(
-                                line_indices=zi.line_indices,
-                                gen_bus_indices_pp=gen_terminal_buses_j,
-                            )
-                        for k_line, line_idx in enumerate(line_map_g):
-                            if line_idx in zi.line_indices:
-                                row = n_v_i + zi.line_indices.index(line_idx)
-                                for k_gen, gen_bus in enumerate(gen_map_i):
+                    # Filter to in-service generators only
+                    is_gen_buses_j = [
+                        int(self.net.gen.at[g, "bus"])
+                        for g in zj.gen_indices
+                        if self.net.gen.at[g, "in_service"]
+                    ]
+                    if is_gen_buses_j:
+                        dV_dVgen, obs_map_g, gen_map = jac.compute_dV_dVgen_matrix(
+                            gen_bus_indices_pp=is_gen_buses_j,
+                            observation_bus_indices=zi.v_bus_indices,
+                        )
+                        for k_obs, obs_bus in enumerate(obs_map_g):
+                            if obs_bus in zi.v_bus_indices:
+                                row = zi.v_bus_indices.index(obs_bus)
+                                for k_gen, gen_bus in enumerate(gen_map):
                                     if gen_bus in gen_terminal_buses_j:
                                         col = n_der_j + n_pcc_j + gen_terminal_buses_j.index(gen_bus)
-                                        H_ij[row, col] = dI_dVgen[k_line, k_gen]
+                                        H_ij[row, col] = dV_dVgen[k_obs, k_gen]
+
+                        if n_li > 0:
+                            dI_dVgen, line_map_g, gen_map_i = \
+                                jac.compute_dI_dVgen_matrix(
+                                    line_indices=zi.line_indices,
+                                    gen_bus_indices_pp=is_gen_buses_j,
+                                )
+                            for k_line, line_idx in enumerate(line_map_g):
+                                if line_idx in zi.line_indices:
+                                    row = n_v_i + zi.line_indices.index(line_idx)
+                                    for k_gen, gen_bus in enumerate(gen_map_i):
+                                        if gen_bus in gen_terminal_buses_j:
+                                            col = n_der_j + n_pcc_j + gen_terminal_buses_j.index(gen_bus)
+                                            H_ij[row, col] = dI_dVgen[k_line, k_gen]
+                    # OOS generator columns stay zero in H_ij.
 
                 # ── Machine-trafo OLTC columns: ∂V_i / ∂s_OLTC_j ────────────
+                # Skip OOS trafos: tap sensitivity is undefined for a
+                # disconnected transformer.
                 if n_oltc_j > 0:
                     oltc_indices_j = list(zj.oltc_trafo_indices)
-                    dV_ds, obs_map_s, trafo_map_s = jac.compute_dV_ds_2w_matrix(
-                        trafo_indices=oltc_indices_j,
-                        observation_bus_indices=zi.v_bus_indices,
-                    )
+                    is_oltc_indices_j = [
+                        t for t in oltc_indices_j
+                        if self.net.trafo.at[t, "in_service"]
+                    ]
                     col_offset = n_der_j + n_pcc_j + n_gen_j
-                    for k_obs, obs_bus in enumerate(obs_map_s):
-                        if obs_bus in zi.v_bus_indices:
-                            row = zi.v_bus_indices.index(obs_bus)
-                            for k_t, t_idx in enumerate(trafo_map_s):
-                                if t_idx in oltc_indices_j:
-                                    col = col_offset + oltc_indices_j.index(t_idx)
-                                    H_ij[row, col] = dV_ds[k_obs, k_t]
-
-                    if n_li > 0:
-                        dI_ds, line_map_s, trafo_map_si = \
-                            jac.compute_dI_ds_2w_matrix(
-                                line_indices=zi.line_indices,
-                                trafo_indices=oltc_indices_j,
-                            )
-                        for k_line, line_idx in enumerate(line_map_s):
-                            if line_idx in zi.line_indices:
-                                row = n_v_i + zi.line_indices.index(line_idx)
-                                for k_t, t_idx in enumerate(trafo_map_si):
+                    if is_oltc_indices_j:
+                        dV_ds, obs_map_s, trafo_map_s = jac.compute_dV_ds_2w_matrix(
+                            trafo_indices=is_oltc_indices_j,
+                            observation_bus_indices=zi.v_bus_indices,
+                        )
+                        for k_obs, obs_bus in enumerate(obs_map_s):
+                            if obs_bus in zi.v_bus_indices:
+                                row = zi.v_bus_indices.index(obs_bus)
+                                for k_t, t_idx in enumerate(trafo_map_s):
                                     if t_idx in oltc_indices_j:
                                         col = col_offset + oltc_indices_j.index(t_idx)
-                                        H_ij[row, col] = dI_ds[k_line, k_t]
+                                        H_ij[row, col] = dV_ds[k_obs, k_t]
+
+                        if n_li > 0:
+                            dI_ds, line_map_s, trafo_map_si = \
+                                jac.compute_dI_ds_2w_matrix(
+                                    line_indices=zi.line_indices,
+                                    trafo_indices=is_oltc_indices_j,
+                                )
+                            for k_line, line_idx in enumerate(line_map_s):
+                                if line_idx in zi.line_indices:
+                                    row = n_v_i + zi.line_indices.index(line_idx)
+                                    for k_t, t_idx in enumerate(trafo_map_si):
+                                        if t_idx in oltc_indices_j:
+                                            col = col_offset + oltc_indices_j.index(t_idx)
+                                            H_ij[row, col] = dI_ds[k_line, k_t]
+                    # OOS OLTC columns stay zero in H_ij.
 
                 self._H_blocks[(i, j)] = H_ij
 
@@ -829,3 +864,23 @@ class MultiTSOCoordinator:
         for ctrl in self._controllers.values():
             ctrl.sensitivities = JacobianSensitivities(net)
         self.invalidate_sensitivity_cache()
+
+    def update_outage_masks(self, net: pp.pandapowerNet) -> None:
+        """
+        Read ``in_service`` status from the network and update each
+        zone controller's OOS actuator masks.
+
+        Call this after applying contingencies so that the MIQP freezes
+        bounds and zeros H columns for out-of-service generators and
+        machine-transformer OLTCs.
+        """
+        oos_gens: Set[int] = set(
+            int(g) for g in net.gen.index
+            if not net.gen.at[g, "in_service"]
+        )
+        oos_trafos: Set[int] = set(
+            int(t) for t in net.trafo.index
+            if not net.trafo.at[t, "in_service"]
+        )
+        for ctrl in self._controllers.values():
+            ctrl.update_outage_mask(oos_gens, oos_trafos)

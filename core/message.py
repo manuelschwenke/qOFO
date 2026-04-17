@@ -37,7 +37,8 @@ class SetpointMessage:
         Pandapower transformer indices for the TSO-DSO interfaces.
     q_setpoints_mvar : NDArray[np.float64]
         Reactive power setpoints in Mvar for each interface transformer.
-        Sign convention: positive = Q flowing into HV bus from transformer.
+        Sign convention: pandapower load convention at HV port
+        (positive = Q flowing from HV bus into transformer).
     """
     
     def __init__(
@@ -98,11 +99,15 @@ class CapabilityMessage:
     interface_transformer_indices : NDArray[np.int64]
         Pandapower transformer indices for the TSO-DSO interfaces.
     q_min_mvar : NDArray[np.float64]
-        Minimum reactive power capability in Mvar for each interface.
-        Sign convention: positive = Q flowing into HV bus from transformer.
+        Minimum achievable Q change at each interface in Mvar (delta from
+        current operating point).
+        Sign convention: pandapower load convention at HV port
+        (positive = Q flowing from HV bus into transformer).
     q_max_mvar : NDArray[np.float64]
-        Maximum reactive power capability in Mvar for each interface.
-        Sign convention: positive = Q flowing into HV bus from transformer.
+        Maximum achievable Q change at each interface in Mvar (delta from
+        current operating point).
+        Sign convention: pandapower load convention at HV port
+        (positive = Q flowing from HV bus into transformer).
     """
     
     def __init__(

@@ -10,7 +10,7 @@ defaults.
 
 Usage::
 
-    from core.cascade_config import CascadeConfig
+    from configs.cascade_config import CascadeConfig
 
     config = CascadeConfig(
         v_setpoint_pu=1.05,
@@ -495,6 +495,10 @@ class CascadeConfig:
                 "element_index": c.element_index,
                 "action": c.action,
                 **({"time_s": c.time_s} if c.time_s is not None else {}),
+                **({"new_setpoint": c.new_setpoint} if not np.isnan(c.new_setpoint) else {}),
+                **({"bus": c.bus} if c.bus is not None else {}),
+                **({"p_mw": c.p_mw} if not np.isnan(c.p_mw) else {}),
+                **({"q_mvar": c.q_mvar} if not np.isnan(c.q_mvar) else {}),
             }
             for c in self.contingencies
         ]
@@ -512,7 +516,7 @@ class CascadeConfig:
 
         Handles datetime parsing and ContingencyEvent reconstruction.
         """
-        from run.records import ContingencyEvent
+        from experiments.records import ContingencyEvent
 
         kwargs = dict(d)  # shallow copy
 

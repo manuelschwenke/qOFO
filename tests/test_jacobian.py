@@ -561,16 +561,22 @@ class TestComputeDVDQDer:
             # Injecting Q should raise voltage at the same bus
             assert dV_dQ[0, 0] > 0
 
-    def test_dV_dQ_der_invalid_buses_raises(self, simple_network):
-        """Test that invalid bus indices raise appropriate errors."""
+    def test_dV_dQ_der_invalid_buses_returns_empty(self, simple_network):
+        """Test that invalid DER bus indices return an empty sensitivity matrix.
+
+        The slack bus (0) has no Jacobian column, so it is silently skipped
+        and the method returns a zero-column matrix with an empty DER mapping.
+        """
         sens = JacobianSensitivities(simple_network)
 
-        # Slack bus (0) should not be valid for DER
-        with pytest.raises(ValueError):
-            sens.compute_dV_dQ_der(
-                der_bus_indices=[0],  # Slack bus
-                observation_bus_indices=[1, 2],
-            )
+        dV_dQ, obs_map, der_map = sens.compute_dV_dQ_der(
+            der_bus_indices=[0],  # Slack bus — no Jacobian column
+            observation_bus_indices=[1, 2],
+        )
+
+        assert der_map == [], "Slack bus must be excluded from DER mapping."
+        assert dV_dQ.shape[1] == 0, "Matrix must have zero DER columns."
+        assert dV_dQ.shape[0] == len(obs_map)
 
 
 class TestComputeDVDs:
@@ -1411,6 +1417,12 @@ class TestThreeWindingQSensitivityOLTC:
 
         Perturbs the OLTC tap position by ±1 and compares the resulting
         change in HV-side reactive power flow.
+
+        Note: ``compute_dQtrafo3w_hv_ds`` internally multiplies the
+        sensitivity by ``delta_tau = tap_step_percent / 100``, so its
+        output is in [Mvar · delta_tau / step].  The finite-difference
+        result ``(Q+ − Q−) / 2`` is in [Mvar / step].  We therefore
+        scale the numerical value by ``delta_tau`` before comparison.
         """
         sens = JacobianSensitivities(trafo3w_network)
 
@@ -1430,7 +1442,8 @@ class TestThreeWindingQSensitivityOLTC:
         pp.runpp(net_minus, calculate_voltage_angles=True)
         Q_hv_minus = net_minus.res_trafo3w.at[0, 'q_hv_mvar']
 
-        dQhv_ds_numerical = (Q_hv_plus - Q_hv_minus) / 2.0
+        delta_tau = trafo3w_network.trafo3w.at[0, 'tap_step_percent'] / 100.0
+        dQhv_ds_numerical = (Q_hv_plus - Q_hv_minus) / 2.0 * delta_tau
 
         np.testing.assert_allclose(
             val_analytical, dQhv_ds_numerical,

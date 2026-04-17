@@ -32,7 +32,7 @@ import numpy as np
 if TYPE_CHECKING:
     from controller.dso_controller import DSOControllerConfig
     from controller.tso_controller import TSOControllerConfig
-    from run.run_S_TSO_M_DSO import IterationRecord
+    from experiments.records import IterationRecord
 
 import os
 

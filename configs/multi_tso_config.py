@@ -128,7 +128,7 @@ class MultiTSOConfig:
     that file."""
 
     # -- Slack variable penalty (g_z) ------------------------------------------
-    g_z_voltage:   float = 1E9
+    g_z_voltage:   float = 1E12
     g_z_current:   float = 0.0
     g_z_interface: float = 0.0
 

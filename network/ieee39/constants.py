@@ -28,15 +28,26 @@ DISTRIBUTED_SLACK_GEN_INDICES: Tuple[int, ...] = tuple(range(9))
 
 
 # ---------------------------------------------------------------------------
-#  SimBench profile peak magnitudes (used for the 50/50 load split)
+#  SimBench profile empirical means (used for the 50/50 load split)
 # ---------------------------------------------------------------------------
-# The HS4 and HS5 simbench time-series peak at roughly 33 % of their nominal
-# scaling.  When every 345 kV load is split 50 % constant + 50 % profile,
-# the profile-driven half is scaled by ``0.5 / peak`` so that (constant half
-# + profile half at peak) equals the original nominal load.
+# Every 345 kV load is split 50 % constant + 50 % profile-driven.  The
+# profile-driven half's ``base_p_mw`` / ``base_q_mvar`` is scaled by
+# ``0.5 / PROFILE_MEAN[profile]`` so that the *time mean* of the aggregate
+# bus load equals the IEEE 39 base case.
+#
+# Values are empirical means over the 8 760 h (35 136-sample) series in
+# ``data/profiles.csv``.  ``mv_rural_qload`` has a slightly negative mean
+# (-0.050) and is intentionally omitted: its variable half on HV loads is
+# driven by the profile directly, while the mean Q is carried by a
+# per-HV-load constant Q (see network/ieee39/hv_networks.py).
 
-PROFILE_PEAK_HS4: float = 0.329
-PROFILE_PEAK_HS5: float = 0.329
+PROFILE_MEAN: Dict[str, float] = {
+    "HS4_pload":      0.4436,
+    "HS4_qload":      0.1458,
+    "HS5_pload":      0.7092,
+    "HS5_qload":      0.2331,
+    "mv_rural_pload": 0.1463,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +92,6 @@ TUDA_WIND_PARKS: List[Tuple[int, float, str]] = [
     (4,  40.0, "WP7"),
     (5, 70.0, "WP10"),
     (6, 60.0, "WP7"),
-    (9, 50.0, "WP10"),
 ]
 
 # TUDA PV plants: (hv_bus_no, p_mw)  -- all use profile "PV3"
@@ -92,22 +102,21 @@ TUDA_WIND_PARKS: List[Tuple[int, float, str]] = [
 #     (7,  30.0),
 # ]
 TUDA_PV_PLANTS: List[Tuple[int, float]] = [
-    (3, 80.0),
+    (3, 60.0),
     (4,  50.0),
     (5,  40.0),
     (7,  30.0),
 ]
 
 # STATCOM-capable wind park at each HV coupling bus (MVA rating)
-HV_COUPLING_WP_MVA: float = 80.0
+HV_COUPLING_WP_MVA: float = 60.0
 
-# Multiplicative factor for the Q portion of HV sub-network loads.
-# The reference Q for each DSO is derived from the pooled IEEE 39
-# coupling-bus loads; this factor scales only the HV-internal Q
-# (the TN-side load reduction stays at the original level).
-# At 1.0 the HV networks carry exactly the IEEE 39 Q share.
-# Increase to enlarge voltage spread within the 110 kV grids.
-HV_Q_LOAD_FACTOR: float = 1.25
+# HV buses with concentrated load (P and Q multiplied by the factor below).
+# Used to create an intentional load–generation asymmetry across the HV
+# sub-network: generation lives on HV buses 0–5 (wind + PV side) and load
+# is concentrated on HV buses 6–9 (opposite side of the 11-line topology).
+HV_HIGH_LOAD_BUS_NOS: Tuple[int, ...] = (6, 7, 8, 9)
+HV_HIGH_LOAD_FACTOR: float = 2.0
 
 # Zone-3 buses for EHV profile assignment (0-indexed pandapower)
 ZONE3_BUSES_0IDX: Set[int] = set(range(14, 24)) | {32, 33, 34, 35}
@@ -125,8 +134,8 @@ SUBNET_DEFS: List[dict] = [
          ieee_1idx=(12, 14, 4),   hv_buses=(3, 0, 8), scale=1.00, gen="mixed"),
     dict(net_id="DSO_3", zone=2,
          ieee_1idx=(11, 10, 13), hv_buses=(3, 0, 8), scale=1.00, gen="mixed"), # 0.75
-    # dict(net_id="DSO_4", zone=3,
-    #      ieee_1idx=(24, 21, 23), hv_buses=(3, 0, 8), scale=2.00, gen="pv"),
+    dict(net_id="DSO_4", zone=3,
+        ieee_1idx=(24, 21, 23), hv_buses=(3, 0, 8), scale=1.00, gen="mixed"),
     # dict(net_id="DSO_5", zone=1,
     #      ieee_1idx=(27, 26, 25), hv_buses=(3, 0, 8), scale=3.00, gen="wind"),
 ]

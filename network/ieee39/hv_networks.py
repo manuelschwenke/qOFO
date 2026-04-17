@@ -31,13 +31,15 @@ from network.ieee39.meta import IEEE39NetworkMeta, HVNetworkInfo
 from network.ieee39.constants import (
     HV_LINE_TOPOLOGY,
     HV_COUPLING_WP_MVA,
-    HV_Q_LOAD_FACTOR,
+    HV_HIGH_LOAD_BUS_NOS,
+    HV_HIGH_LOAD_FACTOR,
+    PROFILE_MEAN,
     TUDA_WIND_PARKS,
     TUDA_PV_PLANTS,
     ZONE3_BUSES_0IDX,
     SUBNET_DEFS,
 )
-from network.ieee39.helpers import get_load_at_bus, reduce_loads_at_bus
+from network.ieee39.helpers import get_load_at_bus
 
 
 # =====================================================================
@@ -160,33 +162,80 @@ def _create_hv_subnetwork(
         coupling_ieee_buses.append(ieee_bus)
         coupling_hv_bus_indices.append(hv_bus)
 
-    # ── 4. Create loads (total P/Q distributed evenly across 10 buses) ───────
+    # ── 4. Create loads — two rows per HV bus, mirroring the TN convention:
+    #       * Constant row: no profile, carries time-mean.  For P this is
+    #         0.5 * per-bus share.  For Q this is the FULL per-bus share:
+    #         ``mv_rural_qload`` has near-zero mean (≈ -0.050), so the
+    #         variable row contributes ≈ 0 on time average, and the
+    #         constant row must carry the whole HV Q mean to match
+    #         ``total_q_mvar``.
+    #       * Variable row: profile-driven.  For P, ``base_p_mw`` is mean-
+    #         normalised so the time mean equals 0.5 * per-bus share.  For
+    #         Q, ``base_q_mvar = 0.5 * q_per_bus`` sets the reactive swing
+    #         amplitude while its time mean adds a small capacitive bias
+    #         (≈ -2.5 % of HV Q), accepted as a design tradeoff.
+    #
+    #       Load concentration on ``HV_HIGH_LOAD_BUS_NOS`` is expressed
+    #       as a relative weight so that the weighted sum across all 10
+    #       buses equals ``total_p_mw`` / ``total_q_mvar`` (no hidden
+    #       inflation).
     load_indices: List[int] = []
-    p_per_load = total_p_mw / 10.0
-    q_per_load = total_q_mvar / 10.0
-    sn_per_load = max(abs(p_per_load), abs(q_per_load), 1.0)
+    _high_load_set = set(HV_HIGH_LOAD_BUS_NOS)
+    raw_weights = [HV_HIGH_LOAD_FACTOR if i in _high_load_set else 1.0
+                   for i in range(10)]
+    weight_sum = sum(raw_weights)
+    weights = [10.0 * w / weight_sum for w in raw_weights]
+
+    p_per_bus_uniform = total_p_mw / 10.0
+    q_per_bus_uniform = total_q_mvar / 10.0
+    mean_mv_p = PROFILE_MEAN["mv_rural_pload"]
 
     for i in range(10):
-        lidx = pp.create_load(
+        w = weights[i]
+        p_per_bus = p_per_bus_uniform * w
+        q_per_bus = q_per_bus_uniform * w
+        sn_bus = max(abs(p_per_bus), abs(q_per_bus), 1.0)
+
+        # Constant row: half of P, FULL Q (variable Q averages ~0)
+        lidx_c = pp.create_load(
             net,
             bus=bus_map[i],
-            sn_mva=sn_per_load,
-            p_mw=p_per_load,
-            q_mvar=q_per_load,
-            name=f"{net_id}|HV_MV_Sub_{i}",
+            sn_mva=sn_bus,
+            p_mw=0.5 * p_per_bus,
+            q_mvar=q_per_bus,
+            name=f"{net_id}|HV_MV_Sub_{i}_const",
+            subnet="DN",
+        )
+        net.load.at[lidx_c, "base_p_mw"] = 0.5 * p_per_bus
+        net.load.at[lidx_c, "base_q_mvar"] = q_per_bus
+        net.load.at[lidx_c, "profile_p"] = None
+        net.load.at[lidx_c, "profile_q"] = None
+        load_indices.append(int(lidx_c))
+
+        # Variable row: mean-normalised P; swing-amplitude Q around zero
+        base_p_var = 0.5 * p_per_bus / mean_mv_p
+        base_q_var = 0.5 * q_per_bus
+        lidx_v = pp.create_load(
+            net,
+            bus=bus_map[i],
+            sn_mva=sn_bus,
+            p_mw=0.5 * p_per_bus,
+            q_mvar=0.0,
+            name=f"{net_id}|HV_MV_Sub_{i}_var",
             subnet="DN",
             profile_p="mv_rural_pload",
             profile_q="mv_rural_qload",
         )
-        load_indices.append(int(lidx))
+        net.load.at[lidx_v, "base_p_mw"] = base_p_var
+        net.load.at[lidx_v, "base_q_mvar"] = base_q_var
+        load_indices.append(int(lidx_v))
 
     # ── 5. Create DER static generators ──────────────────────────────────────
+    # All HV-side DER (WP, PV, STATCOM) initialise with q_mvar=0.  The
+    # DSO controller dispatches Q at run time.
     sgen_indices: List[int] = []
-    cos_phi = 0.98
-    tan_phi = np.tan(np.arccos(cos_phi))
 
     if gen_type == "mixed":
-        # Standard TUDA: all 4 wind parks + all 4 PV plants
         for i, (bus_no, p_mw, profile) in enumerate(TUDA_WIND_PARKS):
             sidx = pp.create_sgen(
                 net, bus=bus_map[bus_no],
@@ -198,10 +247,9 @@ def _create_hv_subnetwork(
             )
             sgen_indices.append(int(sidx))
         for i, (bus_no, p_mw) in enumerate(TUDA_PV_PLANTS):
-            q_mvar = -p_mw * tan_phi
             sidx = pp.create_sgen(
                 net, bus=bus_map[bus_no],
-                p_mw=p_mw, q_mvar=q_mvar, sn_mva=p_mw,
+                p_mw=p_mw, q_mvar=0.0, sn_mva=p_mw,
                 type="PV", profile="PV3",
                 name=f"{net_id}|PV_{i}",
                 subnet="DN",
@@ -210,12 +258,10 @@ def _create_hv_subnetwork(
             sgen_indices.append(int(sidx))
 
     elif gen_type == "pv":
-        # PV-dominated: original PV + wind locations as PV
         for i, (bus_no, p_mw) in enumerate(TUDA_PV_PLANTS):
-            q_mvar = -p_mw * tan_phi
             sidx = pp.create_sgen(
                 net, bus=bus_map[bus_no],
-                p_mw=p_mw, q_mvar=q_mvar, sn_mva=p_mw,
+                p_mw=p_mw, q_mvar=0.0, sn_mva=p_mw,
                 type="PV", profile="PV3",
                 name=f"{net_id}|PV_{i}",
                 subnet="DN",
@@ -223,10 +269,9 @@ def _create_hv_subnetwork(
             )
             sgen_indices.append(int(sidx))
         for i, (bus_no, p_mw, _) in enumerate(TUDA_WIND_PARKS):
-            q_mvar = -p_mw * tan_phi
             sidx = pp.create_sgen(
                 net, bus=bus_map[bus_no],
-                p_mw=p_mw, q_mvar=q_mvar, sn_mva=p_mw,
+                p_mw=p_mw, q_mvar=0.0, sn_mva=p_mw,
                 type="PV", profile="PV3",
                 name=f"{net_id}|PV_ex_wind_{i}",
                 subnet="DN",
@@ -235,7 +280,6 @@ def _create_hv_subnetwork(
             sgen_indices.append(int(sidx))
 
     elif gen_type == "wind":
-        # Wind-dominated: all wind + single PV at bus 7
         for i, (bus_no, p_mw, profile) in enumerate(TUDA_WIND_PARKS):
             sidx = pp.create_sgen(
                 net, bus=bus_map[bus_no],
@@ -249,10 +293,9 @@ def _create_hv_subnetwork(
         for bus_no, p_mw in TUDA_PV_PLANTS:
             if bus_no != 7:
                 continue
-            q_mvar = -p_mw * tan_phi
             sidx = pp.create_sgen(
                 net, bus=bus_map[bus_no],
-                p_mw=p_mw, q_mvar=q_mvar, sn_mva=p_mw,
+                p_mw=p_mw, q_mvar=0.0, sn_mva=p_mw,
                 type="PV", profile="PV3",
                 name=f"{net_id}|PV_0",
                 subnet="DN",
@@ -341,40 +384,43 @@ def _compute_reference_loads(
     n_couplers: int = 3,
 ) -> Dict[str, Tuple[float, float]]:
     """
-    Compute the reference (total_p_mw, total_q_mvar) for each sub-network,
-    capped at the aggregate coupling transformer capacity.
+    Compute the reference (total_p_mw, total_q_mvar) for each sub-network.
 
-    Each HV sub-network connects to the TN via *n_couplers* 3-winding
-    transformers rated at *coupler_sn_mva* each.  The DN load is capped at
-    ``n_couplers * coupler_sn_mva`` (apparent power).  Any excess remains
-    at the TN coupling buses as a separate load — see
-    ``reduce_loads_at_bus``.
+    Each HV sub-network carries **half** of the pooled coupling-bus load
+    (the other half stays at the 345 kV coupling bus as the constant row
+    produced by ``_split_tn_loads``).  The half that moves is distributed
+    equally across the HV sub-networks and capped at ``n_couplers *
+    coupler_sn_mva`` per DSO.
 
-    For buses without a load, the average of the buses that DO have loads
-    in the same 3-bus set is used.  DSO_3 is special: it uses the average
-    of DSO_1 and DSO_2 totals (since its coupling buses have no IEEE load).
+    Pool is reconstructed from the constant rows: each bus contributes
+    ``2 * base_p_mw`` (resp. ``base_q_mvar``) of its constant-row, which
+    equals the original pre-split nominal load.
 
     Returns
     -------
-    dict : net_id -> (total_p_mw, total_q_mvar)
+    dict : net_id -> (total_p_mw, total_q_mvar)  -- the HALF that moves to HV
     """
     max_s_mva = n_couplers * coupler_sn_mva          # 900 MVA default
     n_nets = len(SUBNET_DEFS)
 
-    # ── Step 1: Pool all real loads at ALL coupling buses ───────────────
-    pool_p = 0.0
-    pool_q = 0.0
+    pool_p_full = 0.0
+    pool_q_full = 0.0
     for sdef in SUBNET_DEFS:
         for b1 in sdef["ieee_1idx"]:
-            p, q = get_load_at_bus(net, b1 - 1)
-            pool_p += p
-            pool_q += q
+            b0 = b1 - 1
+            mask = (net.load["bus"] == b0) & (
+                net.load["subnet"].astype(str) == "TN"
+            ) & net.load["profile_p"].isna()
+            pool_p_full += 2.0 * float(net.load.loc[mask, "base_p_mw"].sum())
+            pool_q_full += 2.0 * float(net.load.loc[mask, "base_q_mvar"].sum())
 
-    # ── Step 2: Distribute equally, cap per network ────────────────────
+    # HALF of the full pool moves to HV (mirrors the 50/50 TN split).
+    pool_p = 0.5 * pool_p_full
+    pool_q = 0.5 * pool_q_full
+
     share_p = pool_p / n_nets if n_nets > 0 else 0.0
     share_q = pool_q / n_nets if n_nets > 0 else 0.0
 
-    # Cap each share at coupler capacity (preserving power factor)
     share_s = (share_p ** 2 + share_q ** 2) ** 0.5
     if share_s > max_s_mva and share_s > 0:
         cap_scale = max_s_mva / share_s
@@ -457,38 +503,27 @@ def add_hv_networks(
     net: pp.pandapowerNet,
     meta: IEEE39NetworkMeta,
     *,
-    q_compensation: bool = False,
-    q_load_scale: float = 4.0,
-    q_profile_max_factor: float = 0.329,
     verbose: bool = True,
 ) -> IEEE39NetworkMeta:
     """
-    Attach five 110 kV HV sub-networks (copies of the TUDA DN topology) to
-    the IEEE 39-bus 345 kV network.
+    Attach 110 kV HV sub-networks (copies of the TUDA DN topology) to the
+    IEEE 39-bus 345 kV network.
 
-    Each sub-network replaces the IEEE loads at its 3 coupling buses with
-    a full meshed 110 kV network carrying the equivalent total load.
-    Line lengths are scaled per sub-network, and generation mix varies by zone.
+    Load redistribution convention
+    ------------------------------
+    ``build_ieee39_net`` first splits every 345 kV load into a constant
+    half and a profile-driven half (see ``_split_tn_loads``).  For each
+    coupling bus belonging to a sub-network, this function
 
-    Sub-network definitions
-    -----------------------
-    ====== ====  ===============  =====  ========
-    ID     Zone  IEEE (1-idx)     Scale  Gen type
-    ====== ====  ===============  =====  ========
-    DSO_1   2    7, 8, 5          0.75   mixed
-    DSO_2   2    14, 4, 3         1.50   mixed
-    DSO_3   2    11, 10, 13       0.75   mixed
-    DSO_4   3    24, 21, 23       2.00   pv
-    DSO_5   1    27, 26, 25       3.00   wind
-    ====== ====  ===============  =====  ========
+      * keeps the constant half at 345 kV (unchanged), and
+      * deletes the profile half; the equivalent power is moved into the
+        HV sub-network as loads with their own 50 % const + 50 %
+        mv_rural-driven split (see ``_create_hv_subnetwork``).
 
-    All sub-networks connect to TUDA HV buses (3, 0, 8) in that order.
+    As a result the time mean of the aggregate P and Q matches the IEEE
+    39 base case (up to small biases from profile-mean rounding).
 
-    Special handling
-    ----------------
-    * **DSO_3** coupling buses have no IEEE load after removal; its reference
-      load is set to the average of DSO_1 and DSO_2 totals.
-    * EHV profiles (HS4/HS5) are wired to all remaining IEEE 39-bus loads.
+    Sub-network definitions come from :data:`SUBNET_DEFS`.
 
     Parameters
     ----------
@@ -496,23 +531,6 @@ def add_hv_networks(
         IEEE 39-bus network from ``build_ieee39_net()`` (modified in-place).
     meta : IEEE39NetworkMeta
         Existing metadata (replaced with updated copy).
-    q_compensation : bool
-        When True, add constant (non-profile-scaled) Q-consuming loads at
-        the 345 kV coupling buses to compensate for the low Q-load profiles.
-        The HS4/HS5 Q-load profiles peak at ~33% of the IEEE base case,
-        making the reactive-power control problem unrealistically easy.
-        These compensation loads raise the peak Q to approximately the
-        original IEEE 39-bus level.
-    q_load_scale : float
-        Scale factor for the Q-load base values (default 2.0).  Applied
-        to ``base_q_mvar`` of all profile-scaled loads to increase the
-        profile-driven Q variation.  The actual ``q_mvar`` (used by the
-        initial PF) is NOT changed; only ``base_q_mvar`` is set to the
-        scaled value so that ``apply_profiles()`` uses the larger base.
-    q_profile_max_factor : float
-        Maximum Q-load profile scaling factor (default 0.329 from HS4/HS5).
-        Used to compute the Q deficit:
-        ``Q_comp = original_Q - scaled_Q * q_profile_max_factor``.
     verbose : bool
         Print connection summary table (default True).
 
@@ -533,15 +551,11 @@ def add_hv_networks(
             print(f"  {net_id}: P={p:.1f} MW, Q={q:.1f} Mvar")
 
     # =====================================================================
-    # 2. Reduce IEEE loads at coupling buses by the amount moved to DN
+    # 2. Delete the profile-half TN rows at coupling buses
     # =====================================================================
-    # The total DN load (pooled across all DSOs) was distributed equally
-    # among the HV networks.  We now reduce the original TN loads at the
-    # coupling buses by a total of (n_nets * share) = pool.  The reduction
-    # is distributed proportionally across all loaded coupling buses.
+    # The equivalent power is moved into the HV sub-network (step 3).
+    # The constant-half rows stay untouched at 345 kV.
     all_coupling_buses_0idx = set()
-
-    # Collect all coupling buses and their original loads
     _original_bus_loads: Dict[int, Tuple[float, float]] = {}
     for sdef in SUBNET_DEFS:
         for b1 in sdef["ieee_1idx"]:
@@ -550,33 +564,24 @@ def add_hv_networks(
             if b0 not in _original_bus_loads:
                 _original_bus_loads[b0] = get_load_at_bus(net, b0)
 
-    # Total load at all coupling buses (= pool) and total DN load
-    pool_p = sum(p for p, q in _original_bus_loads.values())
-    pool_q = sum(q for p, q in _original_bus_loads.values())
-    n_nets = len(SUBNET_DEFS)
-    total_dn_p = sum(p for p, q in ref_loads.values())
-    total_dn_q = sum(q for p, q in ref_loads.values())
-
-    # Reduce each loaded coupling bus proportionally
     for b in sorted(all_coupling_buses_0idx):
-        bp, bq = _original_bus_loads[b]
-        if bp == 0.0 and bq == 0.0:
-            continue
-        frac_p = bp / pool_p if pool_p > 0 else 0.0
-        frac_q = bq / pool_q if pool_q > 0 else 0.0
-        remove_p = total_dn_p * frac_p
-        remove_q = total_dn_q * frac_q
-        reduce_loads_at_bus(net, b, remove_p, remove_q)
+        mask = (
+            (net.load["bus"] == b)
+            & (net.load["subnet"].astype(str) == "TN")
+            & net.load["profile_p"].notna()
+        )
+        if mask.any():
+            net.load.drop(index=net.load.index[mask], inplace=True)
 
     if verbose:
-        print("[add_hv_networks] Reduced IEEE loads at coupling buses "
-              f"(0-idx): {sorted(all_coupling_buses_0idx)}")
+        print("[add_hv_networks] Dropped profile-half TN rows at coupling "
+              f"buses (0-idx): {sorted(all_coupling_buses_0idx)}")
         for b in sorted(all_coupling_buses_0idx):
             orig_p, orig_q = _original_bus_loads[b]
             now_p, now_q = get_load_at_bus(net, b)
             if orig_p > 0 or orig_q > 0:
-                print(f"  Bus {b}: {orig_p:.1f} -> {now_p:.1f} MW "
-                      f"(kept {now_p:.1f} MW at TN)")
+                print(f"  Bus {b}: {orig_p:.1f} MW total "
+                      f"-> {now_p:.1f} MW constant-half at TN")
 
     # Also remove TN-DER sgens at coupling buses (they were placed before
     # HV sub-networks replaced the loads).
@@ -606,22 +611,19 @@ def add_hv_networks(
         hv_buses = sdef["hv_buses"]
         coupling_map = list(zip(ieee_0idx, hv_buses))
         total_p, total_q = ref_loads[net_id]
-        total_q_scaled = total_q * HV_Q_LOAD_FACTOR
 
         if verbose:
             print(f"[add_hv_networks] Creating {net_id} (zone {sdef['zone']}, "
                   f"{sdef['gen']}, scale {sdef['scale']:.2f}x, "
-                  f"P={total_p:.1f} MW, Q={total_q_scaled:.1f} Mvar "
-                  f"[Q x{HV_Q_LOAD_FACTOR:.1f}]) ...")
+                  f"P={total_p:.1f} MW, Q={total_q:.1f} Mvar) ...")
 
         hv = _create_hv_subnetwork(
             net, net_id, coupling_map,
             line_length_scale=sdef["scale"],
             total_p_mw=total_p,
-            total_q_mvar=total_q_scaled,
+            total_q_mvar=total_q,
             gen_type=sdef["gen"],
         )
-        # Attach zone metadata
         hv.zone = sdef["zone"]
         hv_nets.append(hv)
 
@@ -631,11 +633,8 @@ def add_hv_networks(
     # =====================================================================
 
     # =====================================================================
-    # 5. Verification power flow (at scaled Q level)
+    # 5. Verification power flow
     # =====================================================================
-    # init='auto' re-uses the TN solution from build_ieee39_net; new HV
-    # buses fall back to flat start.  This converges better than init='flat'
-    # when HV_Q_LOAD_FACTOR > 1.
     pp.runpp(net, run_control=False, calculate_voltage_angles=True,
              init='auto', max_iteration=100)
 
@@ -645,77 +644,13 @@ def add_hv_networks(
     if verbose:
         _print_hv_summary(hv_nets, net)
 
-    # =====================================================================
-    # 6b. Q-load scaling + constant Q compensation at coupling buses
-    # =====================================================================
-    # The HS4/HS5 Q-load profiles peak at ~33% of the IEEE 39 base case.
-    #
-    # base_q_mvar scaling
-    # -------------------
-    # q_load_scale amplifies the profile-driven Q variation so that at
-    # peak the Q is closer to the IEEE 39 base value.
-    #
-    # Layer-specific treatment:
-    #   - TN loads: base_q_mvar = q_mvar * q_load_scale  (profile peak too
-    #     low otherwise).
-    #   - DN/HV loads: base_q_mvar = q_mvar  (already elevated by
-    #     HV_Q_LOAD_FACTOR, no extra scaling needed).
-    #
-    # Optional constant Q compensation (q_compensation=True) adds non-
-    # profile-scaled loads at the 345 kV coupling buses to fill the
-    # remaining gap.  With HV_Q_LOAD_FACTOR >= 3 this is typically not
-    # needed (default: q_compensation=False).
-
-    # Always pre-set base values so snapshot_base_values() won't overwrite
-    # Original IEEE 39 loads have no "subnet" column; HV loads have "DN".
-    # Detect DN explicitly; everything else is TN.
-    is_dn = (net.load["subnet"].astype(str) == "DN") if "subnet" in net.load.columns else False
-    is_tn = ~is_dn
-    total_q = float(net.load["q_mvar"].sum())
-
-    net.load["base_q_mvar"] = net.load["q_mvar"].copy()
-    net.load["base_p_mw"] = net.load["p_mw"].copy()
-
-    # TN loads: apply q_load_scale to increase profile amplitude
-    if "profile_q" in net.load.columns:
-        tn_has_profile = is_tn & net.load["profile_q"].notna() & (
-            net.load["profile_q"].astype(str) != ""
-        )
-        net.load.loc[tn_has_profile, "base_q_mvar"] = (
-            net.load.loc[tn_has_profile, "q_mvar"] * q_load_scale
-        )
-    # DN/HV loads: base_q_mvar = q_mvar (already x HV_Q_LOAD_FACTOR)
-
-    scaled_base_q = float(net.load["base_q_mvar"].sum())
-    tn_q_total = float(net.load.loc[is_tn, "q_mvar"].sum())
-
-    if q_compensation:
-        # Constant Q compensation (TN loads only, DN already elevated)
-        q_comp_total = tn_q_total * (
-            1.0 - q_load_scale * q_profile_max_factor
-        )
-        q_comp_total = max(q_comp_total, 0.0)
-
-        n_coupling = len(all_coupling_buses_0idx)
-        q_per_bus = q_comp_total / n_coupling if n_coupling > 0 else 0.0
-
-        for b in sorted(all_coupling_buses_0idx):
-            lidx = pp.create_load(
-                net,
-                bus=b,
-                p_mw=0.0,
-                q_mvar=q_per_bus,
-                sn_mva=abs(q_per_bus) if q_per_bus != 0 else 1.0,
-                name=f"Q_COMP|bus{b}",
-                subnet="TN",
-            )
-            net.load.at[lidx, "base_p_mw"] = 0.0
-            net.load.at[lidx, "base_q_mvar"] = q_per_bus
-    else:
-        q_comp_total = 0.0
-
     # ── Re-initialise STATCOM Q for the current operating point ──────
-    _statcom_mask = net.sgen["name"].astype(str).str.contains("STATCOM")
+    # TSO-side only: HV-side (subnet=="DN") STATCOMs stay at q_mvar=0
+    # at build time; the DSO controller dispatches their Q at run time.
+    _statcom_mask = (
+        net.sgen["name"].astype(str).str.contains("STATCOM")
+        & (net.sgen["subnet"].astype(str) != "DN")
+    )
     _statcom_idxs = net.sgen.index[_statcom_mask].tolist()
     if _statcom_idxs:
         _tmp_map: Dict[int, int] = {}
@@ -740,16 +675,17 @@ def add_hv_networks(
                  init='auto', max_iteration=100)
 
     if verbose:
-        print(f"[add_hv_networks] Q scaling: HV_Q_LOAD_FACTOR={HV_Q_LOAD_FACTOR:.1f}, "
-              f"q_load_scale(TN)={q_load_scale:.1f}x, "
-              f"q_compensation={q_compensation}")
-        print(f"  TN Q: {tn_q_total:.1f} Mvar, total Q: {total_q:.1f} Mvar")
-        print(f"  Scaled base_q_mvar total: {scaled_base_q:.1f} Mvar "
-              f"(profile peak ~ {scaled_base_q * q_profile_max_factor:.0f} Mvar)")
-        if q_compensation:
-            print(f"  Constant Q compensation: {q_comp_total:.1f} Mvar")
-        peak_q_est = scaled_base_q * q_profile_max_factor + q_comp_total
-        print(f"  Estimated peak total Q: {peak_q_est:.0f} Mvar")
+        is_dn = net.load["subnet"].astype(str) == "DN"
+        is_tn = ~is_dn
+        print(f"[add_hv_networks] Load summary (after redistribution):")
+        print(f"  TN P={net.load.loc[is_tn,'p_mw'].sum():.1f} MW, "
+              f"Q={net.load.loc[is_tn,'q_mvar'].sum():.1f} Mvar "
+              f"(sum of base: P={net.load.loc[is_tn,'base_p_mw'].sum():.1f}, "
+              f"Q={net.load.loc[is_tn,'base_q_mvar'].sum():.1f})")
+        print(f"  HV P={net.load.loc[is_dn,'p_mw'].sum():.1f} MW, "
+              f"Q={net.load.loc[is_dn,'q_mvar'].sum():.1f} Mvar "
+              f"(sum of base: P={net.load.loc[is_dn,'base_p_mw'].sum():.1f}, "
+              f"Q={net.load.loc[is_dn,'base_q_mvar'].sum():.1f})")
 
     # =====================================================================
     # 7. Update metadata

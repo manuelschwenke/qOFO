@@ -516,7 +516,7 @@ class CascadeConfig:
 
         Handles datetime parsing and ContingencyEvent reconstruction.
         """
-        from experiments.records import ContingencyEvent
+        from experiments.helpers import ContingencyEvent
 
         kwargs = dict(d)  # shallow copy
 

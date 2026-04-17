@@ -196,3 +196,18 @@ def apply_qv_local_control(
 
             q = q_min * frac if frac > 0 else q_max * (-frac)
             net.sgen.at[s_idx, "q_mvar"] = float(q)
+
+
+def apply_cos_phi_one_local_control(
+    net: pp.pandapowerNet,
+    hv_networks: List["HVNetworkInfo"],
+) -> None:
+    """Force HV-connected DER to operate at cos phi = 1 (Q = 0 Mvar).
+
+    Unity-power-factor baseline: DSO DER contribute zero reactive power
+    regardless of local voltage. Overwrites any Q set by time-series
+    profiles in the same structural position as ``apply_qv_local_control``.
+    """
+    for hv in hv_networks:
+        for s_idx in hv.sgen_indices:
+            net.sgen.at[s_idx, "q_mvar"] = 0.0

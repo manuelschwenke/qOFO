@@ -50,8 +50,7 @@ import pandapower.networks as pn
 
 from network.ieee39.constants import (
     DISTRIBUTED_SLACK_GEN_INDICES,
-    PROFILE_PEAK_HS4,
-    PROFILE_PEAK_HS5,
+    PROFILE_MEAN,
     ZONE3_BUSES_0IDX,
 )
 from network.ieee39.meta import IEEE39NetworkMeta
@@ -318,11 +317,11 @@ def build_ieee39_net(
     # -- Split every 345 kV load into half-constant + half-profile -----------
     # For every IEEE load whose bus is a TN (345 kV) bus, halve its p/q in
     # place (the remaining row becomes the constant half, with no profile
-    # columns set) and add a second load at the same bus with the other
-    # half scaled up by ``1 / profile_peak`` so that at the profile peak the
-    # two halves sum to the original nominal load.  The profile-driven half
-    # carries the HS4 or HS5 simbench profile depending on zone (HS5 for
-    # zone-3 buses per ``ZONE3_BUSES_0IDX``, HS4 otherwise).
+    # columns set) and add a second load at the same bus with ``base_p_mw``
+    # / ``base_q_mvar`` scaled by ``0.5 / mean(profile)`` so that the *time
+    # mean* of the two halves sums to the original nominal load.  The
+    # profile-driven half carries the HS4 or HS5 simbench profile depending
+    # on zone (HS5 for zone-3 buses per ``ZONE3_BUSES_0IDX``, HS4 otherwise).
     _split_tn_loads(net, tn_buses=tn_buses)
 
     # -- Run initial power flow ------------------------------------------------
@@ -363,12 +362,14 @@ def _split_tn_loads(net: pp.pandapowerNet, *, tn_buses: List[int]) -> None:
 
     * Existing row is halved in place and keeps empty ``profile_p`` /
       ``profile_q`` (constant load).
-    * A sibling row is created at the same bus with ``0.5 / profile_peak``
-      of the original P/Q and profile columns set to HS4 or HS5 depending
-      on zone membership (Zone 3 -> HS5, else HS4).
+    * A sibling row is created at the same bus with
+      ``base_p/q = 0.5 * orig / mean(profile)`` and profile columns set to
+      HS4 or HS5 depending on zone membership (Zone 3 -> HS5, else HS4).
 
-    The peak constants live in :mod:`network.ieee39.constants` and default
-    to 0.329 (simbench HS4/HS5 empirical peak).
+    Mean-normalisation (empirical profile means in
+    :data:`network.ieee39.constants.PROFILE_MEAN`) ensures that the time
+    mean of the two halves sums to the original nominal load -- the
+    aggregate load across a year matches the IEEE 39 base case.
     """
     if "profile_p" not in net.load.columns:
         net.load["profile_p"] = None
@@ -381,7 +382,6 @@ def _split_tn_loads(net: pp.pandapowerNet, *, tn_buses: List[int]) -> None:
         net.load["base_q_mvar"] = net.load["q_mvar"].astype(float)
 
     tn_set = set(int(b) for b in tn_buses)
-    # Iterate over a snapshot of the indices because we append rows below.
     for li in list(net.load.index):
         bus = int(net.load.at[li, "bus"])
         if bus not in tn_set:
@@ -390,10 +390,8 @@ def _split_tn_loads(net: pp.pandapowerNet, *, tn_buses: List[int]) -> None:
         p_orig = float(net.load.at[li, "p_mw"])
         q_orig = float(net.load.at[li, "q_mvar"])
 
-        # Constant half: halve the original row, clear profile columns,
-        # and pin ``base_p/q`` to the halved values so downstream
-        # ``snapshot_base_values`` + ``apply_profiles`` preserve the
-        # constant contribution.
+        # Constant half — pin base to the halved value so apply_profiles()
+        # leaves it alone (no profile columns set).
         net.load.at[li, "p_mw"] = 0.5 * p_orig
         net.load.at[li, "q_mvar"] = 0.5 * q_orig
         net.load.at[li, "base_p_mw"] = 0.5 * p_orig
@@ -402,26 +400,18 @@ def _split_tn_loads(net: pp.pandapowerNet, *, tn_buses: List[int]) -> None:
         net.load.at[li, "profile_q"] = None
         net.load.at[li, "subnet"] = "TN"
 
-        # Zone 3 -> HS5, else HS4.
         if bus in ZONE3_BUSES_0IDX:
-            peak = PROFILE_PEAK_HS5
             prof_p, prof_q = "HS5_pload", "HS5_qload"
         else:
-            peak = PROFILE_PEAK_HS4
             prof_p, prof_q = "HS4_pload", "HS4_qload"
 
-        # Profile half: ``base_p/q = 0.5 * orig / peak`` so that at profile
-        # peak (``scale = peak``) ``apply_profiles`` writes
-        # ``p_mw = base_p_mw * scale = 0.5 * orig`` -- summing with the
-        # constant half to exactly ``orig``.  At construction time we
-        # initialise ``p_mw`` to ``0.5 * orig`` (not ``0``) so the pre-
-        # profile power flow sees the original bus load; ``apply_profiles``
-        # overwrites ``p_mw`` once simulation starts.
-        base_p_profile = (0.5 / peak) * p_orig
-        base_q_profile = (0.5 / peak) * q_orig
+        base_p_profile = 0.5 * p_orig / PROFILE_MEAN[prof_p]
+        base_q_profile = 0.5 * q_orig / PROFILE_MEAN[prof_q]
         orig_name = net.load.at[li, "name"] if "name" in net.load.columns else None
         new_name = f"{orig_name}_profile" if orig_name else f"Load_bus{bus}_profile"
 
+        # Initial ``p_mw`` / ``q_mvar`` at 0.5 * orig gives a baseline-like
+        # pre-profile power flow; apply_profiles() will overwrite them.
         pp.create_load(
             net,
             bus=bus,

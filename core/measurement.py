@@ -41,7 +41,8 @@ class Measurement:
         Pandapower transformer indices for TSO-DSO coupling transformers.
     interface_q_hv_side_mvar : NDArray[np.float64]
         Measured reactive power flow at HV side of interface transformers in Mvar.
-        Positive value indicates Q flowing into the HV bus from the transformer.
+        Pandapower load convention: positive = Q flowing from HV bus into
+        the transformer (i.e. EHV network feeds Q into the distribution system).
     der_indices : NDArray[np.int64]
         Indices of DERs (as sgen or gen in pandapower).
     der_q_mvar : NDArray[np.float64]
@@ -274,6 +275,152 @@ def measure_dso(net, cfg, it: int):
         oltc_indices=np.array(cfg.oltc_trafo_indices, dtype=np.int64),
         oltc_tap_positions=oltc_taps,
         shunt_indices=np.array(cfg.shunt_bus_indices, dtype=np.int64),
+        shunt_states=shunt_states,
+        gen_indices=np.array([], dtype=np.int64),
+        gen_vm_pu=np.array([], dtype=np.float64),
+    )
+
+
+def measure_zone_tso(net, zone_def, it: int) -> "Measurement":
+    """
+    Build a TSO ``Measurement`` for one zone in a multi-zone IEEE 39-bus run.
+
+    Reads the already converged pandapower result tables (``net.res_bus``,
+    ``net.res_line``, ``net.res_trafo3w`` for 3-winding PCC trafos, ``net.res_sgen``,
+    ``net.res_gen``), plus parameter columns (``net.gen.vm_pu``,
+    ``net.trafo.tap_pos``, ``net.shunt.step``).
+
+    Parameters
+    ----------
+    net : pandapowerNet
+        Combined plant network after a converged power flow.
+    zone_def : ZoneDefinition
+        Index sets for this zone.
+    it : int
+        Current iteration (step) number.
+    """
+    all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
+    vm_all = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
+
+    i_ka = np.array(
+        [float(net.res_line.at[li, "i_from_ka"]) for li in zone_def.line_indices],
+        dtype=np.float64,
+    ) if zone_def.line_indices else np.array([], dtype=np.float64)
+
+    q_iface = np.zeros(len(zone_def.pcc_trafo_indices), dtype=np.float64)
+    for k, t in enumerate(zone_def.pcc_trafo_indices):
+        if t in net.res_trafo3w.index:
+            q_iface[k] = float(net.res_trafo3w.at[t, "q_hv_mvar"])
+
+    der_q = np.array(
+        [float(net.res_sgen.at[s, "q_mvar"]) for s in zone_def.tso_der_indices],
+        dtype=np.float64,
+    ) if zone_def.tso_der_indices else np.array([], dtype=np.float64)
+    der_p = np.array(
+        [float(net.res_sgen.at[s, "p_mw"]) for s in zone_def.tso_der_indices],
+        dtype=np.float64,
+    ) if zone_def.tso_der_indices else np.array([], dtype=np.float64)
+
+    shunt_states = np.zeros(len(zone_def.shunt_bus_indices), dtype=np.int64)
+    for k, sb in enumerate(zone_def.shunt_bus_indices):
+        mask = net.shunt["bus"] == sb
+        if mask.any():
+            shunt_states[k] = int(net.shunt.at[net.shunt.index[mask][0], "step"])
+
+    if zone_def.gen_indices:
+        gen_vm = np.empty(len(zone_def.gen_indices), dtype=np.float64)
+        gen_p = np.empty(len(zone_def.gen_indices), dtype=np.float64)
+        gen_q = np.empty(len(zone_def.gen_indices), dtype=np.float64)
+        for k, g in enumerate(zone_def.gen_indices):
+            gen_vm[k] = float(net.gen.at[g, "vm_pu"])
+            if net.gen.at[g, "in_service"]:
+                gen_p[k] = float(net.res_gen.at[g, "p_mw"])
+                gen_q[k] = float(net.res_gen.at[g, "q_mvar"])
+            else:
+                gen_p[k] = 0.0
+                gen_q[k] = 0.0
+    else:
+        gen_vm = np.array([], dtype=np.float64)
+        gen_p = np.array([], dtype=np.float64)
+        gen_q = np.array([], dtype=np.float64)
+
+    oltc_taps = np.array(
+        [int(net.trafo.at[t, "tap_pos"]) for t in zone_def.oltc_trafo_indices],
+        dtype=np.int64,
+    ) if zone_def.oltc_trafo_indices else np.array([], dtype=np.int64)
+
+    return Measurement(
+        iteration=it,
+        bus_indices=all_bus,
+        voltage_magnitudes_pu=vm_all,
+        branch_indices=np.array(zone_def.line_indices, dtype=np.int64),
+        current_magnitudes_ka=i_ka,
+        interface_transformer_indices=np.array(zone_def.pcc_trafo_indices, dtype=np.int64),
+        interface_q_hv_side_mvar=q_iface,
+        der_indices=np.array(zone_def.tso_der_indices, dtype=np.int64),
+        der_q_mvar=der_q,
+        der_p_mw=der_p,
+        oltc_indices=np.array(zone_def.oltc_trafo_indices, dtype=np.int64),
+        oltc_tap_positions=oltc_taps,
+        shunt_indices=np.array(zone_def.shunt_bus_indices, dtype=np.int64),
+        shunt_states=shunt_states,
+        gen_indices=np.array(zone_def.gen_indices, dtype=np.int64),
+        gen_vm_pu=gen_vm,
+        gen_p_mw=gen_p,
+        gen_q_mvar=gen_q,
+    )
+
+
+def measure_zone_dso(net, dso_cfg, it: int) -> "Measurement":
+    """
+    Build a DSO ``Measurement`` for one HV sub-network from the combined plant network.
+
+    Uses ``net.res_trafo3w`` for interface Q at 3-winding couplers and ``net.trafo3w``
+    for coupling-trafo tap positions.
+    """
+    all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
+    vm_all = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
+
+    i_ka = np.array(
+        [float(net.res_line.at[li, "i_from_ka"]) for li in dso_cfg.current_line_indices],
+        dtype=np.float64,
+    ) if dso_cfg.current_line_indices else np.array([], dtype=np.float64)
+
+    q_iface = np.array(
+        [float(net.res_trafo3w.at[t, "q_hv_mvar"]) for t in dso_cfg.interface_trafo_indices],
+        dtype=np.float64,
+    )
+
+    der_q = np.array(
+        [float(net.res_sgen.at[s, "q_mvar"]) for s in dso_cfg.der_indices],
+        dtype=np.float64,
+    )
+    der_p = np.array(
+        [float(net.res_sgen.at[s, "p_mw"]) for s in dso_cfg.der_indices],
+        dtype=np.float64,
+    )
+
+    oltc_taps = np.array(
+        [int(net.trafo3w.at[t, "tap_pos"]) for t in dso_cfg.oltc_trafo_indices],
+        dtype=np.int64,
+    ) if dso_cfg.oltc_trafo_indices else np.array([], dtype=np.int64)
+
+    shunt_states = np.zeros(len(dso_cfg.shunt_bus_indices), dtype=np.int64)
+
+    return Measurement(
+        iteration=it,
+        bus_indices=all_bus,
+        voltage_magnitudes_pu=vm_all,
+        branch_indices=np.array(dso_cfg.current_line_indices, dtype=np.int64),
+        current_magnitudes_ka=i_ka,
+        interface_transformer_indices=np.array(dso_cfg.interface_trafo_indices, dtype=np.int64),
+        interface_q_hv_side_mvar=q_iface,
+        der_indices=np.array(dso_cfg.der_indices, dtype=np.int64),
+        der_q_mvar=der_q,
+        der_p_mw=der_p,
+        oltc_indices=np.array(dso_cfg.oltc_trafo_indices, dtype=np.int64),
+        oltc_tap_positions=oltc_taps,
+        shunt_indices=np.array(dso_cfg.shunt_bus_indices, dtype=np.int64),
         shunt_states=shunt_states,
         gen_indices=np.array([], dtype=np.int64),
         gen_vm_pu=np.array([], dtype=np.float64),

@@ -119,6 +119,15 @@ class DSOControllerConfig:
     buildup when Q-capability limits are hit."""
     v_setpoints_pu: Optional[NDArray[np.float64]] = None
     g_v: float = 1.0
+    gamma_oltc_q: float = 0.0
+    """Role-based Q-tracking attenuation for OLTC columns.  Scales the
+    Q-interface tracking gradient on OLTC decision variables:
+        grad_f[oltc] += 2 · g_q · γ · (Q - Q_set)^T · ∂Q/∂s
+    With γ = 0 (default), OLTCs are driven purely by voltage deviations
+    and the physical Q effect of any tap change is still captured in the
+    output constraints (H matrix).  With γ = 1, OLTCs are equally
+    incentivised for Q-tracking (legacy behaviour).  Values in (0, 1)
+    provide partial Q-sensitivity as a last-resort mechanism."""
     der_mapping: Optional[DERMapping] = None
     """Per-DER mapping for individual sgen-level control.  When
     provided, enables per-DER decision variables in the MIQP
@@ -162,6 +171,10 @@ class DSOControllerConfig:
             raise ValueError(
                 f"q_integral_max_mvar must be positive, got "
                 f"{self.q_integral_max_mvar}"
+            )
+        if not (0.0 <= self.gamma_oltc_q <= 1.0):
+            raise ValueError(
+                f"gamma_oltc_q must be in [0, 1], got {self.gamma_oltc_q}"
             )
         if self.v_setpoints_pu is not None:
             if len(self.v_setpoints_pu) != len(self.voltage_bus_indices):
@@ -338,21 +351,26 @@ class DSOController(BaseOFOController):
         H_expanded = self._expand_H_to_der_level(self._H_cache)
         dQ_interface_dQ_der = H_expanded[:n_interfaces, :n_der]
         
-        # Map DER capability to interface capability
-        # Simple approach: sum contributions assuming independence
+        # Map DER capability to interface capability using delta from current
+        # operating point.  The TSO applies these as:
+        #     u_bound = q_interface_current + q_cap
+        # so q_cap must be a delta: S · (q_der_bound - q_der_current).
+        q_der_current = measurement.der_q_mvar.copy()
         q_interface_min = np.zeros(n_interfaces)
         q_interface_max = np.zeros(n_interfaces)
-        
+
         for i in range(n_interfaces):
             for j in range(n_der):
                 sensitivity = dQ_interface_dQ_der[i, j]
+                dq_min = q_der_min[j] - q_der_current[j]
+                dq_max = q_der_max[j] - q_der_current[j]
                 if sensitivity >= 0:
-                    q_interface_min[i] += sensitivity * q_der_min[j]
-                    q_interface_max[i] += sensitivity * q_der_max[j]
+                    q_interface_min[i] += sensitivity * dq_min
+                    q_interface_max[i] += sensitivity * dq_max
                 else:
-                    q_interface_min[i] += sensitivity * q_der_max[j]
-                    q_interface_max[i] += sensitivity * q_der_min[j]
-        
+                    q_interface_min[i] += sensitivity * dq_max
+                    q_interface_max[i] += sensitivity * dq_min
+
         return CapabilityMessage(
             source_controller_id=self.controller_id,
             target_controller_id=target_controller_id,
@@ -636,6 +654,13 @@ class DSOController(BaseOFOController):
            f_v(u) = g_v · ||V - V_set||²
            ∇f_v  = 2 · g_v · (V - V_set)^T · ∂V/∂u
 
+        **Role-based OLTC attenuation** (``gamma_oltc_q``):
+        The Q-tracking gradient on OLTC columns is scaled by γ ∈ [0, 1].
+        With γ = 0 (default), OLTCs receive no Q-tracking incentive and
+        are driven only by voltage deviations.  The full ∂Q/∂s_OLTC
+        remains in H for output constraints, so the physical coupling
+        between tap changes and reactive power is preserved.
+
         The voltage term is only active when *v_setpoints_pu* is
         configured.  It should be weighted softly (small g_v) so that
         Q-interface tracking remains the dominant objective.
@@ -661,7 +686,23 @@ class DSOController(BaseOFOController):
 
         q_error = q_interface - self.q_setpoint_mvar
         dQ_du = H[:n_interfaces, :]
-        grad_f += 2.0 * self.config.g_q * (q_error @ dQ_du)
+
+        # Role-based gradient attenuation: attenuate Q-tracking gradient
+        # on OLTC columns so that OLTCs are driven primarily by voltage
+        # deviations.  The full ∂Q/∂s remains in H for output constraints,
+        # preserving the physical coupling in predicted outputs.
+        gamma = self.config.gamma_oltc_q
+        if gamma < 1.0:
+            mapping = self.config.der_mapping
+            n_der = mapping.n_der if mapping is not None else len(self.config.der_indices)
+            n_oltc = len(self.config.oltc_trafo_indices)
+            oltc_slice = slice(n_der, n_der + n_oltc)
+            dQ_du_q = dQ_du.copy()
+            dQ_du_q[:, oltc_slice] *= gamma
+        else:
+            dQ_du_q = dQ_du
+
+        grad_f += 2.0 * self.config.g_q * (q_error @ dQ_du_q)
 
         # --- Integral Q-tracking component (leaky integrator) ---
         if self.config.g_qi > 0.0:
@@ -676,7 +717,7 @@ class DSOController(BaseOFOController):
                 self.config.q_integral_max_mvar,
                 out=self._q_error_integral,
             )
-            grad_f += 2.0 * self.config.g_qi * (self._q_error_integral @ dQ_du)
+            grad_f += 2.0 * self.config.g_qi * (self._q_error_integral @ dQ_du_q)
 
         # --- Component 2: Voltage-schedule tracking (optional) ---
         if self.config.v_setpoints_pu is not None:

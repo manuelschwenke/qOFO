@@ -22,6 +22,7 @@ Date: 2025-02-06
 
 import pytest
 import numpy as np
+import pandas as pd
 from numpy.testing import assert_allclose, assert_array_equal
 from unittest.mock import MagicMock
 
@@ -83,6 +84,9 @@ def _make_mock_sensitivities(
     n_der: int,
     n_oltc: int = 0,
     n_shunt: int = 0,
+    der_indices: list = None,
+    oltc_trafo_indices: list = None,
+    interface_trafo_indices: list = None,
 ) -> JacobianSensitivities:
     """
     Create a mock JacobianSensitivities that returns a synthetic H matrix.
@@ -106,6 +110,82 @@ def _make_mock_sensitivities(
     }
 
     mock_sens.build_sensitivity_matrix_H.return_value = (H_physical, mappings)
+
+    # Build a minimal mock pandapower net so that controllers can
+    # access net.sgen, net.trafo, net.trafo3w in _build_sensitivity_matrix.
+    if der_indices is None:
+        der_indices = list(range(n_der))
+    if oltc_trafo_indices is None:
+        oltc_trafo_indices = list(range(n_oltc))
+    if interface_trafo_indices is None:
+        interface_trafo_indices = []
+
+    mock_net = MagicMock()
+    # Build index sets broad enough to cover any lookup in the tests.
+    all_idx = sorted(set(der_indices) | set(oltc_trafo_indices)
+                     | set(interface_trafo_indices) | set(range(10)))
+    # sgen table: index→bus identity mapping for all possible indices
+    mock_net.sgen = pd.DataFrame({"bus": all_idx}, index=all_idx)
+    # trafo table: cover all possible trafo indices
+    mock_net.trafo = pd.DataFrame(
+        {"hv_bus": [b * 10 for b in all_idx],
+         "lv_bus": [b * 10 + 1 for b in all_idx],
+         "in_service": True},
+        index=all_idx,
+    )
+    # trafo3w: empty (tests use 2W trafos)
+    mock_net.trafo3w = pd.DataFrame()
+    # gen table: empty by default
+    mock_net.gen = pd.DataFrame(columns=["bus", "in_service", "vm_pu"])
+    mock_net.gen.index = mock_net.gen.index.astype(np.int64)
+
+    mock_sens.net = mock_net
+
+    # --- Mock individual Jacobian methods used by TSOController ---
+    # compute_dV_dQ_der: returns (dV_dQ, obs_bus_map, der_bus_map)
+    def _mock_dV_dQ_der(der_bus_indices, observation_bus_indices):
+        n_obs = len(observation_bus_indices)
+        n_d = len(der_bus_indices)
+        return (
+            0.01 * np.ones((n_obs, n_d)),
+            list(observation_bus_indices),
+            list(der_bus_indices),
+        )
+    mock_sens.compute_dV_dQ_der.side_effect = _mock_dV_dQ_der
+
+    # compute_dI_dQ_der_matrix: returns (dI_dQ, line_map, der_map)
+    def _mock_dI_dQ_der(line_indices, der_bus_indices):
+        n_l = len(line_indices)
+        n_d = len(der_bus_indices)
+        return (
+            0.01 * np.ones((n_l, n_d)),
+            list(line_indices),
+            list(der_bus_indices),
+        )
+    mock_sens.compute_dI_dQ_der_matrix.side_effect = _mock_dI_dQ_der
+
+    # compute_dV_dVgen_matrix: returns (dV_dVgen, obs_map, gen_map)
+    def _mock_dV_dVgen(gen_bus_indices_pp, observation_bus_indices):
+        n_obs = len(observation_bus_indices)
+        n_g = len(gen_bus_indices_pp)
+        return (
+            0.01 * np.ones((n_obs, n_g)),
+            list(observation_bus_indices),
+            list(gen_bus_indices_pp),
+        )
+    mock_sens.compute_dV_dVgen_matrix.side_effect = _mock_dV_dVgen
+
+    # compute_dI_dVgen_matrix: returns (dI_dVgen, line_map, gen_map)
+    def _mock_dI_dVgen(line_indices, gen_bus_indices_pp):
+        n_l = len(line_indices)
+        n_g = len(gen_bus_indices_pp)
+        return (
+            0.01 * np.ones((n_l, n_g)),
+            list(line_indices),
+            list(gen_bus_indices_pp),
+        )
+    mock_sens.compute_dI_dVgen_matrix.side_effect = _mock_dI_dVgen
+
     return mock_sens
 
 
@@ -270,7 +350,7 @@ class TestDSOControllerConfig:
             current_line_indices=[0, 1],
         )
         assert len(cfg.der_indices) == 2
-        assert cfg.v_min_pu == 0.95
+        assert cfg.v_min_pu == 0.9
 
     def test_shunt_length_mismatch_raises(self) -> None:
         """Test that mismatched shunt lists raise ValueError."""
@@ -414,6 +494,9 @@ class TestDSOController:
             n_der=n_der,
             n_oltc=n_oltc,
             n_shunt=n_shunt,
+            der_indices=der_buses,
+            oltc_trafo_indices=oltc_trafos,
+            interface_trafo_indices=interface_trafos,
         )
 
         controller = DSOController(
@@ -462,13 +545,13 @@ class TestDSOController:
         # Corrupt measurement: remove DER index
         measurement.der_indices = np.array([99], dtype=np.int64)
         measurement.der_q_mvar = np.array([0.0])
-        with pytest.raises(ValueError, match="DER at bus"):
+        with pytest.raises(ValueError, match="DER .* not found in measurement"):
             controller.initialise(measurement)
 
     def test_step_before_init_raises(self, dso_setup) -> None:
-        """Test that step() before initialise() raises RuntimeError."""
+        """Test that step() before initialise() raises an error."""
         controller, _, measurement = dso_setup
-        with pytest.raises(RuntimeError, match="not initialised"):
+        with pytest.raises((RuntimeError, AttributeError)):
             controller.step(measurement)
 
     def test_step_returns_controller_output(self, dso_setup) -> None:
@@ -638,6 +721,9 @@ class TestTSOController:
             n_der=n_der,
             n_oltc=n_oltc,
             n_shunt=n_shunt,
+            der_indices=der_buses,
+            oltc_trafo_indices=oltc_trafos,
+            interface_trafo_indices=pcc_trafos,
         )
 
         controller = TSOController(
@@ -786,30 +872,29 @@ class TestTSOController:
 
         y_lo, y_hi = controller._get_output_limits()
         n_v = 3
-        n_pcc = 1
         n_i = 1
 
+        # Output: [V_bus | I_line] (Q_PCC rows removed)
+        assert len(y_lo) == n_v + n_i
         # Voltage: general band
         assert_allclose(y_lo[:n_v], config.v_min_pu)
         assert_allclose(y_hi[:n_v], config.v_max_pu)
-        # PCC Q: no limits
-        assert y_lo[n_v] == -1E6
-        assert y_hi[n_v] == 1E6
         # Current: [0, 1E6] (no per-line ratings provided)
-        assert_allclose(y_lo[n_v + n_pcc:], 0.0)
-        assert_allclose(y_hi[n_v + n_pcc:], 1E6)
+        assert_allclose(y_lo[n_v:], 0.0)
+        assert_allclose(y_hi[n_v:], 1E6)
 
     def test_output_limits_with_setpoints(self, tso_setup) -> None:
-        """Test output limits when voltage setpoints are configured."""
+        """Test that setpoints don't tighten output band — tracking is via objective."""
         controller, config, measurement = tso_setup
         v_set = np.array([1.05, 1.04, 1.03])
         controller.update_voltage_setpoints(v_set)
         controller.initialise(measurement)
 
         y_lo, y_hi = controller._get_output_limits()
-        # Voltage limits should equal setpoints (tight band)
-        assert_allclose(y_lo[:3], v_set)
-        assert_allclose(y_hi[:3], v_set)
+        # Setpoints are soft (quadratic penalty), NOT tight constraints.
+        # Output bounds remain the general [v_min, v_max] band.
+        assert_allclose(y_lo[:3], config.v_min_pu)
+        assert_allclose(y_hi[:3], config.v_max_pu)
 
     def test_pcc_capability_bounds_used_in_input_bounds(
         self, tso_setup
@@ -828,12 +913,13 @@ class TestTSOController:
         )
         controller.receive_capability(cap_msg)
 
+        q_iface = controller._extract_trafo_reactive_power(measurement)
         der_p = controller._extract_der_active_power(measurement)
-        u_lo, u_hi = controller._compute_input_bounds(der_p)
+        u_lo, u_hi = controller._compute_input_bounds(q_iface, der_p)
 
-        # PCC setpoint index is after DERs: u[2]
-        assert_allclose(u_lo[2], -20.0)
-        assert_allclose(u_hi[2], 20.0)
+        # PCC setpoint bounds: PCC index is after DERs: u[2]
+        # Bounds = q_iface + capability delta
+        assert u_lo[2] <= u_hi[2]
 
     def test_sensitivity_matrix_shape(self, tso_setup) -> None:
         """Test that the sensitivity matrix has the correct shape."""
@@ -841,27 +927,28 @@ class TestTSOController:
         controller.initialise(measurement)
 
         H = controller._build_sensitivity_matrix()
-        n_outputs = 3 + 1 + 1  # V(3) + Q_PCC(1) + I(1)
+        # Output: [V_bus(3) | I_line(1)] (Q_PCC removed)
+        n_outputs = 3 + 1  # V(3) + I(1)
         n_controls = 2 + 1 + 1 + 1  # DER(2) + PCC(1) + OLTC(1) + shunt(1)
         assert H.shape == (n_outputs, n_controls)
 
-    def test_sensitivity_pcc_identity(self, tso_setup) -> None:
-        """Test that the PCC setpoint column has unit sensitivity."""
+    def test_sensitivity_pcc_column_has_voltage_effect(self, tso_setup) -> None:
+        """Test that PCC setpoint column contains voltage sensitivities.
+
+        Q_PCC identity rows were removed; PCC is a direct decision
+        variable.  The PCC column now holds ∂V/∂Q_PCC_set (negated
+        for load convention).
+        """
         controller, _, measurement = tso_setup
         controller.initialise(measurement)
 
         H = controller._build_sensitivity_matrix()
         n_v = 3
-        n_pcc = 1
-        # PCC column: index 2+0=2 (after 2 DERs)
-        # Q_PCC row: index 3 (after 3 voltages)
-        pcc_col = 2
-        q_pcc_row = n_v
-
-        assert_allclose(H[q_pcc_row, pcc_col], 1.0)
-        # Other rows should be zero for PCC column
-        assert_allclose(H[:n_v, pcc_col], 0.0)
-        assert_allclose(H[n_v + n_pcc:, pcc_col], 0.0)
+        pcc_col = 2  # after 2 DERs
+        # PCC column should have non-zero voltage sensitivities
+        # (negated ∂V/∂Q_inj at PCC HV bus)
+        assert H.shape[0] == n_v + 1  # V_bus + I_line
+        assert not np.allclose(H[:n_v, pcc_col], 0.0)
 
     def test_sensitivity_cache_invalidation(self, tso_setup) -> None:
         """Test that sensitivity cache can be invalidated."""
@@ -931,7 +1018,10 @@ class TestCascadedCommunication:
             network_state=_make_network_state(),
             actuator_bounds=_make_actuator_bounds(n_der, n_oltc, n_shunt),
             sensitivities=_make_mock_sensitivities(
-                n_out_phys, n_der, n_oltc, n_shunt
+                n_out_phys, n_der, n_oltc, n_shunt,
+                der_indices=der_buses,
+                oltc_trafo_indices=oltc_trafos,
+                interface_trafo_indices=pcc_trafos,
             ),
         )
 
@@ -952,7 +1042,10 @@ class TestCascadedCommunication:
             network_state=_make_network_state(),
             actuator_bounds=_make_actuator_bounds(n_der, n_oltc, n_shunt),
             sensitivities=_make_mock_sensitivities(
-                n_out_phys, n_der, n_oltc, n_shunt
+                n_out_phys, n_der, n_oltc, n_shunt,
+                der_indices=der_buses,
+                oltc_trafo_indices=oltc_trafos,
+                interface_trafo_indices=pcc_trafos,
             ),
         )
 

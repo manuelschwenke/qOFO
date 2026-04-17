@@ -90,6 +90,7 @@ def _make_measurement(bus_indices, voltages_pu, iteration=1):
         interface_q_hv_side_mvar=np.array([], dtype=np.float64),
         der_indices=np.array([], dtype=np.int64),
         der_q_mvar=np.array([], dtype=np.float64),
+        der_p_mw=np.array([], dtype=np.float64),
         oltc_indices=np.array([], dtype=np.int64),
         oltc_tap_positions=np.array([], dtype=np.int64),
         shunt_indices=np.array([], dtype=np.int64),

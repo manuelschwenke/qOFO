@@ -35,8 +35,8 @@ from pathlib import Path
 from typing import Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from run_cascade import CascadeResult
-    from core.cascade_config import CascadeConfig
+    from experiments.records import CascadeResult
+    from configs.cascade_config import CascadeConfig
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -174,7 +174,7 @@ def load_results(
     -------
     (CascadeResult, CascadeConfig)
     """
-    from core.cascade_config import CascadeConfig
+    from configs.cascade_config import CascadeConfig
 
     # Load pickle
     pkl_path = os.path.join(run_dir, "cascade_result.pkl")

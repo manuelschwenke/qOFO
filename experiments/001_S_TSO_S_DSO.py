@@ -49,10 +49,10 @@ from core.profiles import (
     snapshot_base_values,
 )
 from network.build_tuda_net import build_tuda_net
-from run.contingency import _apply_contingency
-from run.helpers import _build_Gw, _network_state, _sgen_at_bus, print_summary
-from run.plant_io import _apply_dso, _apply_tso
-from run.records import A2S, A3S, CascadeResult, ContingencyEvent, IterationRecord
+from experiments.contingency import _apply_contingency, prepare_load_contingencies
+from experiments.helpers import _build_Gw, _network_state, _sgen_at_bus, print_summary
+from experiments.plant_io import _apply_dso, _apply_tso
+from experiments.records import A2S, A3S, CascadeResult, ContingencyEvent, IterationRecord
 from sensitivity.jacobian import JacobianSensitivities
 
 
@@ -68,13 +68,13 @@ def run_cascade(
     ----------
     config : CascadeConfig
         Central configuration object holding every tunable parameter.
-        See :class:`core.cascade_config.CascadeConfig` for all fields.
+        See :class:`configs.cascade_config.CascadeConfig` for all fields.
     live_plotter : optional
         Object with an ``update(rec)`` method called after each iteration,
         e.g. :class:`visualisation.plot_cascade.LivePlotter`.  Takes
         precedence over ``config.live_plot``.
     """
-    from core.cascade_config import CascadeConfig
+    from configs.cascade_config import CascadeConfig
 
     # ── Unpack frequently-used config fields for readability ──────────────
     v_setpoint_pu = config.v_setpoint_pu
@@ -144,6 +144,10 @@ def run_cascade(
     # Load time-series profiles and snapshot base load/gen values
     profiles = load_profiles(profiles_csv, timestep_s=dt_s)
     snapshot_base_values(net)
+
+    # Pre-create dormant loads for load-contingency events
+    if contingencies:
+        prepare_load_contingencies(net, contingencies, verbose=verbose)
 
     # Apply profiles at t=0 and re-run PF so sensitivities + init use realistic operating point
     if use_profiles:
@@ -359,6 +363,11 @@ def run_cascade(
         for g in tso_gen_indices
     ]
 
+    tso_der_op_diagrams = []
+    for s in tso_der_indices:
+        od = net.sgen.at[s, "op_diagram"] if "op_diagram" in net.sgen.columns else None
+        tso_der_op_diagrams.append(str(od) if od and str(od) != "nan" else "VDE-AR-N-4120-v2")
+
     tso_bounds = ActuatorBounds(
         der_indices=np.array(tso_der_indices, dtype=np.int64),
         der_s_rated_mva=tso_s,
@@ -373,9 +382,15 @@ def run_cascade(
         shunt_indices=np.array(tso_shunt_buses, dtype=np.int64),
         shunt_q_mvar=np.array(tso_shunt_q, dtype=np.float64),
         gen_params=tso_gen_params,
+        der_op_diagrams=tso_der_op_diagrams,
     )
 
     dso_s, dso_p = _der_bounds(dso_der_indices)
+    dso_der_op_diagrams = []
+    for s in dso_der_indices:
+        od = net.sgen.at[s, "op_diagram"] if "op_diagram" in net.sgen.columns else None
+        dso_der_op_diagrams.append(str(od) if od and str(od) != "nan" else "VDE-AR-N-4120-v2")
+
     dso_bounds = ActuatorBounds(
         der_indices=np.array(dso_der_indices, dtype=np.int64),
         der_s_rated_mva=dso_s,
@@ -389,6 +404,7 @@ def run_cascade(
         ),
         shunt_indices=np.array(dso_shunt_buses, dtype=np.int64),
         shunt_q_mvar=np.array(dso_shunt_q, dtype=np.float64),
+        der_op_diagrams=dso_der_op_diagrams,
     )
 
     # 6) Create controllers
@@ -645,14 +661,11 @@ def run_cascade(
                     events.append((desc, short_label))
                 rec.contingency_events = events
 
-                # Re-converge PF with new topology so Jacobian is valid
+                # Re-converge PF with new topology so measurements
+                # reflect the post-contingency operating point.
+                # Controllers keep pre-outage sensitivities — OFO adapts
+                # via measurement feedback (model-mismatch robustness).
                 pp.runpp(net, run_control=False, calculate_voltage_angles=True)
-
-                # Refresh sensitivity matrices for both controllers
-                tso.sensitivities = JacobianSensitivities(net)
-                dso.sensitivities = JacobianSensitivities(net)
-                tso.invalidate_sensitivity_cache()
-                dso.invalidate_sensitivity_cache()
 
         # TSO step
         if run_tso:
@@ -993,7 +1006,7 @@ def run_cascade(
 def main():
     import time as _time
 
-    from core.cascade_config import CascadeConfig
+    from configs.cascade_config import CascadeConfig
     from core.results_storage import save_results
 
     start_min = 600

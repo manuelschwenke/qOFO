@@ -190,7 +190,12 @@ class JacobianSensitivities:
         
         # Store deep copy of network state -> this is the network state all sensitivites are based on
         self.net = copy.deepcopy(net)
-        
+
+        # Re-converge without distributed_slack so the internal Jacobian has
+        # the standard [P_PV, P_PQ, Q_PQ] structure that the sensitivity code
+        # expects.  The operating point barely changes (only loss redistribution).
+        pp.runpp(self.net, run_control=False, calculate_voltage_angles=True)
+
         # Extract Jacobian from power flow solution
         self.J = np.array(self.net._ppc['internal']['J'].todense()) # ToDo: Dense or Sparse?
         

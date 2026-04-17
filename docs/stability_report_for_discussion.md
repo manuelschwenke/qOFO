@@ -349,7 +349,7 @@ These are distinct roles. The tuner must NOT use g_w to brute-force stability â€
 
 ### 6.2 Three-Phase Tuning
 
-The auto_tune() function runs: DSO (C1) -> continuous TSO (C2) -> discrete TSO (C3).
+Three-phase tuning (DSO C1 -> continuous TSO C2 -> discrete TSO C3) was previously automated via an `auto_tune()` helper, now removed; manual tuning follows the same phases.
 
 #### Phase 1: Gershgorin Preconditioning
 

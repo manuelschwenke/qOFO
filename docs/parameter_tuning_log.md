@@ -19,16 +19,15 @@
 | g_w_dso_der     | 10      | DSO DER Q regularisation              |
 | g_w_dso_oltc    | 100     | DSO OLTC tap regularisation           |
 | dso_period_s    | 10      | DSO control period [s]                |
-| auto_tune_gw    | True    | Eigenvector pump auto-tuning          |
 | live_plot       | True    | Real-time plotting                    |
 
 Initial stability verdict: **UNSTABLE** (all three conditions failing).
 
 ## Tuning procedure
 
-### Step 1: Disable auto-tune and live plotting
+### Step 1: Disable live plotting
 
-Set `auto_tune_gw=False`, `live_plot=False` to get a clean baseline and faster iteration.
+Set `live_plot=False` to get a clean baseline and faster iteration.
 Shortened simulation to 60 min for rapid feedback.
 
 ### Step 2: Baseline run (run 1)
@@ -230,7 +229,6 @@ cfg = MultiTSOConfig(
     g_w_tso_oltc=10,           # was 2
     g_w_dso_der=650,           # was 10
     g_w_dso_oltc=50,           # was 100
-    auto_tune_gw=False,        # was True
     live_plot=False,           # was True
 )
 ```

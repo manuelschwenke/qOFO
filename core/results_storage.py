@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from experiments.records import CascadeResult
+    from experiments.helpers import CascadeResult
     from configs.cascade_config import CascadeConfig
 
 

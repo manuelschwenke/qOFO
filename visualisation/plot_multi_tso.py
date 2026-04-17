@@ -26,7 +26,7 @@ Date: 2026-03-27
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -34,7 +34,7 @@ from matplotlib.patches import Patch
 import numpy as np
 
 if TYPE_CHECKING:
-    from experiments.records import MultiTSOIterationRecord
+    from experiments.helpers import MultiTSOIterationRecord
 
 import os
 
@@ -1497,6 +1497,168 @@ class LoadBalanceLivePlotter:
         ax.grid(True, alpha=0.3)
         ax.set_xlabel("Time [s]" if self._sub_minute else "Time [min]")
         _apply_x_fmt(ax, self._sub_minute)
+
+        self._fig.canvas.draw_idle()
+        self._fig.canvas.flush_events()
+
+
+class HVPowerLivePlotter:
+    """
+    Live plot of per-element DER and load P/Q inside each HV sub-network.
+
+    Four stacked subplots (shared x-axis):
+      1. DER active power  P [MW]   — one line per DER sgen.
+      2. DER reactive power Q [Mvar] — one line per DER sgen.
+      3. Load active power  P [MW]   — one line per load.
+      4. Load reactive power Q [Mvar] — one line per load.
+
+    Lines are coloured by HV sub-network (one colour per ``hv.net_id``)
+    so the contribution of each sub-network stays visually grouped even
+    with ~30 lines per panel.  A single proxy legend entry per sub-network
+    is shown on the top panel.
+
+    Parameters
+    ----------
+    hv_info_map : Dict[str, HVNetworkInfo]
+        Map of HV sub-network id -> HVNetworkInfo.  Only ``sgen_indices``
+        and ``load_indices`` are used.
+    sub_minute : bool
+        If True, x-axis unit is seconds; otherwise minutes.
+    update_every : int
+        Redraw every N calls to :meth:`update`.
+    """
+
+    def __init__(
+        self,
+        hv_info_map: "Dict[str, HVNetworkInfo]",
+        *,
+        sub_minute: bool = False,
+        update_every: int = 1,
+    ) -> None:
+        plt.ion()
+
+        self._sub_minute = sub_minute
+        self._update_every = update_every
+        self._call_count = 0
+
+        hv_ids = sorted(hv_info_map.keys())
+        self._hv_color: Dict[str, str] = {}
+        self._der_tracked: List[Tuple[str, int]] = []
+        self._load_tracked: List[Tuple[str, int]] = []
+        self._der_colors: List[str] = []
+        self._load_colors: List[str] = []
+
+        for i, hv_id in enumerate(hv_ids):
+            col = _c(i)
+            self._hv_color[hv_id] = col
+            hv = hv_info_map[hv_id]
+            for sidx in hv.sgen_indices:
+                self._der_tracked.append((hv_id, int(sidx)))
+                self._der_colors.append(col)
+            for lidx in hv.load_indices:
+                self._load_tracked.append((hv_id, int(lidx)))
+                self._load_colors.append(col)
+
+        self._t: List[float] = []
+        self._der_p: List[List[float]] = [[] for _ in self._der_tracked]
+        self._der_q: List[List[float]] = [[] for _ in self._der_tracked]
+        self._load_p: List[List[float]] = [[] for _ in self._load_tracked]
+        self._load_q: List[List[float]] = [[] for _ in self._load_tracked]
+        # Per-DSO aggregated load P/Q time series for the sum overlay.
+        self._load_p_sum: Dict[str, List[float]] = {hv: [] for hv in hv_ids}
+        self._load_q_sum: Dict[str, List[float]] = {hv: [] for hv in hv_ids}
+
+        self._fig, self._axes = plt.subplots(
+            4, 1, figsize=(11, 10), sharex=True, constrained_layout=True,
+        )
+        self._fig.suptitle(
+            "HV sub-network DER / load power (live)", fontweight="bold",
+        )
+        self._titles = [
+            "DER active power P [MW] (one line per DER)",
+            "DER reactive power Q [Mvar] (one line per DER)",
+            "Load active power P [MW] (thin = per load, thick = per-DSO sum)",
+            "Load reactive power Q [Mvar] (thin = per load, thick = per-DSO sum)",
+        ]
+        self._ylabels = ["P [MW]", "Q [Mvar]", "P [MW]", "Q [Mvar]"]
+        for ax, title, ylabel in zip(self._axes, self._titles, self._ylabels):
+            ax.set_title(title)
+            ax.set_ylabel(ylabel)
+            ax.grid(True, alpha=0.3)
+        self._axes[-1].set_xlabel(
+            "Time [s]" if sub_minute else "Time [min]"
+        )
+        self._fig.show()
+
+    def update(self, rec: "MultiTSOIterationRecord", net) -> None:
+        """Append one timestep and redraw.
+
+        Parameters
+        ----------
+        rec : MultiTSOIterationRecord
+            Record for the current step (only ``time_s`` is used).
+        net : pp.pandapowerNet
+            Network after the step's final PF — per-element P/Q is read
+            from ``net.res_sgen`` and ``net.res_load``.
+        """
+        self._call_count += 1
+
+        t = rec.time_s / 60.0 if not self._sub_minute else rec.time_s
+        self._t.append(t)
+        for i, (_, sidx) in enumerate(self._der_tracked):
+            self._der_p[i].append(float(net.res_sgen.at[sidx, "p_mw"]))
+            self._der_q[i].append(float(net.res_sgen.at[sidx, "q_mvar"]))
+        _sum_p: Dict[str, float] = {hv: 0.0 for hv in self._hv_color}
+        _sum_q: Dict[str, float] = {hv: 0.0 for hv in self._hv_color}
+        for i, (hv_id, lidx) in enumerate(self._load_tracked):
+            p_i = float(net.res_load.at[lidx, "p_mw"])
+            q_i = float(net.res_load.at[lidx, "q_mvar"])
+            self._load_p[i].append(p_i)
+            self._load_q[i].append(q_i)
+            _sum_p[hv_id] += p_i
+            _sum_q[hv_id] += q_i
+        for hv_id in self._hv_color:
+            self._load_p_sum[hv_id].append(_sum_p[hv_id])
+            self._load_q_sum[hv_id].append(_sum_q[hv_id])
+
+        if self._call_count % self._update_every != 0:
+            return
+
+        axP, axQ, axLP, axLQ = self._axes
+        for ax, title, ylabel in zip(self._axes, self._titles, self._ylabels):
+            ax.clear()
+            ax.set_title(title)
+            ax.set_ylabel(ylabel)
+            ax.grid(True, alpha=0.3)
+
+        for i, col in enumerate(self._der_colors):
+            axP.plot(self._t, self._der_p[i], color=col, lw=0.8, alpha=0.7)
+            axQ.plot(self._t, self._der_q[i], color=col, lw=0.8, alpha=0.7)
+        for i, col in enumerate(self._load_colors):
+            axLP.plot(self._t, self._load_p[i], color=col, lw=0.6, alpha=0.35)
+            axLQ.plot(self._t, self._load_q[i], color=col, lw=0.6, alpha=0.35)
+        # Per-DSO load-sum overlays (thick, solid, same colour as the group)
+        for hv_id, col in self._hv_color.items():
+            axLP.plot(self._t, self._load_p_sum[hv_id],
+                      color=col, lw=2.0, alpha=1.0, label=f"{hv_id} Σ P_load")
+            axLQ.plot(self._t, self._load_q_sum[hv_id],
+                      color=col, lw=2.0, alpha=1.0, label=f"{hv_id} Σ Q_load")
+
+        from matplotlib.lines import Line2D
+        legend_handles = [
+            Line2D([0], [0], color=col, lw=1.5, label=hv_id)
+            for hv_id, col in self._hv_color.items()
+        ]
+        axP.legend(handles=legend_handles, loc="upper right", fontsize=8,
+                   ncol=max(1, len(legend_handles)))
+        axLP.legend(loc="upper right", fontsize=8,
+                    ncol=max(1, len(self._hv_color)))
+        axLQ.legend(loc="upper right", fontsize=8,
+                    ncol=max(1, len(self._hv_color)))
+
+        axLQ.set_xlabel("Time [s]" if self._sub_minute else "Time [min]")
+        for ax in self._axes:
+            _apply_x_fmt(ax, self._sub_minute)
 
         self._fig.canvas.draw_idle()
         self._fig.canvas.flush_events()

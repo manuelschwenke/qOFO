@@ -92,10 +92,10 @@ class MultiTSOConfig:
     # -- Objective weights -----------------------------------------------------
     g_v:            float = 50000.0
     g_q:            float = 1.0
-    dso_g_v:        float = 10000.0
+    dso_g_v:        float = 50000.0
 
     # -- G_w regularisation weights (TSO) --------------------------------------
-    g_w_der:        float = 20.0
+    g_w_der:        float = 2.0
     g_w_gen:        float = 1e7
     g_w_pcc:        float = 2.0
     g_w_tso_oltc:   float = 1.0
@@ -108,11 +108,11 @@ class MultiTSOConfig:
 
     # -- G_w regularisation weights (DSO) --------------------------------------
     g_w_dso_der:    float = 10.0
-    g_w_dso_oltc:   float = 40.0
+    g_w_dso_oltc:   float = 1.0
 
     # -- Integer switching logic -----------------------------------------------
     int_max_step:   int = 1
-    int_cooldown:   int = 0
+    int_cooldown:   int = 3
 
     # -- DSO OLTC initialisation -----------------------------------------------
     oltc_init_v_target_pu: float = 1.03
@@ -128,7 +128,7 @@ class MultiTSOConfig:
     that file."""
 
     # -- Slack variable penalty (g_z) ------------------------------------------
-    g_z_voltage:   float = 1E-12
+    g_z_voltage:   float = 1E9
     g_z_current:   float = 0.0
     g_z_interface: float = 0.0
 
@@ -148,6 +148,7 @@ class MultiTSOConfig:
     # -- Live plot -------------------------------------------------------------
     live_plot:              bool = False
     live_plot_load_balance: bool = False
+    live_plot_hv_power:     bool = False
 
     # -- Time-series profiles --------------------------------------------------
     use_profiles: bool = False
@@ -178,3 +179,10 @@ class MultiTSOConfig:
     qv_setpoint_pu: float = 1.03
     qv_slope_pu:    float = 0.05
     warmup_s:       float = 0.0
+
+    local_der_mode: str = "cos_phi_1"
+    """HV-connected DER control mode in ``dso_mode='local'`` baseline.
+    ``'cos_phi_1'`` -- unity power factor (Q=0 Mvar); no V-dependence (standard).
+    ``'qv'``        -- linear Q(V) droop around ``qv_setpoint_pu`` with
+                       slope ``qv_slope_pu`` (previous baseline).
+    """

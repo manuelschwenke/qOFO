@@ -3,7 +3,9 @@ Scenario: wind_replace
 ======================
 Replace selected synchronous generators with STATCOM-capable wind parks.
 
-Zone 2:  ALL generators removed; wind parks at HALF the original P_mw.
+Zone 2:  ex-slack gen (term 30, IEEE G10/G1-ex-slack) removed; wind park
+         at HALF the original P_mw.  Retains IEEE G3 (pandapower gen_idx 1,
+         term 31, grid 9, 650 MW) as the Zone-2 synchronous anchor.
 Zone 1:  G1 (term 29) + G8 (term 36) removed; wind at SAME P_mw.
          Retains G9 (term 37, ~830 MW) as synchronous anchor.
 Zone 3:  G4 (term 32) + G5 (term 33) removed; wind at SAME P_mw.
@@ -14,9 +16,13 @@ Each replacement wind park sgen has:
   - op_diagram = 'STATCOM'  (full-circle capability, no dead zone at P=0)
   - profile = 'WP10'
 
-A temporary PV-generator trick initialises the STATCOM Q injection so
-that the power-flow solution starts from a physically reasonable
-operating point.
+A temporary PV-generator trick seeds the STATCOM Q injection at the
+base (pre-profile) operating point so that the downstream base PF
+(``add_hv_networks`` verification run, etc.) converges from a physically
+plausible state.  This is a **seed only** — the authoritative Q + OLTC
+init happens once more at the profile-scaled operating point in the
+caller (see ``run_multi_tso_dso`` step 7c in
+``experiments/000_M_TSO_M_DSO.py``).
 
 Author: Manuel Schwenke / Claude Code
 """
@@ -40,8 +46,9 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     meta : IEEE39NetworkMeta
         Current metadata catalogue.
     ext_grid_vm_pu : float, optional
-        Voltage setpoint [pu] used for the temporary PV-generator
-        initialisation trick (default 1.03).
+        Voltage setpoint [pu] for the temporary PV-generator STATCOM
+        **seed** (default 1.03).  Not the final operating point; the
+        caller re-initialises Q + OLTCs after profiles are applied.
 
     Returns
     -------
@@ -53,9 +60,14 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     _zone2_buses = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 30, 31}
     _zone3_buses = {14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 32, 33, 34, 35}
 
-    # Terminal buses of the specific generators to remove in zones 1 and 3
+    # Terminal buses of the specific generators to remove per zone.
+    # Zone 2 now keeps pandapower gen_idx 1 (term 31, grid 9, IEEE G3,
+    # 650 MW) as the synchronous anchor — only the ex-slack gen at
+    # term 30 (grid 5, IEEE G10 ex-slack, 500 MW) is replaced by a
+    # STATCOM-capable wind park.
     _z1_gens_to_remove_term = {29, 36}   # G1 + G8
-    _z3_gens_to_remove_term = {32, 33}   # G4 + G5
+    _z2_gens_to_remove_term = {30}       # ex-slack only; keep IEEE G3 at term 31
+    _z3_gens_to_remove_term = {33}   # G4 + G5 {32}
 
     # Classify each generator and decide whether to remove it
     _gens_to_remove: List[int] = []
@@ -65,8 +77,7 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
         term_bus = int(net.gen.at[g, "bus"])
         p_mw = float(net.gen.at[g, "p_mw"])
 
-        if gb in _zone2_buses:
-            # Zone 2: remove ALL generators
+        if gb in _zone2_buses and term_bus in _z2_gens_to_remove_term:
             _gens_to_remove.append(g)
             _removed_gen_info.append((g, gb, p_mw, 2))
         elif gb in _zone1_buses and term_bus in _z1_gens_to_remove_term:
@@ -105,35 +116,29 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
         _wp_sgen_buses.append(gb)
         _wp_info.append((int(idx), gb, wp_p, wp_sn))
 
-    # ── Initialize STATCOM Q via temporary PV generators ─────────────────
-    # Place temporary gens at each STATCOM bus with V_target so the
-    # PF solver finds the Q needed to maintain voltage.  Then transfer
-    # that Q to the sgen and remove the temporary gen.
-    _temp_gen_map: Dict[int, int] = {}  # temp_gen_idx -> sgen_idx
+    # ── Seed STATCOM Q via temporary PV generators ──────────────────────
+    # This is a *seed* so downstream base PFs converge; the caller
+    # re-initialises Q + OLTCs once more at the profile-scaled operating
+    # point (see run_multi_tso_dso step 7c).
+    _temp_gen_map: Dict[int, int] = {}
     for sidx, bus, wp_p, wp_sn in _wp_info:
-        # Disable the sgen during initialization
         net.sgen.at[sidx, "in_service"] = False
         gidx = pp.create_gen(
             net, bus=bus, p_mw=wp_p, vm_pu=ext_grid_vm_pu,
             sn_mva=wp_sn,
             max_q_mvar=wp_sn, min_q_mvar=-wp_sn,
             in_service=True,
-            name=f"_TEMP_INIT|bus{bus}",
+            name=f"_TEMP_SEED|bus{bus}",
         )
         _temp_gen_map[int(gidx)] = sidx
 
     pp.runpp(net, run_control=False, calculate_voltage_angles=True,
              max_iteration=50)
 
-    # Transfer Q from temp gens to STATCOMs, then clean up
     for gidx, sidx in _temp_gen_map.items():
-        q_init = float(net.res_gen.at[gidx, "q_mvar"])
-        net.sgen.at[sidx, "q_mvar"] = q_init
+        net.sgen.at[sidx, "q_mvar"] = float(net.res_gen.at[gidx, "q_mvar"])
         net.sgen.at[sidx, "in_service"] = True
     net.gen.drop(index=list(_temp_gen_map.keys()), inplace=True)
-
-    # Re-run PF with sgens active to verify convergence
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
 
     # Update meta to include the new wind park sgens as TSO DERs
     meta = IEEE39NetworkMeta(

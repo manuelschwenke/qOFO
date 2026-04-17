@@ -112,7 +112,7 @@ class MultiTSOConfig:
 
     # -- Integer switching logic -----------------------------------------------
     int_max_step:   int = 1
-    int_cooldown:   int = 3
+    int_cooldown:   int = 5
 
     # -- DSO OLTC initialisation -----------------------------------------------
     oltc_init_v_target_pu: float = 1.03

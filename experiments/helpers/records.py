@@ -12,7 +12,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -202,3 +202,43 @@ class MultiTSOIterationRecord:
     total_gen_p_mw:     float = 0.0
     total_gen_q_mvar:   float = 0.0
     residual_load_p_mw: float = 0.0
+
+    # ── Live-plot observables (added for the three-figure rework) ───────────
+
+    # Per-zone line loadings (max / mean / min loading %) over zd.line_indices.
+    zone_line_loading_max_pct:  Dict[int, float] = field(default_factory=dict)
+    zone_line_loading_mean_pct: Dict[int, float] = field(default_factory=dict)
+    zone_line_loading_min_pct:  Dict[int, float] = field(default_factory=dict)
+
+    # Per-zone TSO DER active power (array, one entry per TSO DER).
+    zone_tso_der_p_mw: Dict[int, NDArray] = field(default_factory=dict)
+
+    # Per-zone aggregate P/Q balance terms (all in MW / Mvar).
+    zone_balance_der_p_mw:            Dict[int, float] = field(default_factory=dict)
+    zone_balance_der_q_mvar:          Dict[int, float] = field(default_factory=dict)
+    zone_balance_gen_p_mw:            Dict[int, float] = field(default_factory=dict)
+    zone_balance_gen_q_mvar:          Dict[int, float] = field(default_factory=dict)
+    zone_balance_load_p_mw:           Dict[int, float] = field(default_factory=dict)
+    zone_balance_load_q_mvar:         Dict[int, float] = field(default_factory=dict)
+    zone_balance_tso_dso_p_out_mw:    Dict[int, float] = field(default_factory=dict)
+    zone_balance_tso_dso_q_out_mvar:  Dict[int, float] = field(default_factory=dict)
+
+    # Inter-zone tie-line Q flow.  Keyed by ordered pair (zone_i, zone_j)
+    # with i < j, positive = Q leaves zone i into zone j, summed over
+    # all physical boundary lines between the two zones.
+    zone_tie_q_mvar: Dict[Tuple[int, int], float] = field(default_factory=dict)
+
+    # Per-zone TSO shunt states (MSC/MSR tap positions; empty array if none).
+    zone_tso_shunt_states: Dict[int, NDArray] = field(default_factory=dict)
+
+    # Per-HV-group line loading stats and balance aggregates.
+    dso_group_i_max_pct:    Dict[str, float] = field(default_factory=dict)
+    dso_group_i_mean_pct:   Dict[str, float] = field(default_factory=dict)
+    dso_group_i_min_pct:    Dict[str, float] = field(default_factory=dict)
+    dso_group_der_p_mw:     Dict[str, float] = field(default_factory=dict)
+    dso_group_load_p_mw:    Dict[str, float] = field(default_factory=dict)
+    dso_group_load_q_mvar:  Dict[str, float] = field(default_factory=dict)
+
+    # Per-interface-trafo actual active power (HV side, parallel to
+    # existing dso_trafo_q_actual_mvar).
+    dso_trafo_p_actual_mw: Dict[str, float] = field(default_factory=dict)

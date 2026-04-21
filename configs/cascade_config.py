@@ -145,6 +145,15 @@ class CascadeConfig:
     reactive-power actuators.  A too-large value causes oscillations when
     current limits are hit."""
 
+    gz_tso_q_gen: float = 1e2
+    """Slack variable penalty for TSO generator Q-capability outputs.
+    Q_gen bounds are state-dependent (from the generator PQ curve); the
+    soft penalty lets the MIQP trade a small capability violation against
+    other control objectives (voltage tracking, interface Q tracking).
+    Should be large enough to keep Q_gen close to its bounds but small
+    enough to avoid dominating the objective when the bound window is
+    narrow.  Default 1e2 ≈ ``gz_tso_current``/10."""
+
     gz_dso_current: float = 1e3
     """Slack variable penalty for DSO current-limit outputs."""
 
@@ -365,14 +374,21 @@ class CascadeConfig:
             np.full(n_shunt, self.gu_dso_shunt),
         ])
 
-    def build_gz_tso(self, n_v: int, n_i: int) -> NDArray[np.float64]:
+    def build_gz_tso(
+        self, n_v: int, n_i: int, n_gen: int = 0,
+    ) -> NDArray[np.float64]:
         """Build per-output g_z vector for the TSO controller.
 
-        Output ordering: [ V_bus | I_line ]
+        Output ordering: [ V_bus | I_line | Q_gen ]
+
+        The trailing ``Q_gen`` block is a soft capability output: bounds
+        come from the generator PQ curve each iteration.  ``n_gen`` may be
+        zero (e.g. DSO-only deployments) for backward compatibility.
         """
         return np.concatenate([
-            np.full(n_v, self.g_z),
-            np.full(n_i, self.gz_tso_current),
+            np.full(n_v,   self.g_z),
+            np.full(n_i,   self.gz_tso_current),
+            np.full(n_gen, self.gz_tso_q_gen),
         ])
 
     def build_gz_dso(self, n_iface: int, n_v: int, n_i: int) -> NDArray[np.float64]:

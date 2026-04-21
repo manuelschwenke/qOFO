@@ -28,6 +28,29 @@ DISTRIBUTED_SLACK_GEN_INDICES: Tuple[int, ...] = tuple(range(9))
 
 
 # ---------------------------------------------------------------------------
+#  Synchronous machine nameplate rating
+# ---------------------------------------------------------------------------
+# pandapower's ``case39()`` does not supply ``sn_mva`` for the synchronous
+# generators.  We assign a nameplate based on the base-case active power
+# output multiplied by this factor.  A 2.0x margin is consistent with the
+# zonal residual that the doubled Q-compensation workload requires and
+# leaves the original case39 base-case dispatch at 50 % of nameplate --
+# a typical value for real synchronous machines.
+#
+# The same factor is applied to ``net.ext_grid.sn_mva`` (derived from the
+# ext_grid's pre-solve nominal P, taken as the largest machine rating) so
+# distributed-slack weights share the same basis.
+#
+# Downstream consumers that must read a consistent nameplate:
+#   - capability-curve plot         (experiments/000_M_TSO_M_DSO.py)
+#   - zonal residual dispatcher     (network/ieee39/zonal_balancing.py)
+#   - distributed-slack weights     (network/ieee39/build.py)
+#   - actuator bounds / Q-limits    (core/actuator_bounds.py)
+
+NAMEPLATE_FACTOR: float = 2.0
+
+
+# ---------------------------------------------------------------------------
 #  SimBench profile empirical means (used for the 50/50 load split)
 # ---------------------------------------------------------------------------
 # Every 345 kV load is split 50 % constant + 50 % profile-driven.  The
@@ -41,7 +64,7 @@ DISTRIBUTED_SLACK_GEN_INDICES: Tuple[int, ...] = tuple(range(9))
 # driven by the profile directly, while the mean Q is carried by a
 # per-HV-load constant Q (see network/ieee39/hv_networks.py).
 
-PROFILE_MEAN: Dict[str, float] = {
+PROFILE_MEAN: Dict[str, float] = { # ToDo: 0.8
     "HS4_pload":      0.4436,
     "HS4_qload":      0.1458,
     "HS5_pload":      0.7092,
@@ -116,7 +139,7 @@ HV_COUPLING_WP_MVA: float = 60.0
 # sub-network: generation lives on HV buses 0–5 (wind + PV side) and load
 # is concentrated on HV buses 6–9 (opposite side of the 11-line topology).
 HV_HIGH_LOAD_BUS_NOS: Tuple[int, ...] = (6, 7, 8, 9)
-HV_HIGH_LOAD_FACTOR: float = 2.0
+HV_HIGH_LOAD_FACTOR: float = 1.5
 
 # Zone-3 buses for EHV profile assignment (0-indexed pandapower)
 ZONE3_BUSES_0IDX: Set[int] = set(range(14, 24)) | {32, 33, 34, 35}

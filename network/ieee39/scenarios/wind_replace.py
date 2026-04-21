@@ -65,7 +65,7 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     # 650 MW) as the synchronous anchor — only the ex-slack gen at
     # term 30 (grid 5, IEEE G10 ex-slack, 500 MW) is replaced by a
     # STATCOM-capable wind park.
-    _z1_gens_to_remove_term = {29, 36}   # G1 + G8
+    _z1_gens_to_remove_term = {29, 36}   # G1 + G8 {36}
     _z2_gens_to_remove_term = {30}       # ex-slack only; keep IEEE G3 at term 31
     _z3_gens_to_remove_term = {33}   # G4 + G5 {32}
 
@@ -99,7 +99,7 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     _wp_sgen_buses: List[int] = []
     _wp_info: List[Tuple[int, int, float, float]] = []  # (sgen_idx, bus, p, sn)
     for _g_idx, gb, gen_p, zone in _removed_gen_info:
-        wp_p = gen_p / 2.0 if zone == 2 else gen_p # ToDo: We can set STATCOM wind park capacities here
+        wp_p = gen_p / 1.5 if zone == 2 else gen_p # ToDo: We can set STATCOM wind park capacities here
         wp_sn = wp_p * 1.2
         idx = pp.create_sgen(
             net,

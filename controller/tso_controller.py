@@ -134,6 +134,32 @@ class TSOControllerConfig:
     ignored for capability-based OLTC blocking.  Example: {0: 2} means
     gen_indices[0] is connected to oltc_trafo_indices[2]."""
 
+    rho_q_gen: float = 1e2
+    """Soft-constraint penalty for Q_gen output violations in the MIQP
+    objective (z^T G_z z contribution).  Q_gen is an operating-point-
+    dependent capability output: bounds come from the generator PQ
+    capability curve each iteration.  Order-of-magnitude guidance:
+    set comparable to ``gz_tso_current`` (default 1e3) so Q_gen and
+    current limits compete on similar footing with DER-Q changes."""
+
+    sat_eps_enter_mvar: float = 5.0
+    """Enter-saturation margin [Mvar]: a generator flips to saturated
+    mode when its measured Q reaches ``Q_lim ∓ sat_eps_enter_mvar``.
+    Small enter margin = quick response to saturation."""
+
+    sat_eps_exit_mvar: float = 25.0
+    """Exit-saturation margin [Mvar]: a saturated generator flips back
+    to free mode only when its Q has retreated to
+    ``Q_lim ∓ sat_eps_exit_mvar``.  Must be greater than
+    ``sat_eps_enter_mvar`` to enforce hysteresis (no mode chatter)."""
+
+    enable_saturation_mode: bool = False
+    """Master gate for Feature B (hysteretic saturation classifier +
+    asymmetric V_gen bound clamp + PQ-mode column zeroing).  When False
+    (default), V_gen behaves as a plain continuous control; the cached
+    ``_sat_mode`` stays zero and the saturation code paths short-circuit.
+    Set True to reproduce the saturation-aware experiment."""
+
     k_t_avt: float = 0.0
     """Achieved-Value Tracking factor for PCC-Q reset.
     0.0 = no reset (current behaviour), 1.0 = full reset (recommended).
@@ -198,6 +224,22 @@ class TSOControllerConfig:
                 f"gen_vm_min_pu ({self.gen_vm_min_pu}) must be less than "
                 f"gen_vm_max_pu ({self.gen_vm_max_pu})"
             )
+        if self.rho_q_gen < 0:
+            raise ValueError(
+                f"rho_q_gen must be non-negative, got {self.rho_q_gen}"
+            )
+        if self.enable_saturation_mode:
+            if self.sat_eps_enter_mvar <= 0 or self.sat_eps_exit_mvar <= 0:
+                raise ValueError(
+                    "sat_eps_enter_mvar and sat_eps_exit_mvar must be positive, "
+                    f"got {self.sat_eps_enter_mvar}, {self.sat_eps_exit_mvar}"
+                )
+            if self.sat_eps_exit_mvar <= self.sat_eps_enter_mvar:
+                raise ValueError(
+                    f"sat_eps_exit_mvar ({self.sat_eps_exit_mvar}) must be "
+                    f"strictly greater than sat_eps_enter_mvar "
+                    f"({self.sat_eps_enter_mvar}) to enforce hysteresis."
+                )
 
 
 class TSOController(BaseOFOController):
@@ -292,6 +334,13 @@ class TSOController(BaseOFOController):
         n_oltc = len(config.oltc_trafo_indices)
         self._oos_gen_mask: NDArray[np.bool_] = np.zeros(n_gen, dtype=np.bool_)
         self._oos_oltc_mask: NDArray[np.bool_] = np.zeros(n_oltc, dtype=np.bool_)
+
+        # AVR saturation mode per generator.  Values:
+        #   0  = free (AVR regulating, gen acts as PV)
+        #  +1  = saturated at upper Q limit (overexcitation)
+        #  -1  = saturated at lower Q limit (underexcitation)
+        # Persists across iterations to implement hysteresis (ε_exit > ε_enter).
+        self._sat_mode: NDArray[np.int8] = np.zeros(n_gen, dtype=np.int8)
 
     # =========================================================================
     # Public interface for cascaded hierarchy communication
@@ -580,16 +629,20 @@ class TSOController(BaseOFOController):
         """
         Extract current output values from measurements.
 
-        Output ordering: [ V_bus | I_line ]
+        Output ordering: [ V_bus | I_line | Q_gen ]
 
-        Note: Q_PCC rows have been removed.  Q_PCC_set is a direct
-        decision variable and does not need to appear as an output.
-        The commented-out block below can be re-enabled if Q_PCC
-        output tracking is needed in the future.
+        Q_gen is a monitored output with a state-dependent soft band drawn
+        from the generator PQ capability curve each iteration.  The MIQP
+        can trade off small Q_gen violations against voltage tracking and
+        interface-Q objectives via the per-output slack variables.
+
+        Note: Q_PCC rows remain removed — Q_PCC_set is a direct decision
+        variable.
         """
         n_v = len(self.config.voltage_bus_indices)
         n_i = len(self.config.current_line_indices)
-        n_outputs = n_v + n_i
+        n_gen = len(self.config.gen_indices)
+        n_outputs = n_v + n_i + n_gen
 
         y = np.zeros(n_outputs)
         idx = 0
@@ -604,21 +657,6 @@ class TSOController(BaseOFOController):
             y[idx] = measurement.voltage_magnitudes_pu[meas_idx[0]]
             idx += 1
 
-        # --- Q_PCC rows removed (Q_PCC_set is a direct decision variable) ---
-        # To re-enable, uncomment this block and update n_outputs above:
-        # n_pcc = len(self.config.pcc_trafo_indices)
-        # n_outputs = n_v + n_pcc + n_i  # (also update above)
-        # for trafo_idx in self.config.pcc_trafo_indices:
-        #     meas_idx = np.where(
-        #         measurement.interface_transformer_indices == trafo_idx
-        #     )[0]
-        #     if len(meas_idx) == 0:
-        #         raise ValueError(
-        #             f"PCC transformer {trafo_idx} not found in measurement"
-        #         )
-        #     y[idx] = measurement.interface_q_hv_side_mvar[meas_idx[0]]
-        #     idx += 1
-
         # Current measurements
         for line_idx in self.config.current_line_indices:
             meas_idx = np.where(measurement.branch_indices == line_idx)[0]
@@ -627,6 +665,16 @@ class TSOController(BaseOFOController):
                     f"Line {line_idx} not found in measurement"
                 )
             y[idx] = measurement.current_magnitudes_ka[meas_idx[0]]
+            idx += 1
+
+        # Generator Q measurements (monitored capability output)
+        for g_idx in self.config.gen_indices:
+            meas_idx = np.where(measurement.gen_indices == g_idx)[0]
+            if len(meas_idx) == 0:
+                raise ValueError(
+                    f"Generator {g_idx} not found in measurement.gen_indices"
+                )
+            y[idx] = float(measurement.gen_q_mvar[meas_idx[0]])
             idx += 1
 
         return y
@@ -658,18 +706,20 @@ class TSOController(BaseOFOController):
         """
         Compute operating-point-dependent input bounds.
 
-        For PCC setpoints, the bounds are updated from capability messages.
-        AVR setpoints start from the fixed ``[gen_vm_min, gen_vm_max]`` band
-        and are then tightened using the detailed generator capability curve
-        (Milano §12.2.1) when ``gen_params`` is available and the measured
-        generator Q approaches a thermal limit.
+        The generator capability curve enters the problem as a *soft
+        output constraint* (Q_gen rows in H, penalised by ``rho_q_gen``)
+        rather than as a pre-emptive tightening of the V_gen bounds.
+        This lets the MIQP trade off small Q_gen violations against
+        voltage tracking, interface Q tracking, and current limits.
 
-        The tightening logic works as follows: if the current Q_gen is
-        within a margin of Q_max (overexcitation / rotor limit), the upper
-        V_gen bound is clamped to the current setpoint so the MIQP cannot
-        increase voltage further (which would push Q_gen past the limit).
-        Similarly, if Q_gen is near Q_min (underexcitation / stator limit),
-        the lower V_gen bound is clamped to prevent further voltage decrease.
+        An asymmetric V_gen bound clamp is still applied when the AVR
+        saturates (``self._sat_mode[k] != 0``): motion in the saturating
+        direction is blocked so the MIQP can only attempt de-saturation.
+        Saturation detection and mode transitions are hysteretic — see
+        :meth:`_classify_saturation_modes`.
+
+        OOS actuator bounds are collapsed to the current value
+        (contingency masking).
         """
         mapping = self.config.der_mapping
         if mapping is not None:
@@ -695,69 +745,29 @@ class TSOController(BaseOFOController):
         u_lower[n_der:n_der + n_pcc] = tso_dso_interface_q_current + self.pcc_capability_min_mvar
         u_upper[n_der:n_der + n_pcc] = tso_dso_interface_q_current + self.pcc_capability_max_mvar
 
-        # DEBUG
-        # print(f'ppc capability min: {u_lower[n_der:n_der + n_pcc]}')
-        # print(f'pcc capability max: {u_upper[n_der:n_der + n_pcc]}')
-
-        # --- AVR setpoint bounds ---
+        # --- AVR setpoint bounds (fixed physical band) ---
         avr_start = n_der + n_pcc
         avr_end = avr_start + n_gen
         u_lower[avr_start:avr_end] = self.config.gen_vm_min_pu
         u_upper[avr_start:avr_end] = self.config.gen_vm_max_pu
 
-        # Tighten V_gen bounds using generator capability curve
+        # --- AVR saturation: asymmetric clamp (Feature B, gated) ---
+        # When the AVR is saturated, the MIQP can only move in the
+        # de-saturating direction.  Saturation is detected with hysteresis
+        # in _classify_saturation_modes; this clamp reads _sat_mode.
         if (
-            self.actuator_bounds.gen_params is not None
-            and self._last_measurement is not None
-            and len(self._last_measurement.gen_p_mw) == n_gen
-            and len(self._last_measurement.gen_q_mvar) == n_gen
+            self.config.enable_saturation_mode
+            and self._u_current is not None
+            and n_gen > 0
         ):
-            meas = self._last_measurement
-            gen_p = meas.gen_p_mw
-            gen_v = meas.gen_vm_pu
-            gen_q = meas.gen_q_mvar
-
-            gen_q_min, gen_q_max = self.actuator_bounds.compute_gen_q_bounds(
-                gen_p, gen_v,
-            )
-
-            # Margin: clamp V_gen when Q is within this fraction of the limit
-            margin_frac = 0.1  # 10% of the capability range
-
             for k in range(n_gen):
-                q_range = gen_q_max[k] - gen_q_min[k]
-                if q_range <= 0:
-                    continue
-                margin = margin_frac * q_range
-
-                # Near overexcitation limit → block V_gen increase
-                # Clamp u_upper down to the current setpoint, but never
-                # below the absolute lower bound gen_vm_min_pu (otherwise
-                # u_lower > u_upper if the current setpoint happens to
-                # sit below the configured lower bound, e.g. when the
-                # bounds are tightened after the plant equilibrated at a
-                # lower voltage).
-                if gen_q[k] >= gen_q_max[k] - margin:
-                    u_upper[avr_start + k] = max(
-                        self.config.gen_vm_min_pu,
-                        min(
-                            u_upper[avr_start + k],
-                            self._u_current[avr_start + k],
-                        ),
-                    )
-
-                # Near underexcitation limit → block V_gen decrease.
-                # Clamp u_lower up to the current setpoint, but never
-                # above the absolute upper bound gen_vm_max_pu (symmetric
-                # safety to the overexcitation branch above).
-                if gen_q[k] <= gen_q_min[k] + margin:
-                    u_lower[avr_start + k] = min(
-                        self.config.gen_vm_max_pu,
-                        max(
-                            u_lower[avr_start + k],
-                            self._u_current[avr_start + k],
-                        ),
-                    )
+                mode = int(self._sat_mode[k])
+                if mode == +1:
+                    # Saturated at upper Q limit (overexcited): block V_gen raise
+                    u_upper[avr_start + k] = self._u_current[avr_start + k]
+                elif mode == -1:
+                    # Saturated at lower Q limit (underexcited): block V_gen drop
+                    u_lower[avr_start + k] = self._u_current[avr_start + k]
 
         # --- OLTC tap bounds (fixed mechanical limits) ---
         tap_min, tap_max = self.actuator_bounds.get_oltc_tap_bounds()
@@ -766,54 +776,6 @@ class TSOController(BaseOFOController):
         u_lower[tap_start:tap_end] = tap_min.astype(np.float64)
         u_upper[tap_start:tap_end] = tap_max.astype(np.float64)
 
-        # --- Directional OLTC blocking from generator capability curve ---
-        # When a generator's Q is near its capability limit, block the
-        # machine-transformer OLTC in the direction that would push Q
-        # further toward (or beyond) the limit.
-        # Tap convention: tap_up → V_HV decreases → Q_gen decreases.
-        #   Near Q_max (overexcited): block tap DECREASE (tap down raises
-        #       V_HV and increases Q_gen).
-        #   Near Q_min (underexcited): block tap INCREASE (tap up lowers
-        #       V_HV and decreases Q_gen).
-        if (
-            self.actuator_bounds.gen_params is not None
-            and self._last_measurement is not None
-            and self._u_current is not None
-            and self.config.gen_oltc_map
-            and len(self._last_measurement.gen_p_mw) == n_gen
-            and len(self._last_measurement.gen_q_mvar) == n_gen
-        ):
-            meas = self._last_measurement
-            gen_p = meas.gen_p_mw
-            gen_v = meas.gen_vm_pu
-            gen_q_cur = meas.gen_q_mvar
-            gen_q_lo, gen_q_hi = self.actuator_bounds.compute_gen_q_bounds(
-                gen_p, gen_v,
-            )
-            cap_margin_frac = 0.1
-
-            for gen_k, oltc_k in self.config.gen_oltc_map.items():
-                if gen_k >= n_gen or oltc_k >= n_oltc:
-                    continue
-                q_range = gen_q_hi[gen_k] - gen_q_lo[gen_k]
-                if q_range <= 0:
-                    continue
-                margin_oltc = cap_margin_frac * q_range
-
-                if gen_q_cur[gen_k] >= gen_q_hi[gen_k] - margin_oltc:
-                    # Block tap decrease (which raises V_HV / Q_gen)
-                    u_lower[tap_start + oltc_k] = max(
-                        u_lower[tap_start + oltc_k],
-                        self._u_current[tap_start + oltc_k],
-                    )
-
-                if gen_q_cur[gen_k] <= gen_q_lo[gen_k] + margin_oltc:
-                    # Block tap increase (which lowers V_HV / Q_gen)
-                    u_upper[tap_start + oltc_k] = min(
-                        u_upper[tap_start + oltc_k],
-                        self._u_current[tap_start + oltc_k],
-                    )
-
         # --- Shunt state bounds (fixed: -1, 0, +1) ---
         state_min, state_max = self.actuator_bounds.get_shunt_state_bounds()
         shunt_start = tap_end
@@ -821,7 +783,6 @@ class TSOController(BaseOFOController):
         u_upper[shunt_start:] = state_max.astype(np.float64)
 
         # --- Freeze OOS generators and OLTCs (contingency masking) ---
-        # Collapse bounds so the MIQP cannot move these actuators.
         if self._u_current is not None:
             for k in range(n_gen):
                 if self._oos_gen_mask[k]:
@@ -841,18 +802,21 @@ class TSOController(BaseOFOController):
         """
         Get output constraint limits.
 
-        Output ordering: [ V_bus | I_line ]
+        Output ordering: [ V_bus | I_line | Q_gen ]
 
         Voltage outputs are constrained to the permissible band
         [v_min_pu, v_max_pu].  Tracking toward voltage setpoints
         (if configured) is handled by the quadratic objective in
         ``_compute_objective_gradient()``, not by tight constraints.
-
-        Note: Q_PCC rows have been removed from the output vector.
+        Q_gen bounds are state-dependent (drawn from the generator PQ
+        capability curve each iteration) and enforced as soft outputs
+        with penalty ``rho_q_gen`` — see the ``g_z`` plumbing for the
+        corresponding slack weight.
         """
         n_v = len(self.config.voltage_bus_indices)
         n_i = len(self.config.current_line_indices)
-        n_outputs = n_v + n_i
+        n_gen = len(self.config.gen_indices)
+        n_outputs = n_v + n_i + n_gen
 
         y_lower = np.zeros(n_outputs)
         y_upper = np.zeros(n_outputs)
@@ -864,15 +828,6 @@ class TSOController(BaseOFOController):
             y_upper[idx] = self.config.v_max_pu
             idx += 1
 
-        # --- Q_PCC limits removed (Q_PCC_set is a direct decision variable) ---
-        # To re-enable, uncomment this block and update n_outputs above:
-        # n_pcc = len(self.config.pcc_trafo_indices)
-        # n_outputs = n_v + n_pcc + n_i  # (also update above)
-        # for _ in range(n_pcc):
-        #     y_lower[idx] = -1E6
-        #     y_upper[idx] = 1E6
-        #     idx += 1
-
         # --- Current limits (upper only, kA) ---
         for j in range(n_i):
             if self.config.current_line_max_i_ka is not None:
@@ -882,6 +837,34 @@ class TSOController(BaseOFOController):
             y_lower[idx] = 0.0
             y_upper[idx] = i_lim_ka
             idx += 1
+
+        # --- Generator Q capability limits (state-dependent) ---
+        if n_gen > 0:
+            if (
+                self.actuator_bounds.gen_params is not None
+                and self._last_measurement is not None
+                and len(self._last_measurement.gen_p_mw) == n_gen
+                and len(self._last_measurement.gen_vm_pu) == n_gen
+            ):
+                meas = self._last_measurement
+                q_min, q_max = self.actuator_bounds.compute_gen_q_bounds(
+                    meas.gen_p_mw, meas.gen_vm_pu,
+                )
+                y_lower[idx:idx + n_gen] = q_min
+                y_upper[idx:idx + n_gen] = q_max
+            else:
+                # No capability information yet (e.g. before first measurement).
+                # Use permissive bounds so the constraint is effectively inactive.
+                y_lower[idx:idx + n_gen] = -1e6
+                y_upper[idx:idx + n_gen] = +1e6
+
+            # OOS generators: open the bound so the soft constraint is inactive
+            # (the Q_gen row is also zeroed in H, so the slack is unused).
+            for k in range(n_gen):
+                if self._oos_gen_mask[k]:
+                    y_lower[idx + k] = -1e6
+                    y_upper[idx + k] = +1e6
+            idx += n_gen
 
         return y_lower, y_upper
 
@@ -952,13 +935,18 @@ class TSOController(BaseOFOController):
             Δy ≈ H · Δu
 
         Columns correspond to:  [ Q_DER | Q_PCC_set | V_gen_set | s_OLTC | s_shunt ]
-        Rows correspond to:     [ V_bus | I_line ]
+        Rows correspond to:     [ V_bus | I_line | Q_gen ]
 
-        Note: Q_PCC rows have been removed from the output vector.
-        Q_PCC_set is a direct decision variable; its effect on the
-        output vector is only through the voltage and current rows
-        (via ∂V/∂Q_PCC_set and ∂I/∂Q_PCC_set).  The code for Q_PCC
-        identity rows is retained (commented out) below.
+        Q_gen rows were added for the generator-capability soft
+        constraint (Feature A).  Q_PCC rows remain removed — Q_PCC_set
+        is a direct decision variable.
+
+        For generators flagged as saturated in ``self._sat_mode``
+        (Feature B), the corresponding V_gen column is zeroed across
+        all row blocks (PQ-mode treatment): a V_gen move in the
+        saturating direction has no effect on the network state while
+        the AVR is rail-bound.  Motion in the de-saturating direction
+        is caught at the next iteration's mode reclassification.
 
         Returns
         -------
@@ -984,7 +972,10 @@ class TSOController(BaseOFOController):
         n_i = len(self.config.current_line_indices)
 
         n_controls = n_der_bus + n_pcc + n_gen + n_oltc + n_shunt
-        n_outputs = n_v + n_i  # Q_PCC rows removed
+        n_outputs = n_v + n_i + n_gen  # Q_PCC rows removed; Q_gen rows appended
+
+        # Row offset of the Q_gen block (used below for the new fills).
+        q_row_start = n_v + n_i
 
         H = np.zeros((n_outputs, n_controls), dtype=np.float64)
 
@@ -1200,6 +1191,100 @@ class TSOController(BaseOFOController):
         # compute_dQtrafo3w_hv_dVgen_matrix() is available if Q_PCC
         # rows are re-enabled in the future.
 
+        # =====================================================================
+        # Q_gen rows: generator Q capability as a soft output (Feature A).
+        # =====================================================================
+        # Row offset: q_row_start = n_v + n_i (set earlier).
+        # Columns: DER | PCC_set | V_gen | OLTC | shunt, same as V/I rows.
+        if n_gen > 0:
+            # --- DER Q → Q_gen ---
+            if der_bus_indices:
+                dQgen_dQder, _, _ = \
+                    self.sensitivities.compute_dQgen_dQder_matrix(
+                        gen_bus_indices_pp=gen_terminal_buses,
+                        der_bus_indices=der_bus_indices,
+                    )
+                H[q_row_start:q_row_start + n_gen, :n_der] = dQgen_dQder
+
+            # --- PCC setpoint (load-convention) → Q_gen ---
+            # Same convention as V/I rows: Q_PCC_set is load-convention on the
+            # HV side, so negate the generator-convention sensitivity.
+            if pcc_hv_buses:
+                dQgen_dQpcc, _, pcc_map_q = \
+                    self.sensitivities.compute_dQgen_dQder_matrix(
+                        gen_bus_indices_pp=gen_terminal_buses,
+                        der_bus_indices=pcc_hv_buses,
+                    )
+                for j_pcc, bus in enumerate(pcc_hv_buses):
+                    if bus in pcc_map_q:
+                        j_jac = pcc_map_q.index(bus)
+                        col = n_der + j_pcc
+                        H[q_row_start:q_row_start + n_gen, col] = (
+                            -dQgen_dQpcc[:, j_jac]
+                        )
+
+            # --- V_gen setpoint → Q_gen  (includes direct diagonal term) ---
+            if is_gen_buses:
+                dQgen_dVgen, _, gen_map_q = \
+                    self.sensitivities.compute_dQgen_dVgen_matrix(
+                        gen_bus_indices_pp_meas=gen_terminal_buses,
+                        gen_bus_indices_pp_chg=is_gen_buses,
+                    )
+                for k, gen_bus_pp in enumerate(gen_terminal_buses):
+                    col = avr_start + k
+                    if gen_bus_pp in gen_map_q:
+                        j_chg = gen_map_q.index(gen_bus_pp)
+                        H[q_row_start:q_row_start + n_gen, col] = (
+                            dQgen_dVgen[:, j_chg]
+                        )
+
+            # --- 2W OLTC tap → Q_gen ---
+            if is_oltc_indices:
+                dQgen_dsOltc, _, _ = \
+                    self.sensitivities.compute_dQgen_ds_2w_matrix(
+                        gen_bus_indices_pp=gen_terminal_buses,
+                        oltc_trafo_indices=is_oltc_indices,
+                    )
+                # is_oltc_indices is a filtered (in-service) subset; remap to
+                # the full OLTC column ordering (OOS columns remain zero).
+                is_pos_q = 0
+                for k, t_idx in enumerate(self.config.oltc_trafo_indices):
+                    if not self._oos_oltc_mask[k]:
+                        target_col = n_der + n_pcc + n_gen + k
+                        H[q_row_start:q_row_start + n_gen, target_col] = (
+                            dQgen_dsOltc[:, is_pos_q]
+                        )
+                        is_pos_q += 1
+
+            # --- Shunt state → Q_gen ---
+            if self.config.shunt_bus_indices:
+                dQgen_dShunt, _, _ = \
+                    self.sensitivities.compute_dQgen_dQ_shunt_matrix(
+                        gen_bus_indices_pp=gen_terminal_buses,
+                        shunt_bus_indices=self.config.shunt_bus_indices,
+                        shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
+                    )
+                col_sh_start = n_der + n_pcc + n_gen + n_oltc
+                H[q_row_start:q_row_start + n_gen,
+                  col_sh_start:col_sh_start + n_shunt] = dQgen_dShunt
+
+            # OOS generators: zero the *row* for any out-of-service gen.
+            # (The column is also zeroed below via the existing loop, but
+            # row zeroing keeps Q_gen_oos unresponsive to every input.)
+            for k in range(n_gen):
+                if self._oos_gen_mask[k]:
+                    H[q_row_start + k, :] = 0.0
+
+        # --- Feature B: PQ-mode V_gen column zeroing for saturated AVRs ---
+        # Saturated gens have V_gen setpoint motion in the saturating
+        # direction with no network-state effect.  The asymmetric u-bound
+        # clamp in _compute_input_bounds allows only de-saturating motion;
+        # zeroing the column here keeps the cached model consistent.
+        if self.config.enable_saturation_mode:
+            for k in range(n_gen):
+                if self._sat_mode[k] != 0:
+                    H[:, avr_start + k] = 0.0
+
         # --- Zero out columns for OOS generators and OLTCs ---
         # An out-of-service generator has no voltage control authority;
         # an OOS machine-transformer OLTC has no tap-change effect.
@@ -1284,15 +1369,135 @@ class TSOController(BaseOFOController):
                     print(f"      trafo {t}: {u_old[i]:.2f} -> "
                           f"{self._u_current[n_der + i]:.2f} Mvar")
 
+    def _classify_saturation_modes(
+        self, measurement: Measurement,
+    ) -> NDArray[np.int8]:
+        """Update ``self._sat_mode`` in place using a hysteretic rule.
+
+        A generator's mode transitions according to its measured Q and the
+        current-operating-point PQ capability limits:
+
+        * Free (0) → +1 (saturated upper) if  ``Q ≥ Q_max − eps_enter``
+        * Free (0) → -1 (saturated lower) if  ``Q ≤ Q_min + eps_enter``
+        * +1 → Free   if  ``Q < Q_max − eps_exit``  (ε_exit > ε_enter)
+        * -1 → Free   if  ``Q > Q_min + eps_exit``
+
+        Hysteresis (ε_exit > ε_enter) prevents mode chatter at the limit.
+        The configured thresholds are validated in ``TSOControllerConfig``.
+
+        Returns
+        -------
+        previous_modes : NDArray[np.int8]
+            Copy of the mode vector *before* this call.  Useful for
+            detecting transitions (e.g. to drive ``apply_avr_mode_reset``).
+        """
+        previous = self._sat_mode.copy()
+        n_gen = len(self.config.gen_indices)
+        if n_gen == 0:
+            return previous
+        if self.actuator_bounds.gen_params is None:
+            return previous
+        if (
+            len(measurement.gen_p_mw) != n_gen
+            or len(measurement.gen_q_mvar) != n_gen
+            or len(measurement.gen_vm_pu) != n_gen
+        ):
+            return previous
+
+        q_min, q_max = self.actuator_bounds.compute_gen_q_bounds(
+            measurement.gen_p_mw, measurement.gen_vm_pu,
+        )
+        eps_enter = self.config.sat_eps_enter_mvar
+        eps_exit = self.config.sat_eps_exit_mvar
+
+        for k in range(n_gen):
+            if self._oos_gen_mask[k]:
+                # OOS generators stay in free mode — their column is zeroed
+                # in H anyway so sat-mode has no meaning.
+                self._sat_mode[k] = 0
+                continue
+
+            q = float(measurement.gen_q_mvar[k])
+            mode = int(previous[k])
+
+            if mode == 0:
+                if q >= q_max[k] - eps_enter:
+                    self._sat_mode[k] = +1
+                elif q <= q_min[k] + eps_enter:
+                    self._sat_mode[k] = -1
+            elif mode == +1:
+                if q < q_max[k] - eps_exit:
+                    self._sat_mode[k] = 0
+            elif mode == -1:
+                if q > q_min[k] + eps_exit:
+                    self._sat_mode[k] = 0
+
+        return previous
+
+    def apply_avr_mode_reset(
+        self, measurement: Measurement, previous_modes: NDArray[np.int8],
+    ) -> None:
+        """Reset the cached V_gen command to the measured value on saturation onset.
+
+        When a generator transitions from free mode (0) into a saturated
+        mode (±1), the commanded V_gen stored in ``self._u_current`` may
+        have diverged from the physically achieved terminal voltage while
+        the AVR was rail-bound.  Reset the command to the measured value
+        so the asymmetric bound clamp in ``_compute_input_bounds`` is
+        applied relative to the achieved voltage (AVT-style).
+
+        Transitions from saturated→free are left alone: the commanded
+        voltage already equals the achieved voltage (because the clamp
+        prevented moves in the saturating direction during saturation).
+
+        Parameters
+        ----------
+        measurement : Measurement
+            Current measurements (for ``gen_vm_pu``).
+        previous_modes : NDArray[np.int8]
+            Mode vector captured *before* :meth:`_classify_saturation_modes`
+            was called this iteration.
+        """
+        if self._u_current is None:
+            return
+        n_gen = len(self.config.gen_indices)
+        if n_gen == 0:
+            return
+        if len(measurement.gen_vm_pu) != n_gen:
+            return
+
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
+        n_pcc = len(self.config.pcc_trafo_indices)
+        avr_start = n_der + n_pcc
+
+        for k in range(n_gen):
+            prev = int(previous_modes[k])
+            curr = int(self._sat_mode[k])
+            if prev == 0 and curr != 0:
+                # Free → saturated transition: realign u_current with achieved V.
+                self._u_current[avr_start + k] = float(measurement.gen_vm_pu[k])
+
     def step(self, measurement: Measurement) -> ControllerOutput:
         """
         Execute one OFO iteration with voltage-dependent sensitivity updates.
 
-        Before delegating to :meth:`BaseOFOController.step`, this method
-        rescales shunt columns by ``(V_measured / V_cached)²`` to account
-        for the constant-susceptance nature of shunt devices, and caches
-        the measurement for use in ``_compute_input_bounds`` (generator
-        capability-curve bounds depend on measured P and V).
+        Pipeline (before delegating to :meth:`BaseOFOController.step`):
+
+        1. Cache the measurement for use in ``_compute_input_bounds`` and
+           ``_get_output_limits`` (capability-curve data).
+        2. Ensure H is built (first call only).
+        3. Rescale shunt columns for the new ``V²`` operating point.
+        4. Achieved-Value Tracking: reset PCC-Q command to measured values.
+        5. Classify AVR saturation modes with hysteresis (Feature B).
+        6. If any generator transitioned from free to saturated, reset its
+           commanded V_gen to the measured value so the asymmetric bound
+           clamp is applied relative to the achieved voltage.
+        7. If the mode vector changed, invalidate the sensitivity cache
+           so the next H build reflects the new PQ-mode V_gen columns.
         """
         # Cache measurement for capability-curve bounds in _compute_input_bounds
         self._last_measurement = measurement
@@ -1306,6 +1511,14 @@ class TSOController(BaseOFOController):
             )
         # Achieved-Value Tracking: reset PCC-Q to measured values
         self.apply_avt_reset(measurement)
+        # AVR saturation classification + mode-transition reset (Feature B, gated)
+        if self.config.enable_saturation_mode:
+            previous_modes = self._classify_saturation_modes(measurement)
+            self.apply_avr_mode_reset(measurement, previous_modes)
+            if np.any(previous_modes != self._sat_mode):
+                # Rebuild H so V_gen columns reflect the new PQ-mode mask.
+                self.invalidate_sensitivity_cache()
+                self._build_sensitivity_matrix()
 
         return super().step(measurement)
 

@@ -125,11 +125,11 @@ def compute_zonal_gen_dispatch(
 
     gen_p_max: Dict[int, float] = {}
     for gi in net.gen.index:
-        sn = net.gen.at[gi, "sn_mva"] if "sn_mva" in net.gen.columns else np.nan
-        if pd.isna(sn):
-            sn = net.gen.at[gi, "max_p_mw"] if "max_p_mw" in net.gen.columns else np.nan
-        if pd.isna(sn):
-            sn = float(net.gen.at[gi, "p_mw"]) * 2.0
+        sn = net.gen.at[gi, "sn_mva"]
+        assert not pd.isna(sn) and sn > 0, (
+            f"gen {gi} has invalid sn_mva={sn}; nameplate must be set in "
+            f"build_ieee39_net (see constants.NAMEPLATE_FACTOR)"
+        )
         gen_p_max[int(gi)] = float(sn)
 
     all_gen_indices = sorted(

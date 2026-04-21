@@ -2331,6 +2331,478 @@ class JacobianSensitivities:
         return matrix, list(trafo3w_indices), list(gen_bus_indices_pp)
 
     # =========================================================================
+    # G. Gen-bus Reactive Power Sensitivities (Q_gen as dependent output)
+    # =========================================================================
+    #
+    # For a PV generator bus k, the injected reactive power Q_gen,k is a
+    # dependent quantity of the power-flow solution:
+    #
+    #     Q_gen,k = V_k · Σ_j V_j · (G_kj sin(θ_k-θ_j) − B_kj cos(θ_k-θ_j))
+    #
+    # The sensitivity of Q_gen,k to any control input u propagates through
+    # the cached Jacobian:  dQ_gen,k/du = (∂Q_gen,k/∂x) · (∂x/∂u).  See
+    # compute_dQtrafo3w_hv_* for the same pattern applied to transformer Q.
+    # =========================================================================
+
+    def _compute_dQgen_dx(self, gen_bus_ppc: int) -> NDArray[np.float64]:
+        """Sensitivity of Q injected at PV bus k to state x = [θ_PV, θ_PQ, V_PQ].
+
+        V_k at the PV bus itself is NOT in x (held at setpoint), so its
+        direct contribution is handled separately by callers that perturb
+        V_gen_set.  The returned vector only contains entries on state
+        variables that the power flow treats as unknowns.
+        """
+        bus_data = self.net._ppc['bus']
+        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
+        n_bus = min(bus_data.shape[0], Ybus.shape[0])
+        V_complex = (
+            bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
+        )
+        Vm = np.abs(V_complex)
+        theta = np.angle(V_complex)
+        G = np.real(Ybus)
+        B = np.imag(Ybus)
+
+        k = gen_bus_ppc
+        V_k = Vm[k]
+
+        dQ_dtheta = np.zeros(n_bus)
+        dQ_dV = np.zeros(n_bus)
+
+        for i in range(n_bus):
+            if i == k:
+                # dQ_k/dθ_k = V_k Σ_{j≠k} V_j (G_kj cos + B_kj sin)
+                s = 0.0
+                for j in range(n_bus):
+                    if j != k:
+                        cos_kj = np.cos(theta[k] - theta[j])
+                        sin_kj = np.sin(theta[k] - theta[j])
+                        s += Vm[j] * (G[k, j] * cos_kj + B[k, j] * sin_kj)
+                dQ_dtheta[i] = V_k * s
+                # dQ_k/dV_k (used only for the direct term in compute_dQgen_dVgen)
+                dQ_dV[i] = -2.0 * V_k * B[k, k]
+                for j in range(n_bus):
+                    if j != k:
+                        cos_kj = np.cos(theta[k] - theta[j])
+                        sin_kj = np.sin(theta[k] - theta[j])
+                        dQ_dV[i] += Vm[j] * (G[k, j] * sin_kj - B[k, j] * cos_kj)
+            else:
+                cos_ki = np.cos(theta[k] - theta[i])
+                sin_ki = np.sin(theta[k] - theta[i])
+                dQ_dtheta[i] = V_k * Vm[i] * (-G[k, i] * cos_ki - B[k, i] * sin_ki)
+                dQ_dV[i] = V_k * (G[k, i] * sin_ki - B[k, i] * cos_ki)
+
+        pv_list = list(self.pv_buses)
+        pq_list = list(self.pq_buses)
+        n_pv = len(pv_list)
+
+        dQ_dx = np.zeros(self.x_size)
+        for idx_pv, bus_pv in enumerate(pv_list):
+            dQ_dx[idx_pv] = dQ_dtheta[bus_pv]
+        for idx_pq, bus_pq in enumerate(pq_list):
+            dQ_dx[n_pv + idx_pq] = dQ_dtheta[bus_pq]
+            dQ_dx[self.n_theta + idx_pq] = dQ_dV[bus_pq]
+
+        return dQ_dx
+
+    def _compute_dg_dVk(
+        self, gen_bus_ppc: int,
+    ) -> Tuple[NDArray[np.float64], float]:
+        """Mismatch derivative ∂g/∂V_k for a PV bus k, plus the self term ∂Q_k/∂V_k.
+
+        Mirrors the construction inside ``compute_dV_dVgen``.  Separated
+        here so ``compute_dQgen_dVgen_matrix`` can reuse the same ∂g/∂V_k
+        and the direct diagonal term ∂Q_k/∂V_k needed when the measurement
+        generator coincides with the setpoint-change generator.
+        """
+        bus_data = self.net._ppc['bus']
+        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
+        n_bus = min(bus_data.shape[0], Ybus.shape[0])
+        V_complex = (
+            bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
+        )
+        Vm = np.abs(V_complex)
+        theta = np.angle(V_complex)
+        G = np.real(Ybus)
+        B = np.imag(Ybus)
+
+        k = gen_bus_ppc
+        dP_dVk = np.zeros(n_bus)
+        dQ_dVk = np.zeros(n_bus)
+        for i in range(n_bus):
+            cos_ik = np.cos(theta[i] - theta[k])
+            sin_ik = np.sin(theta[i] - theta[k])
+            if i == k:
+                dP_dVk[i] = 2.0 * Vm[k] * G[k, k]
+                dQ_dVk[i] = -2.0 * Vm[k] * B[k, k]
+                for j in range(n_bus):
+                    if j != k:
+                        cos_kj = np.cos(theta[k] - theta[j])
+                        sin_kj = np.sin(theta[k] - theta[j])
+                        dP_dVk[i] += Vm[j] * (G[k, j] * cos_kj + B[k, j] * sin_kj)
+                        dQ_dVk[i] += Vm[j] * (G[k, j] * sin_kj - B[k, j] * cos_kj)
+            else:
+                dP_dVk[i] = Vm[i] * (G[i, k] * cos_ik + B[i, k] * sin_ik)
+                dQ_dVk[i] = Vm[i] * (G[i, k] * sin_ik - B[i, k] * cos_ik)
+
+        pv_list = list(self.pv_buses)
+        pq_list = list(self.pq_buses)
+        n_pv = len(pv_list)
+        dg_dVk = np.zeros(self.x_size)
+        for idx_pv, bus_pv in enumerate(pv_list):
+            dg_dVk[idx_pv] = dP_dVk[bus_pv]
+        for idx_pq, bus_pq in enumerate(pq_list):
+            dg_dVk[n_pv + idx_pq] = dP_dVk[bus_pq]
+            dg_dVk[self.n_theta + idx_pq] = dQ_dVk[bus_pq]
+
+        return dg_dVk, float(dQ_dVk[k])
+
+    def _compute_dg_dtau_2w(
+        self, trafo_idx: int,
+    ) -> Tuple[NDArray[np.float64], float, Dict[int, float]]:
+        """Mismatch derivative ∂g/∂τ for a 2-winding transformer tap ratio.
+
+        Returns ``(dg_dtau, delta_tau, dQ_direct)`` where:
+
+        * ``dg_dtau`` / ``delta_tau`` let callers form the indirect
+          state response ``dx/ds = -J⁻¹ (∂g/∂τ) Δτ``.
+        * ``dQ_direct`` is a ``{pandapower_bus_idx: dQ/dτ}`` dict for the
+          two trafo endpoints.  Callers observing Q at a PV bus must add
+          this direct term because V at a PV bus is not in x, so the
+          indirect chain rule misses the τ-dependence of Q at the PV
+          bus's own power balance equation.
+        """
+        if trafo_idx not in self.net.trafo.index:
+            raise ValueError(f"Transformer {trafo_idx} not found in network.")
+        ppc_br_idx = get_ppc_trafo_index(self.net, trafo_idx)
+        if ppc_br_idx is None:
+            raise ValueError(
+                f"Could not find pypower branch index for transformer {trafo_idx}."
+            )
+
+        hv_bus = self.net.trafo.at[trafo_idx, 'hv_bus']
+        lv_bus = self.net.trafo.at[trafo_idx, 'lv_bus']
+
+        V_i = self.net.res_bus.at[hv_bus, 'vm_pu']
+        V_j = self.net.res_bus.at[lv_bus, 'vm_pu']
+        theta_i = np.deg2rad(self.net.res_bus.at[hv_bus, 'va_degree'])
+        theta_j = np.deg2rad(self.net.res_bus.at[lv_bus, 'va_degree'])
+        theta = theta_i - theta_j
+
+        s0 = self.net.trafo.at[trafo_idx, 'tap_pos']
+        delta_tau = self.net.trafo.at[trafo_idx, 'tap_step_percent'] / 100.0
+        tau = 1.0 + s0 * delta_tau
+
+        r_pu = self.net._ppc['branch'][ppc_br_idx, 2]
+        x_pu = self.net._ppc['branch'][ppc_br_idx, 3]
+        y_pu = 1.0 / complex(r_pu, x_pu)
+        g = y_pu.real
+        b = y_pu.imag
+
+        theta_i_idx, v_i_idx = get_jacobian_indices(self.net, hv_bus)
+        theta_j_idx, v_j_idx = get_jacobian_indices(self.net, lv_bus)
+        if theta_i_idx is None or theta_j_idx is None:
+            raise ValueError("Could not find Jacobian indices for transformer buses.")
+
+        dg_dtau = np.zeros(self.x_size)
+        dPi_dtau = (
+            V_i * V_j * (g * np.cos(theta) + b * np.sin(theta)) / tau**2
+            - 2 * g * V_i**2 / tau**3
+        )
+        dPj_dtau = V_j * V_i * (g * np.cos(theta) - b * np.sin(theta)) / tau**2
+        dQi_dtau = (
+            V_i * V_j * (g * np.sin(theta) - b * np.cos(theta)) / tau**2
+            + 2 * b * V_i**2 / tau**3
+        )
+        dQj_dtau = V_j * V_i * (-g * np.sin(theta) - b * np.cos(theta)) / tau**2
+
+        if theta_i_idx is not None:
+            dg_dtau[theta_i_idx] += dPi_dtau
+        if theta_j_idx is not None:
+            dg_dtau[theta_j_idx] += dPj_dtau
+        if v_i_idx is not None:
+            dg_dtau[self.n_theta + v_i_idx] += dQi_dtau
+        if v_j_idx is not None and (self.n_theta + v_j_idx) < self.x_size:
+            dg_dtau[self.n_theta + v_j_idx] += dQj_dtau
+
+        dQ_direct = {int(hv_bus): float(dQi_dtau), int(lv_bus): float(dQj_dtau)}
+        return dg_dtau, float(delta_tau), dQ_direct
+
+    def compute_dQgen_dQder_matrix(
+        self,
+        gen_bus_indices_pp: List[int],
+        der_bus_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """∂Q_gen / ∂Q_DER for multiple generator buses (PV) and DER buses (PQ).
+
+        Returns
+        -------
+        matrix : NDArray[np.float64]
+            Shape ``(n_gen, n_der)``, units [Mvar/Mvar].
+        gen_bus_mapping : List[int]
+        der_bus_mapping : List[int]
+        """
+        n_gen = len(gen_bus_indices_pp)
+        n_der = len(der_bus_indices)
+        if n_gen == 0 or n_der == 0:
+            return np.zeros((n_gen, n_der)), list(gen_bus_indices_pp), list(der_bus_indices)
+
+        # Cache dQ_gen,k/dx for each generator bus
+        dQgen_dx_cache = np.zeros((n_gen, self.x_size))
+        for i, gen_bus_pp in enumerate(gen_bus_indices_pp):
+            gen_bus_ppc = pp_bus_to_ppc_bus(self.net, gen_bus_pp)
+            dQgen_dx_cache[i, :] = self._compute_dQgen_dx(gen_bus_ppc)
+
+        # For each DER bus (PQ), dx/dQ_der = +J_inv[:, n_theta + v_der_jac]
+        # Sign: consistent with dV_dQ_reduced (the PQ-block of J_inv^T ≡ D).
+        matrix = np.zeros((n_gen, n_der))
+        for j, der_bus in enumerate(der_bus_indices):
+            ppc_der = pp_bus_to_ppc_bus(self.net, der_bus)
+            _, v_der_jac = get_jacobian_indices_ppc(self.net, ppc_der)
+            if v_der_jac is None or v_der_jac >= self.n_v:
+                continue  # slack or PV bus — no Q perturbation makes sense
+            dx_dQder = self.J_inv[:, self.n_theta + v_der_jac]
+            matrix[:, j] = dQgen_dx_cache @ dx_dQder
+
+        return matrix, list(gen_bus_indices_pp), list(der_bus_indices)
+
+    def compute_dQgen_dVgen_matrix(
+        self,
+        gen_bus_indices_pp_meas: List[int],
+        gen_bus_indices_pp_chg: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """∂Q_gen_meas / ∂V_gen_chg for multiple measurement/setpoint gens.
+
+        Includes:
+
+        * Indirect term:  ``(∂Q_meas/∂x) · (-J⁻¹) · (∂g/∂V_chg)``
+        * Direct term (only when measurement gen == setpoint gen):
+          ``∂Q_k/∂V_k`` (diagonal self-contribution, not captured by x
+          because V at a PV bus is not a state variable).
+
+        Returns
+        -------
+        matrix : NDArray[np.float64]
+            Shape ``(n_meas, n_chg)``, units [Mvar/p.u.].
+        meas_mapping, chg_mapping : List[int]
+        """
+        n_meas = len(gen_bus_indices_pp_meas)
+        n_chg = len(gen_bus_indices_pp_chg)
+        if n_meas == 0 or n_chg == 0:
+            return np.zeros((n_meas, n_chg)), list(gen_bus_indices_pp_meas), list(gen_bus_indices_pp_chg)
+
+        # Cache dQ_gen,meas/dx for each measurement generator
+        meas_ppc = [
+            pp_bus_to_ppc_bus(self.net, gb) for gb in gen_bus_indices_pp_meas
+        ]
+        dQgen_dx_cache = np.zeros((n_meas, self.x_size))
+        for i, ppc in enumerate(meas_ppc):
+            dQgen_dx_cache[i, :] = self._compute_dQgen_dx(ppc)
+
+        matrix = np.zeros((n_meas, n_chg))
+        for j, chg_bus_pp in enumerate(gen_bus_indices_pp_chg):
+            chg_ppc = pp_bus_to_ppc_bus(self.net, chg_bus_pp)
+            dg_dVl, dQl_dVl = self._compute_dg_dVk(chg_ppc)
+            dx_dVl = -self.J_inv @ dg_dVl
+            # Indirect contribution for all measurement gens
+            matrix[:, j] = dQgen_dx_cache @ dx_dVl
+            # Direct term: matching meas bus picks up the diagonal self-term
+            for i, meas in enumerate(meas_ppc):
+                if meas == chg_ppc:
+                    matrix[i, j] += dQl_dVl
+
+        return matrix, list(gen_bus_indices_pp_meas), list(gen_bus_indices_pp_chg)
+
+    def compute_dQgen_ds_2w_matrix(
+        self,
+        gen_bus_indices_pp: List[int],
+        oltc_trafo_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """∂Q_gen / ∂s for multiple gens and 2W OLTC transformers.
+
+        Returns a matrix of shape ``(n_gen, n_oltc)`` in [Mvar per tap step].
+        Transformers not found in ``net.trafo`` contribute a zero column
+        (same graceful handling as ``build_sensitivity_matrix_H``).
+        """
+        n_gen = len(gen_bus_indices_pp)
+        n_oltc = len(oltc_trafo_indices)
+        if n_gen == 0 or n_oltc == 0:
+            return (
+                np.zeros((n_gen, n_oltc)),
+                list(gen_bus_indices_pp),
+                list(oltc_trafo_indices),
+            )
+
+        dQgen_dx_cache = np.zeros((n_gen, self.x_size))
+        for i, gb in enumerate(gen_bus_indices_pp):
+            ppc = pp_bus_to_ppc_bus(self.net, gb)
+            dQgen_dx_cache[i, :] = self._compute_dQgen_dx(ppc)
+
+        matrix = np.zeros((n_gen, n_oltc))
+        for j, t_idx in enumerate(oltc_trafo_indices):
+            try:
+                dg_dtau, delta_tau, dQ_direct = self._compute_dg_dtau_2w(t_idx)
+            except ValueError:
+                continue
+            dx_ds = -self.J_inv @ dg_dtau * delta_tau
+            matrix[:, j] = dQgen_dx_cache @ dx_ds
+            # Direct term: Q_calc at a trafo endpoint bus has an explicit
+            # τ-dependence through the branch equation that is not captured
+            # by the indirect chain ``dQgen_dx · dx/dτ``.  Add it when a
+            # generator sits at one of this trafo's endpoints.
+            for i, gb in enumerate(gen_bus_indices_pp):
+                if int(gb) in dQ_direct:
+                    matrix[i, j] += dQ_direct[int(gb)] * delta_tau
+
+        return matrix, list(gen_bus_indices_pp), list(oltc_trafo_indices)
+
+    def compute_dQgen_ds_3w_matrix(
+        self,
+        gen_bus_indices_pp: List[int],
+        oltc_trafo3w_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """∂Q_gen / ∂s for multiple gens and 3W OLTC transformers.
+
+        Reuses ``_compute_dg_dtau_3w`` and the HV-branch data helper.
+        Returns a matrix of shape ``(n_gen, n_oltc3w)`` in [Mvar per tap step].
+        """
+        n_gen = len(gen_bus_indices_pp)
+        n_oltc3w = len(oltc_trafo3w_indices)
+        if n_gen == 0 or n_oltc3w == 0:
+            return (
+                np.zeros((n_gen, n_oltc3w)),
+                list(gen_bus_indices_pp),
+                list(oltc_trafo3w_indices),
+            )
+
+        dQgen_dx_cache = np.zeros((n_gen, self.x_size))
+        for i, gb in enumerate(gen_bus_indices_pp):
+            ppc = pp_bus_to_ppc_bus(self.net, gb)
+            dQgen_dx_cache[i, :] = self._compute_dQgen_dx(ppc)
+
+        matrix = np.zeros((n_gen, n_oltc3w))
+        for j, t3w_idx in enumerate(oltc_trafo3w_indices):
+            try:
+                d = _get_trafo3w_hv_branch_data(self.net, t3w_idx)
+                dg_dtau = self._compute_dg_dtau_3w(d)
+                delta_tau = d['delta_tau']
+            except (ValueError, KeyError):
+                continue
+            dx_ds = -self.J_inv @ dg_dtau * delta_tau
+            matrix[:, j] = dQgen_dx_cache @ dx_ds
+
+        return matrix, list(gen_bus_indices_pp), list(oltc_trafo3w_indices)
+
+    def compute_dQgen_dQ_shunt_matrix(
+        self,
+        gen_bus_indices_pp: List[int],
+        shunt_bus_indices: List[int],
+        shunt_q_steps_mvar: List[float],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """∂Q_gen / ∂s_shunt for multiple gens and shunt buses.
+
+        A switchable shunt is modelled as a constant-susceptance device:
+        the Q injected per state step is ``q_step · V_bus²`` and the sign
+        is load-convention (negated relative to DER-Q convention).  This
+        mirrors ``compute_dQtrafo3w_hv_dQ_shunt``.
+
+        Returns a matrix of shape ``(n_gen, n_shunt)`` in [Mvar per state step].
+        """
+        n_gen = len(gen_bus_indices_pp)
+        n_shunt = len(shunt_bus_indices)
+        if n_gen == 0 or n_shunt == 0:
+            return (
+                np.zeros((n_gen, n_shunt)),
+                list(gen_bus_indices_pp),
+                list(shunt_bus_indices),
+            )
+        if len(shunt_q_steps_mvar) != n_shunt:
+            raise ValueError(
+                "shunt_bus_indices and shunt_q_steps_mvar must have equal length."
+            )
+
+        # Start from ∂Q_gen/∂Q at shunt buses (treating shunts as pseudo-DERs)
+        base_matrix, _, _ = self.compute_dQgen_dQder_matrix(
+            gen_bus_indices_pp, shunt_bus_indices,
+        )
+        matrix = np.zeros_like(base_matrix)
+        for j, shunt_bus in enumerate(shunt_bus_indices):
+            V_pu = self.net.res_bus.at[shunt_bus, 'vm_pu']
+            # Shunt Q is load-convention: negate for injection sign.
+            matrix[:, j] = -base_matrix[:, j] * shunt_q_steps_mvar[j] * V_pu**2
+
+        return matrix, list(gen_bus_indices_pp), list(shunt_bus_indices)
+
+    # =========================================================================
+    # H. PQ-mode (AVR saturation) variants of V_gen sensitivity columns
+    # =========================================================================
+    #
+    # When an AVR saturates (rotor/stator/under-excitation limit), the gen
+    # bus behaves as PQ (Q fixed at the reached limit, V free) rather than
+    # PV.  In the saturated regime, a V_gen setpoint move in the saturating
+    # direction has no effect on network state.  The asymmetric bound clamp
+    # (controller side) prevents motion in the saturating direction; the
+    # de-saturating direction is captured at the next iteration's mode
+    # reclassification.  We therefore zero the V_gen column for saturated
+    # generators — sidestepping a Schur-complement rebuild of the reduced
+    # Jacobian for a mixed PV/PQ state.
+    # =========================================================================
+
+    def compute_dV_dVgen_matrix_pqmode(
+        self,
+        gen_bus_indices_pp: List[int],
+        observation_bus_indices: List[int],
+        mode_vector: Optional[NDArray[np.int8]] = None,
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """Like :meth:`compute_dV_dVgen_matrix` but zeros the column for
+        any generator flagged as saturated in ``mode_vector`` (mode != 0).
+        """
+        matrix, obs_map, gen_map = self.compute_dV_dVgen_matrix(
+            gen_bus_indices_pp, observation_bus_indices,
+        )
+        if mode_vector is not None:
+            for j in range(min(len(mode_vector), matrix.shape[1])):
+                if mode_vector[j] != 0:
+                    matrix[:, j] = 0.0
+        return matrix, obs_map, gen_map
+
+    def compute_dI_dVgen_matrix_pqmode(
+        self,
+        line_indices: List[int],
+        gen_bus_indices_pp: List[int],
+        mode_vector: Optional[NDArray[np.int8]] = None,
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """PQ-mode variant of :meth:`compute_dI_dVgen_matrix`."""
+        matrix, line_map, gen_map = self.compute_dI_dVgen_matrix(
+            line_indices, gen_bus_indices_pp,
+        )
+        if mode_vector is not None:
+            for j in range(min(len(mode_vector), matrix.shape[1])):
+                if mode_vector[j] != 0:
+                    matrix[:, j] = 0.0
+        return matrix, line_map, gen_map
+
+    def compute_dQgen_dVgen_matrix_pqmode(
+        self,
+        gen_bus_indices_pp_meas: List[int],
+        gen_bus_indices_pp_chg: List[int],
+        mode_vector: Optional[NDArray[np.int8]] = None,
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """PQ-mode variant of :meth:`compute_dQgen_dVgen_matrix`.
+
+        The mode vector aligns with the *chg* (setpoint-change) generator
+        ordering: the V_gen column for saturated gens is zeroed.
+        """
+        matrix, meas_map, chg_map = self.compute_dQgen_dVgen_matrix(
+            gen_bus_indices_pp_meas, gen_bus_indices_pp_chg,
+        )
+        if mode_vector is not None:
+            for j in range(min(len(mode_vector), matrix.shape[1])):
+                if mode_vector[j] != 0:
+                    matrix[:, j] = 0.0
+        return matrix, meas_map, chg_map
+
+    # =========================================================================
     # Combined Sensitivity Matrix Construction
     # =========================================================================
 

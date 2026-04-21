@@ -50,6 +50,7 @@ import pandapower.networks as pn
 
 from network.ieee39.constants import (
     DISTRIBUTED_SLACK_GEN_INDICES,
+    NAMEPLATE_FACTOR,
     PROFILE_MEAN,
     ZONE3_BUSES_0IDX,
 )
@@ -66,6 +67,7 @@ def build_ieee39_net(
     *,
     ext_grid_vm_pu: float = 1.03,
     scenario: str = "base",
+    verbose: bool = False,
 ) -> Tuple[pp.pandapowerNet, IEEE39NetworkMeta]:
     """
     Build the IEEE 39-bus New England test network.
@@ -128,6 +130,24 @@ def build_ieee39_net(
     gen_indices: List[int] = sorted(int(g) for g in net.gen.index)
     gen_bus_indices: List[int] = [int(net.gen.at[g, "bus"]) for g in gen_indices]
 
+    # -- Explicit nameplate (sn_mva, max_p_mw) on every machine ---------------
+    # pandapower's case39() leaves sn_mva NaN.  Downstream consumers (capability
+    # plot, zonal dispatcher, actuator bounds, slack-weight loop) all need a
+    # consistent nameplate; we assign it here from the base-case p_mw so no
+    # fallback path is ever required.  See constants.NAMEPLATE_FACTOR.
+    for gi in net.gen.index:
+        p_base = float(net.gen.at[gi, "p_mw"])
+        sn = max(p_base * NAMEPLATE_FACTOR, 100.0)
+        net.gen.at[gi, "sn_mva"]   = sn
+        net.gen.at[gi, "max_p_mw"] = sn
+        net.gen.at[gi, "min_p_mw"] = 0.0
+    # ext_grid has no scheduled p_mw; nameplate is purely advisory for its
+    # slack_weight row (kept at 0 below).  Use the largest gen nameplate so any
+    # future consumer that reads ext_grid.sn_mva sees a non-NaN value.
+    _ext_sn = float(net.gen["sn_mva"].max()) if len(net.gen) else 100.0
+    for ei in net.ext_grid.index:
+        net.ext_grid.at[ei, "sn_mva"] = _ext_sn
+
     # -- Distributed-slack weights (approximate primary frequency response) ----
     # Only generators whose 0-indexed ``net.gen`` row is listed in
     # ``DISTRIBUTED_SLACK_GEN_INDICES`` participate.  Their weight is
@@ -136,10 +156,11 @@ def build_ieee39_net(
     # reference; non-participating gens hold their scheduled P).
     slack_set = set(DISTRIBUTED_SLACK_GEN_INDICES)
     for gi in net.gen.index:
-        sn = net.gen.at[gi, "sn_mva"] if "sn_mva" in net.gen.columns else np.nan
-        if pd.isna(sn) or sn <= 0:
-            sn = float(net.gen.at[gi, "p_mw"]) * 1.2
-        net.gen.at[gi, "slack_weight"] = float(sn) if int(gi) in slack_set else 0.0
+        sn = float(net.gen.at[gi, "sn_mva"])
+        assert sn > 0 and not pd.isna(sn), (
+            f"gen {gi} missing sn_mva; nameplate loop should have set it"
+        )
+        net.gen.at[gi, "slack_weight"] = sn if int(gi) in slack_set else 0.0
 
     for ei in net.ext_grid.index:
         net.ext_grid.at[ei, "slack_weight"] = 0.0
@@ -181,8 +202,10 @@ def build_ieee39_net(
             gen_grid_bus_indices.append(grid_bus)
             grid_vn = float(net.bus.at[grid_bus, "vn_kv"])
             gen_terminal_kv = 10.5
-            p_mw = float(net.gen.at[g, "p_mw"])
-            sn_mva = max(p_mw * 1.2, 100.0)
+            # Size the machine trafo at the generator nameplate (already set
+            # by the nameplate loop above).  Keeping trafo sn_mva ≥ gen sn_mva
+            # avoids bottlenecking the machine through its step-up.
+            sn_mva = float(net.gen.at[g, "sn_mva"])
 
             # Create terminal bus
             term_bus = pp.create_bus(
@@ -349,6 +372,29 @@ def build_ieee39_net(
     apply_fn = SCENARIO_REGISTRY[scenario]
     net, meta = apply_fn(net, meta, ext_grid_vm_pu=ext_grid_vm_pu,
                          new_gen_bus30_idx=_new_gen_bus30_idx)
+
+    if verbose:
+        p_load_const = float(
+            net.load.loc[net.load["profile_p"].isna(), "p_mw"].sum()
+        )
+        p_load_profile = float(
+            net.load.loc[net.load["profile_p"].notna(), "p_mw"].sum()
+        )
+        sgen_p = float(net.sgen["p_mw"].sum()) if len(net.sgen) else 0.0
+        gen_p_base = float(net.gen["p_mw"].sum())
+        gen_sn = float(net.gen["sn_mva"].sum())
+        eg_sn = float(net.ext_grid["sn_mva"].sum())
+        n_gen, n_sgen = len(net.gen), len(net.sgen)
+        print(
+            f"[build_ieee39_net scenario={scenario!r}] "
+            f"load P (const+profile@mean) = {p_load_const:.0f} + "
+            f"{p_load_profile:.0f} MW = {p_load_const + p_load_profile:.0f} MW | "
+            f"sgen P = {sgen_p:.0f} MW | "
+            f"gen P (base-case, n={n_gen}) = {gen_p_base:.0f} MW | "
+            f"nameplate sum sn_mva = {gen_sn:.0f} (gen) + {eg_sn:.0f} (ext) "
+            f"= {gen_sn + eg_sn:.0f} MVA | "
+            f"sgen count = {n_sgen}"
+        )
 
     return net, meta
 

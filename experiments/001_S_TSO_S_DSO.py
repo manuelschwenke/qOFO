@@ -495,7 +495,9 @@ def run_cascade(
         n_oltc=len(dso_oltc),
         n_shunt=len(dso_shunt_buses),
     )
-    gz_tso = config.build_gz_tso(n_v=len(tso_v_buses), n_i=len(tso_lines))
+    gz_tso = config.build_gz_tso(
+        n_v=len(tso_v_buses), n_i=len(tso_lines), n_gen=len(tso_gen_indices),
+    )
     gz_dso = config.build_gz_dso(
         n_iface=len(dso_iface_trafos), n_v=len(dso_v_buses), n_i=len(dso_lines)
     )

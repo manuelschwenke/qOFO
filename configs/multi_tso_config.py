@@ -114,6 +114,12 @@ class MultiTSOConfig:
     int_max_step:   int = 1
     int_cooldown:   int = 5
 
+    # -- AVR saturation handling (Feature B) -----------------------------------
+    enable_avr_saturation_mode: bool = False
+    """When True, enable the hysteretic AVR saturation classifier, the
+    asymmetric V_gen bound clamp, and the PQ-mode V_gen column zeroing.
+    False (default) keeps V_gen as a plain continuous control."""
+
     # -- DSO OLTC initialisation -----------------------------------------------
     oltc_init_v_target_pu: float = 1.03
     dso_oltc_init_tol_pu: float = 0.01
@@ -128,9 +134,21 @@ class MultiTSOConfig:
     that file."""
 
     # -- Slack variable penalty (g_z) ------------------------------------------
-    g_z_voltage:   float = 1E12
+    g_z_voltage:   float = 1E8
     g_z_current:   float = 0.0
     g_z_interface: float = 0.0
+    g_z_q_gen:     float = 1E-1
+    """Soft-constraint penalty for TSO Q_gen outputs (generator PQ capability).
+
+    Kept as a gentle nudge only — voltage tracking must dominate when a
+    generator exceeds its capability curve, because in the real system
+    the AVR will physically limit Q_gen anyway.  Prior default 1E2 gave
+    the Q_gen slack a gradient contribution roughly 1000x the voltage
+    tracker at realistic operating points (V~0.9, Q_gen~350 Mvar with
+    Q_max=300), which drove the TSO to ratchet machine-trafo OLTCs to
+    saturation against voltage tracking.  See the tap-sensitivity direct-
+    term fix in :meth:`sensitivity.jacobian.JacobianSensitivities.compute_dQgen_ds_2w_matrix`
+    for the related sensitivity correction."""
 
     # -- g_z warmup ------------------------------------------------------------
     g_z_warmup_s:     float = 900.0
@@ -146,9 +164,33 @@ class MultiTSOConfig:
     result_dir: str = "results"
 
     # -- Live plot -------------------------------------------------------------
-    live_plot:              bool = False
-    live_plot_load_balance: bool = False
-    live_plot_hv_power:     bool = False
+    live_plot_controller: bool = False
+    """Enable Figure 1 — MULTI-TSO CONTROLLER live plot."""
+
+    live_plot_cascade:    bool = False
+    """Enable Figure 2 — CASCADE-DSO CONTROLLER live plot."""
+
+    live_plot_system:     bool = False
+    """Enable Figure 3 — SYSTEM POWER FLOW live plot."""
+
+    live_plot_use_tex:    bool = False
+    """When True, live plots enable ``text.usetex`` with a classicthesis-
+    style mathpazo + eulervm preamble.  Requires a working LaTeX install
+    and slows every redraw.  When False (default), rcParams select a
+    Palatino-family serif font without any LaTeX dependency."""
+
+    live_plot_show_line_currents: bool = False
+    """When False, hide the TSO-line-currents tile on Figure 1 and the
+    DSO-line-currents tile on Figure 2.  Useful to make more vertical
+    room for the remaining tiles."""
+
+    live_plot_layout: str = "dual_screen"
+    """Window layout for the three live figures.
+    ``"thirds"``      -- three figures side-by-side, 1/3 primary screen each.
+    ``"dual_screen"`` -- Figures 1 and 2 half/half on the primary screen;
+                         Figure 3 full-screen on the secondary screen
+                         (falls back to ``"thirds"`` if no secondary).
+    """
 
     # -- Time-series profiles --------------------------------------------------
     use_profiles: bool = False

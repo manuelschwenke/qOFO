@@ -3,16 +3,23 @@ Scenario: wind_replace
 ======================
 Replace selected synchronous generators with STATCOM-capable wind parks.
 
-Zone 2:  ex-slack gen (term 30, IEEE G10/G1-ex-slack) removed; wind park
-         at HALF the original P_mw.  Retains IEEE G3 (pandapower gen_idx 1,
-         term 31, grid 9, 650 MW) as the Zone-2 synchronous anchor.
-Zone 1:  G1 (term 29) + G8 (term 36) removed; wind at SAME P_mw.
+Zone 1:  G1 (term 29) + G8 (term 36) removed.
          Retains G9 (term 37, ~830 MW) as synchronous anchor.
-Zone 3:  G4 (term 32) + G5 (term 33) removed; wind at SAME P_mw.
-         Retains G6 (term 34) + G7 (term 35) as synchronous anchors.
+Zone 2:  ex-slack gen (term 30, IEEE G10/G1-ex-slack) removed.
+         Retains IEEE G3 (pandapower gen_idx 1, term 31, grid 9,
+         650 MW) as the Zone-2 synchronous anchor.
+Zone 3:  G5 (term 33) + G6 (term 34) removed.
+         Retains G4 (term 32, grid 18) + G7 (term 35, grid 35) as
+         synchronous anchors.  This split keeps the two STATCOM wind
+         parks at *different* grid buses (18 and 21) instead of
+         collapsing both onto grid bus 18 via the two-trafo chain that
+         makes G4 and G5 share a grid bus after build_ieee39_net().
 
-Each replacement wind park sgen has:
-  - S_n = 1.2 * P_wp  (20 % oversized converter for Q headroom)
+Each replacement wind park sgen is sized as:
+  - P_n = WIND_REPLACE_SCALE * P_removed_gen  (default 1.0 → full
+    removed-gen P; tune via the module-level ``WIND_REPLACE_SCALE``)
+  - S_n = P_n  (no converter oversize; 'STATCOM' op-diagram still
+    provides the full Q-circle from S_n)
   - op_diagram = 'STATCOM'  (full-circle capability, no dead zone at P=0)
   - profile = 'WP10'
 
@@ -34,6 +41,14 @@ import pandapower as pp
 
 from network.ieee39.helpers import remove_generators
 from network.ieee39.meta import IEEE39NetworkMeta
+
+
+# ── Tunable wind-park sizing ─────────────────────────────────────────────
+# Multiplicative scale on the removed generator's base P_mw.  Default 1.0
+# means "wind park rated at the FULL removed-gen P" (per the docstring
+# convention).  Increase to oversize wind parks for additional zonal
+# headroom; decrease to study under-replacement scenarios.
+WIND_REPLACE_SCALE: float = 1.0
 
 
 def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
@@ -67,7 +82,7 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     # STATCOM-capable wind park.
     _z1_gens_to_remove_term = {29, 36}   # G1 + G8 {36}
     _z2_gens_to_remove_term = {30}       # ex-slack only; keep IEEE G3 at term 31
-    _z3_gens_to_remove_term = {33}   # G4 + G5 {32}
+    _z3_gens_to_remove_term = {33, 34}   # G5 (grid 18, shares with G4) + G6 (grid 21)
 
     # Classify each generator and decide whether to remove it
     _gens_to_remove: List[int] = []
@@ -90,16 +105,16 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     meta = remove_generators(net, meta, _gens_to_remove)
 
     # Create replacement wind park sgens at the same grid buses.
-    # Zone 2: P_wp = P_gen / 2   (half the original capacity)
-    # Zone 1, 3: P_wp = P_gen    (same installed power)
-    # S_n = 1.2 * P_rated (20% oversized converter for Q headroom).
-    #   Q_available = sqrt(S_n^2 - P^2) = sqrt(0.44) * P ~ 0.66 * P
-    # Operating diagram: STATCOM (full circle, no dead zone at P=0).
+    # All zones: P_wp = WIND_REPLACE_SCALE * P_removed_gen   (default 1.0 →
+    # full removed-gen P, restoring the docstring convention; tune via the
+    # module-level ``WIND_REPLACE_SCALE``).  S_n = P_wp (the STATCOM
+    # op-diagram exposes the full Q-circle from S_n alone, no extra
+    # converter oversize).
     _wp_sgen_indices: List[int] = []
     _wp_sgen_buses: List[int] = []
     _wp_info: List[Tuple[int, int, float, float]] = []  # (sgen_idx, bus, p, sn)
     for _g_idx, gb, gen_p, zone in _removed_gen_info:
-        wp_p = gen_p / 1.5 if zone == 2 else gen_p # ToDo: We can set STATCOM wind park capacities here
+        wp_p = gen_p * WIND_REPLACE_SCALE
         wp_sn = wp_p * 1.2
         idx = pp.create_sgen(
             net,

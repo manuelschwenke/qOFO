@@ -633,20 +633,19 @@ def add_hv_networks(
     # =====================================================================
 
     # =====================================================================
-    # 5. Verification power flow
+    # 5. Re-initialise TSO STATCOM Q via temp PV-gens, then verify PF
     # =====================================================================
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True,
-             init='auto', max_iteration=100)
-
-    # =====================================================================
-    # 6. Debug output
-    # =====================================================================
-    if verbose:
-        _print_hv_summary(hv_nets, net)
-
-    # ── Re-initialise STATCOM Q for the current operating point ──────
-    # TSO-side only: HV-side (subnet=="DN") STATCOMs stay at q_mvar=0
-    # at build time; the DSO controller dispatches their Q at run time.
+    # TSO-side wind park sgens carry a Q value seeded by ``wind_replace`` at
+    # the *pre-HV* operating point.  Adding the HV sub-networks shifts that
+    # operating point (load redistribution + new HV gens/loads), so the
+    # seeded Q is no longer self-consistent.  Temporarily disable the
+    # STATCOM sgens and replace them with PV-gens that fix vm_pu=1.03 at
+    # their grid bus; one PF then yields the Q each STATCOM must carry to
+    # hold that voltage at the new state.  The PF is robust because the
+    # PV-gens absorb mismatch as Q.
+    #
+    # HV-side (subnet=="DN") STATCOMs stay at q_mvar=0 at build time; the
+    # DSO controller dispatches their Q at run time.
     _statcom_mask = (
         net.sgen["name"].astype(str).str.contains("STATCOM")
         & (net.sgen["subnet"].astype(str) != "DN")
@@ -671,8 +670,18 @@ def add_hv_networks(
             net.sgen.at[si, "q_mvar"] = float(net.res_gen.at[gi, "q_mvar"])
             net.sgen.at[si, "in_service"] = True
         net.gen.drop(index=list(_tmp_map.keys()), inplace=True)
-        pp.runpp(net, run_control=False, calculate_voltage_angles=True,
-                 init='auto', max_iteration=100)
+
+    # Verification power flow (with STATCOM Q already self-consistent if
+    # the reinit ran above).  Runs unconditionally so scenarios without
+    # STATCOM sgens still get a final convergence check.
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True,
+             init='auto', max_iteration=100)
+
+    # =====================================================================
+    # 6. Debug output
+    # =====================================================================
+    if verbose:
+        _print_hv_summary(hv_nets, net)
 
     if verbose:
         is_dn = net.load["subnet"].astype(str) == "DN"

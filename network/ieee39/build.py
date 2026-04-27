@@ -49,7 +49,6 @@ import pandapower as pp
 import pandapower.networks as pn
 
 from network.ieee39.constants import (
-    DISTRIBUTED_SLACK_GEN_INDICES,
     NAMEPLATE_FACTOR,
     PROFILE_MEAN,
     ZONE3_BUSES_0IDX,
@@ -141,29 +140,29 @@ def build_ieee39_net(
         net.gen.at[gi, "sn_mva"]   = sn
         net.gen.at[gi, "max_p_mw"] = sn
         net.gen.at[gi, "min_p_mw"] = 0.0
-    # ext_grid has no scheduled p_mw; nameplate is purely advisory for its
-    # slack_weight row (kept at 0 below).  Use the largest gen nameplate so any
-    # future consumer that reads ext_grid.sn_mva sees a non-NaN value.
-    _ext_sn = float(net.gen["sn_mva"].max()) if len(net.gen) else 100.0
-    for ei in net.ext_grid.index:
-        net.ext_grid.at[ei, "sn_mva"] = _ext_sn
+    # ``net.ext_grid`` is expected to be empty at this point because
+    # ``swap_slack_to_bus38`` has replaced it with a ``slack=True`` gen.
+    # Any legacy consumer that still reads ``ext_grid.sn_mva`` would
+    # observe an empty table; we keep the set-loop for defensive
+    # behaviour in case another builder re-adds an ext_grid in future.
+    if not net.ext_grid.empty and len(net.gen):
+        _ext_sn = float(net.gen["sn_mva"].max())
+        for ei in net.ext_grid.index:
+            net.ext_grid.at[ei, "sn_mva"] = _ext_sn
 
     # -- Distributed-slack weights (approximate primary frequency response) ----
-    # Only generators whose 0-indexed ``net.gen`` row is listed in
-    # ``DISTRIBUTED_SLACK_GEN_INDICES`` participate.  Their weight is
-    # proportional to rated capacity (``sn_mva``).  All other gens and the
-    # single ``ext_grid`` get weight 0 (the ext_grid only anchors the angle
-    # reference; non-participating gens hold their scheduled P).
-    slack_set = set(DISTRIBUTED_SLACK_GEN_INDICES)
+    # Every synchronous machine in ``net.gen`` participates in the
+    # distributed slack with a weight proportional to its rated capacity
+    # (``sn_mva``).  The ``slack=True`` gen at bus 38 additionally
+    # anchors the voltage-angle reference (``swap_slack_to_bus38``
+    # already converted the former ``ext_grid`` into such a gen), so the
+    # former ``if ei in net.ext_grid`` branch is intentionally gone.
     for gi in net.gen.index:
         sn = float(net.gen.at[gi, "sn_mva"])
         assert sn > 0 and not pd.isna(sn), (
             f"gen {gi} missing sn_mva; nameplate loop should have set it"
         )
-        net.gen.at[gi, "slack_weight"] = sn if int(gi) in slack_set else 0.0
-
-    for ei in net.ext_grid.index:
-        net.ext_grid.at[ei, "slack_weight"] = 0.0
+        net.gen.at[gi, "slack_weight"] = sn
 
     # -- TN buses and lines ----------------------------------------------------
     tn_buses: List[int] = sorted(int(b) for b in net.bus.index
@@ -383,7 +382,11 @@ def build_ieee39_net(
         sgen_p = float(net.sgen["p_mw"].sum()) if len(net.sgen) else 0.0
         gen_p_base = float(net.gen["p_mw"].sum())
         gen_sn = float(net.gen["sn_mva"].sum())
-        eg_sn = float(net.ext_grid["sn_mva"].sum())
+        eg_sn = (
+            float(net.ext_grid["sn_mva"].sum())
+            if (not net.ext_grid.empty and "sn_mva" in net.ext_grid.columns)
+            else 0.0
+        )
         n_gen, n_sgen = len(net.gen), len(net.sgen)
         print(
             f"[build_ieee39_net scenario={scenario!r}] "

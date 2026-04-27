@@ -242,3 +242,14 @@ class MultiTSOIterationRecord:
     # Per-interface-trafo actual active power (HV side, parallel to
     # existing dso_trafo_q_actual_mvar).
     dso_trafo_p_actual_mw: Dict[str, float] = field(default_factory=dict)
+
+    # ── Comparison metrics (used by 002_M_TSO_M_DSO_COMPARE.py) ──────────────
+
+    total_losses_mw: float = 0.0
+    """Sum of res_line.pl_mw + res_trafo.pl_mw + res_trafo3w.pl_mw across the
+    whole combined network.  Filled at every step from the converged PF."""
+
+    gen_q_headroom_mvar: Dict[int, NDArray] = field(default_factory=dict)
+    """Per-zone array, parallel to ``zone_q_gen``: ``q_max(g) - |q_actual(g)|``
+    for each synchronous machine in that zone (positive = remaining
+    capability, zero = saturated, negative = capability violated)."""

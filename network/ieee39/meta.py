@@ -40,8 +40,12 @@ class IEEE39NetworkMeta:
 
     # ── Generators ───────────────────────────────────────────────────────────
     gen_indices: Tuple[int, ...]
-    """pandapower ``net.gen`` indices for the 9 PV generators.
-    (The slack generator is in ``net.ext_grid`` and is NOT controllable by OFO.)
+    """pandapower ``net.gen`` indices for every synchronous machine in the
+    model.  Since :func:`network.ieee39.helpers.swap_slack_to_bus38`
+    replaced the legacy ``ext_grid`` with a ``slack=True`` gen at bus 38,
+    this tuple contains all 10 machines (9 original PV gens + the slack-
+    enabled ex-G10 at bus 38) and every one of them is controllable by
+    the TSO OFO loop.
     """
 
     gen_bus_indices: Tuple[int, ...]

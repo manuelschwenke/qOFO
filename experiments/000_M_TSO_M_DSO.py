@@ -66,7 +66,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -139,6 +139,8 @@ from experiments.helpers import (
     apply_dso_controls,
     apply_qv_local_control,
     apply_zone_tso_controls,
+    install_cos_phi_one,
+    install_qv_characteristic_controllers,
     prepare_load_contingencies,
 )
 from sensitivity.jacobian import JacobianSensitivities
@@ -655,7 +657,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         zone_method = "fixed 3-area" if config.use_fixed_zones else "spectral"
         print("  MULTI-TSO / MULTI-DSO OFO -- IEEE 39-bus New England")
         print(f"  V_set = {v_set:.3f} p.u.  |  N_zones = 3")
-        print(f"  Zone partition: {zone_method}  |  5 HV sub-networks (DSO_1..DSO_5)")
+        print(f"  Zone partition: {zone_method}  |  4 HV sub-networks (DSO_1..DSO_4)")
         print("=" * 72)
 
     # =========================================================================
@@ -751,8 +753,23 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 break
 
     # ── Partition machine-transformer OLTCs per zone ───────────────────────────
+    # Exclude the slack gen's machine trafo from the controllable OLTC set.
+    # Its LV bus is the PYPOWER angle reference, so
+    # :func:`sensitivity.jacobian.JacobianSensitivities.compute_dV_ds_2w`
+    # cannot produce a sensitivity column for it (the reference bus is not
+    # in the Jacobian).  The slack gen's ``vm_pu`` setpoint already gives
+    # the TSO a direct voltage control at that terminal, so losing the
+    # redundant OLTC degree of freedom is acceptable.
+    slack_gen_term_buses: Set[int] = set()
+    if "slack" in net.gen.columns:
+        for g in net.gen.index[net.gen["slack"].astype(bool)]:
+            slack_gen_term_buses.add(int(net.gen.at[g, "bus"]))
+
     zone_oltc_trafos: Dict[int, List[int]] = {z: [] for z in zone_map}
     for t_idx, g_idx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+        lv_bus = int(net.trafo.at[t_idx, "lv_bus"])
+        if lv_bus in slack_gen_term_buses:
+            continue  # slack-gen OLTC excluded (see comment above)
         # Machine trafo's grid bus = hv_bus of the 2W transformer
         grid_bus = int(net.trafo.at[t_idx, "hv_bus"])
         for z, buses in zone_map.items():
@@ -1202,7 +1219,12 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # DIAGNOSTIC of the unconstrained-OFO spectral-gap condition, not a
     # tuning suggestion for this MIQP-OFO controller (see
     # analysis/observer/DISCUSSION.md "Note on naming").
-    observer = attach_observer(coordinator, zone_defs, config, verbose=verbose)
+    # Gated by ``config.run_stability_observer``; when False the observer
+    # is skipped entirely (no per-step recording, no end-of-run artefacts).
+    if config.run_stability_observer:
+        observer = attach_observer(coordinator, zone_defs, config, verbose=verbose)
+    else:
+        observer = None
 
     # =========================================================================
     # STEP 7b: Load profiles and compute zonal generator dispatch
@@ -1274,6 +1296,12 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     v_init_dso = config.oltc_init_v_target_pu  # coupler MV-side → 1.03
     tol_pu     = config.dso_oltc_init_tol_pu
     _local_dso = config.dso_mode == "local"
+    _local_tso = config.tso_mode == "local"
+    # Combined "any local controller in net.controller table that should be
+    # iterated by pp.runpp(run_control=...)".  True for cascade-DSO local mode
+    # (DiscreteTapControl on couplers) AND for TSO local Q(V) mode
+    # (CharacteristicControl on TSO windparks).
+    _run_control = _local_dso or _local_tso
 
     # -- Phase 1: STATCOM Q + machine 2W OLTC -----------------------------
     # TSO-side only: HV-side (subnet=="DN") STATCOMs stay at q_mvar=0
@@ -1423,15 +1451,25 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                       f"{n_dso_sgen} HV DER; OLTCs settled via DiscreteTapControl")
 
     # Re-converge with final Q and tap positions.
-    pp.runpp(net, run_control=_local_dso, calculate_voltage_angles=True,
+    pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
              max_iteration=50,
              distributed_slack=config.distributed_slack)
 
     # ── Slack bus diagnostic after OLTC init ──────────────────────────────
     if verbose >= 1:
-        _slack_idx = net.ext_grid.index[0]
-        _slack_p = float(net.res_ext_grid.at[_slack_idx, "p_mw"])
-        _slack_q = float(net.res_ext_grid.at[_slack_idx, "q_mvar"])
+        # Prefer the slack-gen form (IEEE 39 distributed slack); fall back
+        # to the legacy ext_grid form (TUDA benchmark, other networks).
+        _slack_p, _slack_q = float("nan"), float("nan")
+        if "slack" in net.gen.columns and len(net.gen) > 0:
+            _slack_gens = net.gen.index[net.gen["slack"].astype(bool)].tolist()
+            if _slack_gens:
+                _sg = _slack_gens[0]
+                _slack_p = float(net.res_gen.at[_sg, "p_mw"])
+                _slack_q = float(net.res_gen.at[_sg, "q_mvar"])
+        if (not np.isfinite(_slack_p)) and not net.ext_grid.empty:
+            _sg = net.ext_grid.index[0]
+            _slack_p = float(net.res_ext_grid.at[_sg, "p_mw"])
+            _slack_q = float(net.res_ext_grid.at[_sg, "q_mvar"])
         print(f"  Slack bus: P = {_slack_p:.1f} MW, Q = {_slack_q:.1f} Mvar")
         # Warn on extreme machine trafo taps
         for tidx in meta.machine_trafo_indices:
@@ -1728,6 +1766,77 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         else:  # "cos_phi_1" (default)
             apply_cos_phi_one_local_control(net, meta.hv_networks)
 
+    # ── TSO local-mode setup (one-shot, before main loop) ─────────────────
+    # In TSO local mode (L0/L1/L2 of the comparison experiment) the OFO
+    # controllers are skipped entirely.  To keep the TSO-side primary
+    # voltage control alive, three local-AVR pieces are installed here:
+    #
+    #   (1) Q(V) or cos phi=1 on every TSO-connected windpark sgen.
+    #   (2) Generator AVR setpoints pinned to ``config.v_setpoint_pu``
+    #       (1.03 pu by default).  Without OFO, nothing else writes
+    #       net.gen.vm_pu, but we re-pin defensively in case a profile
+    #       update touches it.
+    #   (3) DiscreteTapControl on every machine 2W trafo, V_target =
+    #       v_setpoint_pu, controlling the HV (grid) side.  These are
+    #       the same controllers used in the Phase 1 OLTC init at
+    #       lines ~1323; they were dropped after that init phase but
+    #       must be re-installed to stay active for the simulation.
+    _tso_der_idx_list: List[int] = [int(s) for s in meta.tso_der_indices]
+    if _local_tso:
+        # (1) Windpark Q control
+        if _tso_der_idx_list:
+            if config.tso_local_mode == "qv":
+                install_qv_characteristic_controllers(
+                    net, _tso_der_idx_list,
+                    v_set=config.tso_qv_setpoint_pu,
+                    slope=config.tso_qv_slope_pu,
+                    name_prefix="qv_tso",
+                )
+                if verbose >= 1:
+                    print(f"  [local TSO] Installed Q(V) CharacteristicControl on "
+                          f"{len(_tso_der_idx_list)} windpark sgens "
+                          f"(V_set={config.tso_qv_setpoint_pu:.3f}, "
+                          f"slope={config.tso_qv_slope_pu:.3f})")
+            else:  # "cos_phi_1"
+                install_cos_phi_one(net, _tso_der_idx_list)
+                if verbose >= 1:
+                    print(f"  [local TSO] Forced cos phi=1 (Q=0) on "
+                          f"{len(_tso_der_idx_list)} windpark sgens")
+
+        # (2) Pin generator AVR setpoints
+        net.gen.loc[:, "vm_pu"] = float(config.v_setpoint_pu)
+        if verbose >= 1:
+            print(f"  [local TSO] Pinned net.gen.vm_pu = {config.v_setpoint_pu:.3f} "
+                  f"on {len(net.gen)} synchronous machines")
+
+        # (3) Machine 2W OLTC DiscreteTapControl, HV side -> v_setpoint_pu
+        _mt_tol_pu = config.dso_oltc_init_tol_pu
+        for _tidx in meta.machine_trafo_indices:
+            DiscreteTapControl(
+                net, element_index=int(_tidx),
+                vm_lower_pu=config.v_setpoint_pu - _mt_tol_pu,
+                vm_upper_pu=config.v_setpoint_pu + _mt_tol_pu,
+                side="hv", element="trafo",
+            )
+        if verbose >= 1:
+            print(f"  [local TSO] Re-installed DiscreteTapControl on "
+                  f"{len(meta.machine_trafo_indices)} machine 2W trafos "
+                  f"(target HV side = {config.v_setpoint_pu:.3f} +/- "
+                  f"{_mt_tol_pu:.3f} p.u.)")
+
+    def _apply_local_tso() -> None:
+        """Re-apply TSO local-mode constraints after profile updates.
+
+        For Q(V) mode this is a no-op: CharacteristicControl iterates inside
+        every pp.runpp(run_control=True) using the current bus voltage.
+        For cos phi=1 mode the profile may have rewritten q_mvar (e.g. via
+        apply_profiles); re-zero it here so the next PF sees Q=0.
+        """
+        if not _local_tso or not _tso_der_idx_list:
+            return
+        if config.tso_local_mode == "cos_phi_1":
+            install_cos_phi_one(net, _tso_der_idx_list)
+
     for step in range(1, n_steps + 1):
         time_s  = step * config.dt_s
         run_tso = (step == 1) or _is_period_hit(time_s, config.tso_period_s)
@@ -1777,8 +1886,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             # the profile).
             if _local_der_active:
                 _apply_local_der()
-            pp.runpp(net, run_control=_local_dso, calculate_voltage_angles=True,
+            _apply_local_tso()
+            pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
                      max_iteration=50,
+                     max_iter=100,
                      distributed_slack=config.distributed_slack)
 
         # ── Apply contingency events ──────────────────────────────────────────
@@ -1807,10 +1918,12 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 # reflect the post-contingency operating point.
                 if _local_der_active:
                     _apply_local_der()
+                _apply_local_tso()
                 try:
-                    pp.runpp(net, run_control=_local_dso,
+                    pp.runpp(net, run_control=_run_control,
                              calculate_voltage_angles=True,
                              max_iteration=50,
+                             max_iter=100,
                              distributed_slack=config.distributed_slack)
                     pf_converged = True
                 except LoadflowNotConverged:
@@ -1827,9 +1940,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                     print("\n  *** Retrying PF with enforce_q_lims=True, "
                           "init='flat', max_iteration=100 ***\n")
                     try:
-                        pp.runpp(net, run_control=_local_dso,
+                        pp.runpp(net, run_control=_run_control,
                                  calculate_voltage_angles=True,
                                  max_iteration=100,
+                                 max_iter=100,
                                  distributed_slack=config.distributed_slack,
                                  enforce_q_lims=True,
                                  init="flat")
@@ -1858,7 +1972,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 coordinator.invalidate_sensitivity_cache()
 
         # ── TSO step ──────────────────────────────────────────────────────────
-        if run_tso:
+        # Skipped entirely in TSO local mode: the CharacteristicControllers
+        # (Q(V)) or the static cos phi=1 setting (Q=0) take over from the OFO
+        # coordinator.  The DSO loop below is also disabled for L0/L1/L2 because
+        # those scenarios use dso_mode='local'.
+        if run_tso and not _local_tso:
             tso_step_count += 1
             # Decide whether to refresh cross-sensitivities this step
             refresh_H = (config.sensitivity_update_interval > 0
@@ -1879,7 +1997,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
             # Passive stability recording.  Refreshes H for the observer only;
             # restores the controller's cached H_blocks immediately after.
-            observer_record_fresh(observer, coordinator, time_s=time_s)
+            if observer is not None:
+                observer_record_fresh(observer, coordinator, time_s=time_s)
 
             # Apply TSO controls to plant network
             for z, tso_out in tso_outputs.items():
@@ -1946,9 +2065,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             # Local DSO mode: apply HV-DER baseline (Q(V) or cos phi=1) before
             # running the final PF with DiscreteTapControl for coupler OLTCs.
             _apply_local_der()
+        _apply_local_tso()
         try:
-            pp.runpp(net, run_control=_local_dso, calculate_voltage_angles=True,
+            pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
                      max_iteration=50,
+                     max_iter=100,
                      distributed_slack=config.distributed_slack)
         except Exception as e:
             print(f"  [Step {step}] Power flow failed: {e}")
@@ -2025,6 +2146,50 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                     [net.res_gen.at[idx, "p_mw"] for idx in zd.gen_indices],
                     dtype=np.float64,
                 )
+                # Synchronous-machine Q headroom: q_max - |q_actual|.
+                # Positive = remaining capability, negative = capability
+                # violated.  Used by 002_M_TSO_M_DSO_COMPARE.py.
+                q_act = np.abs(rec.zone_q_gen[z])
+                q_max = np.array(
+                    [float(net.gen.at[g, "max_q_mvar"]) for g in zd.gen_indices],
+                    dtype=np.float64,
+                )
+                rec.gen_q_headroom_mvar[z] = q_max - q_act
+
+            # ── Live-plot ACTUATORS tiles (TSO controller live plot) ──────
+            # Populated from net state every step in BOTH OFO and local
+            # modes:
+            #   - zone_q_der:     net.sgen.q_mvar at each TSO DER index
+            #   - zone_v_gen:     net.gen.vm_pu (AVR setpoint, constant in
+            #                     local mode; OFO writes it from u_new)
+            #   - zone_oltc_taps: net.trafo.tap_pos at machine 2W indices
+            # The OFO TSO step also writes these from u_new on TSO ticks
+            # (every 3 min); reading from net state every step gives smooth
+            # time series across both modes.  Values reflect the converged
+            # PF (PF does not modify sgen.q_mvar / gen.vm_pu / trafo.tap_pos
+            # so for OFO they equal the commanded values).
+            if zd.tso_der_indices:
+                rec.zone_q_der[z] = np.array(
+                    [float(net.sgen.at[idx, "q_mvar"]) for idx in zd.tso_der_indices],
+                    dtype=np.float64,
+                )
+            if zd.gen_indices:
+                rec.zone_v_gen[z] = np.array(
+                    [float(net.gen.at[idx, "vm_pu"]) for idx in zd.gen_indices],
+                    dtype=np.float64,
+                )
+            if zd.oltc_trafo_indices:
+                rec.zone_oltc_taps[z] = np.array(
+                    [int(net.trafo.at[idx, "tap_pos"]) for idx in zd.oltc_trafo_indices],
+                    dtype=np.int64,
+                )
+
+        # ── Total network losses (single scalar per record) ──────────────────
+        rec.total_losses_mw = (
+            float(net.res_line["pl_mw"].sum())
+            + float(net.res_trafo["pl_mw"].sum())
+            + float(net.res_trafo3w["pl_mw"].sum())
+        )
 
         # ── Record per-zone live-plot observables (loadings, balances,
         #    tie-line Q, shunt states) every step.
@@ -2085,7 +2250,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             _stability_analysis_done = True
             # NOTE: g_w tuning now runs at t=0 (before the main loop),
             # not here.  Only the delayed stability report remains.
-            if config.run_stability_analysis:
+            # Skip stability analysis entirely in TSO local mode: the
+            # multi-zone OFO controllers are bypassed, so the spectral-gap
+            # analysis is not meaningful (and would dereference state that
+            # the local-mode runner never populates).
+            if config.run_stability_analysis and not _local_tso:
                 try:
                     stab_result = _run_delayed_stability_analysis(
                         config=config,
@@ -2145,17 +2314,18 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # =========================================================================
     # STEP 10: Stability observer trajectory report
     # =========================================================================
-    write_observer_results_alongside_report(
-        observer, config.result_dir, verbose=verbose,
-    )
-    tuned = derive_tuned_gw(observer, statistic="percentile", percentile=95.0)
-    if verbose >= 1 and tuned.per_zone:
-        print()
-        print("[9b] Spectral-gap floor (p95, unconstrained-OFO equivalent g_w):")
-        print("     [DIAGNOSTIC ONLY -- not a tuning recommendation for the MIQP loop]")
-        for z, vals in sorted(tuned.per_zone.items()):
-            parts = [f"{k}={v:.2f}" for k, v in vals.items()]
-            print(f"  Zone {z}: " + ", ".join(parts))
+    if observer is not None:
+        write_observer_results_alongside_report(
+            observer, config.result_dir, verbose=verbose,
+        )
+        tuned = derive_tuned_gw(observer, statistic="percentile", percentile=95.0)
+        if verbose >= 1 and tuned.per_zone:
+            print()
+            print("[9b] Spectral-gap floor (p95, unconstrained-OFO equivalent g_w):")
+            print("     [DIAGNOSTIC ONLY -- not a tuning recommendation for the MIQP loop]")
+            for z, vals in sorted(tuned.per_zone.items()):
+                parts = [f"{k}={v:.2f}" for k, v in vals.items()]
+                print(f"  Zone {z}: " + ", ".join(parts))
 
     return log
 
@@ -2175,10 +2345,10 @@ def main_comparison() -> None:
 
     # ── Shared parameters (identical for both scenarios) ─────────────────
     base_kwargs = dict(
-        n_total_s=60.0 * 330,      # 720-min full simulation
+        n_total_s=60.0 * 60 * 6,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
-        g_v=120000.0,  # TSO voltage tracking; drives PCC Q dispatch
+        g_v=150000.0,  # TSO voltage tracking; drives PCC Q dispatch
         # ── DSO objective tuning ──
         dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
@@ -2186,27 +2356,34 @@ def main_comparison() -> None:
         dso_q_integral_max_mvar=50.0,  # anti-windup clamp
         dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
         # ── TSO weights (alpha=1, spectral rho(C)/2) ──
-        g_w_der=20,   # single-DER zones; rho~C_jj=396 -> min 198
-        g_w_gen=2e7,   # excluded from stability
+        g_w_der=10,   # single-DER zones; rho~C_jj=396 -> min 198
+        g_w_gen=4e7,   # excluded from stability
         # ── DSO weights (alpha=1, rho(C_DER)=790 -> min 395) ──
         g_w_dso_der=1000,  # 8 correlated DER; sf~2.5 for smooth tracking
-        g_w_dso_oltc=50,   # rho(C_OLTC)~1.1; higher for switching suppression
+        g_w_dso_oltc=30,   # rho(C_OLTC)~1.1; higher for switching suppression
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
         verbose=1,
         live_plot_system=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 3, 0),
+        start_time=datetime(2016, 4, 15, 12, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
+            # Example: trip line 0 at t=30 min, restore at t=60 min
+            # ContingencyEvent(minute=100, element_type="line", element_index=8, action="trip"),
+            # ContingencyEvent(minute=150, element_type="line", element_index=8, action="restore"),
             ContingencyEvent(minute=90, element_type="gen", element_index=5, action="trip"),
             ContingencyEvent(minute=180, element_type="gen", element_index=5, action="restore"),
-            ContingencyEvent(minute=240, element_type="load", bus=5, p_mw=300, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=300, element_type="load", bus=5, p_mw=300, q_mvar=100, action="trip"),
-            ContingencyEvent(minute=30, element_type="load", bus=13, p_mw=300, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=120, element_type="load", bus=13, p_mw=300, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=120, element_type="load", bus=5, p_mw=400, q_mvar=200, action="connect"),
+            ContingencyEvent(minute=300, element_type="load", bus=5, p_mw=400, q_mvar=200, action="trip"),
+            ContingencyEvent(minute=330, element_type="gen", element_index=4, action="trip"),
+            ContingencyEvent(minute=420, element_type="gen", element_index=4, action="restore"),
+            ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
+            ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
+            ContingencyEvent(minute=720, element_type="load", bus=7, p_mw=300, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=900, element_type="load", bus=7, p_mw=300, q_mvar=100, action="trip"),
         ],
     )
 
@@ -2215,7 +2392,7 @@ def main_comparison() -> None:
         **base_kwargs,
         g_q=200,
         g_w_pcc=100,
-        g_w_tso_oltc=50,
+        g_w_tso_oltc=100,
         live_plot_controller=True,
         live_plot_cascade=True,
     )
@@ -2224,9 +2401,9 @@ def main_comparison() -> None:
     cfg_b = dataclasses.replace(
         cfg_a,
         dso_mode="local",       # local controllers instead of OFO
-        g_w_pcc=1e10,           # TSO cannot dispatch Q_PCC (no coordination)
+        g_w_pcc=1e5,           # TSO cannot dispatch Q_PCC (no coordination)
         g_q=0,
-        g_w_tso_oltc=1000,
+        g_w_tso_oltc=250,
         local_der_mode="cos_phi_1",  # unity power factor for HV-connected DER
         warmup_s=900.0,         # 15 min: let TSO OFO settle before baseline activates
         live_plot_controller=True,
@@ -2328,7 +2505,7 @@ def main() -> None:
         python run/run_M_TSO_M_DSO.py
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 8,      # 720-min full simulation
+        n_total_s=60.0 * 60 * 16,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
         g_v=120000.0,  # TSO voltage tracking; drives PCC Q dispatch
@@ -2340,7 +2517,7 @@ def main() -> None:
         dso_q_integral_max_mvar=50.0,  # anti-windup clamp
         dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
         # ── TSO weights (alpha=1, spectral rho(C)/2) ──
-        g_w_der=20,   # single-DER zones; rho~C_jj=396 -> min 198
+        g_w_der=10,   # single-DER zones; rho~C_jj=396 -> min 198
         g_w_gen=5e7,   # excluded from stability
         g_w_pcc=100,   # 9 correlated PCCs; rho(C)=221 -> min 111
         g_w_tso_oltc=100,
@@ -2353,9 +2530,9 @@ def main() -> None:
         verbose=1,
         live_plot_controller=True,
         live_plot_cascade=True,
-        live_plot_system=True,
+        live_plot_system=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 6, 0),
+        start_time=datetime(2016, 4, 15, 12, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
@@ -2364,12 +2541,14 @@ def main() -> None:
             # ContingencyEvent(minute=150, element_type="line", element_index=8, action="restore"),
             ContingencyEvent(minute=90, element_type="gen", element_index=5, action="trip"),
             ContingencyEvent(minute=180, element_type="gen", element_index=5, action="restore"),
-            ContingencyEvent(minute=300, element_type="load", bus=5, p_mw=300, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=420, element_type="load", bus=5, p_mw=300, q_mvar=100, action="trip"),
-            # ContingencyEvent(minute=420, element_type="load", bus=13, p_mw=300, q_mvar=100, action="connect"),
-            # ContingencyEvent(minute=600, element_type="load", bus=13, p_mw=300, q_mvar=100, action="trip"),
-            # ContingencyEvent(minute=720, element_type="load", bus=7, p_mw=300, q_mvar=100, action="connect"),
-            # ContingencyEvent(minute=780, element_type="load", bus=7, p_mw=300, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=120, element_type="load", bus=5, p_mw=300, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=300, element_type="load", bus=5, p_mw=300, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=330, element_type="gen", element_index=2, action="trip"),
+            ContingencyEvent(minute=420, element_type="gen", element_index=2, action="restore"),
+            ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
+            ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
+            ContingencyEvent(minute=720, element_type="load", bus=7, p_mw=300, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=900, element_type="load", bus=7, p_mw=300, q_mvar=100, action="trip"),
         ],
     )
     log = run_multi_tso_dso(cfg)

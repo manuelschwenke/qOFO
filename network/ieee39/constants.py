@@ -16,15 +16,15 @@ from typing import Dict, List, Set, Tuple
 # ---------------------------------------------------------------------------
 #  Distributed slack (primary frequency response)
 # ---------------------------------------------------------------------------
-# 0-indexed generator indices (rows in ``net.gen``) that participate in the
-# distributed slack.  Non-listed generators get ``slack_weight = 0`` and the
-# ``net.ext_grid`` is always at ``0`` (angle reference only).
-#
-# The weight each participating generator receives is proportional to its
-# ``sn_mva`` (uniform droop in per-unit of rated capacity).  Set this list
-# to ``()`` to fall back to legacy single-ext-grid behaviour.
-
-DISTRIBUTED_SLACK_GEN_INDICES: Tuple[int, ...] = tuple(range(9))
+# Historical note.  Previous builds kept the case39 ``ext_grid`` as the
+# voltage-angle reference and only a subset of ``net.gen`` rows
+# participated in the distributed-slack P allocation
+# (``DISTRIBUTED_SLACK_GEN_INDICES``).  After the refactor in
+# :func:`network.ieee39.helpers.swap_slack_to_bus38` the ``ext_grid`` is
+# replaced by a ``slack=True`` gen at bus 38 with a finite Q capability
+# envelope; every synchronous machine in ``net.gen`` then participates
+# in the distributed slack with ``slack_weight = sn_mva``.  No filter
+# list is needed — see :mod:`network.ieee39.build`.
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ DISTRIBUTED_SLACK_GEN_INDICES: Tuple[int, ...] = tuple(range(9))
 #   - distributed-slack weights     (network/ieee39/build.py)
 #   - actuator bounds / Q-limits    (core/actuator_bounds.py)
 
-NAMEPLATE_FACTOR: float = 2.0
+NAMEPLATE_FACTOR: float = 1.0
 
 
 # ---------------------------------------------------------------------------

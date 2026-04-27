@@ -32,12 +32,24 @@ def _network_state(net: pp.pandapowerNet, source: str = "COMBINED") -> NetworkSt
     buses = np.array(net.bus.index, dtype=np.int64)
     vm = net.res_bus.loc[buses, "vm_pu"].values.astype(np.float64)
     va = np.deg2rad(net.res_bus.loc[buses, "va_degree"].values.astype(np.float64))
-    slack = int(net.ext_grid.at[net.ext_grid.index[0], "bus"])
+
+    # The slack bus can live in either ``net.ext_grid`` (legacy networks
+    # such as TUDA) or as a ``net.gen`` row with ``slack=True`` (IEEE 39
+    # after swap_slack_to_bus38: distributed-slack-ready).  Look for the
+    # gen form first, then fall back to the ext_grid form.
+    slack = -1
+    if "slack" in net.gen.columns and len(net.gen) > 0:
+        _slack_gens = net.gen.index[net.gen["slack"].astype(bool)].tolist()
+        if _slack_gens:
+            slack = int(net.gen.at[_slack_gens[0], "bus"])
+    if slack < 0 and not net.ext_grid.empty:
+        slack = int(net.ext_grid.at[net.ext_grid.index[0], "bus"])
+
     pv = np.array(
         [
             int(net.gen.at[g, "bus"])
             for g in net.gen.index
-            if net.gen.at[g, "in_service"]
+            if net.gen.at[g, "in_service"] and int(net.gen.at[g, "bus"]) != slack
         ],
         dtype=np.int64,
     )

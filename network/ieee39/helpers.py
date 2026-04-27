@@ -63,24 +63,31 @@ def swap_slack_to_bus38(
     net: pp.pandapowerNet,
     ext_grid_vm_pu: float,
 ) -> int:
-    """Move ext_grid from bus 30 to bus 38 (IEEE standard slack location).
+    """Replace the case39 ext_grid slack with a distributed-slack-ready gen.
 
-    pandapower case39() places the slack at bus 30 (0-indexed = bus 31,
-    1-indexed).  The IEEE 39-bus standard has the slack / equivalent
-    generator at bus 39 (1-indexed) = bus 38 (0-indexed).
+    pandapower case39() places the slack at an ``ext_grid`` on bus 30
+    (0-indexed = bus 31 1-indexed).  The IEEE 39-bus standard has the
+    slack / equivalent generator at bus 39 (1-indexed) = bus 38 (0-indexed).
 
-    This function:
-      1. Removes the PV generator at bus 38 (gen index 8, 1000 MW).
-      2. Moves the ext_grid to bus 38.
-      3. Creates a new PV generator at bus 30 with limits taken from the
-         original ext_grid entry (max_p_mw=646, max_q_mvar=300, etc.).
+    This function converts the network to a fully-distributed-slack layout:
+
+      1. Removes the PV generator at bus 38 (the case39 IEEE G9 slot).
+      2. Creates a new PV generator at bus 30 with limits taken from the
+         original ext_grid entry.
+      3. Drops the ``ext_grid`` and creates a real :class:`gen` at bus 38
+         with ``slack=True``.  This gen anchors the voltage-angle
+         reference AND participates in the distributed active-power
+         slack with a positive ``slack_weight`` (assigned by
+         ``build_ieee39_net``).  It has finite Q capability just like
+         every other synchronous machine — Q imbalance is no longer
+         absorbed silently by an ideal-voltage ext_grid.
 
     Returns the pandapower index of the newly created generator at bus 30.
     """
     eg_idx = net.ext_grid.index[0]
     old_bus = int(net.ext_grid.at[eg_idx, "bus"])      # 30
 
-    # Save original ext_grid limits for the replacement gen
+    # Save original ext_grid limits for the replacement gen at bus 30
     eg_max_p = float(net.ext_grid.at[eg_idx, "max_p_mw"])
     eg_min_p = float(net.ext_grid.at[eg_idx, "min_p_mw"])
     eg_max_q = float(net.ext_grid.at[eg_idx, "max_q_mvar"])
@@ -91,16 +98,7 @@ def swap_slack_to_bus38(
     if gen_at_38:
         net.gen.drop(index=gen_at_38, inplace=True)
 
-    # -- 2. Move ext_grid to bus 38 --------------------------------------------
-    net.ext_grid.at[eg_idx, "bus"] = 38
-    net.ext_grid.at[eg_idx, "vm_pu"] = ext_grid_vm_pu
-    # Clear P/Q limits on ext_grid — as the slack it absorbs residual
-    net.ext_grid.at[eg_idx, "max_p_mw"] = 1e6
-    net.ext_grid.at[eg_idx, "min_p_mw"] = -1e6
-    net.ext_grid.at[eg_idx, "max_q_mvar"] = 1e6
-    net.ext_grid.at[eg_idx, "min_q_mvar"] = -1e6
-
-    # -- 3. Fix trafo 1 (hv=5, lv=30) impedance --------------------------------
+    # -- 2. Fix trafo 1 (hv=5, lv=30) impedance --------------------------------
     # In case39 this trafo has vk=45 % because bus 30 represents the
     # equivalent NY external system behind a high-impedance connection.
     # When we place a real generator at bus 30, the machine-trafo loop
@@ -115,7 +113,7 @@ def swap_slack_to_bus38(
         net.trafo.at[ti, "pfe_kw"] = 0.0
         net.trafo.at[ti, "i0_percent"] = 0.0
 
-    # -- 4. Create new PV generator at bus 30 -----------------------------------
+    # -- 3. Create new PV generator at bus 30 -----------------------------------
     new_gen_idx = pp.create_gen(
         net,
         bus=old_bus,
@@ -128,6 +126,27 @@ def swap_slack_to_bus38(
         in_service=True,
         name="Gen_bus30 (ex-slack)",
     )
+
+    # -- 4. Replace ext_grid with a slack-enabled gen at bus 38 ----------------
+    # The new gen inherits a realistic IEEE G10 nameplate (1000 MW / 500
+    # Mvar envelope).  ``slack=True`` anchors θ=0 at bus 38; the nameplate
+    # loop in build_ieee39_net assigns its sn_mva and P limits via
+    # NAMEPLATE_FACTOR; its ``slack_weight`` is set downstream to its
+    # nameplate so it participates in the distributed-slack P allocation
+    # like every other machine.
+    pp.create_gen(
+        net,
+        bus=38,
+        p_mw=1000.0,
+        vm_pu=ext_grid_vm_pu,
+        max_p_mw=1000.0, min_p_mw=0.0,
+        max_q_mvar=500.0, min_q_mvar=-500.0,
+        slack=True,
+        in_service=True,
+        name="Gen_bus38 (slack anchor, ex-G10)",
+    )
+    net.ext_grid.drop(index=eg_idx, inplace=True)
+
     return int(new_gen_idx)
 
 

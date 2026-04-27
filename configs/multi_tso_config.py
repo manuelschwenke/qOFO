@@ -112,7 +112,7 @@ class MultiTSOConfig:
 
     # -- Integer switching logic -----------------------------------------------
     int_max_step:   int = 1
-    int_cooldown:   int = 5
+    int_cooldown:   int = 9
 
     # -- AVR saturation handling (Feature B) -----------------------------------
     enable_avr_saturation_mode: bool = False
@@ -134,10 +134,10 @@ class MultiTSOConfig:
     that file."""
 
     # -- Slack variable penalty (g_z) ------------------------------------------
-    g_z_voltage:   float = 1E8
+    g_z_voltage:   float = 1E-12
     g_z_current:   float = 0.0
     g_z_interface: float = 0.0
-    g_z_q_gen:     float = 1E-1
+    g_z_q_gen:     float = 1E-2
     """Soft-constraint penalty for TSO Q_gen outputs (generator PQ capability).
 
     Kept as a gentle nudge only — voltage tracking must dominate when a
@@ -158,6 +158,15 @@ class MultiTSOConfig:
     run_stability_analysis:       bool = True
     stability_analysis_at_s:      float = 0.0
     sensitivity_update_interval:  int  = int(1E6)
+
+    # -- Stability observer (passive diagnostic) -------------------------------
+    run_stability_observer:       bool = True
+    """If True, attach the passive stability observer that records the
+    spectral-gap floor g_w^min per zone at every TSO step (diagnostic only;
+    writes stability_observer.json / *.png / *.md into result_dir).
+    Set False to skip observer attachment, per-step recording, and end-of-
+    simulation reporting -- useful for baseline / comparison runs where the
+    diagnostic output is not needed."""
 
     # -- Output ----------------------------------------------------------------
     verbose:    int = 0
@@ -228,3 +237,22 @@ class MultiTSOConfig:
     ``'qv'``        -- linear Q(V) droop around ``qv_setpoint_pu`` with
                        slope ``qv_slope_pu`` (previous baseline).
     """
+
+    # -- TSO local-control baseline (for comparison experiments) --------------
+    tso_mode: str = "ofo"
+    """TSO control mode for transmission-network reactive power.
+    ``"ofo"``   -- Multi-zone OFO MIQP controllers (default).
+    ``"local"`` -- Skip OFO step; apply local Q(V) or cos phi=1 to
+                   TSO-connected windparks via pandapower
+                   ``CharacteristicControl`` (Q(V)) or static Q=0
+                   (cos phi=1).  Used by ``002_M_TSO_M_DSO_COMPARE.py``."""
+    tso_local_mode: str = "qv"
+    """TSO windpark local-control mode when ``tso_mode='local'``.
+    ``'qv'``        -- linear Q(V) droop via CharacteristicControl.
+    ``'cos_phi_1'`` -- unity power factor (Q=0)."""
+    tso_qv_setpoint_pu: float = 1.03
+    """Voltage setpoint of the Q(V) droop applied to TSO windparks."""
+    tso_qv_slope_pu: float = 0.07
+    """Half-width of the Q(V) linear region (pu).  At V = setpoint+slope
+    the windpark dispatches Q = q_min (full inductive); at V = setpoint-slope
+    the windpark dispatches Q = q_max (full capacitive)."""

@@ -1,0 +1,905 @@
+"""
+MIQP Solver Module
+==================
+
+This module provides the Mixed-Integer Quadratic Programme (MIQP) solver
+interface for the OFO controllers.
+
+The solver uses CVXPY with SCIP as the backend for mixed-integer problems.
+
+The MIQP problem solved at each OFO iteration is:
+
+    σ^k = argmin  g(w, z, Δs)
+           w,z,Δs
+
+where:
+    g = w^T G_w w + ∇f^T H̃ w + z^T G_z z
+
+subject to:
+    αw ∈ [u_LL - u^k, u_UL - u^k]             (input constraints)
+    α∇H w ∈ [y_LL - y^k - z, y_UL - y^k + z]  (output constraints with slack)
+    z ≥ 0                                      (slack non-negativity)
+    w_i ∈ ℤ                                    (integer variables)
+
+References
+----------
+[1] Schwenke et al., PSCC 2026, Section III (Optimisation Formulation)
+[2] CVXPY Documentation: https://www.cvxpy.org/
+
+Author: Manuel Schwenke
+Date: 2025-02-05
+"""
+
+from dataclasses import dataclass
+from typing import Optional, Tuple, List, Union
+import numpy as np
+from numpy.typing import NDArray
+
+try:
+    import cvxpy as cp
+except ImportError as e:
+    raise ImportError(
+        "CVXPY is required for the MIQP solver. "
+        "Install it with: pip install cvxpy"
+    ) from e
+
+
+@dataclass(frozen=True)
+class MIQPResult:
+    """
+    Result of the MIQP optimisation.
+    
+    This immutable dataclass contains the solution and solver status.
+    
+    Attributes
+    ----------
+    w_continuous : NDArray[np.float64]
+        Optimal change in continuous control variables (DER Q).
+    w_integer : NDArray[np.int64]
+        Optimal change in integer control variables (OLTC taps, shunt states).
+    z : NDArray[np.float64]
+        Optimal slack variables for soft constraints.
+    objective_value : float
+        Optimal objective function value.
+    status : str
+        CVXPY solver status (e.g., 'optimal', 'infeasible').
+    solve_time_s : float
+        Solver computation time in seconds.
+    """
+    w_continuous: NDArray[np.float64]
+    w_integer: NDArray[np.int64]
+    z: NDArray[np.float64]
+    objective_value: float
+    status: str
+    solve_time_s: float
+    
+    @property
+    def is_optimal(self) -> bool:
+        """Check if the solution is optimal."""
+        return self.status == cp.OPTIMAL
+    
+    @property
+    def is_feasible(self) -> bool:
+        """Check if a feasible solution was found."""
+        return self.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)
+
+
+@dataclass
+class MIQPProblem:
+    """
+    MIQP problem formulation for a single OFO iteration.
+    
+    This class encapsulates all data required to formulate the MIQP problem
+    at iteration k. The problem structure follows Equations (23)-(27) from
+    the PSCC 2026 paper.
+    
+    Attributes
+    ----------
+    n_continuous : int
+        Number of continuous control variables (DER Q setpoints).
+    n_integer : int
+        Number of integer control variables (OLTC taps + shunt states).
+    n_outputs : int
+        Number of output constraints (Q_trafo, V_bus, I_branch).
+    alpha : float
+        Controller gain (step size) for the OFO update.
+    G_w : NDArray[np.float64]
+        Quadratic weighting matrix for control changes (n_total x n_total).
+    G_z : NDArray[np.float64]
+        Quadratic weighting matrix for slack variables (n_outputs x n_outputs).
+    grad_f : NDArray[np.float64]
+        Objective gradient vector (n_total,).
+    H_tilde : NDArray[np.float64]
+        Modified sensitivity matrix (n_outputs x n_total).
+    u_current : NDArray[np.float64]
+        Current control variable values (n_total,).
+    u_lower : NDArray[np.float64]
+        Lower bounds on control variables (n_total,).
+    u_upper : NDArray[np.float64]
+        Upper bounds on control variables (n_total,).
+    y_current : NDArray[np.float64]
+        Current output measurements (n_outputs,).
+    y_lower : NDArray[np.float64]
+        Lower bounds on outputs (n_outputs,).
+    y_upper : NDArray[np.float64]
+        Upper bounds on outputs (n_outputs,).
+    integer_indices : List[int]
+        Indices of integer variables within the control vector.
+    """
+    n_continuous: int
+    n_integer: int
+    n_outputs: int
+    alpha: float
+    G_w: NDArray[np.float64]
+    G_z: NDArray[np.float64]
+    grad_f: NDArray[np.float64]
+    H_tilde: NDArray[np.float64]
+    u_current: NDArray[np.float64]
+    u_lower: NDArray[np.float64]
+    u_upper: NDArray[np.float64]
+    y_current: NDArray[np.float64]
+    y_lower: NDArray[np.float64]
+    y_upper: NDArray[np.float64]
+    integer_indices: List[int]
+    
+    def __post_init__(self) -> None:
+        """Validate problem dimensions after initialisation."""
+        n_total = self.n_continuous + self.n_integer
+        
+        if self.G_w.shape != (n_total, n_total):
+            raise ValueError(
+                f"G_w shape {self.G_w.shape} does not match "
+                f"expected ({n_total}, {n_total})"
+            )
+        
+        if self.G_z.shape != (self.n_outputs, self.n_outputs):
+            raise ValueError(
+                f"G_z shape {self.G_z.shape} does not match "
+                f"expected ({self.n_outputs}, {self.n_outputs})"
+            )
+
+        if self.n_outputs > 0 and not np.allclose(
+            self.G_z, np.diag(np.diag(self.G_z))
+        ):
+            raise ValueError(
+                "G_z must be diagonal: the slack-detection logic in "
+                "MIQPSolver inspects only the diagonal (np.diag(G_z) > 0). "
+                "Off-diagonal entries would be ignored and silently disable "
+                "the soft-constraint branch."
+            )
+
+        if len(self.grad_f) != n_total:
+            raise ValueError(
+                f"grad_f length {len(self.grad_f)} does not match "
+                f"n_total {n_total}"
+            )
+        
+        if self.H_tilde.shape != (self.n_outputs, n_total):
+            raise ValueError(
+                f"H_tilde shape {self.H_tilde.shape} does not match "
+                f"expected ({self.n_outputs}, {n_total})"
+            )
+        
+        if len(self.u_current) != n_total:
+            raise ValueError(
+                f"u_current length {len(self.u_current)} does not match "
+                f"n_total {n_total}"
+            )
+        
+        if len(self.u_lower) != n_total:
+            raise ValueError(
+                f"u_lower length {len(self.u_lower)} does not match "
+                f"n_total {n_total}"
+            )
+        
+        if len(self.u_upper) != n_total:
+            raise ValueError(
+                f"u_upper length {len(self.u_upper)} does not match "
+                f"n_total {n_total}"
+            )
+        
+        if len(self.y_current) != self.n_outputs:
+            raise ValueError(
+                f"y_current length {len(self.y_current)} does not match "
+                f"n_outputs {self.n_outputs}"
+            )
+        
+        if len(self.y_lower) != self.n_outputs:
+            raise ValueError(
+                f"y_lower length {len(self.y_lower)} does not match "
+                f"n_outputs {self.n_outputs}"
+            )
+        
+        if len(self.y_upper) != self.n_outputs:
+            raise ValueError(
+                f"y_upper length {len(self.y_upper)} does not match "
+                f"n_outputs {self.n_outputs}"
+            )
+        
+        if len(self.integer_indices) != self.n_integer:
+            raise ValueError(
+                f"integer_indices length {len(self.integer_indices)} does not "
+                f"match n_integer {self.n_integer}"
+            )
+        
+        if self.alpha <= 0:
+            raise ValueError(f"alpha must be positive, got {self.alpha}")
+        
+        # Check bounds ordering
+        for i in range(n_total):
+            if self.u_lower[i] > self.u_upper[i]:
+                raise ValueError(
+                    f"u_lower[{i}] = {self.u_lower[i]} > "
+                    f"u_upper[{i}] = {self.u_upper[i]}"
+                )
+        
+        for i in range(self.n_outputs):
+            if self.y_lower[i] > self.y_upper[i]:
+                raise ValueError(
+                    f"y_lower[{i}] = {self.y_lower[i]} > "
+                    f"y_upper[{i}] = {self.y_upper[i]}"
+                )
+    
+    @property
+    def n_total(self) -> int:
+        """Total number of control variables."""
+        return self.n_continuous + self.n_integer
+
+
+class MIQPSolver:
+    """
+    Mixed-Integer Quadratic Programme solver for OFO controllers.
+    
+    This class provides the interface for solving the MIQP optimisation
+    problem at each OFO iteration. It uses CVXPY for problem formulation
+    and supports multiple solver backends.
+    
+    The solver handles both continuous variables (DER reactive power) and
+    integer variables (OLTC tap positions, shunt states).
+    
+    Attributes
+    ----------
+    solver : str
+        Name of the solver backend to use.
+    verbose : bool
+        Whether to print solver output.
+    time_limit_s : float
+        Maximum solver time in seconds.
+    mip_gap : float
+        Relative MIP gap tolerance for integer problems.
+    
+    Notes
+    -----
+    Recommended solvers for MIQP:
+    - SCIP: Open-source, good for mixed-integer problems
+    - GUROBI: Commercial, very fast (requires licence)
+    - MOSEK: Commercial, good for convex problems (requires licence)
+    - ECOS_BB: Open-source, branch-and-bound for small MIPs
+    
+    For continuous QP (no integer variables), OSQP or ECOS are efficient.
+    """
+    
+    # Solver preference order for MIQP problems
+    MIQP_SOLVERS = ['GUROBI'] #['SCIP', 'MOSEK', 'GUROBI', 'ECOS_BB']
+
+    # Solver preference order for QP problems (continuous only)
+    QP_SOLVERS = ['OSQP', 'ECOS', 'SCS', 'CVXOPT']
+
+    # Class-level cache of the selected solver per problem shape
+    # (has_integers → solver name or None).  ``cp.installed_solvers()`` is
+    # O(seconds) on a Windows network share because it walks importlib
+    # metadata for every candidate backend, so we must hit it exactly once
+    # per Python process rather than once per controller / once per step.
+    _SOLVER_CACHE: dict[bool, Optional[str]] = {}
+    
+    def __init__(
+        self,
+        solver: Optional[str] = None,
+        verbose: bool = False,
+        time_limit_s: float = 30.0,
+        mip_gap: float = 1e-4,
+    ) -> None:
+        """
+        Initialise the MIQP solver.
+
+        Parameters
+        ----------
+        solver : str, optional
+            Solver backend to use. If None, automatically selects based on
+            problem type and available solvers.
+        verbose : bool, optional
+            Whether to print solver output (default: False).
+        time_limit_s : float, optional
+            Maximum solver time in seconds (default: 60.0).
+        mip_gap : float, optional
+            Relative MIP gap tolerance (default: 1e-4).
+        """
+        self.solver = solver
+        self.verbose = verbose
+        self.time_limit_s = time_limit_s
+        self.mip_gap = mip_gap
+    
+    def solve(self, problem: MIQPProblem) -> MIQPResult:
+        """
+        Solve the MIQP problem.
+        
+        Parameters
+        ----------
+        problem : MIQPProblem
+            The MIQP problem to solve.
+        
+        Returns
+        -------
+        MIQPResult
+            The solution result containing optimal values and status.
+        
+        Raises
+        ------
+        ValueError
+            If the problem is malformed or the solver fails unexpectedly.
+        """
+        # Determine if this is a pure QP or MIQP
+        has_integers = problem.n_integer > 0
+        
+        # Select solver if not specified
+        solver_name = self._select_solver(has_integers)
+        
+        # Build and solve the CVXPY problem
+        if has_integers:
+            return self._solve_miqp(problem, solver_name)
+        else:
+            return self._solve_qp(problem, solver_name)
+    
+    def _select_solver(self, has_integers: bool) -> Optional[str]:
+        """Select an appropriate solver based on problem type.
+
+        The result is memoised at the **class level** per ``has_integers``
+        key because ``cp.installed_solvers()`` walks importlib metadata on
+        every call and is prohibitively expensive over a Windows network
+        share (~25 ms per filesystem stat × hundreds of candidates =
+        multiple seconds per invocation).  One lookup per Python process is
+        sufficient; the set of installed solvers does not change at runtime,
+        and sharing the cache across all MIQPSolver instances avoids paying
+        the cost once per controller.
+        """
+        if self.solver is not None:
+            return self.solver
+
+        cache = type(self)._SOLVER_CACHE
+        if has_integers in cache:
+            return cache[has_integers]
+
+        solver_list = self.MIQP_SOLVERS if has_integers else self.QP_SOLVERS
+        installed = set(cp.installed_solvers())
+
+        picked: Optional[str] = None
+        for solver_name in solver_list:
+            if solver_name in installed:
+                picked = solver_name
+                break
+
+        # Fallback to default CVXPY solver (None)
+        cache[has_integers] = picked
+        return picked
+    
+    def _solve_qp(
+        self,
+        problem: MIQPProblem,
+        solver_name: Optional[str],
+    ) -> MIQPResult:
+        """
+        Solve a continuous QP problem (no integer variables).
+        
+        Parameters
+        ----------
+        problem : MIQPProblem
+            The QP problem to solve.
+        solver_name : str or None
+            Name of the solver to use.
+        
+        Returns
+        -------
+        MIQPResult
+            The solution result.
+        """
+        n_total = problem.n_total
+        n_outputs = problem.n_outputs
+        alpha = problem.alpha
+
+        # g_z semantics: g_z = 0 → hard output constraints (no slack),
+        #                g_z > 0 → soft output constraints (z penalised).
+        has_slack = bool(np.any(np.diag(problem.G_z) > 0))
+
+        # Decision variables
+        w = cp.Variable(n_total, name='w')
+
+        if has_slack:
+            z = cp.Variable(n_outputs, name='z', nonneg=True)
+            # Objective: g = w^T G_w w + ∇f^T w + z^T G_z z
+            objective = (
+                cp.quad_form(w, problem.G_w, assume_PSD=True) +
+                problem.grad_f @ w +
+                cp.quad_form(z, problem.G_z)
+            )
+        else:
+            # No slack → pure quadratic + linear objective
+            objective = (
+                cp.quad_form(w, problem.G_w, assume_PSD=True) +
+                problem.grad_f @ w
+            )
+
+        # Constraints
+        constraints = []
+
+        # Input constraints (Equation 24): αw ∈ [u_LL - u^k, u_UL - u^k]
+        w_lower = (problem.u_lower - problem.u_current) / alpha
+        w_upper = (problem.u_upper - problem.u_current) / alpha
+        constraints.append(w >= w_lower)
+        constraints.append(w <= w_upper)
+
+        # Output constraints (Equation 25)
+        Hw = alpha * (problem.H_tilde @ w)
+        y_error_lower = problem.y_lower - problem.y_current
+        y_error_upper = problem.y_upper - problem.y_current
+
+        if has_slack:
+            # Soft output constraints: α H̃ w ∈ [y_LL - y^k - z, y_UL - y^k + z]
+            constraints.append(Hw >= y_error_lower - z)
+            constraints.append(Hw <= y_error_upper + z)
+        else:
+            # Hard output constraints: α H̃ w ∈ [y_LL - y^k, y_UL - y^k]
+            constraints.append(Hw >= y_error_lower)
+            constraints.append(Hw <= y_error_upper)
+
+        # Formulate and solve
+        cvxpy_problem = cp.Problem(cp.Minimize(objective), constraints)
+
+        solver_kwargs = {
+            'verbose': self.verbose,
+        }
+
+        if solver_name is not None:
+            solver_kwargs['solver'] = solver_name
+
+        try:
+            cvxpy_problem.solve(**solver_kwargs)
+        except cp.SolverError as e:
+            return MIQPResult(
+                w_continuous=np.zeros(n_total),
+                w_integer=np.array([], dtype=np.int64),
+                z=np.zeros(n_outputs),
+                objective_value=np.inf,
+                status=str(e),
+                solve_time_s=0.0,
+            )
+
+        # Extract solution
+        if cvxpy_problem.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+            w_opt = np.array(w.value, dtype=np.float64)
+            z_opt = np.array(z.value, dtype=np.float64) if has_slack else np.zeros(n_outputs)
+            obj_val = float(cvxpy_problem.value)
+        else:
+            w_opt = np.zeros(n_total)
+            z_opt = np.zeros(n_outputs)
+            obj_val = np.inf
+
+        solve_time = cvxpy_problem.solver_stats.solve_time or 0.0
+
+        return MIQPResult(
+            w_continuous=w_opt,
+            w_integer=np.array([], dtype=np.int64),
+            z=z_opt,
+            objective_value=obj_val,
+            status=cvxpy_problem.status,
+            solve_time_s=solve_time,
+        )
+    
+    def _solve_miqp(
+        self,
+        problem: MIQPProblem,
+        solver_name: Optional[str],
+    ) -> MIQPResult:
+        """
+        Solve a mixed-integer QP problem.
+        
+        Parameters
+        ----------
+        problem : MIQPProblem
+            The MIQP problem to solve.
+        solver_name : str or None
+            Name of the solver to use.
+        
+        Returns
+        -------
+        MIQPResult
+            The solution result.
+        """
+        _assert_finite_problem_data(problem, solver_name or 'MIQP')
+
+        n_continuous = problem.n_continuous
+        n_integer = problem.n_integer
+        n_total = problem.n_total
+        n_outputs = problem.n_outputs
+        alpha = problem.alpha
+
+        # g_z semantics: g_z = 0 → hard output constraints (no slack),
+        #                g_z > 0 → soft output constraints (z penalised).
+        has_slack = bool(np.any(np.diag(problem.G_z) > 0))
+
+        # Decision variables
+        # w_c: continuous changes (DER Q)
+        # w_i: integer changes (OLTC taps, shunt states)
+        w_c = cp.Variable(n_continuous, name='w_continuous')
+        w_i = cp.Variable(n_integer, name='w_integer', integer=True)
+
+        # Combine w = [w_c; w_i] for matrix operations
+        w = cp.hstack([w_c, w_i])
+
+        if has_slack:
+            z = cp.Variable(n_outputs, name='z', nonneg=True)
+            # Objective: g = w^T G_w w + ∇f^T w + z^T G_z z
+            objective = (
+                cp.quad_form(w, problem.G_w, assume_PSD=True) +
+                problem.grad_f @ w +
+                cp.quad_form(z, problem.G_z)
+            )
+        else:
+            # No slack → pure quadratic + linear objective
+            objective = (
+                cp.quad_form(w, problem.G_w, assume_PSD=True) +
+                problem.grad_f @ w
+            )
+
+        # Constraints
+        constraints = []
+
+        # Input constraints for continuous variables
+        w_c_lower = (problem.u_lower[:n_continuous] -
+                     problem.u_current[:n_continuous]) / alpha
+        w_c_upper = (problem.u_upper[:n_continuous] -
+                     problem.u_current[:n_continuous]) / alpha
+        constraints.append(w_c >= w_c_lower)
+        constraints.append(w_c <= w_c_upper)
+
+        # Input constraints for integer variables
+        # w_i represents the DIRECT change in discrete state (e.g., +1 tap,
+        # -1 shunt step).  No alpha scaling — these are physical switching
+        # decisions, not gradient-descent micro-steps.
+        w_i_lower_int = np.floor(
+            problem.u_lower[n_continuous:] - problem.u_current[n_continuous:]
+        ).astype(np.int64)
+        w_i_upper_int = np.ceil(
+            problem.u_upper[n_continuous:] - problem.u_current[n_continuous:]
+        ).astype(np.int64)
+
+        constraints.append(w_i >= w_i_lower_int)
+        constraints.append(w_i <= w_i_upper_int)
+
+        # Output constraints
+        # Continuous part is scaled by α (gradient step), integer part is
+        # unscaled (direct state change):
+        #   Δy ≈ α · H_c · w_c  +  H_i · w_i
+        H_c = problem.H_tilde[:, :n_continuous]
+        H_i = problem.H_tilde[:, n_continuous:]
+        Hw = alpha * (H_c @ w_c) + H_i @ w_i
+        y_error_lower = problem.y_lower - problem.y_current
+        y_error_upper = problem.y_upper - problem.y_current
+
+        if has_slack:
+            # Soft output constraints with slack
+            constraints.append(Hw >= y_error_lower - z)
+            constraints.append(Hw <= y_error_upper + z)
+        else:
+            # Hard output constraints (no slack)
+            constraints.append(Hw >= y_error_lower)
+            constraints.append(Hw <= y_error_upper)
+
+        # Formulate and solve
+        cvxpy_problem = cp.Problem(cp.Minimize(objective), constraints)
+
+        solver_kwargs = {
+            'verbose': self.verbose,
+        }
+
+        if solver_name is not None:
+            solver_kwargs['solver'] = solver_name
+            # Add solver-specific options
+            if solver_name == 'SCIP':
+                solver_kwargs['scip_params'] = {
+                    'limits/time': self.time_limit_s,
+                    'limits/gap': self.mip_gap,
+                }
+            elif solver_name == 'GUROBI':
+                solver_kwargs['TimeLimit'] = self.time_limit_s
+                solver_kwargs['MIPGap'] = self.mip_gap
+            elif solver_name == 'MOSEK':
+                solver_kwargs['mosek_params'] = {
+                    'MSK_DPAR_OPTIMIZER_MAX_TIME': self.time_limit_s,
+                    'MSK_DPAR_MIO_TOL_REL_GAP': self.mip_gap,
+                }
+
+        try:
+            cvxpy_problem.solve(**solver_kwargs)
+        except cp.SolverError as e:
+            return MIQPResult(
+                w_continuous=np.zeros(n_continuous),
+                w_integer=np.zeros(n_integer, dtype=np.int64),
+                z=np.zeros(n_outputs),
+                objective_value=np.inf,
+                status=str(e),
+                solve_time_s=0.0,
+            )
+
+        # Extract solution
+        if cvxpy_problem.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+            w_c_opt = np.array(w_c.value, dtype=np.float64)
+            w_i_opt = np.round(w_i.value).astype(np.int64)
+            z_opt = np.array(z.value, dtype=np.float64) if has_slack else np.zeros(n_outputs)
+            obj_val = float(cvxpy_problem.value)
+        else:
+            w_c_opt = np.zeros(n_continuous)
+            w_i_opt = np.zeros(n_integer, dtype=np.int64)
+            z_opt = np.zeros(n_outputs)
+            obj_val = np.inf
+
+        solve_time = cvxpy_problem.solver_stats.solve_time or 0.0
+        
+        return MIQPResult(
+            w_continuous=w_c_opt,
+            w_integer=w_i_opt,
+            z=z_opt,
+            objective_value=obj_val,
+            status=cvxpy_problem.status,
+            solve_time_s=solve_time,
+        )
+
+
+def _assert_finite_problem_data(problem: "MIQPProblem", solver_label: str) -> None:
+    """Assert that all numerical arrays in the MIQP problem are finite.
+    Raises ValueError with the offending field name and first non-finite
+    index if any NaN or Inf is found. This check runs before CVXPY sees
+    the data so that the error is traceable."""
+    fields = {
+        'Gw':       problem.G_w,
+        'Gz':       problem.G_z,
+        'gradf':    problem.grad_f,
+        'Htilde':   problem.H_tilde,
+        'ucurrent': problem.u_current,
+        'ulower':   problem.u_lower,
+        'uupper':   problem.u_upper,
+        'ycurrent': problem.y_current,
+        'ylower':   problem.y_lower,
+        'yupper':   problem.y_upper,
+    }
+    for name, arr in fields.items():
+        arr_np = np.asarray(arr, dtype=np.float64)
+        if not np.isfinite(arr_np).all():
+            bad = np.argwhere(~np.isfinite(arr_np))
+            raise ValueError(
+                f"[{solver_label}] NaN or Inf in MIQP problem field '{name}' "
+                f"at indices {bad[:5].tolist()} "
+                f"(showing first 5 of {len(bad)})."
+            )
+
+
+def build_miqp_problem(
+    alpha: float,
+    u_current: NDArray[np.float64],
+    y_current: NDArray[np.float64],
+    H: NDArray[np.float64],
+    grad_f: NDArray[np.float64],
+    u_lower: NDArray[np.float64],
+    u_upper: NDArray[np.float64],
+    y_lower: NDArray[np.float64],
+    y_upper: NDArray[np.float64],
+    g_w: Union[float, NDArray[np.float64]],
+    g_u: Union[float, NDArray[np.float64]],
+    g_z: Union[float, NDArray[np.float64]],
+    integer_indices: Optional[List[int]] = None,
+    g_w_vector: Optional[NDArray[np.float64]] = None,
+    g_u_vector: Optional[NDArray[np.float64]] = None,
+) -> MIQPProblem:
+    """
+    Build an MIQP problem from OFO controller data.
+
+    This is a convenience function that constructs the weight matrices
+    and problem structure from scalar weights and sensitivity data.
+
+    Parameters
+    ----------
+    alpha : float
+        Controller gain (step size).
+    u_current : NDArray[np.float64]
+        Current control variable values.
+    y_current : NDArray[np.float64]
+        Current output measurements.
+    H : NDArray[np.float64]
+        Sensitivity matrix (∇H) from Jacobian calculations.
+    grad_f : NDArray[np.float64]
+        Objective gradient vector.
+    u_lower : NDArray[np.float64]
+        Lower bounds on control variables.
+    u_upper : NDArray[np.float64]
+        Upper bounds on control variables.
+    y_lower : NDArray[np.float64]
+        Lower bounds on outputs.
+    y_upper : NDArray[np.float64]
+        Upper bounds on outputs.
+    g_w : float or NDArray[np.float64]
+        Weight for control variable changes. Either a scalar (applied
+        uniformly to all variables), a 1-D array of length n_total with
+        per-variable weights for the diagonal of G_w, or a 2-D
+        (n_total x n_total) symmetric matrix for coupled weights
+        (e.g. OLTC cross-penalties).  When 2-D, the g_u regularisation
+        is added to the diagonal only.
+    g_u : float or NDArray[np.float64]
+        Weight for control variable usage (regularisation).  Either a
+        scalar (uniform for all variables) or a per-variable array of
+        length n_total.  Set entries to 0 for actuators that should
+        not be regularised towards zero (e.g. OLTC taps, shunts).
+    g_z : float or NDArray[np.float64]
+        Weight for slack variables (constraint violations).  Either a
+        scalar (uniform for all outputs) or a 1-D array of length
+        ``n_outputs`` with per-output weights.  Use lower values for
+        outputs that cannot be tightly controlled (e.g. branch currents
+        in a reactive-power controller).
+    integer_indices : List[int], optional
+        Indices of integer variables within u_current. If None, all
+        variables are treated as continuous.
+    g_w_vector : NDArray[np.float64], optional
+        Per-variable change weights of length ``n_total``.  When
+        provided, overrides ``g_w`` for constructing the diagonal of
+        ``G_w``.  This enables per-DER cost differentiation.
+    g_u_vector : NDArray[np.float64], optional
+        Per-variable usage (regularisation) weights of length
+        ``n_total``.  When provided, overrides ``g_u`` for the
+        regularisation diagonal.
+
+    Returns
+    -------
+    MIQPProblem
+        The constructed MIQP problem.
+
+    Raises
+    ------
+    ValueError
+        If input dimensions are inconsistent.
+    """
+    n_total = len(u_current)
+    n_outputs = len(y_current)
+
+    if integer_indices is None:
+        integer_indices = []
+
+    n_integer = len(integer_indices)
+    n_continuous = n_total - n_integer
+
+    # Validate dimensions
+    if H.shape != (n_outputs, n_total):
+        raise ValueError(
+            f"H shape {H.shape} does not match expected "
+            f"({n_outputs}, {n_total})"
+        )
+
+    if len(grad_f) != n_total:
+        raise ValueError(
+            f"grad_f length {len(grad_f)} does not match n_total {n_total}"
+        )
+
+    if len(u_lower) != n_total:
+        raise ValueError(
+            f"u_lower length {len(u_lower)} does not match n_total {n_total}"
+        )
+
+    if len(u_upper) != n_total:
+        raise ValueError(
+            f"u_upper length {len(u_upper)} does not match n_total {n_total}"
+        )
+
+    if len(y_lower) != n_outputs:
+        raise ValueError(
+            f"y_lower length {len(y_lower)} does not match n_outputs {n_outputs}"
+        )
+
+    if len(y_upper) != n_outputs:
+        raise ValueError(
+            f"y_upper length {len(y_upper)} does not match n_outputs {n_outputs}"
+        )
+
+    # Build weight matrices
+    # ─────────────────────
+    # Continuous variables:  w_c = Δu / α   (gradient-descent micro-step)
+    #   Quadratic: G_w_c = diag(g_w + α² · g_u)
+    #   Linear:    grad_c = grad_f + 2 · α · g_u · u
+    #
+    # Integer variables:     w_i = Δu        (direct state change, no α)
+    #   Quadratic: G_w_i = diag(g_w + g_u)   (no α² factor)
+    #   Linear:    grad_i = grad_f + 2 · g_u · u  (no α factor)
+
+    # --- Per-variable weight overrides (DER mapping) ---
+    # When g_w_vector is provided, it overrides g_w for diagonal construction.
+    # This allows per-DER cost differentiation while remaining compatible
+    # with the existing scalar / array / matrix g_w interface.
+    if g_w_vector is not None:
+        if len(g_w_vector) != n_total:
+            raise ValueError(
+                f"g_w_vector length {len(g_w_vector)} does not match "
+                f"n_total {n_total}"
+            )
+        g_w_arr = np.asarray(g_w_vector, dtype=np.float64)
+    else:
+        g_w_arr = np.asarray(g_w, dtype=np.float64)
+
+    if g_u_vector is not None:
+        if len(g_u_vector) != n_total:
+            raise ValueError(
+                f"g_u_vector length {len(g_u_vector)} does not match "
+                f"n_total {n_total}"
+            )
+        g_u_vec = np.asarray(g_u_vector, dtype=np.float64)
+    else:
+        g_u_vec = np.broadcast_to(np.asarray(g_u, dtype=np.float64), (n_total,)).copy()
+
+    continuous_mask = np.ones(n_total, dtype=bool)
+    for idx in integer_indices:
+        continuous_mask[idx] = False
+
+    if g_w_arr.ndim == 2:
+        # Full (n_total x n_total) weight matrix — use directly, add g_u
+        # to diagonal only.
+        G_w = g_w_arr.copy()
+        diag_idx = np.arange(n_total)
+        G_w[diag_idx[continuous_mask], diag_idx[continuous_mask]] += (
+            alpha**2 * g_u_vec[continuous_mask]
+        )
+        G_w[diag_idx[~continuous_mask], diag_idx[~continuous_mask]] += (
+            g_u_vec[~continuous_mask]
+        )
+    else:
+        # Scalar or 1-D vector → build diagonal G_w
+        g_w_vec = np.broadcast_to(g_w_arr, (n_total,)).copy()
+        diag_Gw = g_w_vec.copy()
+        diag_Gw[continuous_mask] += alpha**2 * g_u_vec[continuous_mask]
+        diag_Gw[~continuous_mask] += g_u_vec[~continuous_mask]
+        G_w = np.diag(diag_Gw)
+
+    # G_z is the slack variable weight (scalar or per-output vector)
+    g_z_vec = np.broadcast_to(np.asarray(g_z, dtype=np.float64), (n_outputs,)).copy()
+    G_z = np.diag(g_z_vec)
+
+    # Modified gradient: continuous get α·g_u, integer get plain g_u
+    grad_f_mod = grad_f.copy()
+    grad_f_mod[continuous_mask] += 2.0 * alpha * g_u_vec[continuous_mask] * u_current[continuous_mask]
+    grad_f_mod[~continuous_mask] += 2.0 * g_u_vec[~continuous_mask] * u_current[~continuous_mask]
+    
+    # Reorder u and H to put continuous variables first, then integer
+    continuous_indices = [i for i in range(n_total) if i not in integer_indices]
+    reorder_indices = continuous_indices + list(integer_indices)
+    
+    u_current_reordered = u_current[reorder_indices]
+    u_lower_reordered = u_lower[reorder_indices]
+    u_upper_reordered = u_upper[reorder_indices]
+    grad_f_reordered = grad_f_mod[reorder_indices]
+    H_reordered = H[:, reorder_indices]
+    G_w_reordered = G_w[np.ix_(reorder_indices, reorder_indices)]
+    
+    # Integer indices in the reordered vector are at the end
+    integer_indices_reordered = list(range(n_continuous, n_total))
+    
+    return MIQPProblem(
+        n_continuous=n_continuous,
+        n_integer=n_integer,
+        n_outputs=n_outputs,
+        alpha=alpha,
+        G_w=G_w_reordered,
+        G_z=G_z,
+        grad_f=grad_f_reordered,
+        H_tilde=H_reordered,
+        u_current=u_current_reordered,
+        u_lower=u_lower_reordered,
+        u_upper=u_upper_reordered,
+        y_current=y_current,
+        y_lower=y_lower,
+        y_upper=y_upper,
+        integer_indices=integer_indices_reordered,
+    )

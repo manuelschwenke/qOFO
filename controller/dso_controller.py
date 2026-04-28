@@ -1,0 +1,908 @@
+"""
+DSO Controller Module
+=====================
+
+This module defines the DSO-level MIQP controller for distribution system
+voltage and reactive power control.
+
+The DSO controller:
+- Controls DER reactive power (continuous)
+- Controls HV-level OLTCs (discrete)
+- Controls HV-level shunts (discrete)
+- Tracks reactive power setpoints received from TSO
+- Reports capability bounds to TSO
+
+The objective function includes a setpoint tracking term:
+    ∇f = 2 · (Q_interface - Q_set) · ∂Q_interface/∂u
+
+References
+----------
+[1] Schwenke et al., PSCC 2026, Section III.B (DSO-level control)
+[2] Schwenke et al., CIGRE 2026 (Cascaded OFO framework)
+
+Author: Manuel Schwenke
+Date: 2025-02-06
+"""
+
+from dataclasses import dataclass
+from typing import Optional, List, Tuple, Dict
+import numpy as np
+from numpy.typing import NDArray
+
+from controller.base_controller import (
+    BaseOFOController,
+    OFOParameters,
+    ControllerOutput,
+)
+from core.network_state import NetworkState
+from core.measurement import Measurement
+from core.actuator_bounds import ActuatorBounds
+from core.der_mapping import DERMapping
+from core.message import SetpointMessage, CapabilityMessage, ShuntDisturbanceMessage
+from sensitivity.jacobian import JacobianSensitivities
+from sensitivity.sensitivity_updater import SensitivityUpdater
+
+
+@dataclass
+class DSOControllerConfig:
+    """
+    Configuration for the DSO controller.
+    
+    Attributes
+    ----------
+    der_indices : List[int]
+        Pandapower sgen indices for controllable DERs.
+    oltc_trafo_indices : List[int]
+        Pandapower transformer indices with OLTCs.
+    shunt_bus_indices : List[int]
+        Pandapower bus indices where switchable shunts are connected.
+    shunt_q_steps_mvar : List[float]
+        Reactive power step per state change for each shunt.
+    interface_trafo_indices : List[int]
+        Pandapower transformer indices for TSO-DSO interfaces.
+    voltage_bus_indices : List[int]
+        Pandapower bus indices for voltage monitoring.
+    current_line_indices : List[int]
+        Pandapower line indices for current monitoring.
+    v_min_pu : float
+        Minimum voltage limit in per-unit.
+    v_max_pu : float
+        Maximum voltage limit in per-unit.
+    i_max_pu : float
+        Maximum current limit as fraction of line rating.
+    g_q : float
+        Weight for Q-interface tracking in the objective function.
+        Scales the gradient ``2 · g_q · (Q - Q_set)^T · ∂Q/∂u``.
+        Higher values make the controller track the TSO's reactive
+        power setpoints more aggressively.  Must be balanced against
+        the change penalty ``g_w``: the effective per-iteration step
+        scales as ``g_q / g_w``.  Default 1.0 (unweighted).
+    v_setpoints_pu : Optional[NDArray[np.float64]]
+        Voltage setpoints at monitored DN buses [p.u.].  If provided,
+        the objective includes a soft voltage-schedule tracking term.
+        Must have the same length as *voltage_bus_indices*.
+        Default ``None`` (no voltage tracking).
+    g_v : float
+        Weight for voltage-schedule tracking in the objective function.
+        Scales the gradient ``2 · g_v · (V - V_set)^T · ∂V/∂u``.
+        Should be kept small relative to the TSO's g_v so that DSO
+        voltage tracking remains a secondary, soft objective behind
+        Q-interface tracking.  Default 1.0.
+    """
+    der_indices: List[int]
+    oltc_trafo_indices: List[int]
+    shunt_bus_indices: List[int]
+    shunt_q_steps_mvar: List[float]
+    interface_trafo_indices: List[int]
+    voltage_bus_indices: List[int]
+    current_line_indices: List[int]
+    v_min_pu: float = 0.9
+    v_max_pu: float = 1.1
+    i_max_pu: float = 1.0 # 1.0
+    current_line_max_i_ka: Optional[List[float]] = None
+    """Per-line thermal rating [kA]. Must have the same length as
+    ``current_line_indices``. If ``None``, limits are not enforced."""
+    g_q: float = 1.0
+    g_qi: float = 0.0
+    """Weight for integral Q-tracking term.  When > 0, a leaky integrator
+    accumulates Q-interface errors over iterations, building pressure for
+    discrete switching actions (OLTC, shunts) when continuous DERs cannot
+    satisfy the setpoint.  The integral gradient contribution is
+    ``2 · g_qi · integral^T · ∂Q/∂u``.  Default 0.0 (disabled)."""
+    lambda_qi: float = 0.9
+    """Decay factor for the leaky integrator (0 ≤ λ ≤ 1).  Controls how
+    fast past errors are forgotten.  1.0 = pure integration (no decay),
+    0.9 = gradual decay.  Only used when *g_qi* > 0."""
+    q_integral_max_mvar: float = 50.0
+    """Anti-windup clamp for the integral accumulator [Mvar].  Limits each
+    element of the integral to ``[-max, +max]`` to prevent excessive
+    buildup when Q-capability limits are hit."""
+    v_setpoints_pu: Optional[NDArray[np.float64]] = None
+    g_v: float = 1.0
+    gamma_oltc_q: float = 0.0
+    """Role-based Q-tracking attenuation for OLTC columns.  Scales the
+    Q-interface tracking gradient on OLTC decision variables:
+        grad_f[oltc] += 2 · g_q · γ · (Q - Q_set)^T · ∂Q/∂s
+    With γ = 0 (default), OLTCs are driven purely by voltage deviations
+    and the physical Q effect of any tap change is still captured in the
+    output constraints (H matrix).  With γ = 1, OLTCs are equally
+    incentivised for Q-tracking (legacy behaviour).  Values in (0, 1)
+    provide partial Q-sensitivity as a last-resort mechanism."""
+    der_mapping: Optional[DERMapping] = None
+    """Per-DER mapping for individual sgen-level control.  When
+    provided, enables per-DER decision variables in the MIQP
+    and factorises the sensitivity matrix as H_der = H_bus @ E.
+    If None, the controller uses the legacy sgen-index-based control."""
+
+    def __post_init__(self) -> None:
+        """Validate configuration after initialisation."""
+        # When a DER mapping is provided, derive der_indices from it
+        if self.der_mapping is not None:
+            object.__setattr__(
+                self, "der_indices",
+                list(self.der_mapping.sgen_indices),
+            )
+        if len(self.shunt_bus_indices) != len(self.shunt_q_steps_mvar):
+            raise ValueError(
+                f"shunt_bus_indices length ({len(self.shunt_bus_indices)}) "
+                f"must match shunt_q_steps_mvar length ({len(self.shunt_q_steps_mvar)})"
+            )
+        if self.v_min_pu >= self.v_max_pu:
+            raise ValueError(
+                f"v_min_pu ({self.v_min_pu}) must be less than "
+                f"v_max_pu ({self.v_max_pu})"
+            )
+        if self.i_max_pu <= 0:
+            raise ValueError(f"i_max_pu must be positive, got {self.i_max_pu}")
+        if self.current_line_max_i_ka is not None:
+            if len(self.current_line_max_i_ka) != len(self.current_line_indices):
+                raise ValueError(
+                    f"current_line_max_i_ka length ({len(self.current_line_max_i_ka)}) "
+                    f"must match current_line_indices length "
+                    f"({len(self.current_line_indices)})"
+                )
+        if self.g_qi < 0:
+            raise ValueError(f"g_qi must be non-negative, got {self.g_qi}")
+        if not (0.0 <= self.lambda_qi <= 1.0):
+            raise ValueError(
+                f"lambda_qi must be in [0, 1], got {self.lambda_qi}"
+            )
+        if self.q_integral_max_mvar <= 0:
+            raise ValueError(
+                f"q_integral_max_mvar must be positive, got "
+                f"{self.q_integral_max_mvar}"
+            )
+        if not (0.0 <= self.gamma_oltc_q <= 1.0):
+            raise ValueError(
+                f"gamma_oltc_q must be in [0, 1], got {self.gamma_oltc_q}"
+            )
+        if self.v_setpoints_pu is not None:
+            if len(self.v_setpoints_pu) != len(self.voltage_bus_indices):
+                raise ValueError(
+                    f"v_setpoints_pu length ({len(self.v_setpoints_pu)}) "
+                    f"must match voltage_bus_indices length "
+                    f"({len(self.voltage_bus_indices)})"
+                )
+
+
+
+class DSOController(BaseOFOController):
+    """
+    DSO-level Online Feedback Optimisation controller.
+    
+    This controller manages the distribution network reactive power and
+    voltage by controlling DERs, OLTCs, and shunts. It tracks reactive
+    power setpoints received from the TSO whilst enforcing local constraints.
+    
+    Control Variables (u):
+        - Q_DER: DER reactive power setpoints [Mvar] (continuous)
+        - s_OLTC: OLTC tap positions (integer)
+        - state_shunt: Shunt switching states {-1, 0, +1} (integer)
+    
+    Outputs (y):
+        - Q_interface: Reactive power at TSO-DSO interface [Mvar]
+        - V_bus: Voltage magnitudes at monitored buses [p.u.]
+        - I_line: Current magnitudes at monitored lines [p.u.]
+    
+    Attributes
+    ----------
+    config : DSOControllerConfig
+        Controller configuration.
+    q_setpoint_mvar : NDArray[np.float64]
+        Current reactive power setpoints from TSO.
+    """
+    
+    def __init__(
+        self,
+        controller_id: str,
+        params: OFOParameters,
+        config: DSOControllerConfig,
+        network_state: NetworkState,
+        actuator_bounds: ActuatorBounds,
+        sensitivities: JacobianSensitivities,
+    ) -> None:
+        """
+        Initialise the DSO controller.
+        
+        Parameters
+        ----------
+        controller_id : str
+            Unique identifier for this controller.
+        params : OFOParameters
+            OFO tuning parameters.
+        config : DSOControllerConfig
+            DSO-specific configuration.
+        network_state : NetworkState
+            Cached network state for sensitivity computation.
+        actuator_bounds : ActuatorBounds
+            Actuator limits calculator.
+        sensitivities : JacobianSensitivities
+            Jacobian-based sensitivity calculator.
+        """
+        super().__init__(
+            controller_id=controller_id,
+            params=params,
+            network_state=network_state,
+            actuator_bounds=actuator_bounds,
+            sensitivities=sensitivities,
+        )
+        
+        self.config = config
+
+        # Initialise Q setpoints to zero (no tracking until TSO sends message)
+        n_interfaces = len(config.interface_trafo_indices)
+        self.q_setpoint_mvar = np.zeros(n_interfaces)
+
+        # Integral Q-error accumulator (leaky integrator for PI-like behaviour)
+        self._q_error_integral = np.zeros(n_interfaces)
+
+        # Shunt bound overrides from Reserve Observer.
+        # Keys: shunt index (0-based within shunt vector).
+        # Values: (lower, upper) bound override for that shunt.
+        # Cleared after each step.
+        self._shunt_bound_overrides: Dict[int, tuple] = {}
+
+        # Cache the sensitivity matrix structure
+        self._H_cache: Optional[NDArray[np.float64]] = None
+        self._H_mappings: Optional[Dict] = None
+        self._sensitivity_updater: Optional[SensitivityUpdater] = None
+    
+    def receive_setpoint(self, message: SetpointMessage) -> None:
+        """
+        Receive a setpoint message from the TSO controller.
+        
+        Parameters
+        ----------
+        message : SetpointMessage
+            Setpoint message from TSO.
+        
+        Raises
+        ------
+        ValueError
+            If the message targets a different controller or has
+            incompatible interface transformers.
+        """
+        if message.target_controller_id != self.controller_id:
+            raise ValueError(
+                f"Message target '{message.target_controller_id}' does not "
+                f"match controller ID '{self.controller_id}'"
+            )
+        
+        # Verify interface transformers match
+        expected = set(self.config.interface_trafo_indices)
+        received = set(message.interface_transformer_indices)
+        
+        if expected != received:
+            raise ValueError(
+                f"Interface transformer mismatch. Expected {expected}, "
+                f"got {received}"
+            )
+        
+        # Store setpoints in the correct order
+        for i, trafo_idx in enumerate(self.config.interface_trafo_indices):
+            msg_idx = list(message.interface_transformer_indices).index(trafo_idx)
+            self.q_setpoint_mvar[i] = message.q_setpoints_mvar[msg_idx]
+    
+    def reset_integral(self) -> None:
+        """Reset the Q-error integral accumulator to zero."""
+        self._q_error_integral[:] = 0.0
+
+    def receive_disturbance_message(
+        self,
+        message: ShuntDisturbanceMessage,
+    ) -> None:
+        """Handle a TSO-owned shunt step change inside this DSO's network.
+
+        For each shunt in the message, the cached reduced Jacobian inverse
+        is updated via a rank-1 Sherman-Morrison correction at the shunt
+        bus.  The cached operating point ``(V, θ)`` is preserved — no
+        ``pp.runpp`` is called and no new measurement is taken.
+
+        After the update(s), the H cache is invalidated so the next
+        ``step(measurement)`` call rebuilds H from the updated
+        ``dV_dQ_reduced``.  This refreshes the OLTC sensitivities of the
+        3-winding transformer whose tertiary hosts the shunt with the
+        correct shunt-coupling term — restoring an otherwise stale
+        ``∂Q_HV-3W / ∂s_OLTC`` column.
+
+        The DSO never sees the shunt as a *control variable*; this is
+        purely a model-state refresh path.
+
+        Parameters
+        ----------
+        message : ShuntDisturbanceMessage
+            Message from the supervising TSO controller listing the
+            shunts whose step has just changed and their new states.
+        """
+        if message.target_controller_id != self.controller_id:
+            raise ValueError(
+                f"Disturbance message target "
+                f"'{message.target_controller_id}' does not match "
+                f"controller ID '{self.controller_id}'"
+            )
+        any_applied = False
+        for bus, step in zip(message.shunt_bus_indices, message.shunt_steps):
+            applied = self.sensitivities.apply_shunt_step_change_smw(
+                int(bus), int(step),
+            )
+            any_applied = any_applied or applied
+        if any_applied:
+            # Drop H caches so the next step(measurement) rebuilds H from the
+            # SMW-updated dV_dQ_reduced.  The cached operating point (V, θ)
+            # in self.sensitivities.net is preserved — no pp.runpp call.
+            self.invalidate_sensitivity_cache()
+
+    def generate_capability_message(
+        self,
+        target_controller_id: str,
+        measurement: Measurement,
+    ) -> CapabilityMessage:
+        """
+        Generate a capability message for the TSO controller.
+        
+        The capability bounds are computed from DER capabilities mapped
+        to the interface using sensitivity analysis.
+        
+        Parameters
+        ----------
+        target_controller_id : str
+            Identifier of the TSO controller.
+        measurement : Measurement
+            Current system measurements.
+        
+        Returns
+        -------
+        CapabilityMessage
+            Message containing interface Q capability bounds.
+        """
+        # Get DER P for capability calculation
+        der_p = self._extract_der_active_power(measurement)
+        
+        # Get DER Q capability bounds
+        q_der_min, q_der_max = self.actuator_bounds.compute_der_q_bounds(der_p)
+        # Build sensitivity matrix if not cached
+        if self._H_cache is None:
+            self._build_sensitivity_matrix()
+
+        # Extract dQ_interface/dQ_DER from H matrix (expanded to per-DER)
+        # The first n_interfaces rows of H correspond to Q_interface outputs
+        n_interfaces = len(self.config.interface_trafo_indices)
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
+
+        H_expanded = self._expand_H_to_der_level(self._H_cache)
+        dQ_interface_dQ_der = H_expanded[:n_interfaces, :n_der]
+        
+        # Map DER capability to interface capability using delta from current
+        # operating point.  The TSO applies these as:
+        #     u_bound = q_interface_current + q_cap
+        # so q_cap must be a delta: S · (q_der_bound - q_der_current).
+        q_der_current = measurement.der_q_mvar.copy()
+        q_interface_min = np.zeros(n_interfaces)
+        q_interface_max = np.zeros(n_interfaces)
+
+        for i in range(n_interfaces):
+            for j in range(n_der):
+                sensitivity = dQ_interface_dQ_der[i, j]
+                dq_min = q_der_min[j] - q_der_current[j]
+                dq_max = q_der_max[j] - q_der_current[j]
+                if sensitivity >= 0:
+                    q_interface_min[i] += sensitivity * dq_min
+                    q_interface_max[i] += sensitivity * dq_max
+                else:
+                    q_interface_min[i] += sensitivity * dq_max
+                    q_interface_max[i] += sensitivity * dq_min
+
+        return CapabilityMessage(
+            source_controller_id=self.controller_id,
+            target_controller_id=target_controller_id,
+            iteration=self.iteration,
+            interface_transformer_indices=np.array(
+                self.config.interface_trafo_indices, dtype=np.int64
+            ),
+            q_min_mvar=q_interface_min,
+            q_max_mvar=q_interface_max,
+        )
+    
+    def set_shunt_overrides(self, overrides: Dict[int, tuple]) -> None:
+        """
+        Set shunt bound overrides from the Reserve Observer.
+
+        Parameters
+        ----------
+        overrides : Dict[int, tuple]
+            Mapping from shunt index (0-based within the DSO shunt
+            vector) to ``(lower, upper)`` bound.  These are applied
+            in :meth:`_compute_input_bounds` and cleared after each
+            call to :meth:`step`.
+        """
+        self._shunt_bound_overrides = overrides.copy()
+
+    # =========================================================================
+    # Implementation of abstract methods
+    # =========================================================================
+
+    def get_interface_der_sensitivity(self) -> NDArray[np.float64]:
+        """
+        Return the ∂Q_interface / ∂Q_DER sub-matrix, shape (n_interfaces, n_der).
+
+        Builds the full H matrix on first call if not yet cached. Subsequent
+        calls return the cached result without recomputation.
+
+        When a DER mapping is active, the returned matrix has per-DER
+        columns (expanded via H_bus @ E).
+        """
+        if self._H_cache is None:
+            self._build_sensitivity_matrix()
+        n_interfaces = len(self.config.interface_trafo_indices)
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
+        H_expanded = self._expand_H_to_der_level(self._H_cache)
+        return H_expanded[:n_interfaces, :n_der]
+
+    def _get_der_mapping(self) -> Optional[DERMapping]:
+        """Return the DER mapping from config."""
+        return self.config.der_mapping
+
+    def _get_n_der_bus(self) -> int:
+        """Number of unique DER bus columns in H_bus."""
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            return mapping.n_unique_bus
+        return len(self.config.der_indices)
+
+    def _get_control_structure(self) -> Tuple[int, int, List[int]]:
+        """Define the control variable structure."""
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
+        n_oltc = len(self.config.oltc_trafo_indices)
+        n_shunt = len(self.config.shunt_bus_indices)
+
+        n_continuous = n_der
+        n_integer = n_oltc + n_shunt
+
+        # Integer indices are after the continuous DER variables
+        integer_indices = list(range(n_continuous, n_continuous + n_integer))
+
+        return n_continuous, n_integer, integer_indices
+    
+    def _extract_control_values(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """Extract current control values from measurements."""
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
+        n_oltc = len(self.config.oltc_trafo_indices)
+        n_shunt = len(self.config.shunt_bus_indices)
+        n_total = n_der + n_oltc + n_shunt
+
+        u = np.zeros(n_total)
+
+        # DER Q setpoints
+        if mapping is not None:
+            # Per-sgen extraction
+            for i, sgen_idx in enumerate(mapping.sgen_indices):
+                meas_idx = np.where(measurement.der_indices == sgen_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(
+                        f"DER sgen {sgen_idx} not found in measurement"
+                    )
+                u[i] = measurement.der_q_mvar[meas_idx[0]]
+        else:
+            # Legacy sgen-index extraction
+            for i, der_idx in enumerate(self.config.der_indices):
+                meas_idx = np.where(measurement.der_indices == der_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(f"DER {der_idx} not found in measurement")
+                u[i] = measurement.der_q_mvar[meas_idx[0]]
+
+        # OLTC tap positions
+        for i, oltc_idx in enumerate(self.config.oltc_trafo_indices):
+            meas_idx = np.where(measurement.oltc_indices == oltc_idx)[0]
+            if len(meas_idx) == 0:
+                raise ValueError(f"OLTC {oltc_idx} not found in measurement")
+            u[n_der + i] = float(measurement.oltc_tap_positions[meas_idx[0]])
+
+        # Shunt states
+        for i, shunt_idx in enumerate(self.config.shunt_bus_indices):
+            meas_idx = np.where(measurement.shunt_indices == shunt_idx)[0]
+            if len(meas_idx) == 0:
+                raise ValueError(f"Shunt at bus {shunt_idx} not found in measurement")
+            u[n_der + n_oltc + i] = float(measurement.shunt_states[meas_idx[0]])
+
+        return u
+    
+    def _extract_outputs(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """Extract current output values from measurements."""
+        n_interfaces = len(self.config.interface_trafo_indices)
+        n_voltage = len(self.config.voltage_bus_indices)
+        n_current = len(self.config.current_line_indices)
+        n_outputs = n_interfaces + n_voltage + n_current
+        
+        y = np.zeros(n_outputs)
+        idx = 0
+        
+        # Interface Q measurements
+        for trafo_idx in self.config.interface_trafo_indices:
+            meas_idx = np.where(
+                measurement.interface_transformer_indices == trafo_idx
+            )[0]
+            if len(meas_idx) == 0:
+                raise ValueError(
+                    f"Interface transformer {trafo_idx} not found in measurement"
+                )
+            y[idx] = measurement.interface_q_hv_side_mvar[meas_idx[0]]
+            idx += 1
+        
+        # Voltage measurements
+        for bus_idx in self.config.voltage_bus_indices:
+            meas_idx = np.where(measurement.bus_indices == bus_idx)[0]
+            if len(meas_idx) == 0:
+                raise ValueError(f"Bus {bus_idx} not found in measurement")
+            y[idx] = measurement.voltage_magnitudes_pu[meas_idx[0]]
+            idx += 1
+        
+        # Current measurements
+        for line_idx in self.config.current_line_indices:
+            meas_idx = np.where(measurement.branch_indices == line_idx)[0]
+            if len(meas_idx) == 0:
+                raise ValueError(f"Line {line_idx} not found in measurement")
+            y[idx] = measurement.current_magnitudes_ka[meas_idx[0]]
+            idx += 1
+        
+        return y
+    
+    def _extract_der_active_power(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """Extract DER active power from measurement for capability calculation."""
+        p_current = measurement.der_p_mw.copy()
+        return p_current
+
+    def _extract_trafo_reactive_power(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """
+        Extract current trafo ractive power flow for capability calculation.
+        """
+        q_current = measurement.interface_q_hv_side_mvar.copy()
+        return q_current
+    
+    def _compute_input_bounds(
+        self,
+        tso_dso_interface_q_current: NDArray[np.float64],
+        der_p_current: NDArray[np.float64],
+    ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Compute operating-point-dependent input bounds."""
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
+        n_oltc = len(self.config.oltc_trafo_indices)
+        n_shunt = len(self.config.shunt_bus_indices)
+        n_total = n_der + n_oltc + n_shunt
+
+        u_lower = np.zeros(n_total)
+        u_upper = np.zeros(n_total)
+
+        # DER Q bounds (P-dependent)
+        q_min, q_max = self.actuator_bounds.compute_der_q_bounds(der_p_current)
+        u_lower[:n_der] = q_min
+        u_upper[:n_der] = q_max
+        
+        # OLTC tap bounds (fixed)
+        tap_min, tap_max = self.actuator_bounds.get_oltc_tap_bounds()
+        u_lower[n_der:n_der + n_oltc] = tap_min.astype(np.float64)
+        u_upper[n_der:n_der + n_oltc] = tap_max.astype(np.float64)
+        
+        # Shunt state bounds (fixed: -1, 0, +1)
+        state_min, state_max = self.actuator_bounds.get_shunt_state_bounds()
+        u_lower[n_der + n_oltc:] = state_min.astype(np.float64)
+        u_upper[n_der + n_oltc:] = state_max.astype(np.float64)
+
+        # Apply Reserve Observer overrides
+        shunt_offset = n_der + n_oltc
+        for j, (lo, hi) in self._shunt_bound_overrides.items():
+            u_lower[shunt_offset + j] = lo
+            u_upper[shunt_offset + j] = hi
+
+        return u_lower, u_upper
+    
+    def _get_output_limits(self) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Get output constraint limits."""
+        n_interfaces = len(self.config.interface_trafo_indices)
+        n_voltage = len(self.config.voltage_bus_indices)
+        n_current = len(self.config.current_line_indices)
+        n_outputs = n_interfaces + n_voltage + n_current
+        
+        y_lower = np.zeros(n_outputs)
+        y_upper = np.zeros(n_outputs)
+        idx = 0
+        
+        # Interface Q: no hard limits (tracking via objective)
+        for _ in range(n_interfaces):
+            y_lower[idx] = -1E6
+            y_upper[idx] = 1E6
+            idx += 1
+        
+        # Voltage limits
+        for _ in range(n_voltage):
+            y_lower[idx] = self.config.v_min_pu
+            y_upper[idx] = self.config.v_max_pu
+            idx += 1
+        
+        # Current limits (upper only, kA)
+        for j in range(n_current):
+            if self.config.current_line_max_i_ka is not None:
+                i_lim_ka = self.config.i_max_pu * self.config.current_line_max_i_ka[j]
+            else:
+                i_lim_ka = 1E6  # no limit if ratings not provided
+            y_lower[idx] = 0.0
+            y_upper[idx] = i_lim_ka
+            idx += 1
+        
+        return y_lower, y_upper
+    
+    def _compute_objective_gradient(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """
+        Compute the objective function gradient.
+
+        The DSO objective combines two terms:
+
+        1. **Q-interface tracking** (primary):
+           f_q(u) = g_q · ||Q_interface - Q_set||²
+           ∇f_q  = 2 · g_q · (Q - Q_set)^T · ∂Q/∂u
+
+        2. **Voltage-schedule tracking** (secondary, optional):
+           f_v(u) = g_v · ||V - V_set||²
+           ∇f_v  = 2 · g_v · (V - V_set)^T · ∂V/∂u
+
+        **Role-based OLTC attenuation** (``gamma_oltc_q``):
+        The Q-tracking gradient on OLTC columns is scaled by γ ∈ [0, 1].
+        With γ = 0 (default), OLTCs receive no Q-tracking incentive and
+        are driven only by voltage deviations.  The full ∂Q/∂s_OLTC
+        remains in H for output constraints, so the physical coupling
+        between tap changes and reactive power is preserved.
+
+        The voltage term is only active when *v_setpoints_pu* is
+        configured.  It should be weighted softly (small g_v) so that
+        Q-interface tracking remains the dominant objective.
+        """
+        n_total = self.n_controls
+        grad_f = np.zeros(n_total)
+
+        # Get sensitivity matrix (bus-level) and expand to per-DER
+        H_bus = self._build_sensitivity_matrix()
+        H = self._expand_H_to_der_level(H_bus)
+
+        n_interfaces = len(self.config.interface_trafo_indices)
+        n_v = len(self.config.voltage_bus_indices)
+
+        # --- Component 1: Q-interface tracking ---
+        q_interface = np.zeros(n_interfaces)
+        for i, trafo_idx in enumerate(self.config.interface_trafo_indices):
+            meas_idx = np.where(
+                measurement.interface_transformer_indices == trafo_idx
+            )[0]
+            if len(meas_idx) > 0:
+                q_interface[i] = measurement.interface_q_hv_side_mvar[meas_idx[0]]
+
+        q_error = q_interface - self.q_setpoint_mvar
+        dQ_du = H[:n_interfaces, :]
+
+        # Role-based gradient attenuation: attenuate Q-tracking gradient
+        # on OLTC columns so that OLTCs are driven primarily by voltage
+        # deviations.  The full ∂Q/∂s remains in H for output constraints,
+        # preserving the physical coupling in predicted outputs.
+        gamma = self.config.gamma_oltc_q
+        if gamma < 1.0:
+            mapping = self.config.der_mapping
+            n_der = mapping.n_der if mapping is not None else len(self.config.der_indices)
+            n_oltc = len(self.config.oltc_trafo_indices)
+            oltc_slice = slice(n_der, n_der + n_oltc)
+            dQ_du_q = dQ_du.copy()
+            dQ_du_q[:, oltc_slice] *= gamma
+        else:
+            dQ_du_q = dQ_du
+
+        grad_f += 2.0 * self.config.g_q * (q_error @ dQ_du_q)
+
+        # --- Integral Q-tracking component (leaky integrator) ---
+        if self.config.g_qi > 0.0:
+            # Leaky integrator: s_{k+1} = lambda * s_k + e_k
+            self._q_error_integral = (
+                self.config.lambda_qi * self._q_error_integral + q_error
+            )
+            # Anti-windup: clamp accumulator
+            np.clip(
+                self._q_error_integral,
+                -self.config.q_integral_max_mvar,
+                self.config.q_integral_max_mvar,
+                out=self._q_error_integral,
+            )
+            grad_f += 2.0 * self.config.g_qi * (self._q_error_integral @ dQ_du_q)
+
+        # --- Component 2: Voltage-schedule tracking (optional) ---
+        if self.config.v_setpoints_pu is not None:
+            v_current = np.zeros(n_v)
+            for j, bus_idx in enumerate(self.config.voltage_bus_indices):
+                meas_idx = np.where(measurement.bus_indices == bus_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(f"Bus {bus_idx} not found in measurement")
+                v_current[j] = measurement.voltage_magnitudes_pu[meas_idx[0]]
+
+            v_error = v_current - self.config.v_setpoints_pu
+
+            # Voltage rows start after interface Q rows in H
+            dV_du = H[n_interfaces:n_interfaces + n_v, :]
+            grad_f += 2.0 * self.config.g_v * (v_error @ dV_du)
+
+        return grad_f
+
+    def _build_sensitivity_matrix(self) -> NDArray[np.float64]:
+        """Build the input-output sensitivity matrix H."""
+        if self._H_cache is not None:
+            return self._H_cache
+
+        # Determine whether interface and OLTC transformers are 2W or 3W.
+        # Check if the indices exist in net.trafo3w (they do for the
+        # TU Darmstadt benchmark where couplers are 3-winding).
+        net = self.sensitivities.net
+
+        iface_are_3w = (
+            hasattr(net, "trafo3w")
+            and not net.trafo3w.empty
+            and all(
+                t in net.trafo3w.index
+                for t in self.config.interface_trafo_indices
+            )
+        )
+        oltc_are_3w = (
+            hasattr(net, "trafo3w")
+            and not net.trafo3w.empty
+            and all(
+                t in net.trafo3w.index
+                for t in self.config.oltc_trafo_indices
+            )
+        )
+
+        # Map DER indices (sgen) to their corresponding buses for sensitivity
+        der_bus_indices = [
+            int(net.sgen.at[s, "bus"]) for s in self.config.der_indices
+        ]
+
+        # Deduplicate: the sensitivity builder works on unique buses.
+        # After building H we expand columns back to one per DER.
+        unique_buses: List[int] = []
+        der_to_unique: List[int] = []  # maps each DER to its unique-bus column
+        for b in der_bus_indices:
+            if b not in unique_buses:
+                unique_buses.append(b)
+            der_to_unique.append(unique_buses.index(b))
+
+        # Build keyword arguments depending on transformer type
+        kw = dict(
+            der_bus_indices=unique_buses,
+            observation_bus_indices=self.config.voltage_bus_indices,
+            line_indices=self.config.current_line_indices,
+            shunt_bus_indices=self.config.shunt_bus_indices,
+            shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
+        )
+        if iface_are_3w:
+            kw["trafo3w_indices"] = self.config.interface_trafo_indices
+        else:
+            kw["trafo_indices"] = self.config.interface_trafo_indices
+
+        if oltc_are_3w:
+            kw["oltc_trafo3w_indices"] = self.config.oltc_trafo_indices
+        else:
+            kw["oltc_trafo_indices"] = self.config.oltc_trafo_indices
+
+        H, mappings = self.sensitivities.build_sensitivity_matrix_H(**kw)
+
+        # When a DER mapping is active, keep H at bus-level (unique buses).
+        # The base class _expand_H_to_der_level will handle per-DER expansion
+        # via the E matrix.  When no mapping is active, use legacy column
+        # duplication so existing code keeps working.
+        if self.config.der_mapping is None:
+            if len(unique_buses) < len(der_bus_indices):
+                n_unique = len(unique_buses)
+                n_other = H.shape[1] - n_unique
+                H_der = H[:, :n_unique][:, der_to_unique]  # expand
+                H_rest = H[:, n_unique:]
+                H = np.hstack([H_der, H_rest])
+                mappings["der_buses"] = der_bus_indices
+
+        self._H_cache = H
+        self._H_mappings = mappings
+
+        # Create the sensitivity updater for voltage-dependent corrections.
+        # DSO has no machine transformer OLTCs, so only shunt updates apply.
+        self._sensitivity_updater = SensitivityUpdater(
+            H=H,
+            mappings=mappings,
+            sensitivities=self.sensitivities,
+            update_interval_min=1,
+        )
+
+        return H
+
+    def step(self, measurement: Measurement) -> ControllerOutput:
+        """
+        Execute one OFO iteration with voltage-dependent sensitivity updates.
+
+        Before delegating to :meth:`BaseOFOController.step`, this method
+        rescales shunt columns of the cached H matrix using the measured
+        bus voltages.  The V² correction accounts for the constant-susceptance
+        nature of shunt devices (MSR / MSC).
+
+        After the step, shunt bound overrides from the Reserve Observer
+        are cleared so they must be re-set each iteration.
+        """
+        # Ensure H is built
+        if self._H_cache is None:
+            self._build_sensitivity_matrix()
+        # Update state-dependent shunt columns
+        if self._sensitivity_updater is not None:
+            self._H_cache = self._sensitivity_updater.update(
+                measurement, measurement.iteration
+            )
+        result = super().step(measurement)
+        # Clear one-shot overrides
+        self._shunt_bound_overrides.clear()
+        return result
+
+    def invalidate_sensitivity_cache(self) -> None:
+        """Invalidate the cached sensitivity matrix.
+
+        Also clears the per-DER expansion cache on the base class so the
+        next ``step()`` rebuilds ``H_der`` from the freshly computed
+        ``H_bus`` (e.g. after a contingency or topology change).
+        """
+        self._H_cache = None
+        self._H_mappings = None
+        self._sensitivity_updater = None
+        self._H_der_cache = None
+        self._H_der_cache_base_id = None

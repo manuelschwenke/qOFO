@@ -97,6 +97,27 @@ class IEEE39NetworkMeta:
     dso_shunt_buses: Tuple[int, ...] = field(default_factory=tuple)
     """Bus indices of DSO shunts."""
 
+    # ── TSO-owned bipolar shunts at DSO tertiaries (see add_hv_networks) ──
+    tso_tertiary_shunt_indices: Tuple[int, ...] = field(default_factory=tuple)
+    """``net.shunt`` indices for the bipolar 50 Mvar shunts installed at
+    the first 20 kV tertiary bus of each active DSO sub-network.  The
+    shunts are TSO-owned actuators (state ∈ {-1, 0, +1}); the DSO
+    controllers see them as disturbances only."""
+
+    tso_tertiary_shunt_buses: Tuple[int, ...] = field(default_factory=tuple)
+    """20 kV tertiary bus index for each TSO tertiary shunt (parallel
+    to ``tso_tertiary_shunt_indices``)."""
+
+    tso_tertiary_shunt_q_steps_mvar: Tuple[float, ...] = field(default_factory=tuple)
+    """Per-shunt rated reactive power per step at V = 1 pu [Mvar].
+    ``q_mvar`` follows pandapower load convention: ``step = +1`` injects
+    +q_mvar (reactor), ``step = -1`` injects −q_mvar (capacitor)."""
+
+    tso_tertiary_shunt_zones: Tuple[int, ...] = field(default_factory=tuple)
+    """TSO zone owning each tertiary shunt (= zone of the parent DSO
+    sub-network).  Used by the experiment runner to populate the right
+    ``ZoneDefinition.shunt_bus_indices`` per TSO zone."""
+
     dn_bus_indices: Tuple[int, ...] = field(default_factory=tuple)
     """All 20 kV distribution bus indices."""
 
@@ -144,6 +165,11 @@ class HVNetworkInfo:
 
     coupling_hv_bus_indices: Tuple[int, ...]
     """HV bus index at the LV side of each coupling transformer."""
+
+    coupling_lv_bus_indices: Tuple[int, ...] = field(default_factory=tuple)
+    """20 kV tertiary bus index for each entry in ``coupling_trafo_indices``.
+    Populated by ``_create_hv_subnetwork``; used by ``add_hv_networks``
+    to attach TSO-owned bipolar shunts at the first tertiary."""
 
     zone: int = 0
     """IEEE zone this sub-network belongs to."""

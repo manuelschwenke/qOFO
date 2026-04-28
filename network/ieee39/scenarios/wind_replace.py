@@ -48,7 +48,7 @@ from network.ieee39.meta import IEEE39NetworkMeta
 # means "wind park rated at the FULL removed-gen P" (per the docstring
 # convention).  Increase to oversize wind parks for additional zonal
 # headroom; decrease to study under-replacement scenarios.
-WIND_REPLACE_SCALE: float = 1.0
+WIND_REPLACE_SCALE: float = 1.1
 
 
 def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
@@ -115,7 +115,7 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     _wp_info: List[Tuple[int, int, float, float]] = []  # (sgen_idx, bus, p, sn)
     for _g_idx, gb, gen_p, zone in _removed_gen_info:
         wp_p = gen_p * WIND_REPLACE_SCALE
-        wp_sn = wp_p * 1.2
+        wp_sn = wp_p * 1.0
         idx = pp.create_sgen(
             net,
             bus=gb,

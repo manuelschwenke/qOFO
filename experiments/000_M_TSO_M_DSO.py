@@ -66,6 +66,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timedelta
+from time import perf_counter
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -89,12 +90,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from analysis.stability_analysis import (
     analyse_multi_zone_stability,
     MultiZoneStabilityResult,
-)
-from analysis.observer.stability_integration_ieee39 import (
-    attach_observer,
-    observer_record_fresh,
-    write_observer_results_alongside_report,
-    derive_tuned_gw,
 )
 from controller.base_controller import OFOParameters
 from controller.dso_controller import DSOController, DSOControllerConfig
@@ -128,6 +123,7 @@ from network.zone_partition import (
     relabel_zones_by_generator_count,
     get_zone_lines,
     get_tie_lines,
+    get_zone_tie_lines,
 )
 from configs.multi_tso_config import MultiTSOConfig
 from experiments.helpers import (
@@ -144,6 +140,7 @@ from experiments.helpers import (
     prepare_load_contingencies,
 )
 from sensitivity.jacobian import JacobianSensitivities
+from core.message import ShuntDisturbanceMessage
 
 
 def _collect_contingency_watch_buses(
@@ -459,16 +456,19 @@ def _record_zone_live_plot_observables(
                     net.res_trafo3w.loc[pccs, "q_hv_mvar"].sum()
                 )
 
-        # Shunt states — ZoneDefinition currently carries shunt_bus_indices
-        # but IEEE39 has no shunts so this is almost always empty.
+        # Shunt states — ZoneDefinition.shunt_bus_indices holds the bus
+        # indices where TSO-owned shunts are connected.  Map each bus to
+        # its row in net.shunt to read the current step.  Order is
+        # preserved so the plot tile stays aligned with the zone's
+        # actuator vector.
         if getattr(zd, "shunt_bus_indices", None):
-            shunt_rows = [s for s in zd.shunt_bus_indices if s in net.shunt.index]
-            if shunt_rows:
-                rec.zone_tso_shunt_states[z] = net.shunt.loc[
-                    shunt_rows, "step"
-                ].to_numpy(dtype=np.int64)
-            else:
-                rec.zone_tso_shunt_states[z] = np.array([], dtype=np.int64)
+            steps: List[int] = []
+            for sb in zd.shunt_bus_indices:
+                mask = net.shunt["bus"] == sb
+                if mask.any():
+                    sh_idx = net.shunt.index[mask][0]
+                    steps.append(int(net.shunt.at[sh_idx, "step"]))
+            rec.zone_tso_shunt_states[z] = np.asarray(steps, dtype=np.int64)
         else:
             rec.zone_tso_shunt_states[z] = np.array([], dtype=np.int64)
 
@@ -713,7 +713,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         print()
         print("[3] Attaching 3 HV sub-networks (DSO_1..DSO_3) ...")
 
-    meta = add_hv_networks(net, meta, verbose=(verbose >= 2))
+    meta = add_hv_networks(
+        net, meta, install_tso_tertiary_shunts=config.install_tso_tertiary_shunts,
+        verbose=(verbose >= 2),
+    )
 
     # add_hv_networks() may remove buses (e.g. bus 11/0-idx = IEEE bus 12).
     # Purge any removed buses from zone_map so downstream logic stays consistent.
@@ -831,6 +834,15 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # HV-network lookup for DSO controller init
     hv_info_map: Dict[str, HVNetworkInfo] = {hv.net_id: hv for hv in meta.hv_networks}
 
+    # Map each TSO-owned tertiary shunt bus to its parent DSO id.  Used at
+    # run-time to dispatch ``ShuntDisturbanceMessage`` to the affected DSO
+    # whenever the TSO MIQP switches a shunt.  The shunt sits at the first
+    # tertiary of a coupling 3-winding transformer (see add_hv_networks).
+    shunt_bus_to_dso_id: Dict[int, str] = {}
+    for hv in meta.hv_networks:
+        if hv.coupling_lv_bus_indices:
+            shunt_bus_to_dso_id[int(hv.coupling_lv_bus_indices[0])] = hv.net_id
+
     # ── Build ZoneDefinition for each zone ────────────────────────────────────
     #
     # TSO monitoring uses TN-only buses and lines (tn_zone_map).
@@ -842,6 +854,22 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         set(int(net.gen.at[g, "bus"]) for g in net.gen.index) |
         set(int(net.ext_grid.at[e, "bus"]) for e in net.ext_grid.index)
     )
+
+    # ── Partition TSO-owned tertiary shunts per zone ──────────────────────────
+    # Each shunt is owned by the TSO zone hosting the parent DSO sub-network
+    # (see meta.tso_tertiary_shunt_zones, populated by add_hv_networks).  The
+    # DSO controllers are blind to these shunts; the bus indices flow into
+    # ZoneDefinition.shunt_bus_indices and from there into TSOControllerConfig.
+    zone_shunt_buses:  Dict[int, List[int]]   = {z: [] for z in zone_map}
+    zone_shunt_qsteps: Dict[int, List[float]] = {z: [] for z in zone_map}
+    for sb, q_step, sz in zip(
+        meta.tso_tertiary_shunt_buses,
+        meta.tso_tertiary_shunt_q_steps_mvar,
+        meta.tso_tertiary_shunt_zones,
+    ):
+        if sz in zone_shunt_buses:
+            zone_shunt_buses[sz].append(int(sb))
+            zone_shunt_qsteps[sz].append(float(q_step))
 
     zone_defs: Dict[int, ZoneDefinition] = {}
     for z in sorted(zone_map.keys()):
@@ -876,6 +904,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             pcc_trafo_indices=zone_pcc_trafos[z],
             pcc_dso_ids=zone_pcc_dso_ids[z],
             oltc_trafo_indices=zone_oltc_trafos[z],
+            shunt_bus_indices=zone_shunt_buses[z],
+            shunt_q_steps_mvar=zone_shunt_qsteps[z],
             v_setpoint_pu=v_set,
             # alpha removed (absorbed into g_w)
             g_v=config.g_v,
@@ -883,14 +913,37 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             g_w_gen=config.g_w_gen,
             g_w_pcc=config.g_w_pcc,
             g_w_oltc=config.g_w_tso_oltc,
+            g_w_shunt=config.g_w_tso_shunt,
+            g_q_tso=config.tso_g_q_pcc,
         )
+
+    # Populate per-zone tie-line sets (Phase A: monitoring only).
+    # A tie line is one whose two endpoints sit in two different TSO zones.
+    # For each zone we record the tie lines touching its bus set together
+    # with the IN-ZONE endpoint bus (sign anchor for Q_tie measurement
+    # and sensitivity).  Both zones touching the same line own it, each
+    # at its own end — symmetric decentralised monitoring.
+    _tn_zone_buses_set = {z: set(tn_zone_map[z]) for z in zone_defs}
+    for z, zd in zone_defs.items():
+        other_lists = [
+            _tn_zone_buses_set[zj] for zj in zone_defs if zj != z
+        ]
+        pairs = get_zone_tie_lines(net, _tn_zone_buses_set[z], other_lists)
+        zd.tie_line_indices = [li for li, _ in pairs]
+        zd.tie_line_endpoint_buses = [endp for _, endp in pairs]
+        zd.q_tie_setpoints_mvar = (
+            np.zeros(len(pairs), dtype=np.float64) if pairs else None
+        )
+        zd.g_q_tie = config.tso_g_q_tie
 
     if verbose >= 1:
         for z, zd in zone_defs.items():
             hv_names = [hv.net_id for hv in zone_hv_networks.get(z, [])]
             print(f"  Zone {z}: {len(zd.gen_indices)} gen, {len(zd.tso_der_indices)} DER, "
                   f"{len(zd.oltc_trafo_indices)} OLTC, "
-                  f"{len(zd.line_indices)} lines, {len(zd.pcc_trafo_indices)} PCC trafos  "
+                  f"{len(zd.shunt_bus_indices)} shunt, "
+                  f"{len(zd.line_indices)} lines, {len(zd.pcc_trafo_indices)} PCC trafos, "
+                  f"{len(zd.tie_line_indices)} tie lines  "
                   f"DSOs: {hv_names}")
 
     # ── Live-plot statics (tie-line map, gen P/Q limits) ─────────────────────
@@ -925,15 +978,30 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
     ns0 = _network_state(net)  # initial network state snapshot
 
+    # Build one full-network Jacobian at the current (pre-profile) operating
+    # point and share it across every TSO and DSO controller, plus the
+    # coordinator.  This snapshot is replaced by a fresh post-Phase-2 one
+    # below (see "Rebuild shared Jacobian"), so all controllers eventually
+    # operate on the same post-init cached plant model.  Avoids 8 redundant
+    # deep-copy + pp.runpp + dense-inversion calls inside the construction
+    # loops.
+    _t_jac_initial = perf_counter()
+    shared_jac = JacobianSensitivities(net)
+    if verbose >= 1:
+        print(f"  [T] initial shared JacobianSensitivities: {perf_counter() - _t_jac_initial:.2f} s")
+
+    _t_step5 = perf_counter()
     tso_controllers: Dict[int, TSOController] = {}
     for z, zd in zone_defs.items():
 
         # ── G_w diagonal for this zone's u vector ────────────────────────────
         gw_diag = zd.gw_diagonal()
         gz_diag_target = np.concatenate([
-            np.full(len(zd.v_bus_indices), config.g_z_voltage),   # voltage slacks
-            np.full(len(zd.line_indices),  config.g_z_current),   # current slacks
-            np.full(len(zd.gen_indices),   config.g_z_q_gen),     # Q_gen slacks
+            np.full(len(zd.v_bus_indices),     config.g_z_voltage),  # V slacks
+            np.full(len(zd.pcc_trafo_indices), config.g_z_q_pcc),    # Q_PCC slacks (Strategy D)
+            np.full(len(zd.line_indices),      config.g_z_current),  # current slacks
+            np.full(len(zd.gen_indices),       config.g_z_q_gen),    # Q_gen slacks
+            np.full(len(zd.tie_line_indices),  config.g_z_q_tie),    # Q_tie slacks (Phase A: 0)
         ])
         # During warmup use a tiny g_z; after warmup switch to gz_diag_target
         if config.g_z_warmup_s > 0:
@@ -977,6 +1045,13 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             gen_bus_indices=zd.gen_bus_indices,
             gen_oltc_map=_gen_oltc_map,
             enable_saturation_mode=config.enable_avr_saturation_mode,
+            g_q_tso=config.tso_g_q_pcc,
+            pcc_capability_on_output=config.tso_pcc_capability_on_output,
+            tie_line_indices=zd.tie_line_indices,
+            tie_line_endpoint_buses=zd.tie_line_endpoint_buses,
+            q_tie_setpoints_mvar=zd.q_tie_setpoints_mvar,
+            g_q_tie=config.tso_g_q_tie,
+            g_z_q_tie=config.g_z_q_tie,
         )
 
         # ActuatorBounds for DERs in this zone
@@ -1043,11 +1118,14 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             config=tso_cfg,
             network_state=ns0,
             actuator_bounds=bounds,
-            sensitivities=JacobianSensitivities(net),
+            sensitivities=shared_jac,
         )
         # _u_current is initialised later (step 7e), after profiles and
         # OLTC/STATCOM init have settled the operating point.
         tso_controllers[z] = ctrl
+
+    if verbose >= 1:
+        print(f"  [T] step [5] TSO controller construction: {perf_counter() - _t_step5:.2f} s")
 
 
     # =========================================================================
@@ -1077,6 +1155,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             print()
             print("[6] Initialising DSO controllers (5 HV sub-networks) ...")
 
+    _t_step6 = perf_counter()
     for hv in meta.hv_networks if config.dso_mode != "local" else []:
         dso_id = hv.net_id  # e.g. "DSO_1"
         interface_trafos = list(hv.coupling_trafo_indices)
@@ -1174,7 +1253,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             config=dso_cfg,
             network_state=ns0,
             actuator_bounds=dso_bounds,
-            sensitivities=JacobianSensitivities(net),
+            sensitivities=shared_jac,
         )
         # _u_current is initialised later (step 7e), after profiles and
         # OLTC/STATCOM init have settled the operating point.
@@ -1183,6 +1262,9 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         if verbose >= 1:
             print(f"  {dso_id} (zone {hv.zone}): {len(der_indices)} DER, "
                   f"{n_iface} PCC trafos, {n_v} V-buses, {n_i} lines")
+
+    if verbose >= 1 and config.dso_mode != "local":
+        print(f"  [T] step [6] DSO controller construction: {perf_counter() - _t_step6:.2f} s")
 
     # Map each DSO controller ID to the ID of its supervising TSO controller.
     # TSO controller IDs follow the pattern "tso_zone_{z}" (see TSOController init above).
@@ -1212,20 +1294,6 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     for z, ctrl in tso_controllers.items():
         coordinator.register_tso_controller(z, ctrl)
 
-    # Attach passive stability observer.  Records spectral-gap g_w^min per
-    # zone at every TSO step using a freshly-computed H; the controller
-    # continues to use its own cached H per
-    # ``config.sensitivity_update_interval``.  The reported floor is a
-    # DIAGNOSTIC of the unconstrained-OFO spectral-gap condition, not a
-    # tuning suggestion for this MIQP-OFO controller (see
-    # analysis/observer/DISCUSSION.md "Note on naming").
-    # Gated by ``config.run_stability_observer``; when False the observer
-    # is skipped entirely (no per-step recording, no end-of-run artefacts).
-    if config.run_stability_observer:
-        observer = attach_observer(coordinator, zone_defs, config, verbose=verbose)
-    else:
-        observer = None
-
     # =========================================================================
     # STEP 7b: Load profiles and compute zonal generator dispatch
     # =========================================================================
@@ -1243,8 +1311,13 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             print(f"[7b] Loading profiles from {profiles_csv}")
             print(f"     start_time = {start_time:%d.%m.%Y %H:%M}")
 
+        _t_init_total = perf_counter()
+
+        _t = perf_counter()
         profiles = load_profiles(profiles_csv, timestep_s=config.dt_s)
         snapshot_base_values(net)
+        if verbose >= 1:
+            print(f"  [T] load_profiles + snapshot_base_values: {perf_counter() - _t:.2f} s")
 
         # Pre-create dormant loads for load-contingency events (must be
         # after snapshot_base_values so base columns exist).
@@ -1254,11 +1327,19 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         # Clip profile DataFrame to the simulation window only.
         # Without this, compute_zonal_gen_dispatch iterates the full profile
         # horizon (up to 525 600 rows at 60 s resolution) unnecessarily.
+        # Note: must clip BOTH start and end — load_profiles returns the
+        # full year (e.g. 2016-01-01 .. 2016-12-31).  ``profiles.loc[:t_end]``
+        # alone would still iterate every row from the CSV start through
+        # ``start_time``, which for an April start_time is ~3.5 months of
+        # rows that compute_zonal_gen_dispatch would scan in vain.
         t_end = start_time + timedelta(seconds=config.n_total_s)
-        profiles = profiles.loc[:t_end]  # keep only rows up to simulation end
+        profiles = profiles.loc[start_time:t_end]
 
         # Apply initial profiles
+        _t = perf_counter()
         apply_profiles(net, profiles, start_time)
+        if verbose >= 1:
+            print(f"  [T] apply_profiles: {perf_counter() - _t:.2f} s")
 
         if config.use_zonal_gen_dispatch:
             # Per-generator P_min: 20% of P_max (consistent with
@@ -1267,15 +1348,21 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 int(g): float(net.gen.at[g, "p_mw"]) * 0.0
                 for g in net.gen.index
             }
+            _t = perf_counter()
             gen_dispatch = compute_zonal_gen_dispatch(
                 net, profiles, zone_map,
                 gen_p_min_mw=_gen_p_min_dict,
             )
             apply_gen_dispatch(net, gen_dispatch, start_time)
+            if verbose >= 1:
+                print(f"  [T] compute+apply zonal gen dispatch: {perf_counter() - _t:.2f} s")
 
         # Re-converge after profile application
+        _t = perf_counter()
         pp.runpp(net, max_iteration=50, run_control=False, calculate_voltage_angles=True, init='auto',
                  distributed_slack=config.distributed_slack)
+        if verbose >= 1:
+            print(f"  [T] post-profile pp.runpp: {perf_counter() - _t:.2f} s")
 
     # ── STEP 7c: Combined operating-point init (two phases) ─────────────
     # After profiles, bring STATCOM Q and OLTC taps to a self-consistent
@@ -1338,8 +1425,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
               f"{len(meta.machine_trafo_indices)} machine OLTC "
               f"-> target {v_init_mt:.3f} +-{tol_pu:.3f} p.u.")
 
+    _t = perf_counter()
     pp.runpp(net, run_control=True, calculate_voltage_angles=True,
              max_iteration=50, distributed_slack=config.distributed_slack)
+    if verbose >= 1:
+        print(f"  [T] Phase 1 pp.runpp(run_control=True): {perf_counter() - _t:.2f} s")
 
     # Transfer Q from temp-PV-gens to STATCOM sgens, then drop temp gens.
     for gi, si in _tmp_map.items():
@@ -1376,8 +1466,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         print(f"[7c.2] Phase 2 (DSO): {n_coup} coupler 3W OLTC "
               f"-> target {v_init_dso:.3f} +-{tol_pu:.3f} p.u.")
 
+    _t = perf_counter()
     pp.runpp(net, run_control=True, calculate_voltage_angles=True,
              max_iteration=50, distributed_slack=config.distributed_slack)
+    if verbose >= 1:
+        print(f"  [T] Phase 2 pp.runpp(run_control=True): {perf_counter() - _t:.2f} s")
 
     if verbose >= 2:
         for hv in meta.hv_networks:
@@ -1451,9 +1544,21 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                       f"{n_dso_sgen} HV DER; OLTCs settled via DiscreteTapControl")
 
     # Re-converge with final Q and tap positions.
-    pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
-             max_iteration=50,
-             distributed_slack=config.distributed_slack)
+    # Pure-cascade mode skip: when both DSO and TSO are non-local, every
+    # controller was dropped above (machine OLTC at line ~1384, coupler
+    # OLTC at line ~1426) and Phase 2's pp.runpp(run_control=True) already
+    # converged the network at the final operating point.  No actuator
+    # state has changed since; running this PF again is redundant.
+    if _run_control or _local_dso or _local_tso:
+        _t = perf_counter()
+        pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
+                 max_iteration=50,
+                 distributed_slack=config.distributed_slack)
+        if verbose >= 1:
+            print(f"  [T] final re-converge pp.runpp: {perf_counter() - _t:.2f} s")
+    elif verbose >= 1:
+        print("  [T] final re-converge pp.runpp: skipped (pure cascade mode, "
+              "Phase 2 PF still current)")
 
     # ── Slack bus diagnostic after OLTC init ──────────────────────────────
     if verbose >= 1:
@@ -1503,18 +1608,39 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     if _v_violations_found:
         print("  ⚠ Voltage violations — MIQP may be infeasible with hard constraints.")
 
+    # Rebuild shared Jacobian at the post-Phase-2 operating point and replace
+    # the pre-profile snapshot held by every controller.  The H matrices
+    # cached in each controller's _H_cache (and _sensitivity_updater) were
+    # built from the stale Jacobian, so invalidate them — the next call to
+    # _build_sensitivity_matrix will rebuild from the fresh shared_jac.
+    _t = perf_counter()
+    shared_jac = JacobianSensitivities(net)
+    for ctrl in tso_controllers.values():
+        ctrl.sensitivities = shared_jac
+        ctrl.invalidate_sensitivity_cache()
+    for dso_ctrl in dso_controllers.values():
+        dso_ctrl.sensitivities = shared_jac
+        dso_ctrl.invalidate_sensitivity_cache()
+    if verbose >= 1:
+        print(f"  [T] post-Phase-2 shared JacobianSensitivities rebuild + reassign: "
+              f"{perf_counter() - _t:.2f} s")
+
     # Re-initialise all controllers so _u_current reflects the updated
     # operating point (profiles + correct tap positions).
+    _t = perf_counter()
     for z, ctrl in tso_controllers.items():
         ctrl.initialise(measure_zone_tso(net, zone_defs[z], 0))
     for dso_id, dso_ctrl in dso_controllers.items():
         dso_ctrl.initialise(measure_zone_dso(net, dso_ctrl.config, 0))
+    if verbose >= 1:
+        print(f"  [T] controller .initialise() loop: {perf_counter() - _t:.2f} s")
 
     # ── Send initial DSO capability messages to TSO controllers ──────────
     # Without this, PCC capability bounds stay at the default ±1e-6 Mvar
     # until the first DSO step inside the loop.  The first TSO step then
     # sees near-zero capability and locks q_pcc; the second TSO step
     # (with real bounds) produces a large corrective jump.
+    _t = perf_counter()
     for dso_id, dso_ctrl in dso_controllers.items():
         meas_init_dso = measure_zone_dso(net, dso_ctrl.config, 0)
         tso_id = dso_to_tso_id[dso_id]
@@ -1528,6 +1654,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         )
         target_tso.receive_capability(cap_msg)
     if verbose >= 1:
+        print(f"  [T] DSO capability messages loop: {perf_counter() - _t:.2f} s")
         for z, ctrl in tso_controllers.items():
             n_pcc = len(zone_defs[z].pcc_trafo_indices)
             if n_pcc > 0:
@@ -1536,10 +1663,22 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                       f"{ctrl.pcc_capability_max_mvar[0]:.1f}] Mvar")
 
     # ── Cross-sensitivity computation (needed by stability analysis) ──────
-    coordinator.compute_cross_sensitivities()
+    # Reuse the same shared Jacobian to avoid yet another deep-copy + PF +
+    # dense inversion inside the coordinator.
+    _t = perf_counter()
+    coordinator.compute_cross_sensitivities(jac=shared_jac)
+    if verbose >= 1:
+        print(f"  [T] coordinator.compute_cross_sensitivities: {perf_counter() - _t:.2f} s")
+    _t = perf_counter()
     coordinator.compute_M_blocks()
+    if verbose >= 1:
+        print(f"  [T] coordinator.compute_M_blocks: {perf_counter() - _t:.2f} s")
 
+    _t = perf_counter()
     contraction_info = coordinator.check_contraction()
+    if verbose >= 1:
+        print(f"  [T] coordinator.check_contraction: {perf_counter() - _t:.2f} s")
+        print(f"  [T] TOTAL init after [7b]: {perf_counter() - _t_init_total:.2f} s")
 
     # Stability analysis is deferred until ``config.stability_analysis_at_s``
     # simulated seconds.  Running it at t=0 with an uncontrolled initial
@@ -1735,9 +1874,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     if not _gz_warmup_done:
         for z, zd in zone_defs.items():
             _gz_targets_tso[z] = np.concatenate([
-                np.full(len(zd.v_bus_indices), config.g_z_voltage),
-                np.full(len(zd.line_indices),  config.g_z_current),
-                np.full(len(zd.gen_indices),   config.g_z_q_gen),
+                np.full(len(zd.v_bus_indices),     config.g_z_voltage),
+                np.full(len(zd.pcc_trafo_indices), config.g_z_q_pcc),
+                np.full(len(zd.line_indices),      config.g_z_current),
+                np.full(len(zd.gen_indices),       config.g_z_q_gen),
+                np.full(len(zd.tie_line_indices),  config.g_z_q_tie),
             ])
         for dso_id_tmp, dso_ctrl_tmp in dso_controllers.items():
             cfg_tmp = dso_ctrl_tmp.config
@@ -1995,14 +2136,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 recompute_cross_sensitivities=refresh_H,
             )
 
-            # Passive stability recording.  Refreshes H for the observer only;
-            # restores the controller's cached H_blocks immediately after.
-            if observer is not None:
-                observer_record_fresh(observer, coordinator, time_s=time_s)
-
             # Apply TSO controls to plant network
             for z, tso_out in tso_outputs.items():
-                apply_zone_tso_controls(net, zone_defs[z], tso_out)
+                prev_shunt_steps = apply_zone_tso_controls(
+                    net, zone_defs[z], tso_out,
+                )
 
                 # Record per-zone results
                 u = tso_out.u_new
@@ -2010,6 +2148,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 n_pcc = len(zone_defs[z].pcc_trafo_indices)
                 n_gen = len(zone_defs[z].gen_indices)
                 n_oltc = len(zone_defs[z].oltc_trafo_indices)
+                n_shunt = len(zone_defs[z].shunt_bus_indices)
                 rec.zone_q_der[z]         = u[:n_der].copy()
                 rec.zone_q_pcc_set[z]     = u[n_der:n_der+n_pcc].copy()
                 rec.zone_v_gen[z]         = u[n_der+n_pcc:n_der+n_pcc+n_gen].copy()
@@ -2021,6 +2160,125 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 # Record contraction diagnostic
                 diag = coordinator.last_coupling_diagnostics.get(z, {})
                 rec.zone_contraction_lhs[z] = diag.get("contraction_lhs", float("nan"))
+
+                # ── TSO-owned shunt switching: detect and propagate ───────
+                # When the MIQP switches a shunt step, apply a rank-1 SMW
+                # update to the TSO's own cached J⁻¹ (no pp.runpp), drop
+                # the H caches so the next TSO step rebuilds H from the
+                # updated dV_dQ_reduced, then dispatch a
+                # ``ShuntDisturbanceMessage`` to the DSO whose tertiary
+                # hosts the shunt so the DSO can refresh its own model.
+                if n_shunt > 0:
+                    shunt_offset = n_der + n_pcc + n_gen + n_oltc
+                    new_shunt_steps = [
+                        int(round(float(u[shunt_offset + k])))
+                        for k in range(n_shunt)
+                    ]
+                    changed = [
+                        (int(zone_defs[z].shunt_bus_indices[k]), s_new, k)
+                        for k, (s_new, s_prev) in enumerate(
+                            zip(new_shunt_steps, prev_shunt_steps)
+                        )
+                        if s_new != s_prev
+                    ]
+                    if changed:
+                        tso_ctrl_z = tso_controllers[z]
+
+                        # ── Diagnostic: which gradient component drove the
+                        # switch?  Decompose the shunt column of H into V,
+                        # I, Q_gen contributions and weight by the matching
+                        # tracking error / soft-slack error.  Helpful for
+                        # debugging "why did the shunt switch from -1 to 0?"
+                        # — if the V-tracking term has the same sign as
+                        # the actual move, the optimiser was tracking V;
+                        # otherwise another term dominated.
+                        H_z = getattr(tso_ctrl_z, "_H_cache", None)
+                        last_meas = getattr(tso_ctrl_z, "_last_measurement", None)
+                        if H_z is not None and last_meas is not None:
+                            n_v_z = len(zone_defs[z].v_bus_indices)
+                            n_pcc_z = len(zone_defs[z].pcc_trafo_indices)
+                            n_i_z = len(zone_defs[z].line_indices)
+                            n_gen_z = len(zone_defs[z].gen_indices)
+                            v_set = float(config.v_setpoint_pu)
+                            v_pu = np.asarray(
+                                [float(last_meas.voltage_magnitudes_pu[
+                                    np.where(last_meas.bus_indices == b)[0][0]
+                                ]) for b in zone_defs[z].v_bus_indices],
+                                dtype=np.float64,
+                            )
+                            v_err = v_pu - v_set
+                            for sb, s_new, k_sh in changed:
+                                col = shunt_offset + k_sh
+                                s_prev_k = prev_shunt_steps[k_sh]
+                                ds = s_new - s_prev_k
+                                col_v_part = H_z[:n_v_z, col]
+                                grad_v = float(v_err @ col_v_part)
+                                # Q_gen contribution
+                                # New row layout: [V | Q_PCC | I | Q_gen]
+                                q_row_start = n_v_z + n_pcc_z + n_i_z
+                                col_qg_part = H_z[q_row_start:q_row_start + n_gen_z, col]
+                                # The gradient contribution from V tracks (V-V_set);
+                                # for Q_gen it tracks (Q_gen - Q_gen_target) — but
+                                # we don't have Q_target handy here; report magnitude
+                                # so user can see if Q_gen column is non-trivial.
+                                qg_norm = float(np.linalg.norm(col_qg_part))
+                                v_min = float(v_pu.min())
+                                v_max = float(v_pu.max())
+                                # Expected V-driven move direction:
+                                #   v_err·col_v < 0 → MIQP wants Δs > 0 (s up)
+                                #   v_err·col_v > 0 → MIQP wants Δs < 0 (s down)
+                                v_wants_up = grad_v < 0.0
+                                actual_up = ds > 0
+                                consistent = (v_wants_up == actual_up)
+                                tag = "OK" if consistent else "INCONSISTENT-with-V"
+                                print(
+                                    f"  [shunt-switch z{z}] bus={sb}: "
+                                    f"s {s_prev_k:+d}→{s_new:+d} (Δ={ds:+d})  "
+                                    f"V[{v_min:.4f},{v_max:.4f}]  "
+                                    f"V-grad={grad_v:+.3e}  "
+                                    f"|Q_gen-col|={qg_norm:.3e}  "
+                                    f"[{tag}]"
+                                )
+
+                        any_smw = False
+                        for sb, s_new, _ in changed:
+                            applied = tso_ctrl_z.sensitivities.apply_shunt_step_change_smw(
+                                sb, s_new,
+                            )
+                            any_smw = any_smw or applied
+                        if any_smw:
+                            tso_ctrl_z.invalidate_sensitivity_cache()
+
+                        # Dispatch a per-DSO ShuntDisturbanceMessage so each
+                        # affected DSO updates its own cached J⁻¹.
+                        per_dso: Dict[str, List[Tuple[int, int, float]]] = {}
+                        for sb, s_new, k_idx in changed:
+                            dso_id_aff = shunt_bus_to_dso_id.get(sb)
+                            if dso_id_aff is None:
+                                continue
+                            q_step = float(zone_defs[z].shunt_q_steps_mvar[k_idx])
+                            per_dso.setdefault(dso_id_aff, []).append(
+                                (sb, s_new, q_step)
+                            )
+                        for dso_id_aff, items in per_dso.items():
+                            dso_ctrl_aff = dso_controllers.get(dso_id_aff)
+                            if dso_ctrl_aff is None:
+                                continue
+                            msg = ShuntDisturbanceMessage(
+                                source_controller_id=tso_ctrl_z.controller_id,
+                                target_controller_id=dso_id_aff,
+                                iteration=step,
+                                shunt_bus_indices=np.array(
+                                    [it[0] for it in items], dtype=np.int64,
+                                ),
+                                shunt_steps=np.array(
+                                    [it[1] for it in items], dtype=np.int64,
+                                ),
+                                shunt_q_steps_mvar=np.array(
+                                    [it[2] for it in items], dtype=np.float64,
+                                ),
+                            )
+                            dso_ctrl_aff.receive_disturbance_message(msg)
 
             # TSO sends Q setpoints to DSOs via grouped setpoint messages
             for z, ctrl in tso_controllers.items():
@@ -2146,15 +2404,25 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                     [net.res_gen.at[idx, "p_mw"] for idx in zd.gen_indices],
                     dtype=np.float64,
                 )
-                # Synchronous-machine Q headroom: q_max - |q_actual|.
-                # Positive = remaining capability, negative = capability
-                # violated.  Used by 002_M_TSO_M_DSO_COMPARE.py.
-                q_act = np.abs(rec.zone_q_gen[z])
-                q_max = np.array(
-                    [float(net.gen.at[g, "max_q_mvar"]) for g in zd.gen_indices],
+                # Synchronous-machine Q headroom from the Milano §12.2.1
+                # capability curve — matches the bound that the TSO MIQP
+                # actually enforces (see TSOController._build_constraint_bounds
+                # at controller/tso_controller.py:1000).  At each step the
+                # bound is recomputed from the current P and terminal V via
+                # ActuatorBounds.compute_gen_q_bounds.
+                # Headroom = signed min margin: min(q_max - q, q - q_min).
+                # Positive = inside envelope; negative = capability violated.
+                gen_vm = np.array(
+                    [float(net.gen.at[g, "vm_pu"]) for g in zd.gen_indices],
                     dtype=np.float64,
                 )
-                rec.gen_q_headroom_mvar[z] = q_max - q_act
+                q_min_cap, q_max_cap = tso_controllers[z].actuator_bounds.compute_gen_q_bounds(
+                    rec.zone_p_gen[z], gen_vm,
+                )
+                q_act = rec.zone_q_gen[z]
+                rec.gen_q_headroom_mvar[z] = np.minimum(
+                    q_max_cap - q_act, q_act - q_min_cap,
+                )
 
             # ── Live-plot ACTUATORS tiles (TSO controller live plot) ──────
             # Populated from net state every step in BOTH OFO and local
@@ -2310,22 +2578,6 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                       f"mean|err|={np.mean(errors):.2f} Mvar, "
                       f"max|err|={max(errors):.2f} Mvar")
         print("=" * 72)
-
-    # =========================================================================
-    # STEP 10: Stability observer trajectory report
-    # =========================================================================
-    if observer is not None:
-        write_observer_results_alongside_report(
-            observer, config.result_dir, verbose=verbose,
-        )
-        tuned = derive_tuned_gw(observer, statistic="percentile", percentile=95.0)
-        if verbose >= 1 and tuned.per_zone:
-            print()
-            print("[9b] Spectral-gap floor (p95, unconstrained-OFO equivalent g_w):")
-            print("     [DIAGNOSTIC ONLY -- not a tuning recommendation for the MIQP loop]")
-            for z, vals in sorted(tuned.per_zone.items()):
-                parts = [f"{k}={v:.2f}" for k, v in vals.items()]
-                print(f"  Zone {z}: " + ", ".join(parts))
 
     return log
 
@@ -2511,7 +2763,7 @@ def main() -> None:
         g_v=120000.0,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=200,  # DSO Q-tracking
         # ── DSO objective tuning ──
-        dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
+        dso_g_v=25000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.9,  # leaky integrator decay
         dso_q_integral_max_mvar=50.0,  # anti-windup clamp
@@ -2521,6 +2773,8 @@ def main() -> None:
         g_w_gen=5e7,   # excluded from stability
         g_w_pcc=100,   # 9 correlated PCCs; rho(C)=221 -> min 111
         g_w_tso_oltc=100,
+        install_tso_tertiary_shunts=False,
+        g_w_tso_shunt=10000,   # bipolar tertiary shunts; mirror g_w_tso_oltc
         # ── DSO weights (alpha=1, rho(C_DER)=790 -> min 395) ──
         g_w_dso_der=1000,  # 8 correlated DER; sf~2.5 for smooth tracking
         g_w_dso_oltc=50,   # rho(C_OLTC)~1.1; higher for switching suppression

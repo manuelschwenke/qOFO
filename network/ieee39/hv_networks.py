@@ -115,6 +115,7 @@ def _create_hv_subnetwork(
     coupling_trafo_indices: List[int] = []
     coupling_ieee_buses: List[int] = []
     coupling_hv_bus_indices: List[int] = []
+    coupling_lv_bus_indices: List[int] = []
 
     for ieee_bus, hv_no in coupling_map:
         hv_bus = bus_map[hv_no]
@@ -126,6 +127,7 @@ def _create_hv_subnetwork(
             name=f"{net_id}|Tertiary_TN{ieee_bus}_HV{hv_no}",
             subnet="DN",
         )
+        coupling_lv_bus_indices.append(int(lv_bus))
 
         vn_hv = float(net.bus.at[ieee_bus, "vn_kv"])  # 345 kV
         tidx = pp.create_transformer3w_from_parameters(
@@ -336,6 +338,7 @@ def _create_hv_subnetwork(
         coupling_trafo_indices=tuple(coupling_trafo_indices),
         coupling_ieee_buses=tuple(coupling_ieee_buses),
         coupling_hv_bus_indices=tuple(coupling_hv_bus_indices),
+        coupling_lv_bus_indices=tuple(coupling_lv_bus_indices),
         line_length_scale=line_length_scale,
         total_ref_p_mw=total_p_mw,
         total_ref_q_mvar=total_q_mvar,
@@ -503,6 +506,8 @@ def add_hv_networks(
     net: pp.pandapowerNet,
     meta: IEEE39NetworkMeta,
     *,
+    install_tso_tertiary_shunts: bool = True,
+    tso_tertiary_shunt_q_mvar: float = 50.0,
     verbose: bool = True,
 ) -> IEEE39NetworkMeta:
     """
@@ -628,9 +633,40 @@ def add_hv_networks(
         hv_nets.append(hv)
 
     # =====================================================================
-    # 4. (EHV profile wiring is performed during build_ieee39_net's 50/50
-    #    load split; no extra wiring needed here.)
+    # 4. TSO-owned bipolar shunts at first tertiary of each DSO
     # =====================================================================
+    # One bipolar 50 Mvar shunt per active DSO sub-network at the 20 kV
+    # tertiary bus of the FIRST coupling 3-winding transformer.  These are
+    # TSO actuators (state ∈ {-1, 0, +1}); the DSO controllers see them as
+    # disturbances only (DSOControllerConfig.shunt_bus_indices stays []).
+    # Installed at step=0 so the operating point is unchanged at build time.
+    tso_sh_idx: List[int] = []
+    tso_sh_buses: List[int] = []
+    tso_sh_q: List[float] = []
+    tso_sh_zone: List[int] = []
+    if install_tso_tertiary_shunts:
+        for hv in hv_nets:
+            tert_bus = int(hv.coupling_lv_bus_indices[0])
+            sh = pp.create_shunt(
+                net, bus=tert_bus,
+                q_mvar=float(tso_tertiary_shunt_q_mvar),
+                p_mw=0.0, vn_kv=20.0,
+                step=0, max_step=1,
+                name=f"{hv.net_id}|TSOShunt_Tertiary",
+                in_service=True,
+            )
+            tso_sh_idx.append(int(sh))
+            tso_sh_buses.append(tert_bus)
+            tso_sh_q.append(float(tso_tertiary_shunt_q_mvar))
+            tso_sh_zone.append(int(hv.zone))
+        # Defensive: pandapower may declare net.shunt['step'] as uint;
+        # bipolar writes need int64 so step = -1 round-trips through pandas.
+        if "step" in net.shunt.columns:
+            net.shunt["step"] = net.shunt["step"].astype("int64")
+        if verbose:
+            print(f"[add_hv_networks] Installed {len(tso_sh_idx)} TSO-owned "
+                  f"tertiary shunts ({tso_tertiary_shunt_q_mvar:.1f} Mvar each, "
+                  f"step=0).")
 
     # =====================================================================
     # 5. Re-initialise TSO STATCOM Q via temp PV-gens, then verify PF
@@ -697,6 +733,16 @@ def add_hv_networks(
               f"Q={net.load.loc[is_dn,'base_q_mvar'].sum():.1f})")
 
     # =====================================================================
+    # 6b. Explicit init: TSO-owned shunts at step=0 (off)
+    # =====================================================================
+    # Defensive reset right before metadata return.  The shunts were
+    # created at step=0 in section 4, but the verification PF and the
+    # STATCOM reinit pass run between then and now — be explicit so the
+    # init contract holds regardless of intervening code.
+    for sh_idx in tso_sh_idx:
+        net.shunt.at[sh_idx, "step"] = 0
+
+    # =====================================================================
     # 7. Update metadata
     # =====================================================================
     all_dn_buses = sorted(
@@ -726,6 +772,11 @@ def add_hv_networks(
         dso_der_buses=meta.dso_der_buses,
         dso_shunt_indices=meta.dso_shunt_indices,
         dso_shunt_buses=meta.dso_shunt_buses,
+        # TSO-owned bipolar tertiary shunts (one per active DSO sub-network)
+        tso_tertiary_shunt_indices=tuple(tso_sh_idx),
+        tso_tertiary_shunt_buses=tuple(tso_sh_buses),
+        tso_tertiary_shunt_q_steps_mvar=tuple(tso_sh_q),
+        tso_tertiary_shunt_zones=tuple(tso_sh_zone),
         # DN indices cover all HV sub-network elements
         dn_bus_indices=tuple(all_dn_buses),
         dn_line_indices=tuple(all_dn_lines),

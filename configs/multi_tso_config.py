@@ -99,6 +99,13 @@ class MultiTSOConfig:
     g_w_gen:        float = 1e7
     g_w_pcc:        float = 2.0
     g_w_tso_oltc:   float = 1.0
+    g_w_tso_shunt:  float = 10000.0
+    """Regularisation penalty on TSO bipolar shunt step changes.  Set
+    relatively low (~ ``g_w_tso_oltc``) so the discrete actuator can
+    engage when continuous DERs cannot satisfy voltage / Q targets, but
+    high enough to discourage chattering.  Used by
+    :class:`controller.multi_tso_coordinator.ZoneDefinition.gw_diagonal`
+    to fill the ``s_shunt`` block of the regularisation vector."""
 
     # -- DSO objective tuning --------------------------------------------------
     dso_g_qi:       float = 0.0
@@ -158,15 +165,6 @@ class MultiTSOConfig:
     run_stability_analysis:       bool = True
     stability_analysis_at_s:      float = 0.0
     sensitivity_update_interval:  int  = int(1E6)
-
-    # -- Stability observer (passive diagnostic) -------------------------------
-    run_stability_observer:       bool = True
-    """If True, attach the passive stability observer that records the
-    spectral-gap floor g_w^min per zone at every TSO step (diagnostic only;
-    writes stability_observer.json / *.png / *.md into result_dir).
-    Set False to skip observer attachment, per-step recording, and end-of-
-    simulation reporting -- useful for baseline / comparison runs where the
-    diagnostic output is not needed."""
 
     # -- Output ----------------------------------------------------------------
     verbose:    int = 0
@@ -228,7 +226,7 @@ class MultiTSOConfig:
                   and Q(V) droop for HV-connected DER.  No TSO->DSO coordination.
     """
     qv_setpoint_pu: float = 1.03
-    qv_slope_pu:    float = 0.05
+    qv_slope_pu:    float = 0.07
     warmup_s:       float = 0.0
 
     local_der_mode: str = "cos_phi_1"
@@ -256,3 +254,68 @@ class MultiTSOConfig:
     """Half-width of the Q(V) linear region (pu).  At V = setpoint+slope
     the windpark dispatches Q = q_min (full inductive); at V = setpoint-slope
     the windpark dispatches Q = q_max (full capacitive)."""
+
+    # -- TSO-owned bipolar shunts at DSO tertiaries ----------------------------
+    install_tso_tertiary_shunts: bool = True
+    """Install one bipolar 50 Mvar shunt per active DSO sub-network at
+    the first 20 kV tertiary, switched by the TSO controller.  DSOs see
+    it as a disturbance (``DSOControllerConfig.shunt_bus_indices`` stays
+    ``[]``).  Set ``False`` to revert to the legacy no-shunt IEEE 39
+    topology."""
+
+    tso_tertiary_shunt_q_mvar: float = 50.0
+    """Per-shunt rated reactive power per step at V = 1 pu [Mvar].
+    Sign convention follows pandapower load convention: ``step = +1``
+    injects +q_mvar (reactor), ``step = -1`` injects −q_mvar (capacitor)."""
+
+    tso_g_q_pcc: float = 1.0
+    """Q-tracking weight on the (re-enabled) Q_PCC output rows of the TSO
+    H matrix.  Scales the gradient contribution of
+    ``(Q_PCC_actual − Q_PCC_set)^2`` in the TSO objective.  Default 1.0
+    (small) — TSO mildly prefers to cancel shunt-induced Q displacement
+    at the interface via ``Q_PCC_set`` adjustments rather than overload
+    the DSO.  Set ``0.0`` to keep the rows informational only."""
+
+    tso_pcc_capability_on_output: bool = False
+    """If True, apply DSO-reported PCC capability bounds to the physical
+    ``Q_PCC`` output (so a shunt switch is counted against DSO
+    capability).  If False, bounds remain on the control variable
+    ``Q_PCC_set`` as in the legacy formulation.  Recommended ``True``
+    when ``install_tso_tertiary_shunts`` is True."""
+
+    g_z_q_pcc: float = 1e2
+    """Soft-constraint penalty for Q_PCC capability output bound.
+    Mirrors ``g_z_q_gen``.  Engages when a shunt switch (or any other
+    actuator move) would push physical Q_PCC outside the DSO-reported
+    capability, providing the MIQP with a finite penalty for capability
+    violation rather than a hard infeasibility.  Default 1e-2 is a
+    gentle nudge; raise for tighter capability tracking."""
+
+    tso_g_q_tie: float = 10.0
+    """Q-tracking weight on tie-line reactive power outputs.  Scales the
+    gradient contribution ``2 * tso_g_q_tie * (Q_tie_meas - Q_tie_set)^T
+    * dQ_tie/du`` in each zone's TSO objective.
+
+    Sign convention: Q_tie measured at the tie-line endpoint inside the
+    zone, into the line.  Both zones touching a tie line independently
+    penalise their own Q_tie reading toward the setpoint (no inter-zone
+    real-time exchange — symmetric decentralised tracking).
+
+    Tuning (validated on IEEE 39-bus 'wind_replace', 30-min smoke):
+        0.0   — Phase A: rows present in H but no objective contribution
+                (informational only).  No effect on actuator dispatch.
+        1.0   — Recommended Phase B starting point.  Per-Mvar gradient
+                strength matches the Q_PCC tracker (``tso_g_q_pcc``); on
+                the smoke run, mean voltage error IMPROVED from 2.22 to
+                1.72 mpu and |Q_tie(2,3)| reduced 27%.  Contraction LHS
+                essentially unchanged from baseline.
+        1e2…1e4 — Aggressive tracking; observed to overshoot —
+                voltage error grows >10x and some tie pairs carry MORE
+                reactive power as zones reroute Q via other ties.  Avoid
+                without careful per-zone weight rebalancing.
+        >=1e6 — Numerically unstable in our smoke; voltage band collapses."""
+
+    g_z_q_tie: float = 0.0
+    """Soft-constraint slack penalty for Q_tie output bound (Phase B
+    optional).  Mirrors ``g_z_q_pcc``.  Default 0.0 = no slack-based
+    bound enforcement on Q_tie."""

@@ -20,7 +20,7 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from typing import List, Sequence, TYPE_CHECKING
+from typing import List, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
 import pandapower as pp
@@ -38,31 +38,59 @@ if TYPE_CHECKING:
 
 
 class DampedCharacteristicControl(CharacteristicControl):
-    """:class:`CharacteristicControl` with first-order damping on the output.
+    """:class:`CharacteristicControl` with damping on the output.
 
     Pandapower's stock controller writes ``Q_new = char(V)`` directly each
     iteration.  For Q(V) droops on large STATCOM-class units (Sn ~600 Mvar)
-    with a tight slope (0.07 pu), the open-loop gain ``q_max / slope`` is so
-    large that the un-damped controller oscillates between ±q_max and never
-    converges within :func:`pp.control.run_control`'s default 30 iterations.
+    with a tight slope (0.07 pu), the open-loop gain ``q_max / slope`` is
+    ~9 GVar/pu — combined with the wind-bus ``∂V/∂Q`` sensitivity (0.001 –
+    0.005 pu/Mvar at TN level, larger during contingencies) the closed-loop
+    fixed-point iteration can have a contraction factor far above 1, so the
+    un-damped controller oscillates between ±q_max and never converges
+    within :func:`pp.control.run_control`'s iteration cap.
 
-    This subclass replaces the write step with a damped update
+    This subclass replaces the per-iteration write with
 
-        Q_{k+1} = Q_k + alpha * (target - Q_k),  0 < alpha <= 1
+        Q_{k+1} = Q_k + alpha * clip(target - Q_k, ±max_step)
 
-    while keeping the convergence test against the *un-damped* target so that
-    the loop still terminates when the implicit equation ``Q = char(V(Q))`` is
-    satisfied within ``tol``.
+    where ``alpha`` is the linear damping factor and ``max_step`` (Mvar)
+    optionally caps how far the controller can move in a single call.  The
+    step cap matters during contingency transients: a sudden V excursion
+    that would otherwise drive ``target = q_max`` triggers a single-step
+    swing of ``alpha * 2*q_max`` Mvar, which can over-shoot and cause the
+    loop to ping-pong between rails.  Capping the step keeps the trajectory
+    smooth even when ``target`` is far from ``Q_k``.
+
+    Convergence is judged on the *un-damped* error ``|target − Q_k|`` so
+    the loop terminates exactly when the implicit equation
+    ``Q = char(V(Q))`` is satisfied within ``tol``.
 
     Parameters
     ----------
-    damping : float, default 0.5
-        Damping factor alpha.  Lower = more damped (slower but more stable).
+    damping : float, default 0.1
+        Linear damping factor alpha.  Lower = more damped (slower but more
+        stable).  0.1 is robust under contingency-induced ∂V/∂Q shifts up
+        to ~0.005 pu/Mvar with q_max/slope ~9 GVar/pu.
+    max_step_mvar : float or None, default None
+        If given, |target − Q_k| is clipped to ``max_step_mvar`` before the
+        damping factor is applied.  Recommended ~0.25 × q_max for
+        STATCOM-class units (≈150 Mvar for a 600 Mvar park).  ``None``
+        disables the step cap (legacy behaviour).
     """
 
-    def __init__(self, net, *args, damping: float = 0.5, **kwargs):
+    def __init__(
+        self,
+        net,
+        *args,
+        damping: float = 0.1,
+        max_step_mvar: Optional[float] = None,
+        **kwargs,
+    ):
         super().__init__(net, *args, **kwargs)
         self.damping = float(damping)
+        self.max_step_mvar = (
+            float(max_step_mvar) if max_step_mvar is not None else None
+        )
 
     def is_converged(self, net) -> bool:
         input_values = read_from_net(
@@ -74,7 +102,10 @@ class DampedCharacteristicControl(CharacteristicControl):
             net, self.output_element, self.output_element_index,
             self.output_variable, self.write_flag,
         )
-        damped = output_values + self.damping * (target - output_values)
+        delta = target - output_values
+        if self.max_step_mvar is not None:
+            delta = np.clip(delta, -self.max_step_mvar, self.max_step_mvar)
+        damped = output_values + self.damping * delta
         write_to_net(
             net, self.output_element, self.output_element_index,
             self.output_variable, damped, self.write_flag,
@@ -145,7 +176,7 @@ def apply_zone_tso_controls(
     net: pp.pandapowerNet,
     zone_def: "ZoneDefinition",
     tso_out,
-) -> None:
+) -> List[int]:
     """
     Write TSO control output for one zone back to the pandapower plant network.
 
@@ -154,6 +185,16 @@ def apply_zone_tso_controls(
 
     PCC Q setpoints are *not* applied here; they are communicated to the DSO
     via ``TSOController.generate_setpoint_messages()``.
+
+    Returns
+    -------
+    prev_shunt_steps : List[int]
+        The previous step values of the zone's shunts (in the order of
+        ``zone_def.shunt_bus_indices``) BEFORE this call wrote the new
+        steps.  Empty list when the zone has no shunts.  The caller can
+        compare the returned values against the new steps in
+        ``tso_out.u_new`` to detect which shunts switched, and dispatch
+        ``ShuntDisturbanceMessage`` to the affected DSOs accordingly.
     """
     u = tso_out.u_new
     n_der = len(zone_def.tso_der_indices)
@@ -176,7 +217,23 @@ def apply_zone_tso_controls(
     for k, t_idx in enumerate(zone_def.oltc_trafo_indices):
         net.trafo.at[t_idx, "tap_pos"] = int(round(u[off + k]))
     off += n_oltc
-    # Shunt switching omitted for IEEE 39-bus (no TN shunts in base setup).
+
+    # TSO-owned bipolar shunts (typically at DSO tertiaries).  State range
+    # ∈ {-1, 0, +1}.  Capture the pre-write step so the caller can detect
+    # which shunts switched and dispatch ShuntDisturbanceMessage to the
+    # affected DSO controllers.
+    prev_shunt_steps: List[int] = []
+    n_shunt = len(zone_def.shunt_bus_indices)
+    for k, sb in enumerate(zone_def.shunt_bus_indices):
+        mask = net.shunt["bus"] == sb
+        if not mask.any():
+            prev_shunt_steps.append(0)
+            continue
+        sh_idx = net.shunt.index[mask][0]
+        prev_shunt_steps.append(int(net.shunt.at[sh_idx, "step"]))
+        net.shunt.at[sh_idx, "step"] = int(round(u[off + k]))
+    off += n_shunt
+    return prev_shunt_steps
 
 
 def apply_dso_controls(
@@ -226,8 +283,9 @@ def install_qv_characteristic_controllers(
     v_set: float,
     slope: float,
     name_prefix: str = "qv",
-    tol_mvar: float = 2.0,
-    damping: float = 0.2,
+    tol_mvar: float = 1.0,
+    damping: float = 0.1,
+    max_step_frac: Optional[float] = 0.5,
 ) -> List[int]:
     """Install a pandapower :class:`CharacteristicControl` per sgen index.
 
@@ -253,9 +311,10 @@ def install_qv_characteristic_controllers(
     Implementation note: uses :class:`DampedCharacteristicControl` (not the
     stock :class:`CharacteristicControl`) because Q(V) on STATCOM-class
     windparks (Sn ~600 Mvar) with slope 0.07 pu has open-loop gain
-    ~9 GVar/pu — the un-damped controller oscillates between rails and
-    fails ``run_control``.  A damping factor of 0.5 (default) typically
-    converges in 4-6 inner iterations.
+    ~9 GVar/pu.  Default ``damping=0.1`` plus a per-iteration step cap
+    of ``max_step_frac × q_max`` keeps the loop stable under
+    contingency-induced ∂V/∂Q transients while still converging in 10–30
+    inner iterations.  Set ``max_step_frac=None`` to disable the step cap.
 
     The function also stores the characteristic under
     ``net['characteristics'][f'{name_prefix}_{s_idx}']`` and (if the sgen
@@ -292,6 +351,10 @@ def install_qv_characteristic_controllers(
 
         net.sgen.at[s_idx, "qctrl"] = "Q(V)"
 
+        max_step = (
+            max_step_frac * max(abs(q_min), abs(q_max))
+            if max_step_frac is not None else None
+        )
         cc = DampedCharacteristicControl(
             net,
             output_element="sgen",
@@ -305,6 +368,7 @@ def install_qv_characteristic_controllers(
             level=0,
             order=0,
             damping=damping,
+            max_step_mvar=max_step,
         )
         controller_indices.append(int(cc.index))
 

@@ -21,7 +21,7 @@ import optuna
 
 from configs.multi_tso_config import MultiTSOConfig
 from tuning._types import Ceilings
-from tuning.metrics import CostWeights, NoiseFloors
+from tuning.metrics import CostWeights, NoiseFloors, cost_components
 from tuning.parameters import BO_DIMS, resolve_high
 from tuning.runner import RunResult, run_one
 from tuning.scenarios import ScenarioSpec
@@ -111,15 +111,18 @@ def make_objective(
 
         # per-scenario diagnostics
         for r in results:
-            trial.set_user_attr(f"J__{r.scenario_name}",
-                                float(r.metrics.cost_J))
-            trial.set_user_attr(f"wall_s__{r.scenario_name}",
-                                float(r.wall_time_s))
-            trial.set_user_attr(f"pf_fail__{r.scenario_name}",
-                                int(r.metrics.pf_failures))
+            sc = r.scenario_name
+            trial.set_user_attr(f"J__{sc}",       float(r.metrics.cost_J))
+            trial.set_user_attr(f"wall_s__{sc}",  float(r.wall_time_s))
+            trial.set_user_attr(f"pf_fail__{sc}", int(r.metrics.pf_failures))
             if r.failure_reason:
-                trial.set_user_attr(f"err__{r.scenario_name}",
-                                    r.failure_reason[:500])
+                trial.set_user_attr(f"err__{sc}", r.failure_reason[:500])
+
+            # Per-scenario per-component cost breakdown for offline
+            # weight calibration.  Stored as `cost__<scenario>__<key>`.
+            comps = cost_components(r.metrics, cost_weights)
+            for k, v in comps.items():
+                trial.set_user_attr(f"cost__{sc}__{k}", float(v))
 
         # aggregate scenario costs
         Js = [float(r.metrics.cost_J) for r in results]

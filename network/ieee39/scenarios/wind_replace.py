@@ -3,11 +3,17 @@ Scenario: wind_replace
 ======================
 Replace selected synchronous generators with STATCOM-capable wind parks.
 
-Zone 1:  G1 (term 29) + G8 (term 36) removed.
-         Retains G9 (term 37, ~830 MW) as synchronous anchor.
-Zone 2:  ex-slack gen (term 30, IEEE G10/G1-ex-slack) removed.
-         Retains IEEE G3 (pandapower gen_idx 1, term 31, grid 9,
-         650 MW) as the Zone-2 synchronous anchor.
+Generator labels follow the standard IEEE-39 textbook convention
+(G1 = aggregated equivalent at IEEE bus 39; G10 = Hydro at IEEE bus 30).
+Terminal-bus indices are 0-indexed pandapower buses (= IEEE 1-idx − 1).
+
+Zone 1:  G8 (term 36) removed.
+         Retains G10 (term 29, Hydro, 1 GVA), G9 (term 37, ~830 MW), and
+         G1 (term 38, slack anchor, 10 GVA equivalent) as synchronous
+         anchors.
+Zone 2:  G2 (term 30, Nuclear, ex-slack) removed.
+         Retains G3 (pandapower gen_idx 1, term 31, grid 9, 650 MW) as
+         the Zone-2 synchronous anchor.
 Zone 3:  G5 (term 33) + G6 (term 34) removed.
          Retains G4 (term 32, grid 18) + G7 (term 35, grid 35) as
          synchronous anchors.  This split keeps the two STATCOM wind
@@ -48,7 +54,7 @@ from network.ieee39.meta import IEEE39NetworkMeta
 # means "wind park rated at the FULL removed-gen P" (per the docstring
 # convention).  Increase to oversize wind parks for additional zonal
 # headroom; decrease to study under-replacement scenarios.
-WIND_REPLACE_SCALE: float = 1.1
+WIND_REPLACE_SCALE: float = 1
 
 
 def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
@@ -76,12 +82,12 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     _zone3_buses = {14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 32, 33, 34, 35}
 
     # Terminal buses of the specific generators to remove per zone.
-    # Zone 2 now keeps pandapower gen_idx 1 (term 31, grid 9, IEEE G3,
-    # 650 MW) as the synchronous anchor — only the ex-slack gen at
-    # term 30 (grid 5, IEEE G10 ex-slack, 500 MW) is replaced by a
-    # STATCOM-capable wind park.
-    _z1_gens_to_remove_term = {29, 36}   # G1 + G8 {36}
-    _z2_gens_to_remove_term = {30}       # ex-slack only; keep IEEE G3 at term 31
+    # Zone 1 keeps G10 (term 29, Hydro), G9 (term 37) and G1 (term 38,
+    # slack anchor) as synchronous anchors — only G8 is replaced by a
+    # STATCOM wind park.  Zone 2 keeps G3 (pandapower gen_idx 1, term 31,
+    # grid 9, 650 MW) as the synchronous anchor; G2 (ex-slack) is replaced.
+    _z1_gens_to_remove_term = {36}       # G8 only — G10 (term 29, Hydro) retained
+    _z2_gens_to_remove_term = {30}       # G2 (ex-slack); keep G3 at term 31
     _z3_gens_to_remove_term = {33, 34}   # G5 (grid 18, shares with G4) + G6 (grid 21)
 
     # Classify each generator and decide whether to remove it

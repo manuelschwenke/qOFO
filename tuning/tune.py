@@ -30,6 +30,7 @@ from tuning._io import load_config_yaml, save_tuned_params
 from tuning.ceilings import compute_ceilings
 from tuning.metrics import CostWeights, NoiseFloors
 from tuning.objective import make_objective
+from tuning.parameters import params_from_config
 from tuning.scenarios import design_set
 
 
@@ -47,6 +48,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--n-startup-trials", type=int, default=15,
         help="Sobol-style initial trials before TPE kicks in.",
     )
+    p.add_argument(
+        "--n-ei-candidates", type=int, default=50,
+        help="Number of EI candidates per TPE proposal "
+             "(Optuna default: 24; bumped here because the search "
+             "space is 9-dimensional).",
+    )
     p.add_argument("--study-name", type=str, required=True)
     p.add_argument(
         "--storage", type=str,
@@ -56,7 +63,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--n-jobs", type=int, default=1,
         help="Parallel scenarios per trial (1 is safest).",
     )
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=1)
     p.add_argument(
         "--output", type=Path,
         default=Path("configs/tuned_params.yaml"),
@@ -70,6 +77,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-progress-bar", action="store_true",
         help="Suppress the Optuna progress bar (useful for tests / CI).",
+    )
+    p.add_argument(
+        "--no-warm-start-baseline", action="store_true",
+        help=(
+            "Disable enqueueing the baseline-config parameters as the "
+            "first trial. By default, when a fresh study is created the "
+            "baseline is evaluated as trial 0 to give TPE a known-good "
+            "anchor. Skipped automatically when resuming a study that "
+            "already has trials."
+        ),
     )
     return p
 
@@ -102,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     sampler = optuna.samplers.TPESampler(
         seed=args.seed,
         n_startup_trials=args.n_startup_trials,
+        n_ei_candidates=args.n_ei_candidates,
         multivariate=True,
         group=True,
     )
@@ -122,6 +140,19 @@ def main(argv: list[str] | None = None) -> int:
         n_jobs=args.n_jobs,
         cvar_pct=args.cvar_pct,
     )
+
+    # Warm-start: enqueue baseline as trial 0 in fresh studies.  Skipped
+    # for resumed studies (already have trials) and when the user passes
+    # --no-warm-start-baseline.  All baseline values must lie in
+    # [low, high] of their BOParam, otherwise enqueue_trial raises.
+    if not args.no_warm_start_baseline and len(study.trials) == 0:
+        warm_params = params_from_config(baseline_cfg)
+        study.enqueue_trial(warm_params)
+        print(
+            f"[tune] Warm-start: enqueued baseline params as trial 0 "
+            f"({warm_params})",
+            flush=True,
+        )
 
     print(f"[tune] Running {args.n_trials} trials ...", flush=True)
     study.optimize(

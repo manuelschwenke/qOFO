@@ -16,7 +16,7 @@ from typing import List, Tuple
 
 import pandapower as pp
 
-from network.ieee39.constants import LINE_LENGTHS_KM
+from network.ieee39.constants import GEN_NAMEPLATE, LINE_LENGTHS_KM
 from network.ieee39.meta import IEEE39NetworkMeta
 
 
@@ -101,19 +101,23 @@ def swap_slack_to_bus38(
     # -- 2. Fix trafo 1 (hv=5, lv=30) impedance --------------------------------
     # In case39 this trafo has vk=45 % because bus 30 represents the
     # equivalent NY external system behind a high-impedance connection.
-    # When we place a real generator at bus 30, the machine-trafo loop
-    # will convert this to a 345/10.5 kV step-up.  With vk=45 % that
-    # would be unrealistically high (typical gen step-up: 12-15 %).
-    # Reset to realistic values before the machine-trafo loop runs.
+    # When we place a real generator (G2, Nuclear) at bus 30, the
+    # machine-trafo loop will convert this to a 345/10.5 kV step-up.  With
+    # vk=45 % that would be unrealistically high (typical gen step-up:
+    # 12-15 %).  Reset to realistic values before the machine-trafo loop
+    # runs and size the trafo to G2's nameplate from GEN_NAMEPLATE.
+    bus30_sn_mva = GEN_NAMEPLATE[old_bus][1]
     trafo_mask = (net.trafo["lv_bus"] == old_bus) | (net.trafo["hv_bus"] == old_bus)
     for ti in net.trafo.index[trafo_mask]:
         net.trafo.at[ti, "vk_percent"] = 12.0
         net.trafo.at[ti, "vkr_percent"] = 0.3
-        net.trafo.at[ti, "sn_mva"] = max(eg_max_p * 1.2, 100.0)
+        net.trafo.at[ti, "sn_mva"] = bus30_sn_mva
         net.trafo.at[ti, "pfe_kw"] = 0.0
         net.trafo.at[ti, "i0_percent"] = 0.0
 
-    # -- 3. Create new PV generator at bus 30 -----------------------------------
+    # -- 3. Create new PV generator at bus 30 (G2, Nuclear) --------------------
+    # P/Q limits are placeholders inherited from the dropped ext_grid; the
+    # nameplate loop in build_ieee39_net overwrites them from GEN_NAMEPLATE.
     new_gen_idx = pp.create_gen(
         net,
         bus=old_bus,
@@ -124,16 +128,16 @@ def swap_slack_to_bus38(
         max_q_mvar=eg_max_q,
         min_q_mvar=eg_min_q,
         in_service=True,
-        name="Gen_bus30 (ex-slack)",
+        name="G2 (Nuclear) ex-slack",
     )
 
-    # -- 4. Replace ext_grid with a slack-enabled gen at bus 38 ----------------
-    # The new gen inherits a realistic IEEE G10 nameplate (1000 MW / 500
-    # Mvar envelope).  ``slack=True`` anchors θ=0 at bus 38; the nameplate
-    # loop in build_ieee39_net assigns its sn_mva and P limits via
-    # NAMEPLATE_FACTOR; its ``slack_weight`` is set downstream to its
-    # nameplate so it participates in the distributed-slack P allocation
-    # like every other machine.
+    # -- 4. Replace ext_grid with a slack-enabled gen at bus 38 (G1) -----------
+    # G1 is the aggregated NY-system equivalent (10 GVA in GEN_NAMEPLATE).
+    # ``slack=True`` anchors θ=0 at bus 38; the nameplate loop in
+    # build_ieee39_net overwrites the placeholder P/Q limits from
+    # GEN_NAMEPLATE, and ``slack_weight`` is set downstream to ``sn_mva``
+    # so G1 dominates the distributed-slack P allocation as expected for
+    # an external-system equivalent.
     pp.create_gen(
         net,
         bus=38,
@@ -143,7 +147,7 @@ def swap_slack_to_bus38(
         max_q_mvar=500.0, min_q_mvar=-500.0,
         slack=True,
         in_service=True,
-        name="Gen_bus38 (slack anchor, ex-G10)",
+        name="G1 (Equivalent, slack anchor)",
     )
     net.ext_grid.drop(index=eg_idx, inplace=True)
 

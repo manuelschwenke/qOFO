@@ -33,6 +33,10 @@ from network.ieee39.constants import (
     HV_COUPLING_WP_MVA,
     HV_HIGH_LOAD_BUS_NOS,
     HV_HIGH_LOAD_FACTOR,
+    LOAD_CONST_FRACTION,
+    LOAD_PEAK_BOOST,
+    LOAD_VAR_FRACTION,
+    PROFILE_MAX,
     PROFILE_MEAN,
     TUDA_WIND_PARKS,
     TUDA_PV_PLANTS,
@@ -190,6 +194,9 @@ def _create_hv_subnetwork(
 
     p_per_bus_uniform = total_p_mw / 10.0
     q_per_bus_uniform = total_q_mvar / 10.0
+    c = LOAD_CONST_FRACTION
+    v = LOAD_VAR_FRACTION
+    max_mv_p = PROFILE_MAX["mv_rural_pload"]
     mean_mv_p = PROFILE_MEAN["mv_rural_pload"]
 
     for i in range(10):
@@ -198,30 +205,41 @@ def _create_hv_subnetwork(
         q_per_bus = q_per_bus_uniform * w
         sn_bus = max(abs(p_per_bus), abs(q_per_bus), 1.0)
 
-        # Constant row: half of P, FULL Q (variable Q averages ~0)
+        # Constant row: c * P (so peak = (c+v) * p_per_bus = p_per_bus when
+        # the variable profile hits its maximum), FULL Q (the mv_rural_qload
+        # profile has near-zero mean so the variable Q row swings around 0
+        # and the constant row carries the per-bus mean Q).
         lidx_c = pp.create_load(
             net,
             bus=bus_map[i],
             sn_mva=sn_bus,
-            p_mw=0.5 * p_per_bus,
+            p_mw=c * p_per_bus,
             q_mvar=q_per_bus,
             name=f"{net_id}|HV_MV_Sub_{i}_const",
             subnet="DN",
         )
-        net.load.at[lidx_c, "base_p_mw"] = 0.5 * p_per_bus
+        net.load.at[lidx_c, "base_p_mw"] = c * p_per_bus
         net.load.at[lidx_c, "base_q_mvar"] = q_per_bus
         net.load.at[lidx_c, "profile_p"] = None
         net.load.at[lidx_c, "profile_q"] = None
         load_indices.append(int(lidx_c))
 
-        # Variable row: mean-normalised P; swing-amplitude Q around zero
-        base_p_var = 0.5 * p_per_bus / mean_mv_p
+        # Variable row: max-normalised P (peak at LOAD_PEAK_BOOST * v *
+        # p_per_bus when profile hits max); swing-amplitude Q around zero
+        # (kept as 0.5 * q_per_bus to preserve the previous Q swing behaviour,
+        # since mv_rural_qload has near-zero mean and ~0.34 max amplitude --
+        # the boost is intentionally not applied to HV Q).
+        base_p_var = LOAD_PEAK_BOOST * v * p_per_bus / max_mv_p
         base_q_var = 0.5 * q_per_bus
+        # Initial p_mw at the per-bus IEEE share at peak (c+v=1.0); this
+        # plus the c*p_per_bus constant row gives a startup PF that matches
+        # the original 0.5 + 0.5 = 1.0 * p_per_bus convention.
+        # apply_profiles() overwrites this every step.
         lidx_v = pp.create_load(
             net,
             bus=bus_map[i],
             sn_mva=sn_bus,
-            p_mw=0.5 * p_per_bus,
+            p_mw=v * p_per_bus,
             q_mvar=0.0,
             name=f"{net_id}|HV_MV_Sub_{i}_var",
             subnet="DN",
@@ -396,8 +414,10 @@ def _compute_reference_loads(
     coupler_sn_mva`` per DSO.
 
     Pool is reconstructed from the constant rows: each bus contributes
-    ``2 * base_p_mw`` (resp. ``base_q_mvar``) of its constant-row, which
-    equals the original pre-split nominal load.
+    ``(1/c) * base_p_mw`` (resp. ``base_q_mvar``) of its constant-row,
+    which equals the original pre-split nominal load (since the constant
+    row stores ``c * p_orig``).  The previous 2.0x factor assumed the
+    fixed 50/50 split; now ``c = LOAD_CONST_FRACTION`` is configurable.
 
     Returns
     -------
@@ -405,6 +425,8 @@ def _compute_reference_loads(
     """
     max_s_mva = n_couplers * coupler_sn_mva          # 900 MVA default
     n_nets = len(SUBNET_DEFS)
+
+    inv_c = 1.0 / LOAD_CONST_FRACTION
 
     pool_p_full = 0.0
     pool_q_full = 0.0
@@ -414,10 +436,12 @@ def _compute_reference_loads(
             mask = (net.load["bus"] == b0) & (
                 net.load["subnet"].astype(str) == "TN"
             ) & net.load["profile_p"].isna()
-            pool_p_full += 2.0 * float(net.load.loc[mask, "base_p_mw"].sum())
-            pool_q_full += 2.0 * float(net.load.loc[mask, "base_q_mvar"].sum())
+            pool_p_full += inv_c * float(net.load.loc[mask, "base_p_mw"].sum())
+            pool_q_full += inv_c * float(net.load.loc[mask, "base_q_mvar"].sum())
 
-    # HALF of the full pool moves to HV (mirrors the 50/50 TN split).
+    # HALF of the full pool moves to HV (mirrors the original 50/50 split
+    # convention; the per-coupling-bus distribution and HV per-bus split
+    # remain symmetric so total system mean is preserved).
     pool_p = 0.5 * pool_p_full
     pool_q = 0.5 * pool_q_full
 

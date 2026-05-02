@@ -88,12 +88,13 @@ def make_base_config() -> MultiTSOConfig:
       for post-hoc comparison plots instead.
     """
     cfg = MultiTSOConfig(
-        n_total_s    = 60.0 * 60 * 6,    # 4-hour full simulation
+        n_total_s    = 60.0 * 60 * 5,    # 4-hour full simulation
         tso_period_s = 60.0 * 3,          # TSO every 3 minutes
-        dso_period_s = 10.0,              # DSO at fastest viable cadence
-        g_v          = 120000.0,
+        dso_period_s = 20.0,              # DSO at fastest viable cadence
+        g_v          = 150000.0,
         g_q          = 200,
-        tso_g_q_tie  = 5,
+        tso_g_q_tie  = 2,
+        g_z_q_gen    = 1E1,
         # ── DSO objective tuning ──────────────────────────────────────
         dso_g_v                  = 20000.0,
         dso_g_qi                 = 0,
@@ -103,13 +104,13 @@ def make_base_config() -> MultiTSOConfig:
         # ── TSO weights ──────────────────────────────────────────────
         install_tso_tertiary_shunts=False,
         g_w_der      = 10,
-        g_w_gen      = 4e7,
-        g_w_pcc      = 100,
+        g_w_gen      = 5e7,
+        g_w_pcc      = 50,
         g_w_tso_oltc = 100,
         g_w_tso_shunt=50000,
         # ── DSO weights ──────────────────────────────────────────────
-        g_w_dso_der  = 800,
-        g_w_dso_oltc = 30,
+        g_w_dso_der  = 1000,
+        g_w_dso_oltc = 20,
         use_fixed_zones              = True,
         run_stability_analysis       = False,
         sensitivity_update_interval  = int(1e6),
@@ -119,18 +120,20 @@ def make_base_config() -> MultiTSOConfig:
         live_plot_cascade    = True,
         live_plot_system     = False,
         # ── Profile & contingency settings ───────────────────────────
-        start_time              = datetime(2016, 4, 15, 8, 0),
+        start_time              = datetime(2016, 1, 5, 8, 0),
         use_profiles            = True,
         use_zonal_gen_dispatch  = True,
         contingencies           = [
-            ContingencyEvent(minute=90,  element_type="gen",  element_index=5, action="trip"),
-            ContingencyEvent(minute=180, element_type="gen",  element_index=5, action="restore"),
-            ContingencyEvent(minute=120, element_type="load", bus=5,  p_mw=300, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=300, element_type="load", bus=5,  p_mw=300, q_mvar=100, action="trip"),
-            # ContingencyEvent(minute=330, element_type="gen",  element_index=2, action="trip"),
-            # ContingencyEvent(minute=420, element_type="gen",  element_index=2, action="restore"),
-            ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
-            ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
+            ContingencyEvent(minute=60,  element_type="gen",  element_index=2, action="trip"),
+            ContingencyEvent(minute=100, element_type="gen",  element_index=2, action="restore"),
+            ContingencyEvent(minute=120, element_type="load", bus=2,  p_mw=200, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=240, element_type="load", bus=2,  p_mw=200, q_mvar=100, action="trip"),
+            # ContingencyEvent(minute=240, element_type="load", bus=14, p_mw=200, q_mvar=100, action="connect"),
+            # ContingencyEvent(minute=330, element_type="load", bus=14, p_mw=200, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=180, element_type="gen",  element_index=2, action="trip"),
+            ContingencyEvent(minute=280, element_type="gen",  element_index=2, action="restore"),
+            # ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
+            # ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
             # ContingencyEvent(minute=720, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="connect"),
             # ContingencyEvent(minute=900, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="trip"),
         ],

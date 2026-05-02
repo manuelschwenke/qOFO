@@ -51,6 +51,32 @@ NAMEPLATE_FACTOR: float = 1.0
 
 
 # ---------------------------------------------------------------------------
+#  Per-machine nameplate / fuel type for IEEE 39 generators
+# ---------------------------------------------------------------------------
+# Standard IEEE-39 textbook convention (G1 = aggregated equivalent at bus 39
+# 1-idx; G10 = Hydro at bus 30 1-idx).  Keyed by **pandapower 0-indexed bus**
+# of the gen's terminal, which after ``build_ieee39_net`` equals the
+# original IEEE bus index minus 1 for every machine (every gen has a
+# step-up trafo, so the gen sits at the lv side and the term_bus index is
+# preserved).  Single source of truth consumed by:
+#   - ``build.py`` nameplate loop  (sets sn_mva / max_p_mw / type / Q-limits)
+#   - ``helpers.swap_slack_to_bus38``  (sizes the bus-30 trafo)
+
+GEN_NAMEPLATE: Dict[int, Tuple[str, float, str]] = {
+    29: ("G10", 1000.0, "Hydro"),
+    30: ("G2",   700.0, "Nuclear"),
+    31: ("G3",   800.0, "Nuclear"),
+    32: ("G4",   800.0, "Coal"),
+    33: ("G5",   600.0, "Coal"),
+    34: ("G6",   800.0, "Nuclear"),
+    35: ("G7",   700.0, "Coal"),
+    36: ("G8",   700.0, "Nuclear"),
+    37: ("G9",  1000.0, "Nuclear"),
+    38: ("G1", 10000.0, "Equivalent"),  # slack anchor (10 GVA equivalent of NY system)
+}
+
+
+# ---------------------------------------------------------------------------
 #  SimBench profile empirical means (used for the 50/50 load split)
 # ---------------------------------------------------------------------------
 # Every 345 kV load is split 50 % constant + 50 % profile-driven.  The
@@ -64,13 +90,75 @@ NAMEPLATE_FACTOR: float = 1.0
 # driven by the profile directly, while the mean Q is carried by a
 # per-HV-load constant Q (see network/ieee39/hv_networks.py).
 
-PROFILE_MEAN: Dict[str, float] = { # ToDo: 0.8
+PROFILE_MEAN: Dict[str, float] = {
     "HS4_pload":      0.4436,
     "HS4_qload":      0.1458,
     "HS5_pload":      0.7092,
     "HS5_qload":      0.2331,
     "mv_rural_pload": 0.1463,
 }
+
+
+# ---------------------------------------------------------------------------
+#  SimBench profile empirical full-year MAX (used for the new c/v load split)
+# ---------------------------------------------------------------------------
+# Empirical full-year max over data/profiles.csv.  Used together with
+# LOAD_CONST_FRACTION / LOAD_VAR_FRACTION below so that
+#
+#     peak_load_per_bus = (LOAD_CONST_FRACTION + LOAD_VAR_FRACTION) * orig
+#                       = orig                                         (c=0.3, v=0.7)
+#     min_load_per_bus  = LOAD_CONST_FRACTION                  * orig
+#                       = 0.30 * orig
+#
+# regardless of the profile's mean (i.e. peaks no longer overshoot the
+# IEEE 39 base case at high-profile timestamps).  See diagnostic in
+# tuning/scripts/check_load_peaks.py.
+#
+# ``mv_rural_qload`` retains its special "constant carries mean, variable
+# swings around zero" convention in hv_networks.py; PROFILE_MAX["mv_rural_qload"]
+# is provided for completeness only.
+
+PROFILE_MAX: Dict[str, float] = {
+    "HS4_pload":      1.0000,
+    "HS4_qload":      0.3287,
+    "HS5_pload":      1.0000,
+    "HS5_qload":      0.3287,
+    "mv_rural_pload": 0.3841,
+    "mv_rural_qload": 0.3443,
+}
+
+
+# ---------------------------------------------------------------------------
+#  Load split: constant share + variable amplitude
+# ---------------------------------------------------------------------------
+# Each profile-driven load row has
+#     p_const = LOAD_CONST_FRACTION * p_orig
+#     p_var(t) = LOAD_VAR_FRACTION * p_orig * profile[t] / PROFILE_MAX[prof]
+# so that
+#     p_total(t) = p_orig * (LOAD_CONST_FRACTION
+#                            + LOAD_VAR_FRACTION * profile[t] / PROFILE_MAX[prof])
+# with peak at p_orig (when profile = max) and trough at
+# LOAD_CONST_FRACTION * p_orig (when profile = 0).  Same convention applies
+# to the HV sub-network P loads (mv_rural_pload).  The HV Q convention is
+# different (constant = full q_per_bus, variable = 0.5 * q_per_bus around
+# zero mean) because mv_rural_qload has near-zero mean.
+
+LOAD_CONST_FRACTION: float = 0.4
+LOAD_VAR_FRACTION:   float = 0.6
+
+# Peak overshoot multiplier on the variable amplitude.  Multiplies the
+# variable contribution at profile = max so that
+#
+#     peak_load_per_bus = (LOAD_CONST_FRACTION
+#                          + LOAD_PEAK_BOOST * LOAD_VAR_FRACTION) * orig
+#
+# Set so peak = 1.20 * orig (i.e. +20 % stress headroom above IEEE 39 base):
+#     LOAD_PEAK_BOOST = (1.20 - LOAD_CONST_FRACTION) / LOAD_VAR_FRACTION
+#                     = (1.20 - 0.4) / 0.6 = 4/3
+# Min load stays at LOAD_CONST_FRACTION * orig (the boost touches only the
+# variable share's amplitude).  Set to 1.0 to disable the boost.
+
+LOAD_PEAK_BOOST: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -113,8 +201,8 @@ HV_LINE_TOPOLOGY: List[Tuple[int, int, float]] = [
 # ]
 TUDA_WIND_PARKS: List[Tuple[int, float, str]] = [
     (4,  40.0, "WP7"),
-    (5, 70.0, "WP10"),
-    (6, 60.0, "WP7"),
+    (5, 60.0, "WP10"),
+    (6, 50.0, "WP7"),
 ]
 
 # TUDA PV plants: (hv_bus_no, p_mw)  -- all use profile "PV3"
@@ -125,21 +213,21 @@ TUDA_WIND_PARKS: List[Tuple[int, float, str]] = [
 #     (7,  30.0),
 # ]
 TUDA_PV_PLANTS: List[Tuple[int, float]] = [
-    (3, 60.0),
-    (4,  50.0),
-    (5,  40.0),
-    (7,  30.0),
+    (3, 50.0),
+    (4,  40.0),
+    (5,  30.0),
+    (7,  20.0),
 ]
 
 # STATCOM-capable wind park at each HV coupling bus (MVA rating)
-HV_COUPLING_WP_MVA: float = 60.0
+HV_COUPLING_WP_MVA: float = 30.0
 
 # HV buses with concentrated load (P and Q multiplied by the factor below).
 # Used to create an intentional load–generation asymmetry across the HV
 # sub-network: generation lives on HV buses 0–5 (wind + PV side) and load
 # is concentrated on HV buses 6–9 (opposite side of the 11-line topology).
 HV_HIGH_LOAD_BUS_NOS: Tuple[int, ...] = (6, 7, 8, 9)
-HV_HIGH_LOAD_FACTOR: float = 1.5
+HV_HIGH_LOAD_FACTOR: float = 2
 
 # Zone-3 buses for EHV profile assignment (0-indexed pandapower)
 ZONE3_BUSES_0IDX: Set[int] = set(range(14, 24)) | {32, 33, 34, 35}

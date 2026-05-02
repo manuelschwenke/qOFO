@@ -26,24 +26,64 @@ from configs.multi_tso_config import MultiTSOConfig
 from tuning._types import BOParam, Ceilings
 
 
-# 9 BO dimensions
+# 9 BO dimensions.
+# `g_w_tso_shunt` is conditionally excluded while
+# `install_tso_tertiary_shunts=False` in the baseline (no shunt actuators
+# → vacuous coordinate). The slot is pinned in FIXED_OVERRIDES so the
+# baseline value still flows through `apply_to_config`. Re-enable by
+# uncommenting and removing the FIXED_OVERRIDES entry once shunts are
+# installed.
+#
+# `tso_g_q_tie` (added 2026-04-29) is a tracking weight on the Q-tie-line
+# rows of the TSO MIQP objective — analogous to `g_q` (Q-PCC tracking),
+# scales the curvature ``Q`` block of the iteration matrix rather than
+# the proximal ``G_w`` block.  Bounds are chosen from the field's own
+# docstring (configs/multi_tso_config.py:294): validated 1.0 starting
+# point, aggressive 1e2-1e4, numerically unstable above 1e6.  A
+# log-uniform [1e-1, 1e3] range stays inside the validated envelope.
+#
+# Adaptive `g_w` meta-knobs (`g_w_adapt_beta1`, `g_w_adapt_beta2`,
+# `g_w_adapt_t_min`, `g_w_adapt_t_max`, `g_w_adapt_deadband_rel`,
+# added 2026-04-29) are NOT in BO_DIMS by default.  When the operator
+# enables one or more `adapt_g_w_*` flags in the config, the existing
+# `g_w_*` BO dims serve as the *initial* values for the online adapter
+# (warm-start), and the meta-knobs take their config defaults.  Add the
+# meta-knobs to `BO_DIMS` only after deciding to BO-tune them too —
+# typical ranges: β₁, β₂ ∈ [1e-2, 3e-1] log-uniform; t_min ∈ [1e-3, 1]
+# log-uniform; t_max ∈ [1, 1e6] log-uniform.  See paper Eq. 16
+# (Zagorowska et al., IFAC WC 2026, arXiv:2604.12863).
 BO_DIMS: tuple[BOParam, ...] = (
-    BOParam("g_v",           log=True, low=1e2,  high="ceil", fallback_high=1e7),
-    BOParam("g_q",           log=True, low=1.0,  high=1e4),
-    BOParam("dso_g_v",       log=True, low=1e2,  high=1e6),
-    BOParam("g_w_der",       log=True, low=1e-1, high="ceil", fallback_high=1e4),
-    BOParam("g_w_pcc",       log=True, low=1e-1, high="ceil", fallback_high=1e4),
-    BOParam("g_w_tso_oltc",  log=True, low=1e-1, high="ceil", fallback_high=1e4),
-    BOParam("g_w_tso_shunt", log=True, low=1e-1, high="ceil", fallback_high=1e4),
-    BOParam("g_w_dso_der",   log=True, low=1e-1, high="ceil", fallback_high=1e4),
-    BOParam("g_w_dso_oltc",  log=True, low=1e-1, high="ceil", fallback_high=1e4),
+    BOParam("g_v",           log=True, low=1e2, high=1e5), #  high="ceil", fallback_high=1e7),
+    BOParam("g_q",           log=True, low=1e-1,  high=1e3),
+    BOParam("tso_g_q_tie",   log=True, low=1e-1, high=1e3),
+    BOParam("dso_g_v",       log=True, low=1,  high=1e5),
+    BOParam("g_w_der",       log=True, low=1e-1, high=1e3), # high="ceil", fallback_high=1e4),
+    # `g_w_pcc` upper bound capped at 30 (≈10^1.5) on 2026-05-02:
+    # a prior BO run converged to ``g_w_pcc ≈ 269.7`` by exploiting
+    # the gameability of ``itae_q_pcc`` (very high ``g_w_pcc`` freezes
+    # the PCC setpoint, making the DSO trivially track it).  See the
+    # ``CostWeights`` docstring in ``tuning/metrics.py`` for the
+    # paired objective-side fix (demoted ``w_q_track`` and new
+    # ``w_pcc_underutil`` term).  Values above ~30 are sluggish without
+    # a meaningful end-performance benefit.
+    BOParam("g_w_pcc",       log=True, low=1e-1, high=100.0),
+    BOParam("g_w_tso_oltc",  log=True, low=1, high=1e5), # high="ceil", fallback_high=1e4),
+    #BOParam("g_w_tso_shunt", log=True, low=1e-1, high="ceil", fallback_high=1e4),
+    BOParam("g_w_dso_der",   log=True, low=1e-1, high=1e3), # high="ceil", fallback_high=1e4),
+    BOParam("g_w_dso_oltc",  log=True, low=1, high=1e5), # high="ceil", fallback_high=1e4),
 )
 
 
 # Fields always pinned during tuning (override baseline config).
 FIXED_OVERRIDES: dict[str, Any] = {
     # Per-user decision: g_w_gen excluded from stability tuning
-    "g_w_gen":                 1e7,
+    "g_w_gen":                 5e7,
+
+    # Conditionally pinned: shunts not installed at TSO tertiary
+    # (`install_tso_tertiary_shunts=False`), so this dim is vacuous.
+    # Value matches the 002 baseline; remove this key when shunts are
+    # re-installed and the BO_DIMS entry is uncommented.
+    "g_w_tso_shunt":           50000.0,
 
     # Integral Q-tracking off (user excluded these from BO)
     "dso_g_qi":                0.0,

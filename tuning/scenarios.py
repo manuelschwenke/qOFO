@@ -68,9 +68,15 @@ class ScenarioSpec:
 # ---------------------------------------------------------------------------
 # Design set: 5 deterministic scenarios
 # ---------------------------------------------------------------------------
-# Total simulated time across all 5: ~6 hours.  Wall-clock per trial (one
-# full design set) target: ~2.5 minutes on the developer machine.  Adjust
-# durations if wall-clock per trial drifts beyond ~5 minutes.
+# All scenarios are 75 min: 15 min of *stabilisation* (no events) so the
+# controller settles the operating point before any disturbance, then
+# 60 min of *event window* during which contingencies fire.  Equal
+# duration across scenarios eliminates the T^2 ITAE bias (same physical
+# tracking error → same metric contribution regardless of scenario).
+
+_STABILISE_MIN = 15
+_EVENT_WINDOW_MIN = 60
+_TOTAL_MIN = _STABILISE_MIN + _EVENT_WINDOW_MIN     # 75 min
 
 _T0 = datetime(2016, 4, 15, 12, 0)         # spring noon, mid-load
 _T_WINTER = datetime(2016, 1, 14, 18, 0)   # winter evening, peak
@@ -78,42 +84,45 @@ _T_WINTER = datetime(2016, 1, 14, 18, 0)   # winter evening, peak
 
 def design_set() -> List[ScenarioSpec]:
     """Five named, deterministic scenarios spanning the operating
-    envelope."""
+    envelope.  Each is 75 min total (15 min stabilisation + 60 min
+    event window)."""
     return [
         ScenarioSpec(
             name="nominal_quiet",
             start_time=_T0,
-            duration_s=60 * 60,
+            duration_s=_TOTAL_MIN * 60,
             contingencies=(),
         ),
         ScenarioSpec(
             name="gen_trip_recovery",
             start_time=_T0,
-            duration_s=90 * 60,
+            duration_s=_TOTAL_MIN * 60,
             contingencies=(
                 ContingencyEvent(
-                    minute=20, element_type="gen", element_index=5,
-                    action="trip",
+                    # Trip 5 min into the event window.
+                    minute=_STABILISE_MIN + 5, element_type="gen",
+                    element_index=2, action="trip",
                 ),
                 ContingencyEvent(
-                    minute=60, element_type="gen", element_index=5,
-                    action="restore",
+                    # Restore 35 min later, leaves 20 min recovery.
+                    minute=_STABILISE_MIN + 40, element_type="gen",
+                    element_index=2, action="restore",
                 ),
             ),
         ),
         ScenarioSpec(
             name="load_step",
             start_time=_T0,
-            duration_s=60 * 60,
+            duration_s=_TOTAL_MIN * 60,
             contingencies=(
                 ContingencyEvent(
-                    minute=15, element_type="load",
-                    bus=5, p_mw=300.0, q_mvar=100.0,
+                    minute=_STABILISE_MIN + 5, element_type="load",
+                    bus=5, p_mw=300.0, q_mvar=150.0,
                     action="connect",
                 ),
                 ContingencyEvent(
-                    minute=45, element_type="load",
-                    bus=5, p_mw=300.0, q_mvar=100.0,
+                    minute=_STABILISE_MIN + 45, element_type="load",
+                    bus=5, p_mw=300.0, q_mvar=150.0,
                     action="trip",
                 ),
             ),
@@ -121,24 +130,24 @@ def design_set() -> List[ScenarioSpec]:
         ScenarioSpec(
             name="dual_disturbance",
             start_time=_T0,
-            duration_s=120 * 60,
+            duration_s=_TOTAL_MIN * 60,
             contingencies=(
                 ContingencyEvent(
-                    minute=20, element_type="gen", element_index=5,
-                    action="trip",
+                    minute=_STABILISE_MIN + 5, element_type="gen",
+                    element_index=5, action="trip",
                 ),
                 ContingencyEvent(
-                    minute=40, element_type="load",
-                    bus=27, p_mw=300.0, q_mvar=150.0,
+                    minute=_STABILISE_MIN + 15, element_type="load",
+                    bus=2, p_mw=200.0, q_mvar=100.0,
                     action="connect",
                 ),
                 ContingencyEvent(
-                    minute=80, element_type="gen", element_index=5,
-                    action="restore",
+                    minute=_STABILISE_MIN + 35, element_type="gen",
+                    element_index=5, action="restore",
                 ),
                 ContingencyEvent(
-                    minute=100, element_type="load",
-                    bus=27, p_mw=300.0, q_mvar=150.0,
+                    minute=_STABILISE_MIN + 50, element_type="load",
+                    bus=2, p_mw=200.0, q_mvar=100.0,
                     action="trip",
                 ),
             ),
@@ -146,7 +155,7 @@ def design_set() -> List[ScenarioSpec]:
         ScenarioSpec(
             name="winter_peak",
             start_time=_T_WINTER,
-            duration_s=60 * 60,
+            duration_s=_TOTAL_MIN * 60,
             contingencies=(),
         ),
     ]

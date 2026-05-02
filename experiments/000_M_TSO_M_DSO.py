@@ -167,6 +167,173 @@ def _collect_contingency_watch_buses(
     return sorted(watch)
 
 
+def _snapshot_oltc_taps(
+    net: pp.pandapowerNet,
+) -> Dict[Tuple[str, int], int]:
+    """Snapshot ``tap_pos`` of every ``DiscreteTapControl`` in ``net.controller``.
+
+    Keyed by ``(element_table, element_idx)`` with ``element_table`` in
+    ``{'trafo', 'trafo3w'}``.  Returns an empty dict if no controllers
+    are installed.  Used by the local-mode OLTC rate-limit clamp to
+    bound per-step tap movement (see
+    :attr:`configs.multi_tso_config.MultiTSOConfig.local_oltc_max_step_per_dt`).
+    """
+    from pandapower.control import DiscreteTapControl
+    snap: Dict[Tuple[str, int], int] = {}
+    if not hasattr(net, "controller") or len(net.controller) == 0:
+        return snap
+    for cid in net.controller.index:
+        obj = net.controller.at[cid, "object"]
+        if not isinstance(obj, DiscreteTapControl):
+            continue
+        table = str(getattr(obj, "element", "trafo"))
+        tid = int(getattr(obj, "tid", -1))
+        if tid < 0 or table not in net or tid not in net[table].index:
+            continue
+        snap[(table, tid)] = int(net[table].at[tid, "tap_pos"])
+    return snap
+
+
+def _clamp_oltc_taps(
+    net: pp.pandapowerNet,
+    snapshot: Dict[Tuple[str, int], int],
+    max_step: int,
+) -> List[Tuple[str, int, int, int]]:
+    """Clamp each ``DiscreteTapControl``'s tap_pos to ``±max_step`` of snapshot.
+
+    Returns a list of ``(table, tid, prev_tap, clamped_tap)`` for every
+    OLTC whose tap_pos was clamped.  An empty list means no clamping
+    happened; the caller can skip the re-run PF.  Modifies
+    ``net[table].tap_pos`` in place.
+    """
+    from pandapower.control import DiscreteTapControl
+    moved: List[Tuple[str, int, int, int]] = []
+    if not snapshot or not hasattr(net, "controller") or len(net.controller) == 0:
+        return moved
+    if max_step < 0:
+        return moved
+    for cid in net.controller.index:
+        obj = net.controller.at[cid, "object"]
+        if not isinstance(obj, DiscreteTapControl):
+            continue
+        table = str(getattr(obj, "element", "trafo"))
+        tid = int(getattr(obj, "tid", -1))
+        key = (table, tid)
+        if key not in snapshot:
+            continue
+        prev = snapshot[key]
+        curr = int(net[table].at[tid, "tap_pos"])
+        delta = curr - prev
+        if abs(delta) <= max_step:
+            continue
+        clamped = prev + (max_step if delta > 0 else -max_step)
+        net[table].at[tid, "tap_pos"] = int(clamped)
+        moved.append((table, tid, prev, int(clamped)))
+    return moved
+
+
+class _OLTCRateLimiter:
+    """Per-step ``DiscreteTapControl`` rate limiter for local-mode OLTCs.
+
+    Wraps :func:`_snapshot_oltc_taps` / :func:`_clamp_oltc_taps` with a
+    persistent ``last_change_time_s`` map so each OLTC can be locked for
+    ``cooldown_s`` simulation seconds after every actual tap movement,
+    in addition to the existing per-step ``±max_step`` clamp.
+
+    Usage pattern (once per outer simulation step, around every plant
+    PF):
+
+    >>> limiter = _OLTCRateLimiter(max_step=1, cooldown_s=30.0)
+    >>> # at the top of every step:
+    >>> limiter.snapshot(net)
+    >>> # after every pp.runpp(run_control=True):
+    >>> moved = limiter.clamp(net, time_s)
+    >>> if moved:
+    ...     pp.runpp(net, run_control=False, ...)
+    """
+
+    def __init__(self, max_step: int, cooldown_s: float) -> None:
+        self.max_step: int = int(max_step)
+        self.cooldown_s: float = float(cooldown_s)
+        self._snapshot: Dict[Tuple[str, int], int] = {}
+        self._last_change_time_s: Dict[Tuple[str, int], float] = {}
+
+    @property
+    def active(self) -> bool:
+        """``True`` when the limiter will do anything (either rate-cap
+        or cooldown).  ``max_step < 0`` AND ``cooldown_s <= 0`` means
+        the limiter is a no-op and callers can skip the snapshot/clamp
+        round-trip entirely."""
+        return self.max_step >= 0 or self.cooldown_s > 0.0
+
+    def snapshot(self, net: pp.pandapowerNet) -> None:
+        """Record every ``DiscreteTapControl`` tap_pos at the start of a
+        step.  Subsequent :meth:`clamp` calls within the same step
+        reference this snapshot."""
+        self._snapshot = _snapshot_oltc_taps(net)
+
+    def clamp(
+        self,
+        net: pp.pandapowerNet,
+        time_s: float,
+    ) -> List[Tuple[str, int, int, int]]:
+        """Enforce the per-step ``±max_step`` clamp AND the wall-clock
+        ``cooldown_s`` lock against this step's snapshot.
+
+        Per OLTC, with ``delta = curr - snapshot``:
+          * ``delta == 0``  → no-op.
+          * ``delta != 0`` AND ``time_s − last_change_time_s < cooldown_s``
+            → revert ``tap_pos`` to the snapshot (cooldown not yet
+            elapsed); recorded as ``(table, tid, curr, prev)`` in the
+            returned list so the caller can log the rate-limit revert.
+          * Otherwise → apply the existing ``±max_step`` clamp; if the
+            tap actually moved, update ``last_change_time_s[(table,
+            tid)] = time_s``.
+
+        Returns the list of OLTCs whose ``tap_pos`` was modified by this
+        call (whether by clamp or by cooldown revert), so the caller
+        can decide whether to re-run the PF with ``run_control=False``.
+        """
+        from pandapower.control import DiscreteTapControl
+        moved: List[Tuple[str, int, int, int]] = []
+        if not self._snapshot:
+            return moved
+        if not hasattr(net, "controller") or len(net.controller) == 0:
+            return moved
+        for cid in net.controller.index:
+            obj = net.controller.at[cid, "object"]
+            if not isinstance(obj, DiscreteTapControl):
+                continue
+            table = str(getattr(obj, "element", "trafo"))
+            tid = int(getattr(obj, "tid", -1))
+            key = (table, tid)
+            if key not in self._snapshot:
+                continue
+            prev = self._snapshot[key]
+            curr = int(net[table].at[tid, "tap_pos"])
+            delta = curr - prev
+            if delta == 0:
+                continue
+            last_t = self._last_change_time_s.get(key, float("-inf"))
+            if self.cooldown_s > 0.0 and (time_s - last_t) < self.cooldown_s:
+                # Cooldown not elapsed: revert any tap movement.
+                net[table].at[tid, "tap_pos"] = int(prev)
+                moved.append((table, tid, curr, prev))
+                continue
+            # Apply existing per-step ±max_step clamp on top of the
+            # cooldown gate (max_step < 0 disables this stage).
+            if self.max_step >= 0 and abs(delta) > self.max_step:
+                clamped = prev + (self.max_step if delta > 0 else -self.max_step)
+                net[table].at[tid, "tap_pos"] = int(clamped)
+                if clamped != prev:
+                    self._last_change_time_s[key] = time_s
+                moved.append((table, tid, prev, int(clamped)))
+            else:
+                # The natural move (within ±max_step) is allowed.
+                self._last_change_time_s[key] = time_s
+        return moved
+
+
 def _dump_contingency_diagnostics(
     net: pp.pandapowerNet,
     label: str,
@@ -1016,6 +1183,9 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             alpha=1.0,
             int_max_step=config.int_max_step,
             int_cooldown=config.int_cooldown,
+            int_cooldown_s=config.oltc_cooldown_s,
+            adapt_g_w_classes=config.tso_adapt_g_w_classes(),
+            g_w_adapt_meta=config.make_g_w_adapt_meta(),
         )
 
         # Build gen→OLTC position mapping for capability-based OLTC blocking.
@@ -1245,6 +1415,9 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             alpha=1.0,
             int_max_step=config.int_max_step,
             int_cooldown=config.int_cooldown,
+            int_cooldown_s=config.oltc_cooldown_s,
+            adapt_g_w_classes=config.dso_adapt_g_w_classes(),
+            g_w_adapt_meta=config.make_g_w_adapt_meta(),
         )
 
         dso_ctrl = DSOController(
@@ -1360,7 +1533,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         # Re-converge after profile application
         _t = perf_counter()
         pp.runpp(net, max_iteration=50, run_control=False, calculate_voltage_angles=True, init='auto',
-                 distributed_slack=config.distributed_slack)
+                 distributed_slack=config.distributed_slack,
+                 enforce_q_lims=config.enforce_q_lims_plant)
         if verbose >= 1:
             print(f"  [T] post-profile pp.runpp: {perf_counter() - _t:.2f} s")
 
@@ -1427,7 +1601,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
     _t = perf_counter()
     pp.runpp(net, run_control=True, calculate_voltage_angles=True,
-             max_iteration=50, distributed_slack=config.distributed_slack)
+             max_iteration=50, distributed_slack=config.distributed_slack,
+             enforce_q_lims=config.enforce_q_lims_plant)
     if verbose >= 1:
         print(f"  [T] Phase 1 pp.runpp(run_control=True): {perf_counter() - _t:.2f} s")
 
@@ -1468,7 +1643,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
     _t = perf_counter()
     pp.runpp(net, run_control=True, calculate_voltage_angles=True,
-             max_iteration=50, distributed_slack=config.distributed_slack)
+             max_iteration=50, distributed_slack=config.distributed_slack,
+             enforce_q_lims=config.enforce_q_lims_plant)
     if verbose >= 1:
         print(f"  [T] Phase 2 pp.runpp(run_control=True): {perf_counter() - _t:.2f} s")
 
@@ -1507,7 +1683,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             for _qv_iter in range(20):
                 # Run PF with OLTC active (adjusts taps to current Q/V)
                 pp.runpp(net, run_control=True, calculate_voltage_angles=True,
-                         max_iteration=50)
+                         max_iteration=50,
+                         enforce_q_lims=config.enforce_q_lims_plant)
                 # Compute Q(V) from post-PF voltages
                 max_dq = 0.0
                 for hv in meta.hv_networks:
@@ -1538,7 +1715,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             # DiscreteTapControl settle OLTC taps to the resulting voltages.
             apply_cos_phi_one_local_control(net, meta.hv_networks)
             pp.runpp(net, run_control=True, calculate_voltage_angles=True,
-                     max_iteration=50)
+                     max_iteration=50,
+                     enforce_q_lims=config.enforce_q_lims_plant)
             if verbose >= 1:
                 print(f"  [local DSO] cos phi=1 init: Q=0 Mvar on "
                       f"{n_dso_sgen} HV DER; OLTCs settled via DiscreteTapControl")
@@ -1553,7 +1731,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         _t = perf_counter()
         pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
                  max_iteration=50,
-                 distributed_slack=config.distributed_slack)
+                 distributed_slack=config.distributed_slack,
+                 enforce_q_lims=config.enforce_q_lims_plant)
         if verbose >= 1:
             print(f"  [T] final re-converge pp.runpp: {perf_counter() - _t:.2f} s")
     elif verbose >= 1:
@@ -1978,6 +2157,21 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         if config.tso_local_mode == "cos_phi_1":
             install_cos_phi_one(net, _tso_der_idx_list)
 
+    # ── Persistent OLTC rate-limiter for local-control mode ──────────────
+    # Wraps the existing per-step ±max_step clamp with a wall-clock
+    # cooldown (config.oltc_cooldown_s) so each DiscreteTapControl-managed
+    # OLTC is locked for that many seconds after every actual tap
+    # movement.  Only active when at least one local-mode tap controller
+    # is present; the OFO MIQP path enforces the same cooldown via
+    # OFOParameters.int_cooldown_s on its own integer block.
+    _oltc_limiter = _OLTCRateLimiter(
+        max_step=config.local_oltc_max_step_per_dt,
+        cooldown_s=(
+            config.oltc_cooldown_s if (_local_dso or _local_tso) else 0.0
+        ),
+    )
+    _oltc_limiter_active = (_local_dso or _local_tso) and _oltc_limiter.active
+
     for step in range(1, n_steps + 1):
         time_s  = step * config.dt_s
         run_tso = (step == 1) or _is_period_hit(time_s, config.tso_period_s)
@@ -1991,7 +2185,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             _apply_local_der()
             pp.runpp(net, run_control=True, calculate_voltage_angles=True,
                      max_iteration=50,
-                     distributed_slack=config.distributed_slack)
+                     distributed_slack=config.distributed_slack,
+                     enforce_q_lims=config.enforce_q_lims_plant)
             if verbose >= 1:
                 print(f"  -- local DER mode '{config.local_der_mode}' "
                       f"activated at t={time_s:.0f}s after "
@@ -2013,6 +2208,18 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             step=step, time_s=time_s, tso_active=run_tso, dso_active=run_dso
         )
 
+        # ── Local-mode OLTC rate-limit snapshot ──────────────────────────────
+        # Snapshot every DiscreteTapControl tap_pos at the start of the
+        # step so plant PFs in the step (post-profile, post-contingency,
+        # end-of-step) can be clamped to ±config.local_oltc_max_step_per_dt
+        # of these values AND blocked from moving twice within
+        # config.oltc_cooldown_s seconds.  Only relevant when local-mode
+        # tap controllers are present (cascade-DSO local mode and/or TSO
+        # local mode); the OFO MIQP path manages its OLTCs via
+        # int_max_step / int_cooldown / int_cooldown_s in the controller.
+        if _oltc_limiter_active:
+            _oltc_limiter.snapshot(net)
+
         # ── Apply time-series profiles ────────────────────────────────────────
         if use_profiles and profiles is not None:
             t_now = start_time + timedelta(seconds=time_s)
@@ -2031,7 +2238,27 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
                      max_iteration=50,
                      max_iter=100,
-                     distributed_slack=config.distributed_slack)
+                     distributed_slack=config.distributed_slack,
+                     enforce_q_lims=config.enforce_q_lims_plant)
+            if _oltc_limiter_active:
+                _moved = _oltc_limiter.clamp(net, time_s)
+                if _moved:
+                    if verbose >= 1:
+                        _pretty = ", ".join(
+                            f"{tab}#{tid} {prev:+d}->{new:+d}"
+                            for tab, tid, prev, new in _moved
+                        )
+                        print(
+                            f"  [Step {step}] post-profile OLTC tap-rate limit "
+                            f"({len(_moved)}): {_pretty}; re-running PF "
+                            f"with run_control=False..."
+                        )
+                    pp.runpp(
+                        net, run_control=False, calculate_voltage_angles=True,
+                        max_iteration=100,
+                        distributed_slack=config.distributed_slack,
+                        enforce_q_lims=config.enforce_q_lims_plant,
+                    )
 
         # ── Apply contingency events ──────────────────────────────────────────
         if contingencies:
@@ -2046,10 +2273,12 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 watch_buses = _collect_contingency_watch_buses(
                     net, fired, gen_trafo_map
                 )
-                _dump_contingency_diagnostics(
-                    net, label=f"PRE-TRIP t={time_s:.0f}s",
-                    watch_bus_0idx=watch_buses,
-                )
+
+                if verbose > 1:
+                    _dump_contingency_diagnostics(
+                        net, label=f"PRE-TRIP t={time_s:.0f}s",
+                        watch_bus_0idx=watch_buses,
+                    )
 
                 for ev in fired:
                     _apply_contingency(net, ev, verbose,
@@ -2061,6 +2290,17 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                     _apply_local_der()
                 _apply_local_tso()
                 try:
+                    # First attempt: no Q-limit enforcement so that gens
+                    # transiently producing Q outside their static box
+                    # immediately after a topology change (gen trip) can
+                    # converge in PV mode rather than cascading into
+                    # PV→PQ flips that stall Newton-Raphson.  The
+                    # subsequent end-of-step PF (with
+                    # enforce_q_lims=config.enforce_q_lims_plant) clamps
+                    # any out-of-box Q on the same step.  Keeping the
+                    # asymmetry preserves the legacy retry path below
+                    # (which adds enforce_q_lims=True as a recovery
+                    # action when this unclipped attempt diverges).
                     pp.runpp(net, run_control=_run_control,
                              calculate_voltage_angles=True,
                              max_iteration=50,
@@ -2095,17 +2335,42 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                     except LoadflowNotConverged:
                         print("  *** Retry with enforce_q_lims + flat start "
                               "ALSO diverged — structural issue. ***\n")
+                        if verbose > 1:
                         # Dump what diagnostics we can without res_* tables
-                        _dump_contingency_diagnostics(
-                            net, label=f"POST-TRIP FAILED t={time_s:.0f}s",
-                            watch_bus_0idx=watch_buses,
-                        )
+                            _dump_contingency_diagnostics(
+                                net, label=f"POST-TRIP FAILED t={time_s:.0f}s",
+                                watch_bus_0idx=watch_buses,
+                            )
                         raise
+                if verbose > 1:
+                    _dump_contingency_diagnostics(
+                        net, label=f"POST-TRIP t={time_s:.0f}s",
+                        watch_bus_0idx=watch_buses,
+                    )
 
-                _dump_contingency_diagnostics(
-                    net, label=f"POST-TRIP t={time_s:.0f}s",
-                    watch_bus_0idx=watch_buses,
-                )
+                if _oltc_limiter_active:
+                    _moved = _oltc_limiter.clamp(net, time_s)
+                    if _moved:
+                        if verbose >= 1:
+                            _pretty = ", ".join(
+                                f"{tab}#{tid} {prev:+d}->{new:+d}"
+                                for tab, tid, prev, new in _moved
+                            )
+                            print(
+                                f"  [Step {step}] post-contingency OLTC "
+                                f"tap-rate limit ({len(_moved)}): {_pretty}; "
+                                f"re-running PF with run_control=False..."
+                            )
+                        # Match the post-contingency PF's enforce_q_lims=False
+                        # behaviour to keep convergence robust on the
+                        # transient post-trip operating point.
+                        pp.runpp(
+                            net, run_control=False,
+                            calculate_voltage_angles=True,
+                            max_iteration=100,
+                            distributed_slack=config.distributed_slack,
+                            enforce_q_lims=False,
+                        )
 
                 # Notify controllers: freeze OOS actuator bounds, zero
                 # their H columns, and invalidate sensitivity caches.
@@ -2134,6 +2399,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 measurements,
                 step,
                 recompute_cross_sensitivities=refresh_H,
+                sim_time_s=time_s,
             )
 
             # Apply TSO controls to plant network
@@ -2315,7 +2581,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 target_tso.receive_capability(cap_msg)
 
                 # --- DSO optimisation step -------------------------------------------
-                dso_out = dso_ctrl.step(meas_dso)
+                dso_out = dso_ctrl.step(meas_dso, sim_time_s=time_s)
                 apply_dso_controls(net, dso_ctrl.config, dso_out)
 
         # ── Power flow ────────────────────────────────────────────────────────
@@ -2325,10 +2591,54 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             _apply_local_der()
         _apply_local_tso()
         try:
-            pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
-                     max_iteration=50,
-                     max_iter=100,
-                     distributed_slack=config.distributed_slack)
+            try:
+                pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
+                         max_iteration=50,
+                         max_iter=100,
+                         distributed_slack=config.distributed_slack,
+                         enforce_q_lims=config.enforce_q_lims_plant)
+            except LoadflowNotConverged:
+                # End-of-step PF with enforce_q_lims=True can fail to
+                # converge on stressful events (e.g., a heavy load
+                # connect) when run_control=True is also active: the
+                # local Q(V) droop and the PV→PQ flips from
+                # enforce_q_lims interact and oscillate within the 50-NR
+                # iteration budget.  Fall back to a flat-start retry
+                # without Q-limit enforcement so the timestep still
+                # records a converged state; the next step's PFs (post-
+                # profile, post-contingency, or the next end-of-step PF
+                # itself) re-attempt with the clamp on a more relaxed
+                # operating point.
+                if verbose >= 1:
+                    print(f"  [Step {step}] end-of-step PF with "
+                          f"enforce_q_lims={config.enforce_q_lims_plant} "
+                          f"diverged; retrying flat-start unclipped...")
+                pp.runpp(net, run_control=_run_control,
+                         calculate_voltage_angles=True,
+                         max_iteration=100,
+                         max_iter=100,
+                         distributed_slack=config.distributed_slack,
+                         enforce_q_lims=False,
+                         init='flat')
+            if _oltc_limiter_active:
+                _moved = _oltc_limiter.clamp(net, time_s)
+                if _moved:
+                    if verbose >= 1:
+                        _pretty = ", ".join(
+                            f"{tab}#{tid} {prev:+d}->{new:+d}"
+                            for tab, tid, prev, new in _moved
+                        )
+                        print(
+                            f"  [Step {step}] end-of-step OLTC tap-rate "
+                            f"limit ({len(_moved)}): {_pretty}; re-running "
+                            f"PF with run_control=False..."
+                        )
+                    pp.runpp(
+                        net, run_control=False, calculate_voltage_angles=True,
+                        max_iteration=100,
+                        distributed_slack=config.distributed_slack,
+                        enforce_q_lims=config.enforce_q_lims_plant,
+                    )
         except Exception as e:
             print(f"  [Step {step}] Power flow failed: {e}")
             log.append(rec)
@@ -2377,6 +2687,29 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                     rec.dso_group_v_max_pu[hv.net_id]  = float(vm_hv.max())
                     rec.dso_group_v_mean_pu[hv.net_id] = float(vm_hv.mean())
                 rec.dso_controller_group[hv.net_id] = hv.net_id
+
+                # DER reactive power per HV group (post-PF measurement of
+                # local-mode Q(V) droop or cos phi=1 dispatch).  Without
+                # this the cascade-DSO live plot's "DER Q per HV group"
+                # tile shows "no DSO DER dispatch available" in any
+                # scenario with dso_mode='local' (L0/L1/L2 and T-OFO).
+                # The ±sn_mva headroom band is a static box approximation
+                # to the VDE-AR-N 4120 capability used by the OFO path
+                # (compute_der_q_bounds); it is sufficient for live
+                # visualisation in local mode where no controller drives
+                # the DER toward the precise envelope.
+                valid_der = [
+                    s for s in hv.sgen_indices if s in net.res_sgen.index
+                ]
+                if valid_der:
+                    rec.dso_group_q_der_mvar[hv.net_id] = float(
+                        net.res_sgen.loc[valid_der, "q_mvar"].sum()
+                    )
+                    sn_total = float(
+                        net.sgen.loc[valid_der, "sn_mva"].sum()
+                    )
+                    rec.dso_group_q_der_min_mvar[hv.net_id] = -sn_total
+                    rec.dso_group_q_der_max_mvar[hv.net_id] = +sn_total
             _record_local_dso_trafo_data(rec, net, hv_info_map)
             _record_hv_group_observables(rec, net, hv_info_map)
 
@@ -2459,6 +2792,29 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             + float(net.res_trafo3w["pl_mw"].sum())
         )
 
+        # ── Slack saturation diagnostic (added 2026-05-02) ───────────────────
+        # Records the slack's P/Q every step plus a flag for whether |Q| is
+        # within 1 % of max_q_mvar (saturation indicator).  Helps post-hoc
+        # diagnosis of L0 / cos-phi-1 divergence: if the slack pegs at its
+        # capability limit before NR fails, that is the proximate cause.
+        if "slack" in net.gen.columns and len(net.gen) > 0:
+            _slack_idxs = net.gen.index[net.gen["slack"].astype(bool)].tolist()
+            if _slack_idxs:
+                _sg = _slack_idxs[0]
+                rec.slack_p_mw   = float(net.res_gen.at[_sg, "p_mw"])
+                rec.slack_q_mvar = float(net.res_gen.at[_sg, "q_mvar"])
+                _qmax = float(net.gen.at[_sg, "max_q_mvar"])
+                _qmin = float(net.gen.at[_sg, "min_q_mvar"])
+                _qabs_lim = max(abs(_qmax), abs(_qmin), 1.0)
+                rec.slack_q_at_limit = bool(
+                    abs(rec.slack_q_mvar) >= 0.99 * _qabs_lim
+                )
+        elif not net.ext_grid.empty:
+            _sg = net.ext_grid.index[0]
+            rec.slack_p_mw   = float(net.res_ext_grid.at[_sg, "p_mw"])
+            rec.slack_q_mvar = float(net.res_ext_grid.at[_sg, "q_mvar"])
+            rec.slack_q_at_limit = False  # ext_grid is unbounded
+
         # ── Record per-zone live-plot observables (loadings, balances,
         #    tie-line Q, shunt states) every step.
         _record_zone_live_plot_observables(
@@ -2476,6 +2832,35 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 for z in sorted(zone_defs.keys())
             )
             print(f"  t={min_num:3d} min | {v_info}")
+            # ── Adaptive g_w live state per controller ─────────────────────
+            # For each adapted class, show ``min..max`` of g_w_live across
+            # the variables in that class.  Single-actuator classes (or
+            # classes whose entries are all equal) collapse to one number.
+            # Lines are skipped entirely when no controller has an active
+            # adapter so the baseline log stays clean.
+            def _fmt_class(arr):
+                vmin = float(arr.min())
+                vmax = float(arr.max())
+                if arr.size == 1 or vmin == vmax:
+                    return f"{vmin:.3g}"
+                return f"{vmin:.3g}..{vmax:.3g}"
+
+            tso_parts = []
+            for z in sorted(tso_controllers.keys()):
+                s = tso_controllers[z].adapter_summary()
+                if s:
+                    kv = " ".join(f"{k}={_fmt_class(v)}" for k, v in s.items())
+                    tso_parts.append(f"Z{z}[{kv}]")
+            if tso_parts:
+                print(f"  t={min_num:3d} min | g_w TSO  {' '.join(tso_parts)}")
+            dso_parts = []
+            for did in sorted(dso_controllers.keys()):
+                s = dso_controllers[did].adapter_summary()
+                if s:
+                    kv = " ".join(f"{k}={_fmt_class(v)}" for k, v in s.items())
+                    dso_parts.append(f"{did}[{kv}]")
+            if dso_parts:
+                print(f"  t={min_num:3d} min | g_w DSO  {' '.join(dso_parts)}")
             if verbose >= 2:
                 for z in sorted(zone_defs.keys()):
                     lhs = rec.zone_contraction_lhs.get(z, float("nan"))
@@ -2756,11 +3141,12 @@ def main() -> None:
     Invoke from the project root:
         python run/run_M_TSO_M_DSO.py
     """
+
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 16,      # 720-min full simulation
+        n_total_s=60.0 * 60 * 2,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
-        g_v=120000.0,  # TSO voltage tracking; drives PCC Q dispatch
+        g_v=150000.0,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=200,  # DSO Q-tracking
         # ── DSO objective tuning ──
         dso_g_v=25000.0,  # reduced to avoid competing with Q tracking
@@ -2771,13 +3157,51 @@ def main() -> None:
         # ── TSO weights (alpha=1, spectral rho(C)/2) ──
         g_w_der=10,   # single-DER zones; rho~C_jj=396 -> min 198
         g_w_gen=5e7,   # excluded from stability
-        g_w_pcc=100,   # 9 correlated PCCs; rho(C)=221 -> min 111
+        g_w_pcc=50,   # 9 correlated PCCs; rho(C)=221 -> min 111
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,   # bipolar tertiary shunts; mirror g_w_tso_oltc
         # ── DSO weights (alpha=1, rho(C_DER)=790 -> min 395) ──
         g_w_dso_der=1000,  # 8 correlated DER; sf~2.5 for smooth tracking
-        g_w_dso_oltc=50,   # rho(C_OLTC)~1.1; higher for switching suppression
+        g_w_dso_oltc=40,   # rho(C_OLTC)~1.1; higher for switching suppression
+        # ── Adaptive g_w (paper Eq.16, sign-only) — all continuous classes ──
+        # `g_w_*` values above become the warm-start; the meta below
+        # controls the multiplicative rate and clip box.  Discrete
+        # actuators (OLTC, shunt) intentionally left static.
+        adapt_g_w_der=False,
+        adapt_g_w_pcc=False,
+        adapt_g_w_gen=False,
+        adapt_g_w_dso_der=False,
+        # ── Shared scalars (used as fallbacks) ──
+        # g_w_adapt_beta1=0.02,
+        # g_w_adapt_beta2=0.2,
+        # g_w_adapt_t_min=100.0,  # fallback floor
+        g_w_adapt_t_max=5e7,
+        g_w_adapt_deadband_rel=1e-4,
+        # ── Per-class clip floors at each class's stability minimum ──
+        g_w_adapt_t_min_per_class={
+            "der": 10.0,
+            "pcc": 10.0,
+            "gen": 1.0e4,
+            "dso_der": 100.0,
+        },
+        g_w_adapt_t_max_per_class={
+            "der": 1e4,  # cap at 1.5× warm-start to limit β2 overshoot
+            "pcc": 1e4,
+            "dso_der": 1e4,  # this is the key: cap DSO_4 at ~1e4, not 1e8
+        },
+        g_w_adapt_beta1_per_class={
+            "der": 0.05,
+            "pcc": 0.02,
+            "gen": 0.1,  # 3 h adapt time so it stays under 0.3
+            "dso_der": 0.002,
+        },
+        g_w_adapt_beta2_per_class={
+            "der": 0.3,
+            "pcc": 0.15,
+            "gen": 0.2,
+            "dso_der": 0.03,
+        },
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -2786,17 +3210,17 @@ def main() -> None:
         live_plot_cascade=True,
         live_plot_system=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 4, 15, 12, 0),
+        start_time=datetime(2016, 4, 15, 10, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
             # Example: trip line 0 at t=30 min, restore at t=60 min
             # ContingencyEvent(minute=100, element_type="line", element_index=8, action="trip"),
             # ContingencyEvent(minute=150, element_type="line", element_index=8, action="restore"),
-            ContingencyEvent(minute=90, element_type="gen", element_index=5, action="trip"),
-            ContingencyEvent(minute=180, element_type="gen", element_index=5, action="restore"),
-            ContingencyEvent(minute=120, element_type="load", bus=5, p_mw=300, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=300, element_type="load", bus=5, p_mw=300, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=15, element_type="gen", element_index=2, action="trip"),
+            ContingencyEvent(minute=105, element_type="gen", element_index=2, action="restore"),
+            ContingencyEvent(minute=45, element_type="load", bus=5, p_mw=300, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=90, element_type="load", bus=5, p_mw=300, q_mvar=100, action="trip"),
             ContingencyEvent(minute=330, element_type="gen", element_index=2, action="trip"),
             ContingencyEvent(minute=420, element_type="gen", element_index=2, action="restore"),
             ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),

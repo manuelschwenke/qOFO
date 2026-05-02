@@ -49,7 +49,12 @@ import pandapower as pp
 import pandapower.networks as pn
 
 from network.ieee39.constants import (
+    GEN_NAMEPLATE,
+    LOAD_CONST_FRACTION,
+    LOAD_PEAK_BOOST,
+    LOAD_VAR_FRACTION,
     NAMEPLATE_FACTOR,
+    PROFILE_MAX,
     PROFILE_MEAN,
     ZONE3_BUSES_0IDX,
 )
@@ -129,26 +134,27 @@ def build_ieee39_net(
     gen_indices: List[int] = sorted(int(g) for g in net.gen.index)
     gen_bus_indices: List[int] = [int(net.gen.at[g, "bus"]) for g in gen_indices]
 
-    # -- Explicit nameplate (sn_mva, max_p_mw) on every machine ---------------
-    # pandapower's case39() leaves sn_mva NaN.  Downstream consumers (capability
-    # plot, zonal dispatcher, actuator bounds, slack-weight loop) all need a
-    # consistent nameplate; we assign it here from the base-case p_mw so no
-    # fallback path is ever required.  See constants.NAMEPLATE_FACTOR.
+    # -- Explicit nameplate / fuel type / Q envelope on every machine ---------
+    # Single source of truth: ``GEN_NAMEPLATE`` (constants.py) keyed by the
+    # gen's terminal bus 0-idx.  After ``swap_slack_to_bus38`` every machine
+    # sits at one of buses {29..38} and the table covers all ten.  The Q
+    # envelope is set to ``±0.5·sn_mva`` (typical synchronous-machine Q-circle)
+    # so downstream capability plots and actuator bounds scale consistently.
     for gi in net.gen.index:
-        p_base = float(net.gen.at[gi, "p_mw"])
-        sn = max(p_base * NAMEPLATE_FACTOR, 100.0)
-        net.gen.at[gi, "sn_mva"]   = sn
-        net.gen.at[gi, "max_p_mw"] = sn
-        net.gen.at[gi, "min_p_mw"] = 0.0
-    # ``net.ext_grid`` is expected to be empty at this point because
-    # ``swap_slack_to_bus38`` has replaced it with a ``slack=True`` gen.
-    # Any legacy consumer that still reads ``ext_grid.sn_mva`` would
-    # observe an empty table; we keep the set-loop for defensive
-    # behaviour in case another builder re-adds an ext_grid in future.
-    if not net.ext_grid.empty and len(net.gen):
-        _ext_sn = float(net.gen["sn_mva"].max())
-        for ei in net.ext_grid.index:
-            net.ext_grid.at[ei, "sn_mva"] = _ext_sn
+        term_bus = int(net.gen.at[gi, "bus"])
+        if term_bus not in GEN_NAMEPLATE:
+            raise KeyError(
+                f"Gen {gi} sits on bus {term_bus} with no entry in "
+                f"GEN_NAMEPLATE; expected one of {sorted(GEN_NAMEPLATE)}"
+            )
+        label, sn_mva, gen_type = GEN_NAMEPLATE[term_bus]
+        net.gen.at[gi, "sn_mva"]     = sn_mva
+        net.gen.at[gi, "max_p_mw"]   = sn_mva
+        net.gen.at[gi, "min_p_mw"]   = 0.0
+        net.gen.at[gi, "type"]       = gen_type
+        net.gen.at[gi, "max_q_mvar"] =  0.5 * sn_mva
+        net.gen.at[gi, "min_q_mvar"] = -0.5 * sn_mva
+        net.gen.at[gi, "name"]       = f"{label}_bus{term_bus}"
 
     # -- Distributed-slack weights (approximate primary frequency response) ----
     # Every synchronous machine in ``net.gen`` participates in the
@@ -409,16 +415,21 @@ def build_ieee39_net(
 def _split_tn_loads(net: pp.pandapowerNet, *, tn_buses: List[int]) -> None:
     """Split every IEEE load at a TN (345 kV) bus into two rows.
 
-    * Existing row is halved in place and keeps empty ``profile_p`` /
-      ``profile_q`` (constant load).
+    * Existing row is reduced in place to ``LOAD_CONST_FRACTION * orig``
+      and keeps empty ``profile_p`` / ``profile_q`` (constant load).
     * A sibling row is created at the same bus with
-      ``base_p/q = 0.5 * orig / mean(profile)`` and profile columns set to
-      HS4 or HS5 depending on zone membership (Zone 3 -> HS5, else HS4).
+      ``base_p/q = LOAD_VAR_FRACTION * orig / max(profile)`` and profile
+      columns set to HS4 or HS5 depending on zone membership (Zone 3 ->
+      HS5, else HS4).
 
-    Mean-normalisation (empirical profile means in
-    :data:`network.ieee39.constants.PROFILE_MEAN`) ensures that the time
-    mean of the two halves sums to the original nominal load -- the
-    aggregate load across a year matches the IEEE 39 base case.
+    With ``c = LOAD_CONST_FRACTION``, ``v = LOAD_VAR_FRACTION`` and
+    ``profile_max = PROFILE_MAX[prof]`` the per-bus total at time t is
+
+        p_total(t) = p_orig * (c + v * profile[t] / profile_max)
+
+    so peak load = ``(c + v) * p_orig`` and trough = ``c * p_orig``.  With
+    the default ``c = 0.30, v = 0.70`` this caps peak at the IEEE 39 base
+    and lets load drop to 30 % during low-profile hours.
     """
     if "profile_p" not in net.load.columns:
         net.load["profile_p"] = None
@@ -430,6 +441,9 @@ def _split_tn_loads(net: pp.pandapowerNet, *, tn_buses: List[int]) -> None:
         net.load["base_p_mw"] = net.load["p_mw"].astype(float)
         net.load["base_q_mvar"] = net.load["q_mvar"].astype(float)
 
+    c = LOAD_CONST_FRACTION
+    v = LOAD_VAR_FRACTION
+
     tn_set = set(int(b) for b in tn_buses)
     for li in list(net.load.index):
         bus = int(net.load.at[li, "bus"])
@@ -439,12 +453,12 @@ def _split_tn_loads(net: pp.pandapowerNet, *, tn_buses: List[int]) -> None:
         p_orig = float(net.load.at[li, "p_mw"])
         q_orig = float(net.load.at[li, "q_mvar"])
 
-        # Constant half — pin base to the halved value so apply_profiles()
-        # leaves it alone (no profile columns set).
-        net.load.at[li, "p_mw"] = 0.5 * p_orig
-        net.load.at[li, "q_mvar"] = 0.5 * q_orig
-        net.load.at[li, "base_p_mw"] = 0.5 * p_orig
-        net.load.at[li, "base_q_mvar"] = 0.5 * q_orig
+        # Constant share of the load — pin base to ``c * orig`` so
+        # apply_profiles() leaves it alone (no profile columns set).
+        net.load.at[li, "p_mw"] = c * p_orig
+        net.load.at[li, "q_mvar"] = c * q_orig
+        net.load.at[li, "base_p_mw"] = c * p_orig
+        net.load.at[li, "base_q_mvar"] = c * q_orig
         net.load.at[li, "profile_p"] = None
         net.load.at[li, "profile_q"] = None
         net.load.at[li, "subnet"] = "TN"
@@ -454,18 +468,22 @@ def _split_tn_loads(net: pp.pandapowerNet, *, tn_buses: List[int]) -> None:
         else:
             prof_p, prof_q = "HS4_pload", "HS4_qload"
 
-        base_p_profile = 0.5 * p_orig / PROFILE_MEAN[prof_p]
-        base_q_profile = 0.5 * q_orig / PROFILE_MEAN[prof_q]
+        base_p_profile = LOAD_PEAK_BOOST * v * p_orig / PROFILE_MAX[prof_p]
+        base_q_profile = LOAD_PEAK_BOOST * v * q_orig / PROFILE_MAX[prof_q]
         orig_name = net.load.at[li, "name"] if "name" in net.load.columns else None
         new_name = f"{orig_name}_profile" if orig_name else f"Load_bus{bus}_profile"
 
-        # Initial ``p_mw`` / ``q_mvar`` at 0.5 * orig gives a baseline-like
-        # pre-profile power flow; apply_profiles() will overwrite them.
+        # Initial ``p_mw`` / ``q_mvar`` set so the per-bus total at startup
+        # (constant row + this variable row) equals ``p_orig`` / ``q_orig``
+        # -- the IEEE 39 base case dispatch.  apply_profiles() will overwrite
+        # these at every step.  This avoids a large startup surplus that
+        # would force the slack to absorb gigawatts before the simulation
+        # even begins.
         pp.create_load(
             net,
             bus=bus,
-            p_mw=0.5 * p_orig,
-            q_mvar=0.5 * q_orig,
+            p_mw=v * p_orig,
+            q_mvar=v * q_orig,
             name=new_name,
         )
         new_idx = net.load.index[-1]

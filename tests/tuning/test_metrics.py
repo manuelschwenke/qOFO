@@ -17,6 +17,7 @@ from tuning.metrics import (
     _count_oscillations,
     _count_tap_switches,
     _itae,
+    _itae_pcc_underutilization,
     _normalise,
     extract_metrics,
 )
@@ -32,7 +33,11 @@ def test_extract_metrics_empty_log_returns_sentinel(
     m = extract_metrics([], baseline_cfg)
     assert isinstance(m, TrajectoryMetrics)
     assert m.pf_failures == 1
-    assert m.cost_J >= 1000.0
+    # Catastrophe penalty should match the configured w_pf (cost = w_pf
+    # * min(pf_fail, 1) for any divergence).  Comparing against the
+    # default rather than a hard-coded 1000 keeps the test resilient to
+    # weight rebalancing.
+    assert m.cost_J == pytest.approx(CostWeights().w_pf)
     assert m.n_records == 0
     assert m.n_tso_active == 0
     assert m.n_dso_active == 0
@@ -148,7 +153,8 @@ def test_extract_metrics_synthetic_log_runs(baseline_cfg: MultiTSOConfig) -> Non
 
     # All numeric fields finite
     for fld in (
-        "itae_v_ts", "itae_v_ds", "rmsd_v_ts", "rmsd_v_ds", "itae_q_pcc",
+        "itae_v_ts", "itae_v_ds", "rmsd_v_ts", "rmsd_v_ds",
+        "itae_q_pcc", "itae_q_tie", "itae_pcc_underutil",
         "rho_emp_p95", "losses_mean_mw", "cost_J",
     ):
         v = getattr(m, fld)
@@ -180,3 +186,90 @@ def test_cost_weights_increase_J(baseline_cfg: MultiTSOConfig) -> None:
     m_heavy = extract_metrics(log, baseline_cfg, weights=heavy)
     assert m_light.n_osc_der > 0
     assert m_heavy.cost_J > m_light.cost_J
+
+
+# ---------------------------------------------------------------------------
+# 9. Conditional DSO under-utilisation metric
+# ---------------------------------------------------------------------------
+
+def _make_underutil_log(
+    n: int,
+    *,
+    v_offset: float,
+    dso_q_act: float,
+    v_set: float = 1.0,
+) -> tuple[List[MultiTSOIterationRecord], np.ndarray, np.ndarray]:
+    """Build (records, v_mean_ts, t_min) with constant per-step values.
+
+    `v_offset` is the (signed) deviation of v_mean_ts from `v_set`;
+    `dso_q_act` is the per-DSO actual PCC reactive injection (Mvar).
+    The time grid spans 0..75 minutes with `n` evenly spaced samples.
+    """
+    log = [_make_record(i, dso_q_act=dso_q_act) for i in range(n)]
+    v_mean = np.full(n, v_set + v_offset)
+    t_min = np.linspace(0.0, 75.0, n)
+    return log, v_mean, t_min
+
+
+def test_itae_pcc_underutilization_zero_in_deadband() -> None:
+    """Inside the voltage deadband (|v_err| ≤ deadband_v), the metric
+    is zero regardless of DSO PCC injection."""
+    log, v_mean, t_min = _make_underutil_log(
+        n=20, v_offset=0.003, dso_q_act=0.0,    # |v_err|=3 mpu < 5 mpu
+    )
+    out = _itae_pcc_underutilization(
+        log, v_mean, t_min, v_set=1.0, deadband_v=0.005, q_ref_mvar=100.0,
+    )
+    assert out == pytest.approx(0.0)
+
+
+def test_itae_pcc_underutilization_zero_when_dso_at_ref() -> None:
+    """When the per-DSO mean ``|Q_PCC_actual|`` is at or above
+    ``q_ref_mvar``, the metric is zero regardless of TSO voltage
+    stress."""
+    log, v_mean, t_min = _make_underutil_log(
+        n=20, v_offset=0.05, dso_q_act=120.0,   # 5% v error, but |Q|>ref
+    )
+    out = _itae_pcc_underutilization(
+        log, v_mean, t_min, v_set=1.0, deadband_v=0.005, q_ref_mvar=100.0,
+    )
+    assert out == pytest.approx(0.0)
+
+
+def test_itae_pcc_underutilization_known_value() -> None:
+    """Constant stress (s = |v_err|−deadband = 5 mpu) and constant
+    inactivity (q = q_ref − |Q_actual| = 50 Mvar) over 75 min give
+
+        ITAE = ∫₀⁷⁵ t·(s·q) dt = 0.005 × 50 × 75²/2 = 703.125 .
+
+    Trapezoidal integration over the 76-sample evenly spaced grid
+    matches the analytic value to within numerical noise.
+    """
+    log, v_mean, t_min = _make_underutil_log(
+        n=76,                # 1 sample per minute, inclusive of 0 and 75
+        v_offset=0.01,       # |v_err|=10 mpu, deadband 5 mpu → s=5 mpu
+        dso_q_act=50.0,      # |Q_actual|=50, q_ref=100 → q=50 Mvar
+    )
+    out = _itae_pcc_underutilization(
+        log, v_mean, t_min, v_set=1.0, deadband_v=0.005, q_ref_mvar=100.0,
+    )
+    assert out == pytest.approx(703.125, rel=1e-6)
+
+
+def test_itae_pcc_underutilization_negative_voltage_error_symmetric() -> None:
+    """Voltage error sign does not matter — only its magnitude past
+    the deadband."""
+    log_pos, v_pos, t_min = _make_underutil_log(
+        n=40, v_offset=+0.02, dso_q_act=20.0,
+    )
+    log_neg, v_neg, _ = _make_underutil_log(
+        n=40, v_offset=-0.02, dso_q_act=20.0,
+    )
+    out_pos = _itae_pcc_underutilization(
+        log_pos, v_pos, t_min, v_set=1.0, deadband_v=0.005, q_ref_mvar=100.0,
+    )
+    out_neg = _itae_pcc_underutilization(
+        log_neg, v_neg, t_min, v_set=1.0, deadband_v=0.005, q_ref_mvar=100.0,
+    )
+    assert out_pos == pytest.approx(out_neg)
+    assert out_pos > 0.0

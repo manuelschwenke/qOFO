@@ -1041,8 +1041,9 @@ class MultiTSOCoordinator:
                     f"(lam+sum)={contraction_lhs:.4f}  "
                     f"{'OK' if stable else 'UNSTABLE'}"
                 )
-            for w in warnings:
-                print(f"  WARNING: {w}")
+            if self.verbose > 2:
+                for w in warnings:
+                    print(f"  WARNING: {w}")
 
             diagnostics[i] = {
                 'lambda_max_Mii':  lambda_max,
@@ -1106,6 +1107,7 @@ class MultiTSOCoordinator:
         step_index: int,
         *,
         recompute_cross_sensitivities: bool = False,
+        sim_time_s: Optional[float] = None,
     ) -> Dict[int, object]:
         """
         Execute one decentralised TSO step for all zones.
@@ -1125,6 +1127,11 @@ class MultiTSOCoordinator:
             If True, recompute H_ij blocks after this step.  Set this to True
             on the first step and periodically (e.g. every 10 steps) to keep
             the cross-sensitivity consistent with the current operating point.
+        sim_time_s : float, optional
+            Wall-clock simulation time in seconds, forwarded to every
+            zone's :meth:`TSOController.step` to drive the wall-clock
+            OLTC cooldown.  ``None`` (the default) preserves legacy
+            behaviour and disables the cooldown.
 
         Returns
         -------
@@ -1142,7 +1149,7 @@ class MultiTSOCoordinator:
             meas = measurements.get(zone_id)
             if meas is None:
                 raise KeyError(f"No measurement provided for zone_id={zone_id}.")
-            outputs[zone_id] = controller.step(meas)
+            outputs[zone_id] = controller.step(meas, sim_time_s=sim_time_s)
 
         # Optionally refresh cross-sensitivity and re-run stability diagnostics
         if recompute_cross_sensitivities:

@@ -253,3 +253,10 @@ class MultiTSOIterationRecord:
     """Per-zone array, parallel to ``zone_q_gen``: ``q_max(g) - |q_actual(g)|``
     for each synchronous machine in that zone (positive = remaining
     capability, zero = saturated, negative = capability violated)."""
+
+    # ── Slack-Q saturation diagnostic (added 2026-05-02) ────────────────────────
+    # Populated post-PF in run_multi_tso_dso() to expose slack saturation in
+    # pickled logs.  Defaults keep older logs loadable.
+    slack_p_mw: float = 0.0
+    slack_q_mvar: float = 0.0
+    slack_q_at_limit: bool = False

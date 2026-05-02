@@ -168,7 +168,7 @@ def _apply_contingency(
             net.trafo.at[t_idx, "in_service"] = in_service
             desc += f" + machine trafo {t_idx}"
             if verbose > 0:
-                print(f"    → Also {'tripping' if trip else 'restoring'} "
+                print(f"    -> Also {'tripping' if trip else 'restoring'} "
                       f"machine transformer {t_idx}")
     elif ev.element_type == "ext_grid":
         old_setpoint = net.ext_grid.at[ev.element_index, "vm_pu"]

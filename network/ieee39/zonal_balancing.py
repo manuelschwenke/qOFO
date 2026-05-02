@@ -300,7 +300,7 @@ def compute_zonal_gen_dispatch(
     print()
     print("=" * 72)
     print("  Zonal Generator Dispatch (per-zone residual-load balancing)")
-    print(f"  Per-gen P cap: α · sn_mva   with α = {gen_p_cap_factor:.2f}")
+    print(f"  Per-gen P cap: alpha * sn_mva   with alpha = {gen_p_cap_factor:.2f}")
     print("=" * 72)
     for z in sorted(zone_map.keys()):
         n_loads = len(zone_loads[z])

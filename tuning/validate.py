@@ -39,7 +39,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--baseline", type=Path, required=True)
     p.add_argument("--n-scenarios", type=int, default=200)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--n-jobs", type=int, default=1)
+    p.add_argument("--n-jobs", type=int, default=4)
     p.add_argument(
         "--report", type=Path,
         default=Path("results/tuning/validation_report.html"),

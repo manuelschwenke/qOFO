@@ -494,6 +494,50 @@ class DSOController(BaseOFOController):
         integer_indices = list(range(n_continuous, n_continuous + n_integer))
 
         return n_continuous, n_integer, integer_indices
+
+    def _get_oltc_integer_indices(self) -> List[int]:
+        """OLTC slice within the integer block.
+
+        DSO ordering ``[Q_DER | s_OLTC | s_shunt]`` puts the OLTC
+        integers immediately after the continuous DER block.  Used by
+        :class:`BaseOFOController` to scope the wall-clock cooldown to
+        OLTC indices only.
+        """
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
+        n_oltc = len(self.config.oltc_trafo_indices)
+        return list(range(n_der, n_der + n_oltc))
+
+    def _actuator_class_indices(self) -> Dict[str, NDArray[np.int64]]:
+        """Per-class index map for adaptive ``g_w`` (paper Eq. 16).
+
+        Class names match the BO dimension naming in
+        ``tuning/parameters.py``: ``"dso_der"``, ``"dso_oltc"``,
+        ``"dso_shunt"``.  Empty classes are dropped from the map.
+        """
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+        else:
+            n_der = len(self.config.der_indices)
+        n_oltc = len(self.config.oltc_trafo_indices)
+        n_shunt = len(self.config.shunt_bus_indices)
+
+        oltc_start = n_der
+        oltc_end = oltc_start + n_oltc
+        shunt_end = oltc_end + n_shunt
+
+        out: Dict[str, NDArray[np.int64]] = {}
+        if n_der > 0:
+            out["dso_der"] = np.arange(0, n_der, dtype=np.int64)
+        if n_oltc > 0:
+            out["dso_oltc"] = np.arange(oltc_start, oltc_end, dtype=np.int64)
+        if n_shunt > 0:
+            out["dso_shunt"] = np.arange(oltc_end, shunt_end, dtype=np.int64)
+        return out
     
     def _extract_control_values(
         self,
@@ -869,7 +913,12 @@ class DSOController(BaseOFOController):
 
         return H
 
-    def step(self, measurement: Measurement) -> ControllerOutput:
+    def step(
+        self,
+        measurement: Measurement,
+        *,
+        sim_time_s: Optional[float] = None,
+    ) -> ControllerOutput:
         """
         Execute one OFO iteration with voltage-dependent sensitivity updates.
 
@@ -880,6 +929,15 @@ class DSOController(BaseOFOController):
 
         After the step, shunt bound overrides from the Reserve Observer
         are cleared so they must be re-set each iteration.
+
+        Parameters
+        ----------
+        measurement : Measurement
+            Current system measurements.
+        sim_time_s : float, optional
+            Wall-clock simulation time forwarded to
+            :meth:`BaseOFOController.step` to drive the wall-clock OLTC
+            cooldown (see :attr:`OFOParameters.int_cooldown_s`).
         """
         # Ensure H is built
         if self._H_cache is None:
@@ -889,7 +947,7 @@ class DSOController(BaseOFOController):
             self._H_cache = self._sensitivity_updater.update(
                 measurement, measurement.iteration
             )
-        result = super().step(measurement)
+        result = super().step(measurement, sim_time_s=sim_time_s)
         # Clear one-shot overrides
         self._shunt_bound_overrides.clear()
         return result

@@ -37,8 +37,9 @@ def _multi_tso_config_fields() -> set[str]:
 # ---------------------------------------------------------------------------
 
 def test_bo_dims_complete() -> None:
-    """``BO_DIMS`` has exactly 9 entries; every name exists on
-    ``MultiTSOConfig``."""
+    """``BO_DIMS`` has exactly 9 entries (``g_w_tso_shunt`` excluded
+    while shunts are not installed; ``tso_g_q_tie`` added 2026-04-29);
+    every name exists on ``MultiTSOConfig``."""
     assert len(BO_DIMS) == 9
     cfg_fields = _multi_tso_config_fields()
     names = [p.name for p in BO_DIMS]
@@ -202,13 +203,35 @@ def test_search_space_returns_9_entries_with_log() -> None:
     assert len(space) == 9
     assert set(space.keys()) == {p.name for p in BO_DIMS}
 
-    must_be_log = {"g_v", "g_w_der", "g_w_pcc", "g_w_tso_oltc",
-                   "g_w_tso_shunt", "g_w_dso_der", "g_w_dso_oltc"}
+    must_be_log = {"g_v", "tso_g_q_tie", "g_w_der", "g_w_pcc",
+                   "g_w_tso_oltc", "g_w_dso_der", "g_w_dso_oltc"}
     for name, (low, high, log) in space.items():
         assert low > 0, f"{name}: low={low} must be > 0 for log-space search"
         assert high > low, f"{name}: high={high} must exceed low={low}"
         if name in must_be_log:
             assert log is True, f"{name} must use log-scale BO sampling"
+
+
+# ---------------------------------------------------------------------------
+# 9b. g_w_pcc upper bound is capped (degenerate-optimum guard)
+# ---------------------------------------------------------------------------
+
+def test_g_w_pcc_upper_bound_capped() -> None:
+    """``g_w_pcc`` upper bound is capped at 30 to prevent BO from
+    converging to the degenerate "freeze the PCC setpoint" optimum
+    (see the rationale comment in ``tuning/parameters.py`` and the
+    ``CostWeights`` docstring in ``tuning/metrics.py``).
+
+    Asserted as a strict upper bound rather than equality so a future
+    further-tightening of the bound does not break the regression."""
+    low, high, log = search_space(None)["g_w_pcc"]
+    assert log is True
+    assert low == pytest.approx(1e-1)
+    assert high <= 30.0, (
+        f"g_w_pcc upper bound {high} > 30 — values above ~30 produce "
+        f"sluggish PCC tracking with no end-performance benefit; see "
+        f"tuning/parameters.py rationale comment."
+    )
 
 
 # ---------------------------------------------------------------------------

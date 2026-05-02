@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Mapping, Optional, Union
 
 
 @dataclass
@@ -117,9 +117,94 @@ class MultiTSOConfig:
     g_w_dso_der:    float = 10.0
     g_w_dso_oltc:   float = 1.0
 
+    # -- Adaptive g_w (paper Eq. 16, sign-only rule) --------------------------
+    # When any of the per-class flags below is True, the corresponding
+    # ``g_w_*`` entries become the *initial* values for an online
+    # adapter (:class:`controller.g_w_adapter.GwAdapter`).  The shared
+    # meta parameters control the multiplicative rates and clip box; α
+    # remains fixed at 1.0 (no step-size adaptation).  See
+    # :ref:`paper Zagorowska et al. (IFAC WC 2026)` and the project plan
+    # at ``~/.claude/plans/c-users-manuel-schwenke-desktop-2604-12-soft-starfish.md``.
+    adapt_g_w_der:        bool = False
+    adapt_g_w_pcc:        bool = False
+    adapt_g_w_gen:        bool = False
+    """Enable online adaptation for TSO V_gen_set (AVR) g_w entries.
+    NOTE: ``g_w_gen`` is pinned at ``1e7`` in
+    :data:`tuning.parameters.FIXED_OVERRIDES`, so adapting it is only
+    meaningful when ``g_w_gen`` is removed from the FIXED_OVERRIDES
+    or the BO study is bypassed (e.g. running the experiment script
+    directly).  Otherwise the BO overlay re-pins ``g_w_gen`` after
+    every trial."""
+    adapt_g_w_tso_oltc:   bool = False
+    adapt_g_w_dso_der:    bool = False
+    adapt_g_w_dso_oltc:   bool = False
+    g_w_adapt_beta1:      float = 0.05
+    """Multiplicative shrink rate of ``g_w`` in the descent regime
+    (paper Eq. 16 β₁, in the S-space convention the *grow* rate of S).
+    Must be in ``[0, 1)``."""
+    g_w_adapt_beta2:      float = 0.10
+    """Multiplicative grow rate of ``g_w`` in the anti-descent regime
+    (paper Eq. 16 β₂).  Must be ``≥ 0``."""
+    g_w_adapt_t_min:      float = 1e-2
+    """Absolute floor on adapted ``g_w`` entries (clip after Eq. 16)."""
+    g_w_adapt_t_max:      float = 1e6
+    """Absolute ceiling on adapted ``g_w`` entries."""
+    g_w_adapt_deadband_rel: float = 1e-6
+    """Relative tolerance on ``|s_i| = |grad·w|`` below which no update
+    is applied.  Scaled by ``max(||grad_f|| · ||w||, 1.0)`` so the floor
+    matches numerical noise rather than the gradient magnitude.  Always
+    a single shared scalar — has no per-class semantics, since the
+    deadband is a property of the adapter as a whole."""
+
+    # ---- Per-class overrides (paper Eq. 16, v1.1) ----------------------
+    # When non-empty, the corresponding scalar above is treated as a
+    # *fallback* and the per-class value is used for the listed class.
+    # Class names match the keys returned by
+    # :meth:`controller.tso_controller.TSOController._actuator_class_indices`
+    # and :meth:`controller.dso_controller.DSOController._actuator_class_indices`
+    # (``"der"``, ``"pcc"``, ``"gen"``, ``"tso_oltc"``, ``"tso_shunt"``,
+    # ``"dso_der"``, ``"dso_oltc"``, ``"dso_shunt"``).  Classes not
+    # listed fall back to the shared scalar above.  Values for classes
+    # whose adapt-flag is ``False`` are silently ignored.  Typical use:
+    # ``g_w_adapt_t_min_per_class={"der": 250, "pcc": 140, ...}`` so
+    # each class clips at its own stability floor instead of forcing a
+    # single shared value to satisfy the most conservative class.
+    g_w_adapt_beta1_per_class: Dict[str, float] = field(default_factory=dict)
+    g_w_adapt_beta2_per_class: Dict[str, float] = field(default_factory=dict)
+    g_w_adapt_t_min_per_class: Dict[str, float] = field(default_factory=dict)
+    g_w_adapt_t_max_per_class: Dict[str, float] = field(default_factory=dict)
+
     # -- Integer switching logic -----------------------------------------------
     int_max_step:   int = 1
-    int_cooldown:   int = 9
+    int_cooldown:   int = 6
+
+    # -- Local-mode OLTC rate limit --------------------------------------------
+    local_oltc_max_step_per_dt: int = 1
+    """Maximum number of tap-position changes any local-mode
+    ``DiscreteTapControl`` (machine 2W gen-trafo OLTCs and coupler 3W
+    OLTCs) may execute per simulation timestep ``dt_s``.  pandapower's
+    ``DiscreteTapControl`` iterates internally inside
+    ``pp.runpp(run_control=True)`` and can move many positions in a
+    single PF call when a disturbance is large; real OLTC mechanics
+    impose an inter-tap delay (typically 30-60 s).  The runner snapshots
+    every ``DiscreteTapControl``'s ``tap_pos`` at the start of each
+    simulation step and, after every plant PF in the step, clamps the
+    delta-from-snapshot to ``±local_oltc_max_step_per_dt``, re-running
+    the PF with ``run_control=False`` if any tap was clamped.  Only
+    applied when ``_local_dso`` or ``_local_tso`` is active; the OFO
+    MIQP path uses ``int_max_step`` / ``int_cooldown`` for the same
+    purpose."""
+
+    oltc_cooldown_s: float = 30.0
+    """Minimum wall-clock interval (simulation seconds) between
+    consecutive tap changes on the same OLTC.  Applied to BOTH the
+    local-mode ``DiscreteTapControl`` post-clamp (machine 2W gen-trafo
+    and coupler 3W OLTCs) and the OFO MIQP integer cooldown (scoped to
+    OLTC indices only — shunt switching still uses the iteration-based
+    ``int_cooldown``).  Default 30 s reflects mechanical inter-tap delay
+    of real OLTCs.  Set to 0.0 to disable the wall-clock cooldown
+    entirely (the iteration-based ``int_cooldown`` and per-step
+    ``local_oltc_max_step_per_dt`` clamp remain active)."""
 
     # -- AVR saturation handling (Feature B) -----------------------------------
     enable_avr_saturation_mode: bool = False
@@ -144,7 +229,7 @@ class MultiTSOConfig:
     g_z_voltage:   float = 1E-12
     g_z_current:   float = 0.0
     g_z_interface: float = 0.0
-    g_z_q_gen:     float = 1E-2
+    g_z_q_gen:     float = 1E3
     """Soft-constraint penalty for TSO Q_gen outputs (generator PQ capability).
 
     Kept as a gentle nudge only — voltage tracking must dominate when a
@@ -218,6 +303,19 @@ class MultiTSOConfig:
 
     distributed_slack: bool = True
 
+    enforce_q_lims_plant: bool = True
+    """Pass ``enforce_q_lims=True`` to every plant-side ``pp.runpp`` in the
+    main run loop so synchronous generators that hit their static
+    ``[min_q_mvar, max_q_mvar]`` box are converted from PV to PQ for that
+    PF iteration (mirroring real AVR Q saturation).  Without this, the PF
+    is free to settle the gen at any Q the AVR voltage setpoint demands,
+    which produces capability-envelope violations in the post-PF state
+    visible in ``compare_gen_q_headroom`` plots — most prominently in the
+    local-droop scenarios (L0/L1/L2 of ``002_M_TSO_M_DSO_COMPARE.py``)
+    where neither the TSO nor the DSO MIQP is stepped and the
+    ``g_z_q_gen`` slack penalty has no effect.  Set to ``False`` to
+    reproduce the pre-fix behaviour (e.g. for ablation)."""
+
     # -- DSO control mode ------------------------------------------------------
     dso_mode: str = "ofo"
     """DSO control mode for HV sub-networks.
@@ -283,7 +381,7 @@ class MultiTSOConfig:
     ``Q_PCC_set`` as in the legacy formulation.  Recommended ``True``
     when ``install_tso_tertiary_shunts`` is True."""
 
-    g_z_q_pcc: float = 1e2
+    g_z_q_pcc: float = 1e-2
     """Soft-constraint penalty for Q_PCC capability output bound.
     Mirrors ``g_z_q_gen``.  Engages when a shunt switch (or any other
     actuator move) would push physical Q_PCC outside the DSO-reported
@@ -319,3 +417,107 @@ class MultiTSOConfig:
     """Soft-constraint slack penalty for Q_tie output bound (Phase B
     optional).  Mirrors ``g_z_q_pcc``.  Default 0.0 = no slack-based
     bound enforcement on Q_tie."""
+
+    # ---- Adaptive g_w helpers ------------------------------------------------
+    def tso_adapt_g_w_classes(self) -> tuple:
+        """Tuple of TSO actuator-class names whose ``g_w`` entries are
+        adapted online.  Names match
+        :meth:`controller.tso_controller.TSOController._actuator_class_indices`
+        (``"der"``, ``"pcc"``, ``"tso_oltc"``).
+        """
+        out = []
+        if self.adapt_g_w_der:
+            out.append("der")
+        if self.adapt_g_w_pcc:
+            out.append("pcc")
+        if self.adapt_g_w_gen:
+            out.append("gen")
+        if self.adapt_g_w_tso_oltc:
+            out.append("tso_oltc")
+        return tuple(out)
+
+    def dso_adapt_g_w_classes(self) -> tuple:
+        """Tuple of DSO actuator-class names whose ``g_w`` entries are
+        adapted online.  Names match
+        :meth:`controller.dso_controller.DSOController._actuator_class_indices`
+        (``"dso_der"``, ``"dso_oltc"``).
+        """
+        out = []
+        if self.adapt_g_w_dso_der:
+            out.append("dso_der")
+        if self.adapt_g_w_dso_oltc:
+            out.append("dso_oltc")
+        return tuple(out)
+
+    def make_g_w_adapt_meta(self):
+        """Build the meta-parameter object(s) for the adapter from the
+        scalar fields and any per-class overrides on this config.
+
+        Returns
+        -------
+        :class:`controller.g_w_adapter.GwAdaptMeta`
+            When all per-class override dicts are empty, returns a single
+            shared meta — the v1 behaviour.
+        ``Mapping[str, GwAdaptMeta]``
+            When **any** per-class override dict is non-empty, returns
+            a dict spanning every adapted class (TSO ∪ DSO) with the
+            shared scalars filling in any per-class field that was not
+            explicitly overridden.  Classes whose adapt-flag is ``True``
+            but for which no per-class entry is provided still appear
+            in the dict so the adapter receives a complete map.
+
+        ``deadband_rel`` is always taken from the shared scalar (it has
+        no per-class meaning).
+
+        Imported lazily so the config module stays free of controller
+        dependencies at import time.
+        """
+        from controller.g_w_adapter import GwAdaptMeta
+
+        shared = GwAdaptMeta(
+            beta1=self.g_w_adapt_beta1,
+            beta2=self.g_w_adapt_beta2,
+            t_min=self.g_w_adapt_t_min,
+            t_max=self.g_w_adapt_t_max,
+            deadband_rel=self.g_w_adapt_deadband_rel,
+        )
+
+        per_class_dicts = (
+            self.g_w_adapt_beta1_per_class,
+            self.g_w_adapt_beta2_per_class,
+            self.g_w_adapt_t_min_per_class,
+            self.g_w_adapt_t_max_per_class,
+        )
+        any_override = any(d for d in per_class_dicts)
+        if not any_override:
+            return shared
+
+        # Span all adapted classes plus any class mentioned only in an
+        # override (so a typo'd class name surfaces visibly via the
+        # adapter rather than silently falling back to defaults).
+        adapted = set(self.tso_adapt_g_w_classes()) | set(
+            self.dso_adapt_g_w_classes()
+        )
+        mentioned: set = set()
+        for d in per_class_dicts:
+            mentioned.update(d.keys())
+        classes = adapted | mentioned
+
+        out: Dict[str, GwAdaptMeta] = {}
+        for cls in classes:
+            out[cls] = GwAdaptMeta(
+                beta1=self.g_w_adapt_beta1_per_class.get(
+                    cls, self.g_w_adapt_beta1,
+                ),
+                beta2=self.g_w_adapt_beta2_per_class.get(
+                    cls, self.g_w_adapt_beta2,
+                ),
+                t_min=self.g_w_adapt_t_min_per_class.get(
+                    cls, self.g_w_adapt_t_min,
+                ),
+                t_max=self.g_w_adapt_t_max_per_class.get(
+                    cls, self.g_w_adapt_t_max,
+                ),
+                deadband_rel=self.g_w_adapt_deadband_rel,
+            )
+        return out

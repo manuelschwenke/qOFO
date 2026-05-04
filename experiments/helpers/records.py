@@ -153,6 +153,12 @@ class MultiTSOIterationRecord:
     zone_q_der:         Dict[int, NDArray] = field(default_factory=dict)
     zone_q_pcc_set:     Dict[int, NDArray] = field(default_factory=dict)
     zone_v_gen:         Dict[int, NDArray] = field(default_factory=dict)
+    zone_v_gf:          Dict[int, NDArray] = field(default_factory=dict)
+    """Per-zone V_gf actuator commands (vm_pu setpoints for grid-forming
+    converter gens).  Same indexing as ``zone_v_gen`` but for the
+    Stage-1-promoted ``net.gen`` rows in
+    ``meta.tso_grid_forming_gen_indices``.  Empty dict on the legacy
+    sgen-only path."""
     zone_q_gen:         Dict[int, Any] = field(default_factory=dict)
     zone_p_gen:         Dict[int, NDArray] = field(default_factory=dict)
     zone_oltc_taps:     Dict[int, NDArray] = field(default_factory=dict)

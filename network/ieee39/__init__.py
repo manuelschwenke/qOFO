@@ -21,12 +21,13 @@ remove_generators
 
 from network.ieee39.meta import IEEE39NetworkMeta, HVNetworkInfo
 from network.ieee39.helpers import remove_generators
-from network.ieee39.build import build_ieee39_net
+from network.ieee39.build import apply_der_classification, build_ieee39_net
 from network.ieee39.hv_networks import add_hv_networks
 
 __all__ = [
     "build_ieee39_net",
     "add_hv_networks",
+    "apply_der_classification",
     "IEEE39NetworkMeta",
     "HVNetworkInfo",
     "remove_generators",

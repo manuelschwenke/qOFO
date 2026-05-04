@@ -71,6 +71,18 @@ BO_DIMS: tuple[BOParam, ...] = (
     #BOParam("g_w_tso_shunt", log=True, low=1e-1, high="ceil", fallback_high=1e4),
     BOParam("g_w_dso_der",   log=True, low=1e-1, high=1e3), # high="ceil", fallback_high=1e4),
     BOParam("g_w_dso_oltc",  log=True, low=1, high=1e5), # high="ceil", fallback_high=1e4),
+    # ── Stage-2 (grid-forming + Q(V) local loop) knobs ─────────────────
+    # g_w_gridforming is the only stage-2 g_w that actually affects the
+    # MIQP step in the current controller setup — it must dominate the
+    # V_gf curvature ``g_v · (∂V/∂vm_pu)² ≈ 5·10⁵``.  Below ``1e6`` the
+    # TSO V_gf chases DSO transients; above ``1e8`` the converter
+    # response slows toward synch-machine timescales.  Search box
+    # spans the validated band [1e6, 1e8].
+    BOParam("g_w_gridforming", log=True, low=1e6, high=1e8),
+    # g_w_dso_der_vref is empirically inert in the current setup
+    # (curvature dominates).  Pinned in FIXED_OVERRIDES rather than
+    # tuned to avoid wasting BO trials on a vacuous coordinate.
+    # See ``tests/diag_stage2_steps.py`` for the proof sweep.
 )
 
 
@@ -84,6 +96,14 @@ FIXED_OVERRIDES: dict[str, Any] = {
     # Value matches the 002 baseline; remove this key when shunts are
     # re-installed and the BO_DIMS entry is uncommented.
     "g_w_tso_shunt":           50000.0,
+
+    # Stage-2 knob that's empirically inert (curvature dominates the
+    # MIQP step regardless of g_w_dso_der_vref across [1e-2, 1e8]).
+    # Pinned at 1.0 to keep BO from wasting trials on a vacuous
+    # coordinate.  Promote to BO_DIMS only after a controller change
+    # makes it non-redundant (e.g. lowering g_q sufficiently or
+    # disabling the K-transform).
+    "g_w_dso_der_vref":        1.0,
 
     # Integral Q-tracking off (user excluded these from BO)
     "dso_g_qi":                0.0,

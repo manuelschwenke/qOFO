@@ -84,7 +84,7 @@ class CascadeDSOLivePlotter:
         sub_minute: bool = False,
         update_every: int = 1,
         slot_idx: int = 1,
-        layout: str = "thirds",
+        layout: str = "dual_screen",
         show_line_currents: bool = True,
         use_tex: bool = False,
     ) -> None:

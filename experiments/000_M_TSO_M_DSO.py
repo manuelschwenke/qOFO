@@ -112,6 +112,7 @@ from core.profiles import (
 from network.ieee39.zonal_balancing import apply_gen_dispatch, compute_zonal_gen_dispatch
 from network.ieee39 import (
     add_hv_networks,
+    apply_der_classification,
     build_ieee39_net,
     HVNetworkInfo,
     IEEE39NetworkMeta,
@@ -141,6 +142,10 @@ from experiments.helpers import (
 )
 from sensitivity.jacobian import JacobianSensitivities
 from core.message import ShuntDisturbanceMessage
+from controller.dso_qv_local_loop import (
+    QVLocalLoop,
+    install_qv_local_loops,
+)
 
 
 def _collect_contingency_watch_buses(
@@ -892,6 +897,53 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         zone_map[z] = [b for b in zone_map[z] if b in existing_buses]
 
     # =========================================================================
+    # STEP 3b: DER grid-forming / grid-following classification + promotion
+    # =========================================================================
+    # Promotes every TSO-connected DER (and any DSO DER overridden via
+    # ``config.der_mode_overrides``) from net.sgen → net.gen with vm_pu
+    # control.  Classification result is stored on meta for downstream
+    # zone partitioning to find the new gens.
+    if verbose >= 1:
+        print()
+        print("[3b] Classifying DERs (grid-forming / grid-following) ...")
+    # Convenience: force every TSO-side DER to grid-following for the
+    # all-direct-Q ablation baseline.  Per-DER overrides still win for
+    # any keys already set in the dict.
+    _overrides = dict(config.der_mode_overrides)
+    if config.force_all_der_grid_following:
+        for s_id in meta.tso_der_indices:
+            _overrides.setdefault(int(s_id), "grid_following")
+        if verbose >= 1:
+            print(f"      force_all_der_grid_following=True: marked "
+                  f"{len(meta.tso_der_indices)} TSO sgens as grid-following")
+    meta = apply_der_classification(
+        net, meta,
+        overrides=_overrides,
+        enforce_q_lims_in_pf=config.enforce_q_lims_plant,
+        verbose=(verbose >= 1),
+    )
+
+    # ── Stage-2: Install plant-side Q(V) local loops on grid-following DERs ──
+    if config.use_qv_local_loop and meta.der_classification is not None:
+        gf_following_sgens = [
+            int(s) for s in meta.der_classification.grid_following_der_ids()
+            if s in net.sgen.index
+        ]
+        if gf_following_sgens:
+            n_qv = len(install_qv_local_loops(
+                net, gf_following_sgens,
+                slope_pu=config.qv_slope_pu,
+                damping=config.qv_local_damping,
+                max_step_frac=config.qv_local_max_step_frac,
+                tol_mvar=config.qv_local_tol_mvar,
+            ))
+            if verbose >= 1:
+                print(
+                    f"[3c] Installed {n_qv} Q(V) local loops "
+                    f"(slope={config.qv_slope_pu}, V_ref init=1.03 pu)"
+                )
+
+    # =========================================================================
     # STEP 4: Build ZoneDefinitions and TSOControllerConfigs
     # =========================================================================
     if verbose >= 1:
@@ -920,6 +972,33 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             if s_bus in set(buses):
                 zone_der_indices[z].append(s_idx)
                 zone_der_buses[z].append(s_bus)
+                break
+
+    # ── Partition grid-forming converter gens per zone ───────────────────────
+    # Each promoted converter gen lives at the *same* bus the original sgen
+    # had, so zone membership is read from net.gen.at[g,"bus"].  The
+    # capability constraint uses ``net.gen.at[g,"sn_mva"]`` directly because
+    # ``apply_der_classification`` carried it forward from the source sgen.
+    zone_gridforming_indices: Dict[int, List[int]] = {z: [] for z in zone_map}
+    zone_gridforming_buses:   Dict[int, List[int]] = {z: [] for z in zone_map}
+    zone_gridforming_sn_mva:  Dict[int, List[float]] = {z: [] for z in zone_map}
+    zone_gridforming_op_diag: Dict[int, List[str]] = {z: [] for z in zone_map}
+    for g_idx, g_bus in zip(
+        meta.tso_grid_forming_gen_indices,
+        meta.tso_grid_forming_gen_buses,
+    ):
+        sn = float(net.gen.at[int(g_idx), "sn_mva"])
+        if "op_diagram" in net.gen.columns:
+            od = net.gen.at[int(g_idx), "op_diagram"]
+            od_str = str(od) if od is not None and str(od) != "nan" else "STATCOM"
+        else:
+            od_str = "STATCOM"
+        for z, buses in zone_map.items():
+            if int(g_bus) in set(buses):
+                zone_gridforming_indices[z].append(int(g_idx))
+                zone_gridforming_buses[z].append(int(g_bus))
+                zone_gridforming_sn_mva[z].append(sn)
+                zone_gridforming_op_diag[z].append(od_str)
                 break
 
     # ── Partition machine-transformer OLTCs per zone ───────────────────────────
@@ -1082,6 +1161,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             g_w_oltc=config.g_w_tso_oltc,
             g_w_shunt=config.g_w_tso_shunt,
             g_q_tso=config.tso_g_q_pcc,
+            gridforming_gen_indices=zone_gridforming_indices[z],
+            gridforming_gen_buses=zone_gridforming_buses[z],
+            gridforming_gen_sn_mva=zone_gridforming_sn_mva[z],
+            gridforming_gen_op_diagrams=zone_gridforming_op_diag[z],
+            g_w_gridforming=config.g_w_gridforming,
         )
 
     # Populate per-zone tie-line sets (Phase A: monitoring only).
@@ -1164,11 +1248,13 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         # ── G_w diagonal for this zone's u vector ────────────────────────────
         gw_diag = zd.gw_diagonal()
         gz_diag_target = np.concatenate([
-            np.full(len(zd.v_bus_indices),     config.g_z_voltage),  # V slacks
-            np.full(len(zd.pcc_trafo_indices), config.g_z_q_pcc),    # Q_PCC slacks (Strategy D)
-            np.full(len(zd.line_indices),      config.g_z_current),  # current slacks
-            np.full(len(zd.gen_indices),       config.g_z_q_gen),    # Q_gen slacks
-            np.full(len(zd.tie_line_indices),  config.g_z_q_tie),    # Q_tie slacks (Phase A: 0)
+            np.full(len(zd.v_bus_indices),     config.g_z_voltage),       # V slacks
+            np.full(len(zd.pcc_trafo_indices), config.g_z_q_pcc),         # Q_PCC slacks (Strategy D)
+            np.full(len(zd.line_indices),      config.g_z_current),       # current slacks
+            np.full(len(zd.gen_indices),       config.g_z_q_gen),         # Q_gen slacks
+            np.full(len(zd.gridforming_gen_indices),
+                                              config.g_z_q_gridforming), # Q_gf slacks (STATCOM capability)
+            np.full(len(zd.tie_line_indices),  config.g_z_q_tie),         # Q_tie slacks (Phase A: 0)
         ])
         # During warmup use a tiny g_z; after warmup switch to gz_diag_target
         if config.g_z_warmup_s > 0:
@@ -1222,6 +1308,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             q_tie_setpoints_mvar=zd.q_tie_setpoints_mvar,
             g_q_tie=config.tso_g_q_tie,
             g_z_q_tie=config.g_z_q_tie,
+            gridforming_gen_indices=zd.gridforming_gen_indices,
+            gridforming_gen_buses=zd.gridforming_gen_buses,
+            gridforming_gen_sn_mva=zd.gridforming_gen_sn_mva,
+            gridforming_gen_op_diagrams=zd.gridforming_gen_op_diagrams,
         )
 
         # ActuatorBounds for DERs in this zone
@@ -1326,10 +1416,35 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             print("[6] Initialising DSO controllers (5 HV sub-networks) ...")
 
     _t_step6 = perf_counter()
+    cls = meta.der_classification
     for hv in meta.hv_networks if config.dso_mode != "local" else []:
         dso_id = hv.net_id  # e.g. "DSO_1"
         interface_trafos = list(hv.coupling_trafo_indices)
-        der_indices = list(hv.sgen_indices)
+        # Split this HV's DERs by grid-forming / grid-following classification.
+        # Grid-following sgens become DSO der_indices (legacy path).
+        # Grid-forming gens (promoted to net.gen) become DSO gridforming_*.
+        if cls is not None:
+            der_indices = [s for s in hv.sgen_indices if cls.is_grid_following(int(s))]
+            dso_gf_der_ids = [s for s in hv.sgen_indices if cls.is_grid_forming(int(s))]
+        else:
+            der_indices = list(hv.sgen_indices)
+            dso_gf_der_ids = []
+        dso_gf_gen_indices = [cls.gen_idx(int(d)) for d in dso_gf_der_ids] if cls else []
+        dso_gf_gen_buses = [
+            int(net.gen.at[g, "bus"]) for g in dso_gf_gen_indices
+        ]
+        dso_gf_gen_sn = [
+            float(net.gen.at[g, "sn_mva"]) for g in dso_gf_gen_indices
+        ]
+        dso_gf_gen_op = []
+        for g in dso_gf_gen_indices:
+            od = (
+                net.gen.at[g, "op_diagram"]
+                if "op_diagram" in net.gen.columns else None
+            )
+            dso_gf_gen_op.append(
+                str(od) if od is not None and str(od) != "nan" else "STATCOM"
+            )
         v_buses = list(hv.bus_indices)
 
         # HV lines — filter to PQ-bus endpoints only (same as TN lines)
@@ -1340,9 +1455,28 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         ]
         hv_line_max = [float(net.line.at[li, "max_i_ka"]) for li in hv_lines]
 
-        # G_w diagonal: [DER_Q | OLTC_tap]
+        # G_w diagonal: [DER (Q or V_ref) | V_gf | OLTC_tap]
+        # The DER block uses different units depending on the OFO mode:
+        #   * Stage 1 (use_qv_local_loop=False): block is Q in Mvar
+        #     → g_w_dso_der is the right knob (1/Mvar²).
+        #   * Stage 2 V_ref-direct (use_qv_local_loop=True,
+        #     qv_apply_mode='v_ref'): block is V_ref in pu_v
+        #     → g_w_dso_der_vref is the right knob (1/pu_v²).
+        #     A Mvar-tuned value here would silently misfire by 4-5 OOM.
+        #   * Stage 2 Q+shim (use_qv_local_loop=True,
+        #     qv_apply_mode='q_shim'): OFO output is Q in Mvar
+        #     (same as Stage 1) but the apply step converts to V_ref.
+        #     g_w_dso_der is the right knob — Mvar units.
+        # The V_gf grid-forming block always uses g_w_gridforming
+        # (vm_pu units, same as synch-machine AVR).
+        if config.use_qv_local_loop and config.qv_apply_mode == "v_ref":
+            dso_der_g_w = config.g_w_dso_der_vref
+        else:
+            # Stage 1 OR Q+shim — both use Mvar units for the DER block.
+            dso_der_g_w = config.g_w_dso_der
         dso_gw_diag = np.concatenate([
-            np.full(len(der_indices), config.g_w_dso_der),
+            np.full(len(der_indices), dso_der_g_w),
+            np.full(len(dso_gf_gen_indices), config.g_w_gridforming),
             np.full(len(interface_trafos), config.g_w_dso_oltc),
         ])
 
@@ -1362,6 +1496,15 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             v_setpoints_pu=np.full(len(v_buses), v_set),
             g_v=config.dso_g_v,
             gamma_oltc_q=config.dso_gamma_oltc_q,
+            gridforming_gen_indices=dso_gf_gen_indices,
+            gridforming_gen_buses=dso_gf_gen_buses,
+            gridforming_gen_sn_mva=dso_gf_gen_sn,
+            gridforming_gen_op_diagrams=dso_gf_gen_op,
+            use_qv_local_loop=config.use_qv_local_loop,
+            qv_apply_mode=config.qv_apply_mode,
+            qv_slope_pu=config.qv_slope_pu,
+            qv_v_ref_min_pu=config.qv_v_ref_min_pu,
+            qv_v_ref_max_pu=config.qv_v_ref_max_pu,
         )
 
         dso_s_rated = np.array(
@@ -1399,10 +1542,23 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         n_iface = len(interface_trafos)
         n_v = len(v_buses)
         n_i = len(hv_lines)
+        n_gf_dso = len(dso_gf_gen_indices)
+        # Stage-2: Q_realized_DER soft output rows are appended to the
+        # DSO H matrix only in V_ref-direct mode.  Under Q+shim the OFO
+        # solves direct-Q (no Q_realized rows), and under Stage 1 the
+        # plant has no Q(V) loop at all.  ``g_z_q_dso_der`` is the
+        # capability-rail slack penalty.
+        n_q_real_dso = (
+            len(der_indices)
+            if (config.use_qv_local_loop and config.qv_apply_mode == "v_ref")
+            else 0
+        )
         dso_gz_target = np.concatenate([
-            np.full(n_iface, config.g_z_interface),   # interface-Q slacks
-            np.full(n_v,     config.g_z_voltage),     # voltage slacks
-            np.full(n_i,     config.g_z_current),     # current slacks
+            np.full(n_iface,     config.g_z_interface),       # interface-Q slacks
+            np.full(n_v,         config.g_z_voltage),         # voltage slacks
+            np.full(n_i,         config.g_z_current),         # current slacks
+            np.full(n_gf_dso,    config.g_z_q_gridforming),   # Q_gf slacks
+            np.full(n_q_real_dso, config.g_z_q_dso_der),      # Q_realized DER slacks
         ])
         if config.g_z_warmup_s > 0:
             dso_gz = np.where(dso_gz_target > 0, config.g_z_warmup_value, 0.0)
@@ -1560,9 +1716,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     _local_tso = config.tso_mode == "local"
     # Combined "any local controller in net.controller table that should be
     # iterated by pp.runpp(run_control=...)".  True for cascade-DSO local mode
-    # (DiscreteTapControl on couplers) AND for TSO local Q(V) mode
-    # (CharacteristicControl on TSO windparks).
-    _run_control = _local_dso or _local_tso
+    # (DiscreteTapControl on couplers), TSO local Q(V) mode
+    # (CharacteristicControl on TSO windparks), AND Stage-2 DSO Q(V) local
+    # loops (one QVLocalLoop per grid-following DSO sgen).
+    _run_control = _local_dso or _local_tso or config.use_qv_local_loop
 
     # -- Phase 1: STATCOM Q + machine 2W OLTC -----------------------------
     # TSO-side only: HV-side (subnet=="DN") STATCOMs stay at q_mvar=0
@@ -1613,9 +1770,16 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     if _tmp_map:
         net.gen.drop(index=list(_tmp_map.keys()), inplace=True)
 
-    # Drop machine-trafo controllers (only ones present at this point).
+    # Drop machine-trafo controllers — but preserve any plant-side
+    # QVLocalLoops installed earlier at step [3c] (they must survive into
+    # the experiment loop so the local Q(V) feedback runs after each apply).
     if hasattr(net, "controller") and len(net.controller) > 0:
-        net.controller.drop(net.controller.index, inplace=True)
+        drop_idx = [
+            idx for idx, row in net.controller.iterrows()
+            if not isinstance(row["object"], QVLocalLoop)
+        ]
+        if drop_idx:
+            net.controller.drop(index=drop_idx, inplace=True)
 
     if verbose >= 2:
         print("[7c.1] Phase 1 result (machine 2W OLTC):")
@@ -1658,10 +1822,17 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                       f"V_mv={vm:.4f} p.u.")
 
     # In "cascade" DSO mode, drop coupler controllers (OFO takes over).
-    # In "local" DSO mode, keep them active as local AVR.
+    # In "local" DSO mode, keep them active as local AVR.  Either way
+    # preserve the plant-side QVLocalLoops installed at step [3c] so
+    # they survive into the experiment loop.
     if not _local_dso:
         if hasattr(net, "controller") and len(net.controller) > 0:
-            net.controller.drop(net.controller.index, inplace=True)
+            drop_idx = [
+                idx for idx, row in net.controller.iterrows()
+                if not isinstance(row["object"], QVLocalLoop)
+            ]
+            if drop_idx:
+                net.controller.drop(index=drop_idx, inplace=True)
     elif verbose >= 1:
         print(f"  [local DSO] Kept {len(net.controller)} coupler OLTC "
               f"DiscreteTapControl(s) active for simulation.")
@@ -1990,6 +2161,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 z: len(getattr(zd, "shunt_bus_indices", []) or [])
                 for z, zd in zone_defs.items()
             },
+            n_gridforming_per_zone={
+                z: len(getattr(zd, "gridforming_gen_indices", []) or [])
+                for z, zd in zone_defs.items()
+            },
             v_setpoint_pu=config.v_setpoint_pu,
             v_min_pu=0.9, v_max_pu=1.1,
             sub_minute=False, update_every=1, slot_idx=0,
@@ -2057,6 +2232,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 np.full(len(zd.pcc_trafo_indices), config.g_z_q_pcc),
                 np.full(len(zd.line_indices),      config.g_z_current),
                 np.full(len(zd.gen_indices),       config.g_z_q_gen),
+                np.full(len(zd.gridforming_gen_indices),
+                                                  config.g_z_q_gridforming),
                 np.full(len(zd.tie_line_indices),  config.g_z_q_tie),
             ])
         for dso_id_tmp, dso_ctrl_tmp in dso_controllers.items():
@@ -2064,10 +2241,17 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             n_iface_tmp = len(cfg_tmp.interface_trafo_indices)
             n_v_tmp = len(cfg_tmp.voltage_bus_indices)
             n_i_tmp = len(cfg_tmp.current_line_indices)
+            n_gf_tmp = len(cfg_tmp.gridforming_gen_indices)
+            n_q_real_tmp = (
+                len(cfg_tmp.der_indices)
+                if cfg_tmp.ofo_in_v_ref_mode else 0
+            )
             _gz_targets_dso[dso_id_tmp] = np.concatenate([
-                np.full(n_iface_tmp, config.g_z_interface),
-                np.full(n_v_tmp,     config.g_z_voltage),
-                np.full(n_i_tmp,     config.g_z_current),
+                np.full(n_iface_tmp,  config.g_z_interface),
+                np.full(n_v_tmp,      config.g_z_voltage),
+                np.full(n_i_tmp,      config.g_z_current),
+                np.full(n_gf_tmp,     config.g_z_q_gridforming),
+                np.full(n_q_real_tmp, config.g_z_q_dso_der),
             ])
 
     n_steps = int(config.n_total_s / config.dt_s)
@@ -2408,17 +2592,26 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                     net, zone_defs[z], tso_out,
                 )
 
-                # Record per-zone results
+                # Record per-zone results.
+                # Actuator order on u (from TSOControllerConfig._continuous_block):
+                #   [ Q_DER | Q_PCC_set | V_gen_set | V_gf | s_OLTC | s_shunt ]
+                # The V_gf block (length n_gf) lives between V_gen and OLTC
+                # and carries the vm_pu setpoints for Stage-1-promoted
+                # grid-forming converter gens.  Without slicing it out here
+                # the OLTC and shunt offsets would silently shift by n_gf.
                 u = tso_out.u_new
                 n_der = len(zone_defs[z].tso_der_indices)
                 n_pcc = len(zone_defs[z].pcc_trafo_indices)
                 n_gen = len(zone_defs[z].gen_indices)
+                n_gf = len(getattr(zone_defs[z], "gridforming_gen_indices", []) or [])
                 n_oltc = len(zone_defs[z].oltc_trafo_indices)
                 n_shunt = len(zone_defs[z].shunt_bus_indices)
-                rec.zone_q_der[z]         = u[:n_der].copy()
-                rec.zone_q_pcc_set[z]     = u[n_der:n_der+n_pcc].copy()
-                rec.zone_v_gen[z]         = u[n_der+n_pcc:n_der+n_pcc+n_gen].copy()
-                rec.zone_oltc_taps[z]     = u[n_der+n_pcc+n_gen:n_der+n_pcc+n_gen+n_oltc].copy()
+                off = 0
+                rec.zone_q_der[z]         = u[off:off+n_der].copy(); off += n_der
+                rec.zone_q_pcc_set[z]     = u[off:off+n_pcc].copy(); off += n_pcc
+                rec.zone_v_gen[z]         = u[off:off+n_gen].copy(); off += n_gen
+                rec.zone_v_gf[z]          = u[off:off+n_gf].copy();  off += n_gf
+                rec.zone_oltc_taps[z]     = u[off:off+n_oltc].copy(); off += n_oltc
                 rec.zone_tso_objective[z] = tso_out.objective_value
                 rec.zone_tso_status[z]    = tso_out.solver_status
                 rec.zone_tso_solve_s[z]   = tso_out.solve_time_s
@@ -2435,7 +2628,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 # ``ShuntDisturbanceMessage`` to the DSO whose tertiary
                 # hosts the shunt so the DSO can refresh its own model.
                 if n_shunt > 0:
-                    shunt_offset = n_der + n_pcc + n_gen + n_oltc
+                    # Shunt block sits after [Q_DER | Q_PCC | V_gen | V_gf | OLTC].
+                    shunt_offset = n_der + n_pcc + n_gen + n_gf + n_oltc
                     new_shunt_steps = [
                         int(round(float(u[shunt_offset + k])))
                         for k in range(n_shunt)
@@ -2582,7 +2776,14 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
                 # --- DSO optimisation step -------------------------------------------
                 dso_out = dso_ctrl.step(meas_dso, sim_time_s=time_s)
-                apply_dso_controls(net, dso_ctrl.config, dso_out)
+                # Pass the live JacobianSensitivities handle so the
+                # Q+shim apply step can read the **full** per-DSO S_VQ
+                # block (cross-DER coupling included) directly off the
+                # cached ``dV_dQ_reduced`` — no recompute, no extra PF.
+                apply_dso_controls(
+                    net, dso_ctrl.config, dso_out,
+                    sensitivities=getattr(dso_ctrl, "sensitivities", None),
+                )
 
         # ── Power flow ────────────────────────────────────────────────────────
         if _local_der_active:
@@ -2769,14 +2970,48 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             # time series across both modes.  Values reflect the converged
             # PF (PF does not modify sgen.q_mvar / gen.vm_pu / trafo.tap_pos
             # so for OFO they equal the commanded values).
-            if zd.tso_der_indices:
-                rec.zone_q_der[z] = np.array(
-                    [float(net.sgen.at[idx, "q_mvar"]) for idx in zd.tso_der_indices],
+            # zone_q_der: concatenate grid-following sgen Q (legacy path)
+            # with the realised Q of any TSO grid-forming converter gen
+            # in the zone (Stage-1 promoted units now live in net.gen).
+            # This keeps the live plot showing the FULL TSO DER reactive
+            # infeed, not just the un-promoted slice.  Sgen indices that
+            # were promoted are no longer in zd.tso_der_indices, so the
+            # two reads cover disjoint sets of physical units.
+            der_q_following = (
+                np.array(
+                    [float(net.res_sgen.at[idx, "q_mvar"])
+                     for idx in zd.tso_der_indices],
                     dtype=np.float64,
+                )
+                if zd.tso_der_indices
+                else np.array([], dtype=np.float64)
+            )
+            der_q_forming = (
+                np.array(
+                    [float(net.res_gen.at[idx, "q_mvar"])
+                     for idx in zd.gridforming_gen_indices],
+                    dtype=np.float64,
+                )
+                if zd.gridforming_gen_indices
+                else np.array([], dtype=np.float64)
+            )
+            if der_q_following.size or der_q_forming.size:
+                rec.zone_q_der[z] = np.concatenate(
+                    [der_q_following, der_q_forming]
                 )
             if zd.gen_indices:
                 rec.zone_v_gen[z] = np.array(
                     [float(net.gen.at[idx, "vm_pu"]) for idx in zd.gen_indices],
+                    dtype=np.float64,
+                )
+            # zone_v_gf: vm_pu setpoints commanded by the OFO V_gf actuator
+            # to Stage-1-promoted grid-forming converter gens.  Read every
+            # step from net.gen so the live plot has a smooth trace in both
+            # OFO and local modes (PF does not modify gen.vm_pu).
+            if zd.gridforming_gen_indices:
+                rec.zone_v_gf[z] = np.array(
+                    [float(net.gen.at[idx, "vm_pu"])
+                     for idx in zd.gridforming_gen_indices],
                     dtype=np.float64,
                 )
             if zd.oltc_trafo_indices:
@@ -3143,27 +3378,31 @@ def main() -> None:
     """
 
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 2,      # 720-min full simulation
+        n_total_s=60.0 * 60 * 8,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
-        g_v=150000.0,  # TSO voltage tracking; drives PCC Q dispatch
+        g_v=500000.0,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=200,  # DSO Q-tracking
         # ── DSO objective tuning ──
-        dso_g_v=25000.0,  # reduced to avoid competing with Q tracking
+        use_qv_local_loop=True,
+        force_all_der_grid_following=False,
+        dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.9,  # leaky integrator decay
         dso_q_integral_max_mvar=50.0,  # anti-windup clamp
-        dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
+        dso_gamma_oltc_q=1.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
         # ── TSO weights (alpha=1, spectral rho(C)/2) ──
         g_w_der=10,   # single-DER zones; rho~C_jj=396 -> min 198
+        g_w_gridforming= 5E6,
         g_w_gen=5e7,   # excluded from stability
         g_w_pcc=50,   # 9 correlated PCCs; rho(C)=221 -> min 111
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,   # bipolar tertiary shunts; mirror g_w_tso_oltc
         # ── DSO weights (alpha=1, rho(C_DER)=790 -> min 395) ──
-        g_w_dso_der=1000,  # 8 correlated DER; sf~2.5 for smooth tracking
-        g_w_dso_oltc=40,   # rho(C_OLTC)~1.1; higher for switching suppression
+        g_w_dso_der=200,  # 8 correlated DER; sf~2.5 for smooth tracking
+        g_w_dso_der_vref=1E6,
+        g_w_dso_oltc=20,   # rho(C_OLTC)~1.1; higher for switching suppression
         # ── Adaptive g_w (paper Eq.16, sign-only) — all continuous classes ──
         # `g_w_*` values above become the warm-start; the meta below
         # controls the multiplicative rate and clip box.  Discrete
@@ -3210,23 +3449,22 @@ def main() -> None:
         live_plot_cascade=True,
         live_plot_system=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 4, 15, 10, 0),
+        start_time=datetime(2016, 7, 5, 6, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
-        contingencies=[
-            # Example: trip line 0 at t=30 min, restore at t=60 min
-            # ContingencyEvent(minute=100, element_type="line", element_index=8, action="trip"),
-            # ContingencyEvent(minute=150, element_type="line", element_index=8, action="restore"),
-            ContingencyEvent(minute=15, element_type="gen", element_index=2, action="trip"),
-            ContingencyEvent(minute=105, element_type="gen", element_index=2, action="restore"),
-            ContingencyEvent(minute=45, element_type="load", bus=5, p_mw=300, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=90, element_type="load", bus=5, p_mw=300, q_mvar=100, action="trip"),
-            ContingencyEvent(minute=330, element_type="gen", element_index=2, action="trip"),
-            ContingencyEvent(minute=420, element_type="gen", element_index=2, action="restore"),
-            ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
-            ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
-            ContingencyEvent(minute=720, element_type="load", bus=7, p_mw=300, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=900, element_type="load", bus=7, p_mw=300, q_mvar=100, action="trip"),
+        contingencies           = [
+            ContingencyEvent(minute=60,  element_type="gen",  element_index=2, action="trip"),
+            ContingencyEvent(minute=100, element_type="gen",  element_index=2, action="restore"),
+            ContingencyEvent(minute=120, element_type="load", bus=2,  p_mw=300, q_mvar=150, action="connect"),
+            ContingencyEvent(minute=240, element_type="load", bus=2,  p_mw=300, q_mvar=150, action="trip"),
+            ContingencyEvent(minute=150, element_type="load", bus=14, p_mw=100, q_mvar=50, action="connect"),
+            ContingencyEvent(minute=160, element_type="load", bus=14, p_mw=100, q_mvar=50, action="trip"),
+            ContingencyEvent(minute=180, element_type="gen",  element_index=5, action="trip"),
+            ContingencyEvent(minute=280, element_type="gen",  element_index=5, action="restore"),
+            # ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
+            # ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
+            # ContingencyEvent(minute=720, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="connect"),
+            # ContingencyEvent(minute=900, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="trip"),
         ],
     )
     log = run_multi_tso_dso(cfg)

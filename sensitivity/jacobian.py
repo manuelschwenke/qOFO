@@ -31,7 +31,7 @@ The following Sensitivities are implemented:
 ∂V/∂XXX
 -------------
 1)  ∂V/∂Q_n = J_r^{-1}                                          -> compute_dV_dQ_der()
-2)  ∂V/∂s_i (2W) = Δτ·[D₂₁ D₂₂]·(∂g/∂τ_i)                     -> compute_dV_ds()
+2)  ∂V/∂s_i (2W) = Δτ·[D₂₁ D₂₂]·(∂g/∂τ_i)                       -> compute_dV_ds()
                                                                 -> compute_dV_ds_matrix()
 2b) ∂V/∂s_i (3W) = same formulation for HV winding of 3W trafo  -> compute_dV_ds_trafo3w()
                                                                 -> compute_dV_ds_trafo3w_matrix()

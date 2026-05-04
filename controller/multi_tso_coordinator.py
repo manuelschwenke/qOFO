@@ -234,25 +234,54 @@ class ZoneDefinition:
     ``MultiTSOConfig.tso_g_q_tie`` at zone construction time.  Default
     0.0 keeps Q_tie informational only (Phase A)."""
 
+    # ── Grid-forming converter gens (V_gf actuator block) ──────────────────
+    gridforming_gen_indices:  List[int]   = field(default_factory=list)
+    """``net.gen`` row indices for grid-forming converter gens in this
+    zone (e.g. STATCOM-capable wind parks promoted from sgens).  The
+    TSO OFO commands ``vm_pu`` on each via the dedicated ``V_gf``
+    actuator block.  Empty list ⇒ no grid-forming converters in this
+    zone (legacy behaviour).  Populated by the experiment runner from
+    ``meta.tso_grid_forming_gen_indices`` partitioned per zone."""
+
+    gridforming_gen_buses:    List[int]   = field(default_factory=list)
+    """Bus index for each entry in ``gridforming_gen_indices``."""
+
+    gridforming_gen_sn_mva:   List[float] = field(default_factory=list)
+    """Rated apparent power [MVA] per grid-forming gen.  Used for the
+    STATCOM Q-circle capability constraint enforced as a soft output
+    bound on realised Q (analogous to the synch-machine ``Q_gen`` band)."""
+
+    gridforming_gen_op_diagrams: List[str] = field(default_factory=list)
+    """Per-gen operating-diagram label.  Defaults to ``"STATCOM"`` for
+    every entry if left empty."""
+
+    g_w_gridforming:          float = 1.0
+    """Regularisation penalty on V_gf voltage setpoint changes.  Default
+    1.0 — choose comparable to ``g_w_gen`` for synch-machine AVR.  The
+    grid-forming converters react fast, so a tighter penalty than for
+    synch machines is rarely needed."""
+
     def n_controls(self) -> int:
         """Total number of control variables for this zone."""
         return (
-            len(self.tso_der_indices)      # Q_DER
-            + len(self.pcc_trafo_indices)   # Q_PCC_set
-            + len(self.gen_indices)         # V_gen
-            + len(self.oltc_trafo_indices)  # s_OLTC (machine trafos)
-            + len(self.shunt_bus_indices)   # s_shunt (bipolar shunts)
+            len(self.tso_der_indices)            # Q_DER
+            + len(self.pcc_trafo_indices)         # Q_PCC_set
+            + len(self.gen_indices)               # V_gen
+            + len(self.gridforming_gen_indices)   # V_gf
+            + len(self.oltc_trafo_indices)        # s_OLTC (machine trafos)
+            + len(self.shunt_bus_indices)         # s_shunt (bipolar shunts)
         )
 
     def n_outputs(self) -> int:
         """Total number of output variables (rows in H_ii).
 
-        Layout: [V_bus | Q_PCC | I_line | Q_gen | Q_tie]."""
+        Layout: [V_bus | Q_PCC | I_line | Q_gen | Q_gf | Q_tie]."""
         return (
             len(self.v_bus_indices)
             + len(self.pcc_trafo_indices)
             + len(self.line_indices)
             + len(self.gen_indices)
+            + len(self.gridforming_gen_indices)
             + len(self.tie_line_indices)
         )
 
@@ -260,22 +289,24 @@ class ZoneDefinition:
         """
         Per-output objective weight vector Q_obj for this zone.
 
-        Row ordering: [V_bus (g_v) | Q_PCC (g_q_tso) | I_line (0) | Q_gen (0) | Q_tie (g_q_tie)].
-        Currents are treated as hard constraints; Q_gen rows are driven
-        by the soft-slack penalty ``g_z_q_gen`` rather than the
-        objective-row weight, so their q_obj entry is 0.  Q_tie weight
-        is 0 in Phase A; set non-zero in Phase B.
+        Row ordering: [V_bus (g_v) | Q_PCC (g_q_tso) | I_line (0) | Q_gen (0) | Q_gf (0) | Q_tie (g_q_tie)].
+        Currents and Q_gen / Q_gf rows are driven by soft-slack
+        penalties (``g_z_*``), not the objective-row weight, so their
+        q_obj entries are 0.  Q_tie weight is 0 in Phase A; set non-zero
+        in Phase B.
         """
         n_v = len(self.v_bus_indices)
         n_pcc = len(self.pcc_trafo_indices)
         n_i = len(self.line_indices)
         n_gen = len(self.gen_indices)
+        n_gf = len(self.gridforming_gen_indices)
         n_tie = len(self.tie_line_indices)
         return np.concatenate([
             np.full(n_v, self.g_v),
             np.full(n_pcc, self.g_q_tso),
             np.zeros(n_i),
             np.zeros(n_gen),
+            np.zeros(n_gf),
             np.full(n_tie, self.g_q_tie),
         ])
 
@@ -283,7 +314,7 @@ class ZoneDefinition:
         """
         Regularisation weight vector G_w (diagonal of G_w matrix) for this zone.
 
-        Column ordering: [Q_DER | Q_PCC_set | V_gen | s_OLTC | s_shunt].
+        Column ordering: [Q_DER | Q_PCC_set | V_gen | V_gf | s_OLTC | s_shunt].
 
         When ``g_w_pcc_per`` is set, each PCC actuator gets its own
         weight (floored by ``g_w_pcc``).  Otherwise all PCCs use
@@ -292,6 +323,7 @@ class ZoneDefinition:
         n_der = len(self.tso_der_indices)
         n_pcc = len(self.pcc_trafo_indices)
         n_gen = len(self.gen_indices)
+        n_gf = len(self.gridforming_gen_indices)
         n_oltc = len(self.oltc_trafo_indices)
         n_shunt = len(self.shunt_bus_indices)
         if self.g_w_pcc_per is not None and len(self.g_w_pcc_per) == n_pcc:
@@ -302,6 +334,7 @@ class ZoneDefinition:
             np.full(n_der, self.g_w_der),
             pcc_weights,
             np.full(n_gen, self.g_w_gen),
+            np.full(n_gf, self.g_w_gridforming),
             np.full(n_oltc, self.g_w_oltc),
             np.full(n_shunt, self.g_w_shunt),
         ])
@@ -472,17 +505,20 @@ class MultiTSOCoordinator:
             n_pcc_i = len(zi.pcc_trafo_indices)
             n_li  = len(zi.line_indices)
             n_gen_i = len(zi.gen_indices)
+            n_gf_i = len(zi.gridforming_gen_indices)
             n_tie_i = len(zi.tie_line_indices)
 
             # Row offsets — must match TSOController._build_sensitivity_matrix
-            # ([V | Q_PCC | I | Q_gen | Q_tie]).  Q_gen rows are not filled
-            # by this method (deferred); they remain zero.  Q_tie rows are
-            # filled below (Phase B).  The row count must still match H_ii
-            # so the stability M-matrix assembly stays dimension-consistent.
+            # ([V | Q_PCC | I | Q_gen | Q_gf | Q_tie]).  Q_gen / Q_gf rows
+            # are not filled by this method (deferred); they remain zero.
+            # Q_tie rows are filled below (Phase B).  The row count must
+            # still match H_ii so the stability M-matrix assembly stays
+            # dimension-consistent.
             q_pcc_row_offset = n_v_i
             i_row_offset     = n_v_i + n_pcc_i
             # q_gen_row_offset = n_v_i + n_pcc_i + n_li  (still zero stub)
-            q_tie_row_offset = n_v_i + n_pcc_i + n_li + n_gen_i
+            # q_gf_row_offset  = n_v_i + n_pcc_i + n_li + n_gen_i  (zero stub)
+            q_tie_row_offset = n_v_i + n_pcc_i + n_li + n_gen_i + n_gf_i
 
             # Tie-line endpoint list for zone i (used by Q_tie cross-fills).
             tie_indices_i = list(zi.tie_line_indices)
@@ -502,17 +538,25 @@ class MultiTSOCoordinator:
                 n_der_j  = len(zj.tso_der_indices)
                 n_pcc_j  = len(zj.pcc_trafo_indices)
                 n_gen_j  = len(zj.gen_indices)
+                n_gf_j   = len(zj.gridforming_gen_indices)
                 n_oltc_j = len(zj.oltc_trafo_indices)
                 n_shunt_j = len(zj.shunt_bus_indices)
-                n_col    = n_der_j + n_pcc_j + n_gen_j + n_oltc_j + n_shunt_j
+                n_col    = (
+                    n_der_j + n_pcc_j + n_gen_j + n_gf_j + n_oltc_j + n_shunt_j
+                )
 
                 # Output shape of this block: full ordering
-                # [V_i | Q_PCC_i | I_i | Q_gen_i | Q_tie_i].  Q_gen and
-                # Q_tie rows are zero in Phase A (cross-sensitivities
-                # deferred); the row count must still match H_ii so the
-                # stability M-matrix assembly stays dimension-consistent.
+                # [V_i | Q_PCC_i | I_i | Q_gen_i | Q_gf_i | Q_tie_i].
+                # Q_gen, Q_gf and Q_tie rows are zero in Phase A
+                # (cross-sensitivities deferred); the row count must still
+                # match H_ii so the stability M-matrix assembly stays
+                # dimension-consistent.  Same for V_gf columns: the
+                # cross-zone ∂V_i/∂V_gf_j stub is zero by default.
                 H_ij = np.zeros(
-                    (n_v_i + n_pcc_i + n_li + n_gen_i + n_tie_i, n_col),
+                    (
+                        n_v_i + n_pcc_i + n_li + n_gen_i + n_gf_i + n_tie_i,
+                        n_col,
+                    ),
                     dtype=np.float64,
                 )
 
@@ -763,7 +807,7 @@ class MultiTSOCoordinator:
                         t for t in oltc_indices_j
                         if self.net.trafo.at[t, "in_service"]
                     ]
-                    col_offset = n_der_j + n_pcc_j + n_gen_j
+                    col_offset = n_der_j + n_pcc_j + n_gen_j + n_gf_j
                     if is_oltc_indices_j:
                         dV_ds, obs_map_s, trafo_map_s = jac.compute_dV_ds_2w_matrix(
                             trafo_indices=is_oltc_indices_j,
@@ -824,7 +868,7 @@ class MultiTSOCoordinator:
                 # sub-networks).  Same q_step_mvar × V_pu² convention as the
                 # diagonal H_jj block (see TSOController._build_sensitivity_matrix).
                 if n_shunt_j > 0:
-                    col_offset_sh = n_der_j + n_pcc_j + n_gen_j + n_oltc_j
+                    col_offset_sh = n_der_j + n_pcc_j + n_gen_j + n_gf_j + n_oltc_j
                     for k_sh, sh_bus in enumerate(zj.shunt_bus_indices):
                         q_step = float(zj.shunt_q_steps_mvar[k_sh])
                         try:

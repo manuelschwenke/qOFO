@@ -778,6 +778,17 @@ def add_hv_networks(
         if str(net.line.at[li, "subnet"]) == "DN"
     )
 
+    # Aggregate per-HV sgen indices into the flat dso_der_indices /
+    # dso_der_buses registries so downstream steps (DER classification,
+    # generic per-DER iteration) can find every DSO-controlled converter
+    # without recursing into hv_networks.
+    flat_dso_der_indices: List[int] = list(meta.dso_der_indices)
+    flat_dso_der_buses: List[int] = list(meta.dso_der_buses)
+    for hv in hv_nets:
+        for s in hv.sgen_indices:
+            flat_dso_der_indices.append(int(s))
+            flat_dso_der_buses.append(int(net.sgen.at[int(s), "bus"]))
+
     return IEEE39NetworkMeta(
         tn_bus_indices=meta.tn_bus_indices,
         tn_line_indices=meta.tn_line_indices,
@@ -792,8 +803,8 @@ def add_hv_networks(
         dso_pcc_trafo_indices=meta.dso_pcc_trafo_indices,
         dso_pcc_hv_buses=meta.dso_pcc_hv_buses,
         dso_lv_buses=meta.dso_lv_buses,
-        dso_der_indices=meta.dso_der_indices,
-        dso_der_buses=meta.dso_der_buses,
+        dso_der_indices=tuple(flat_dso_der_indices),
+        dso_der_buses=tuple(flat_dso_der_buses),
         dso_shunt_indices=meta.dso_shunt_indices,
         dso_shunt_buses=meta.dso_shunt_buses,
         # TSO-owned bipolar tertiary shunts (one per active DSO sub-network)

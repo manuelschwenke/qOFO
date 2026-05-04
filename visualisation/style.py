@@ -221,7 +221,7 @@ def position_figure_in_slot(
     fig: Figure,
     slot_idx: int,
     *,
-    layout: str = "thirds",
+    layout: str = "dual_screen",
     n_slots: int = 3,
 ) -> None:
     """Place ``fig`` in the requested slot of the chosen layout.

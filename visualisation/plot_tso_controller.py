@@ -3,19 +3,28 @@ visualisation/plot_tso_controller.py
 ====================================
 Live plotter for Figure 1 — MULTI-TSO CONTROLLER.
 
-Eight tiles grouped into two colour-banded sections:
+Eight (or nine) tiles grouped into two colour-banded sections.  When
+any zone hosts a grid-forming converter (Stage 1 promoted ``pp.gen``),
+the OFO actuator for those DERs is the vm_pu setpoint, not Q — so the
+DER Q infeed becomes a *measurement* and the OFO V setpoint is shown as
+the actuator instead.
 
     MEASUREMENTS (orange)
         1. TSO Voltages per Zone (v_min / mean / max band per zone)
         2. TSO Generator Reactive Power Injections
         3. TSO Reactive Power Tie-Line Flows
         4. TSO Line Currents (max / mean / min loading % per zone)
+        5. TSO DER Q Infeed per Zone   (only if grid-forming present)
 
     ACTUATORS (dark blue)
-        5. TSO DER Reactive Power Infeed per Zone
-        6. TSO Generator AVR Setpoints
-        7. TSO Machine Transformer Setpoints (OLTC taps)
-        8. TSO Shunt States (MSC/MSR)
+        6. TSO DER Reactive Power Infeed per Zone
+                                          (default mode — direct Q)
+           OR
+           TSO DER Voltage Setpoints per Zone
+                                          (grid-forming mode — vm_pu)
+        7. TSO Generator AVR Setpoints
+        8. TSO Machine Transformer Setpoints (OLTC taps)
+        9. TSO Shunt States (MSC/MSR)
 
 The figure is sized to fit one third of the screen width at full height
 and is placed into slot 0 by :func:`visualisation.style.position_figure_in_slot`.
@@ -56,13 +65,14 @@ class TSOControllerLivePlotter:
         n_oltc_per_zone: Dict[int, int],
         n_shunt_per_zone: Dict[int, int],
         *,
+        n_gridforming_per_zone: Dict[int, int] | None = None,
         v_setpoint_pu: float = 1.03,
         v_min_pu: float = 0.9,
         v_max_pu: float = 1.1,
         sub_minute: bool = False,
         update_every: int = 1,
         slot_idx: int = 0,
-        layout: str = "thirds",
+        layout: str = "dual_screen",
         show_line_currents: bool = True,
         use_tex: bool = False,
     ) -> None:
@@ -73,6 +83,12 @@ class TSOControllerLivePlotter:
         self._tie_pairs = list(tie_line_pairs)
         self._n_oltc = dict(n_oltc_per_zone)
         self._n_shunt = dict(n_shunt_per_zone)
+        self._n_gridforming = dict(n_gridforming_per_zone or {})
+        # Grid-forming mode: at least one zone has a Stage-1 promoted
+        # converter gen.  In that mode the OFO commands V (not Q) for
+        # those DERs, so Q infeed moves to measurements and V setpoints
+        # become the actuator.
+        self._has_gridforming = sum(self._n_gridforming.values()) > 0
         self._v_set = v_setpoint_pu
         self._v_min = v_min_pu
         self._v_max = v_max_pu
@@ -98,6 +114,7 @@ class TSOControllerLivePlotter:
 
         self._zone_q_der: Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
         self._zone_v_gen: Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
+        self._zone_v_der: Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
         self._zone_oltc:  Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
         self._zone_shunt: Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
 
@@ -118,6 +135,10 @@ class TSOControllerLivePlotter:
         plot_h = 1.0
         band_h = 0.18
         n_meas = 4 if self._show_iline else 3
+        # Grid-forming mode: add the DER Q infeed tile to measurements
+        # (it's no longer the actuator).
+        if self._has_gridforming:
+            n_meas += 1
         heights = [band_h] + [plot_h] * n_meas + [band_h] + [plot_h] * 4
         gs = GridSpec(
             len(heights), 1, figure=self._fig,
@@ -132,19 +153,35 @@ class TSOControllerLivePlotter:
         self._ax_v    = self._fig.add_subplot(gs[1, 0])
         self._ax_qgen = self._fig.add_subplot(gs[2, 0], sharex=self._ax_v)
         self._ax_tie  = self._fig.add_subplot(gs[3, 0], sharex=self._ax_v)
+        next_row = 4
         if self._show_iline:
-            self._ax_iline = self._fig.add_subplot(gs[4, 0], sharex=self._ax_v)
-            act_start = 5
+            self._ax_iline = self._fig.add_subplot(gs[next_row, 0], sharex=self._ax_v)
+            next_row += 1
         else:
             self._ax_iline = None
-            act_start = 4
+        # Q infeed lives in measurements when grid-forming converters
+        # exist (OFO doesn't actuate Q directly for those DERs).
+        if self._has_gridforming:
+            self._ax_qder_meas = self._fig.add_subplot(gs[next_row, 0], sharex=self._ax_v)
+            next_row += 1
+        else:
+            self._ax_qder_meas = None
+        act_start = next_row
 
         # ACT band
         self._ax_band_act = self._fig.add_subplot(gs[act_start, 0])
         fill_section_band(self._ax_band_act, "Actuators", COLOUR_ACT_BAND)
 
-        # Actuator rows (DER Q, V_gen, OLTC, shunts)
-        self._ax_qder  = self._fig.add_subplot(gs[act_start + 1, 0], sharex=self._ax_v)
+        # First actuator row: V setpoints (grid-forming) or Q infeed
+        # (legacy direct-Q dispatch).  Bind both names to the same axis
+        # so downstream redraw helpers can pick the right one.
+        self._ax_der_act = self._fig.add_subplot(gs[act_start + 1, 0], sharex=self._ax_v)
+        if self._has_gridforming:
+            self._ax_vder = self._ax_der_act
+            self._ax_qder = self._ax_qder_meas
+        else:
+            self._ax_qder = self._ax_der_act
+            self._ax_vder = None
         self._ax_vgen  = self._fig.add_subplot(gs[act_start + 2, 0], sharex=self._ax_v)
         self._ax_oltc  = self._fig.add_subplot(gs[act_start + 3, 0], sharex=self._ax_v)
         self._ax_shunt = self._fig.add_subplot(gs[act_start + 4, 0], sharex=self._ax_v)
@@ -154,8 +191,13 @@ class TSOControllerLivePlotter:
         ]
         if self._ax_iline is not None:
             self._plot_axes.append(self._ax_iline)
+        if self._has_gridforming:
+            # Q in measurements, V in actuators
+            self._plot_axes += [self._ax_qder_meas, self._ax_vder]
+        else:
+            self._plot_axes += [self._ax_qder]
         self._plot_axes += [
-            self._ax_qder, self._ax_vgen, self._ax_oltc, self._ax_shunt,
+            self._ax_vgen, self._ax_oltc, self._ax_shunt,
         ]
 
         tile_title(self._ax_v,     "TSO Voltages per Zone")
@@ -163,7 +205,11 @@ class TSOControllerLivePlotter:
         tile_title(self._ax_tie,   "TSO Reactive Power Tie-Line Flows")
         if self._ax_iline is not None:
             tile_title(self._ax_iline, "TSO Line Currents (Loading %)")
-        tile_title(self._ax_qder,  "TSO DER Q Infeed per Zone")
+        if self._has_gridforming:
+            tile_title(self._ax_qder_meas, "TSO DER Q Infeed per Zone")
+            tile_title(self._ax_vder,      "TSO DER Voltage Setpoints per Zone")
+        else:
+            tile_title(self._ax_qder,      "TSO DER Q Infeed per Zone")
         tile_title(self._ax_vgen,  "TSO Generator AVR Setpoints")
         tile_title(self._ax_oltc,  "TSO Machine Transformer Taps")
         tile_title(self._ax_shunt, "TSO Shunt States")
@@ -207,6 +253,11 @@ class TSOControllerLivePlotter:
                 self._zone_v_gen[z].append(
                     np.asarray(rec.zone_v_gen.get(z, []), dtype=float)
                 )
+                # rec.zone_v_gf is empty when no grid-forming converters
+                # exist; the redraw guard handles that case.
+                self._zone_v_der[z].append(
+                    np.asarray(getattr(rec, "zone_v_gf", {}).get(z, []), dtype=float)
+                )
                 self._zone_oltc[z].append(
                     np.asarray(rec.zone_oltc_taps.get(z, []), dtype=float)
                 )
@@ -227,6 +278,8 @@ class TSOControllerLivePlotter:
         if self._ax_iline is not None:
             self._redraw_line_currents()
         self._redraw_der_q()
+        if self._has_gridforming:
+            self._redraw_v_der()
         self._redraw_v_gen()
         self._redraw_oltc()
         self._redraw_shunts()
@@ -373,6 +426,28 @@ class TSOControllerLivePlotter:
         ax.legend(handles=self._zone_legend_handles(),
                   loc="upper left", fontsize=7,
                   ncol=min(len(self._zone_ids), 3), frameon=False)
+
+    def _redraw_v_der(self) -> None:
+        """V setpoints commanded to grid-forming converter gens (Stage 1).
+        Only invoked when at least one zone has a grid-forming DER."""
+        ax = self._ax_vder
+        ax.clear()
+        tile_title(ax, "TSO DER Voltage Setpoints per Zone")
+        ax.axhline(self._v_set, color="k", ls=":", lw=0.8, alpha=0.6)
+        t = np.asarray(self._t_tso, dtype=float)
+        self._plot_padded_multi(ax, t, self._zone_v_der, drawstyle="default")
+        ax.set_ylabel(r"V$_\mathrm{DER,set}$ / p.u.")
+        ax.grid(True, alpha=0.3)
+        # Only zones that actually host a grid-forming converter get a
+        # legend handle.
+        handles = [
+            plt.Line2D([0], [0], color=_c(i + 1), lw=1.2, label=f"Z{z}")
+            for i, z in enumerate(self._zone_ids)
+            if self._n_gridforming.get(z, 0) > 0
+        ]
+        if handles:
+            ax.legend(handles=handles, loc="upper left", fontsize=7,
+                      ncol=min(len(handles), 3), frameon=False)
 
     def _redraw_oltc(self) -> None:
         ax = self._ax_oltc

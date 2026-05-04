@@ -115,6 +115,39 @@ class MultiTSOConfig:
 
     # -- G_w regularisation weights (DSO) --------------------------------------
     g_w_dso_der:    float = 10.0
+    """Step-size penalty on the DSO DER block when
+    ``use_qv_local_loop=False`` (legacy Stage-1 path).  Units: 1/Mvar²
+    — penalises Q dispatch deltas in Mvar.  Ignored under Stage 2."""
+
+    g_w_dso_der_vref: float = 1.0
+    """Step-size penalty on the DSO DER block when
+    ``use_qv_local_loop=True`` (Stage 2).  Units: 1/pu_v².
+
+    **NOTE — empirically inert in the current controller setup.**
+    A 7-OOM sweep (``g_w ∈ [1e-2, 1e5]``) with ``g_q=200`` shows
+    bit-for-bit identical Q-iface tracking across the range.  The MIQP
+    step is dominated by curvature ``g_q · (∂Q_iface/∂V_ref)² ≈ 2·10⁸``
+    from the K(I+SK)^{-1} closed-loop transform; ``g_w`` only matters
+    once it exceeds that curvature (so `>> 1e8`).  Below 1e8 it is
+    effectively redundant.
+
+    Default ``1.0`` is a placeholder — feel free to override for
+    ablation studies, but the actual lever for tighter Q-tracking is
+    ``qv_slope_pu`` (steeper droop = more Q per V_ref shift).  See
+    ``tests/diag_stage2_steps.py`` for the validating sweep."""
+
+    g_w_gridforming: float = 1.0e7
+    """Step-size penalty on the V_gf actuator block (grid-forming
+    converter ``vm_pu`` setpoint).  Same units as ``g_w_gen`` (1/pu_v²).
+
+    Default ``1e7`` matches ``g_w_gen``.  Empirically the V_gf curvature
+    contribution from voltage tracking is ``g_v · 1² ≈ 5·10⁵``; for the
+    OFO regularisation to actually constrain V_gf moves, ``g_w_gridforming``
+    must dominate this curvature — so values below ``1e6`` produce visible
+    chatter on V_gf (TSO chases DSO transients), and ``1e7`` is the
+    sweet spot.  Lower it carefully; raising it to e.g. ``1e8`` slows
+    the converter response toward synch-machine timescales."""
+
     g_w_dso_oltc:   float = 1.0
 
     # -- Adaptive g_w (paper Eq. 16, sign-only rule) --------------------------
@@ -230,6 +263,13 @@ class MultiTSOConfig:
     g_z_current:   float = 0.0
     g_z_interface: float = 0.0
     g_z_q_gen:     float = 1E3
+    g_z_q_gridforming: float = 1E3
+    """Soft-constraint penalty for the Q_gf output (grid-forming converter
+    realised Q vs the STATCOM ±sqrt(S^2-P^2) Q-circle).  Mirrors
+    ``g_z_q_gen`` for synch machines.  Default 1E3 — a gentle nudge that
+    lets voltage tracking dominate when the converter exceeds its Q
+    envelope, since the physical converter will clip Q anyway via
+    ``enforce_q_lims=True`` in the plant PF."""
     """Soft-constraint penalty for TSO Q_gen outputs (generator PQ capability).
 
     Kept as a gentle nudge only — voltage tracking must dominate when a
@@ -353,6 +393,127 @@ class MultiTSOConfig:
     the windpark dispatches Q = q_min (full inductive); at V = setpoint-slope
     the windpark dispatches Q = q_max (full capacitive)."""
 
+    # -- Per-DER grid-forming / grid-following classification ----------------
+    der_mode_overrides: Dict[int, str] = field(default_factory=dict)
+    """Optional per-DER override of the default grid-forming /
+    grid-following classification.  Keys are *original* pandapower sgen
+    indices (before any build-time promotion); values are
+    ``"grid_forming"`` or ``"grid_following"``.
+
+    Empty dict ⇒ defaults apply: every sgen registered in
+    ``meta.tso_der_indices`` is treated as ``GRID_FORMING`` (modeled as
+    ``pp.gen``, OFO commands ``vm_pu``); every sgen in
+    ``meta.dso_der_indices`` is treated as ``GRID_FOLLOWING`` (modeled
+    as ``pp.sgen``, OFO commands Q or V_ref).
+
+    Use this to flip individual DERs without rewriting the network
+    builder.  Example::
+
+        der_mode_overrides = {17: "grid_following", 22: "grid_forming"}
+
+    See :class:`core.der_classification.DERClassification` for semantics
+    and :mod:`network.ieee39.build` for where the classification is
+    applied to the pandapower model."""
+
+    force_all_der_grid_following: bool = False
+    """Convenience override: when True, every TSO-side DER in
+    ``meta.tso_der_indices`` is forced to ``"grid_following"`` at
+    classification time, regardless of ``der_mode_overrides``.  Combined
+    with ``use_qv_local_loop=False`` this reproduces the pre-Stage-1
+    architecture (every controllable converter is a current-source
+    ``pp.sgen`` with direct Q dispatch from the OFO) for ablation /
+    baseline comparison."""
+
+    use_qv_local_loop: bool = True
+    """Stage-2 master switch — controls **plant model** only.  When True,
+    every grid-following DSO DER sgen gets a local Q(V) controller
+    installed in the simulated plant
+    (:class:`controller.dso_qv_local_loop.QVLocalLoop`), so the
+    converter response to V_bus follows ``Q = -k(V_bus - V_ref)``
+    clipped to the PQ envelope.
+
+    The way the OFO interacts with that plant model is then chosen by
+    :attr:`qv_apply_mode` (V_ref-direct or Q+shim).  Default ``False``
+    keeps the legacy Stage-1 direct-Q dispatch (no Q(V) plant model).
+
+    Historical V_ref-direct details (``qv_apply_mode='v_ref'``): the
+    DSO MIQP sensitivity matrix gains the closed-loop transform
+    ``K (I + S_VQ K)^{-1}`` on the DER column block, and the realized
+    Q is enforced as a soft output constraint via ``g_z_q_dso_der``.
+    See ``MultiTSOConfig.qv_setpoint_pu`` and
+    ``MultiTSOConfig.qv_slope_pu`` for the global Q(V) parameters;
+    per-DER overrides live on
+    :attr:`core.der_classification.DERClassification.qv_slope_pu` and
+    ``qv_v_ref_init_pu``."""
+
+    qv_apply_mode: str = "q_shim"
+    """How the DSO OFO drives the Q(V) plant model when
+    ``use_qv_local_loop=True``.  Two modes:
+
+    * ``"v_ref"`` — OFO commands V_ref directly.  The MIQP solves over
+      ``V_ref ∈ [qv_v_ref_min_pu, qv_v_ref_max_pu]`` and uses the
+      ``K(I+SK)⁻¹`` closed-loop sensitivity transform plus Q_realized
+      soft output rows (``g_z_q_dso_der``).  Highest physical fidelity,
+      but the V_ref bound + bus-voltage feedback caps the achievable Q
+      at roughly half the converter capability — see
+      ``tests/diag_dso_sgen_state.py`` for the validating diagnostic.
+
+    * ``"q_shim"`` (default) — OFO solves the same direct-Q MIQP as
+      Stage 1 (no K-transform, no Q_realized rows; ``g_w_dso_der`` and
+      ``g_q`` recover their Stage-1 meaning).  The apply step inverts
+      the droop locally::
+
+          vm_pu_ref = V_bus_meas + Q_cmd / k     # k = S_n / qv_slope_pu
+
+      The plant's Q(V) loop converges to ``Q ≈ Q_cmd``, so Q tracking
+      quality matches Stage 1 while the plant model still represents a
+      real grid-following converter (Q(V) loop runs every PF; comm-loss
+      keeps the local loop holding the last V_ref).
+
+    Ignored when ``use_qv_local_loop=False`` (Stage 1 path)."""
+
+    qv_v_ref_min_pu: float = 0.95
+    """Lower bound on the DSO V_ref OFO variable (only used when
+    ``qv_apply_mode='v_ref'``).  Q+shim sets V_ref via the apply-step
+    formula and uses Q-bounds on the OFO variable instead."""
+
+    qv_v_ref_max_pu: float = 1.10
+    """Upper bound on the DSO V_ref OFO variable (Stage 2)."""
+
+    qv_local_damping: float = 0.5
+    """Damping factor for the Q(V) local loop iteration.
+
+    Closed-loop iteration contraction factor: ``|1 − damping·(1 + K·S_VQ)|``.
+    With the corrected ``S_VQ`` units (``dV_pu / dQ_Mvar``, divided by
+    the system base ``net.sn_mva``), typical HV S_VQ ≈ 1e-3 pu/Mvar.
+    For ``K = S_n/0.07`` and S_n ~ 50 Mvar, ``K·S_VQ ≈ 0.7``, so
+    damping=0.5 gives contraction ≈ ``|1 − 0.5·1.7| = 0.15`` —
+    converges in ~10 iterations.  Larger damping (up to ~1.17) is also
+    stable but risks overshoot for STATCOM-class units (S_n ~600 Mvar)
+    where ``K·S_VQ`` can reach ~3-4."""
+
+    qv_local_max_step_frac: float = 1.0
+    """Per-iteration step cap on the Q(V) damped update, as a fraction
+    of S_n.  Default ``1.0`` (= no effective cap, since ``|target| ≤ S_n``
+    by the capability clip).  Lower values further restrict per-iteration
+    swing; raise to disable."""
+
+    qv_local_tol_mvar: float = 0.01
+    """Convergence tolerance for the Q(V) local loop (Mvar).
+
+    Tight default (0.01 Mvar) so that small Q-shim commands (e.g. 0.5
+    Mvar) get tracked precisely.  Was 1.0 Mvar in the early Stage 2
+    debug period — fine for V_ref direct mode but caused the QV loop to
+    sit in dead band for tiny Q+shim commands, locking Q_realized at the
+    pre-step value regardless of V_ref change."""
+
+    g_z_q_dso_der: float = 1e2
+    """Soft-constraint penalty for the realized-Q output of each
+    grid-following DSO DER under the V_ref-mode (Stage 2).  The
+    capability bound ``[Q_min, Q_max]`` from the op_diagram is enforced
+    as a soft output via this slack penalty so the DSO OFO sees explicit
+    saturation pressure rather than relying on the K-zeroing trick alone."""
+
     # -- TSO-owned bipolar shunts at DSO tertiaries ----------------------------
     install_tso_tertiary_shunts: bool = True
     """Install one bipolar 50 Mvar shunt per active DSO sub-network at
@@ -366,7 +527,7 @@ class MultiTSOConfig:
     Sign convention follows pandapower load convention: ``step = +1``
     injects +q_mvar (reactor), ``step = -1`` injects −q_mvar (capacitor)."""
 
-    tso_g_q_pcc: float = 1.0
+    tso_g_q_pcc: float = 5.0
     """Q-tracking weight on the (re-enabled) Q_PCC output rows of the TSO
     H matrix.  Scales the gradient contribution of
     ``(Q_PCC_actual − Q_PCC_set)^2`` in the TSO objective.  Default 1.0

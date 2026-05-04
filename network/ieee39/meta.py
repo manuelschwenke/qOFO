@@ -11,7 +11,9 @@ safe to import in contexts where only structural metadata is needed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Optional, Tuple
+
+from core.der_classification import DERClassification
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +128,43 @@ class IEEE39NetworkMeta:
 
     hv_networks: Tuple = field(default_factory=tuple)
     """HVNetworkInfo objects for attached 110 kV sub-networks (see add_hv_networks)."""
+
+    # ── DER grid-forming / grid-following classification ──────────────────────
+    der_classification: Optional[DERClassification] = None
+    """Per-DER classification mapping each TSO/DSO sgen index to either
+    ``GRID_FORMING`` (modeled as ``pp.gen``, OFO commands ``vm_pu``) or
+    ``GRID_FOLLOWING`` (modeled as ``pp.sgen``, OFO commands Q or V_ref).
+
+    Constructed by ``network/ieee39/build.py`` from the historical default
+    (TSO → grid-forming, DSO → grid-following) and optionally overridden
+    via ``MultiTSOConfig.der_mode_overrides``. After the build-time
+    promotion step, ``der_classification.gen_idx_of_der_id`` records the
+    new ``net.gen`` row for each promoted grid-forming unit so controllers
+    can locate it.
+
+    ``None`` indicates the legacy code path where every controllable
+    converter is treated as a current-source ``sgen``."""
+
+    # ── Grid-forming gen registries (populated by promotion step) ─────────────
+    tso_grid_forming_gen_indices: Tuple[int, ...] = field(default_factory=tuple)
+    """``net.gen`` row indices for the TSO-connected grid-forming converters
+    promoted from ``net.sgen`` by ``apply_der_classification``. The TSO
+    OFO commands ``vm_pu`` on each of these. ``tso_der_indices`` is pruned
+    of these units after promotion (it then lists only grid-following
+    sgens), so the two registries together cover the full TSO DER set
+    classified for OFO control."""
+
+    tso_grid_forming_gen_buses: Tuple[int, ...] = field(default_factory=tuple)
+    """Bus index of each gen in ``tso_grid_forming_gen_indices`` (same
+    order). Same buses as the original sgens before promotion."""
+
+    dso_grid_forming_gen_indices: Tuple[int, ...] = field(default_factory=tuple)
+    """Same as ``tso_grid_forming_gen_indices`` but for any DSO-connected
+    DERs reclassified to grid-forming via ``der_mode_overrides``. Empty
+    under the default classification (all DSO DERs are grid-following)."""
+
+    dso_grid_forming_gen_buses: Tuple[int, ...] = field(default_factory=tuple)
+    """Bus index for each entry in ``dso_grid_forming_gen_indices``."""
 
 
 # ---------------------------------------------------------------------------

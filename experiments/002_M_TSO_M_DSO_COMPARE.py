@@ -88,36 +88,42 @@ def make_base_config() -> MultiTSOConfig:
       for post-hoc comparison plots instead.
     """
     cfg = MultiTSOConfig(
-        n_total_s    = 60.0 * 60 * 5,    # 4-hour full simulation
-        tso_period_s = 60.0 * 3,          # TSO every 3 minutes
-        dso_period_s = 20.0,              # DSO at fastest viable cadence
-        g_v          = 150000.0,
-        g_q          = 200,
-        tso_g_q_tie  = 2,
-        g_z_q_gen    = 1E1,
-        # ── DSO objective tuning ──────────────────────────────────────
-        dso_g_v                  = 20000.0,
-        dso_g_qi                 = 0,
-        dso_lambda_qi            = 0.9,
-        dso_q_integral_max_mvar  = 50.0,
-        dso_gamma_oltc_q         = 0.0,
-        # ── TSO weights ──────────────────────────────────────────────
+        n_total_s=60.0 * 60 * 5,      # 720-min full simulation
+        tso_period_s=60.0 * 3,    # TSO every 3 minutes
+        dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
+        g_v=500000.0,  # TSO voltage tracking; drives PCC Q dispatch
+        g_q=200,  # DSO Q-tracking
+        # ── DSO objective tuning ──
+        use_qv_local_loop=True,
+        force_all_der_grid_following=False,
+        dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
+        dso_g_qi=0,  # integral Q-tracking (0 = off)
+        dso_lambda_qi=0.9,  # leaky integrator decay
+        dso_q_integral_max_mvar=50.0,  # anti-windup clamp
+        dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
+        # ── TSO weights (alpha=1, spectral rho(C)/2) ──
+        g_w_der=10,   # single-DER zones; rho~C_jj=396 -> min 198
+        g_w_gridforming= 5E6,
+        g_w_gen=5e7,   # excluded from stability
+        g_w_pcc=50,   # 9 correlated PCCs; rho(C)=221 -> min 111
+        g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
-        g_w_der      = 10,
-        g_w_gen      = 5e7,
-        g_w_pcc      = 50,
-        g_w_tso_oltc = 100,
-        g_w_tso_shunt=50000,
-        # ── DSO weights ──────────────────────────────────────────────
-        g_w_dso_der  = 1000,
-        g_w_dso_oltc = 20,
+        g_w_tso_shunt=10000,   # bipolar tertiary shunts; mirror g_w_tso_oltc
+        # ── DSO weights (alpha=1, rho(C_DER)=790 -> min 395) ──
+        g_w_dso_der=1000,  # 8 correlated DER; sf~2.5 for smooth tracking
+        g_w_dso_der_vref=1E6,
+        g_w_dso_oltc=20,   # rho(C_OLTC)~1.1; higher for switching suppression
+        # ── Adaptive g_w (paper Eq.16, sign-only) — all continuous classes ──
+        # `g_w_*` values above become the warm-start; the meta below
+        # controls the multiplicative rate and clip box.  Discrete
+        # actuators (OLTC, shunt) intentionally left static.
         use_fixed_zones              = True,
         run_stability_analysis       = False,
         sensitivity_update_interval  = int(1e6),
         verbose                      = 1,
         # Live plots forced OFF for sequential comparison sweep.
-        live_plot_controller = True,
-        live_plot_cascade    = True,
+        live_plot_controller = False,
+        live_plot_cascade    = False,
         live_plot_system     = False,
         # ── Profile & contingency settings ───────────────────────────
         start_time              = datetime(2016, 1, 5, 8, 0),
@@ -126,12 +132,12 @@ def make_base_config() -> MultiTSOConfig:
         contingencies           = [
             ContingencyEvent(minute=60,  element_type="gen",  element_index=2, action="trip"),
             ContingencyEvent(minute=100, element_type="gen",  element_index=2, action="restore"),
-            ContingencyEvent(minute=120, element_type="load", bus=2,  p_mw=200, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=240, element_type="load", bus=2,  p_mw=200, q_mvar=100, action="trip"),
-            # ContingencyEvent(minute=240, element_type="load", bus=14, p_mw=200, q_mvar=100, action="connect"),
-            # ContingencyEvent(minute=330, element_type="load", bus=14, p_mw=200, q_mvar=100, action="trip"),
-            ContingencyEvent(minute=180, element_type="gen",  element_index=2, action="trip"),
-            ContingencyEvent(minute=280, element_type="gen",  element_index=2, action="restore"),
+            ContingencyEvent(minute=120, element_type="load", bus=2,  p_mw=300, q_mvar=150, action="connect"),
+            ContingencyEvent(minute=240, element_type="load", bus=2,  p_mw=300, q_mvar=150, action="trip"),
+            ContingencyEvent(minute=150, element_type="load", bus=14, p_mw=100, q_mvar=50, action="connect"),
+            ContingencyEvent(minute=160, element_type="load", bus=14, p_mw=100, q_mvar=50, action="trip"),
+            ContingencyEvent(minute=180, element_type="gen",  element_index=5, action="trip"),
+            ContingencyEvent(minute=280, element_type="gen",  element_index=5, action="restore"),
             # ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
             # ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
             # ContingencyEvent(minute=720, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="connect"),
@@ -144,26 +150,45 @@ def make_base_config() -> MultiTSOConfig:
 
 
 SCENARIOS: Dict[str, Dict[str, Any]] = {
+    # ── Historical baselines (L0/L1/L2) ─────────────────────────────────
+    # Force every TSO converter to remain a current-source ``pp.sgen``
+    # (matching the pre-Stage-1 model these baselines were defined for)
+    # and disable the new plant-side Q(V) local loop (the legacy
+    # cos_phi_1 / characteristic_control install handles the plant
+    # behavior in local mode).
     "L0":  dict(
         tso_mode="local", tso_local_mode="cos_phi_1",
         dso_mode="local", local_der_mode="cos_phi_1",
+        use_qv_local_loop=False,
+        force_all_der_grid_following=True,
     ),
     "L1":  dict(
         tso_mode="local", tso_local_mode="qv",
         tso_qv_setpoint_pu=1.03, tso_qv_slope_pu=0.07,
         dso_mode="local", local_der_mode="cos_phi_1",
+        use_qv_local_loop=False,
+        force_all_der_grid_following=True,
     ),
     "L2":  dict(
         tso_mode="local", tso_local_mode="qv",
         tso_qv_setpoint_pu=1.03, tso_qv_slope_pu=0.07,
         dso_mode="local", local_der_mode="qv",
         qv_setpoint_pu=1.03, qv_slope_pu=0.07,
+        use_qv_local_loop=False,         # legacy install handles plant Q(V)
+        force_all_der_grid_following=True,
     ),
+    # ── OFO scenarios ───────────────────────────────────────────────────
+    # T-OFO: TSO uses the new OFO (grid-forming gens stay).  DSO is
+    # local with legacy Q(V) install, so disable the new plant loop here
+    # too to avoid duplicate Q(V) controllers per sgen.
     "T-OFO": dict(
         tso_mode="ofo",
         dso_mode="local", local_der_mode="qv",
         qv_setpoint_pu=1.03, qv_slope_pu=0.07,
+        use_qv_local_loop=False,
     ),
+    # C-OFO: full Stage-1 + Stage-2 cascade architecture; keep the base
+    # config's use_qv_local_loop=True / force_all_der_grid_following=False.
     "C-OFO": dict(
         tso_mode="ofo",
         dso_mode="ofo",

@@ -2557,7 +2557,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             _apply_local_tso()
             pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
                      max_iteration=50,
-                     max_iter=100,
+                     max_iter=500,
                      distributed_slack=config.distributed_slack,
                      enforce_q_lims=config.enforce_q_lims_plant)
             if _oltc_limiter_active:
@@ -2624,7 +2624,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                     pp.runpp(net, run_control=_run_control,
                              calculate_voltage_angles=True,
                              max_iteration=50,
-                             max_iter=100,
+                             max_iter=500,
                              distributed_slack=config.distributed_slack)
                     pf_converged = True
                 except LoadflowNotConverged:
@@ -2644,7 +2644,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                         pp.runpp(net, run_control=_run_control,
                                  calculate_voltage_angles=True,
                                  max_iteration=100,
-                                 max_iter=100,
+                                 max_iter=500,
                                  distributed_slack=config.distributed_slack,
                                  enforce_q_lims=True,
                                  init="flat")
@@ -2961,7 +2961,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             try:
                 pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
                          max_iteration=50,
-                         max_iter=100,
+                         max_iter=500,
                          distributed_slack=config.distributed_slack,
                          enforce_q_lims=config.enforce_q_lims_plant)
             except LoadflowNotConverged:
@@ -2983,7 +2983,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 pp.runpp(net, run_control=_run_control,
                          calculate_voltage_angles=True,
                          max_iteration=100,
-                         max_iter=100,
+                         max_iter=500,
                          distributed_slack=config.distributed_slack,
                          enforce_q_lims=False,
                          init='flat')

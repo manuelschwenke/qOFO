@@ -911,98 +911,50 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         zone_map[z] = [b for b in zone_map[z] if b in existing_buses]
 
     # =========================================================================
-    # STEP 3b: DER grid-forming / grid-following classification + promotion
+    # STEP 3b: tag every DER with its q_mode (Soleimani §III-B Q_cor path)
     # =========================================================================
-    # Promotes every TSO-connected DER (and any DSO DER overridden via
-    # ``config.der_mode_overrides``) from net.sgen → net.gen with vm_pu
-    # control.  Classification result is stored on meta for downstream
-    # zone partitioning to find the new gens.
-    if config.use_q_cor_actuator:
-        # ── refactor_v2 path: Q_cor actuator (Soleimani §III-B) ──
-        # All DERs stay as pp.sgen (no promotion).  Tag every TSO and
-        # DSO sgen with its q_mode and parameters from the runner-level
-        # MultiTSOConfig hierarchy.  The plant-side controllers
-        # (QVLocalLoop / CosPhiConstLoop) read these columns each PF
-        # iteration.
-        if verbose >= 1:
-            print()
-            print("[3b] Tagging DER q_modes (refactor_v2 Q_cor path) ...")
-        meta = tag_der_q_modes(
-            net, meta,
-            tso_q_mode=config.tso_q_mode,
-            dso_q_mode=config.dso_q_mode,
-            q_mode_overrides=config.der_q_mode_overrides,
-            tso_qv_slope_pu=config.tso_qv_slope_pu,
-            dso_qv_slope_pu=config.dso_qv_slope_pu,
-            qv_slope_pu_overrides=config.der_qv_slope_pu_overrides,
-            tso_qv_vref_pu=config.tso_qv_vref_pu,
-            dso_qv_vref_pu=config.dso_qv_vref_pu,
-            qv_vref_pu_overrides=config.der_qv_vref_pu_overrides,
-            tso_qv_deadband_pu=config.tso_qv_deadband_pu,
-            dso_qv_deadband_pu=config.dso_qv_deadband_pu,
-            qv_deadband_pu_overrides=config.der_qv_deadband_pu_overrides,
-            tso_cosphi=config.tso_cosphi,
-            dso_cosphi=config.dso_cosphi,
-            cosphi_overrides=config.der_cosphi_overrides,
-            tso_cosphi_sign=config.tso_cosphi_sign,
-            dso_cosphi_sign=config.dso_cosphi_sign,
-            cosphi_sign_overrides=config.der_cosphi_sign_overrides,
-            verbose=(verbose >= 1),
-        )
+    # All DERs stay as pp.sgen.  Tag every TSO and DSO sgen with its
+    # q_mode and parameters from the runner-level MultiTSOConfig
+    # hierarchy.  The plant-side controllers (QVLocalLoop /
+    # CosPhiConstLoop) read these columns each PF iteration.
+    if verbose >= 1:
+        print()
+        print("[3b] Tagging DER q_modes ...")
+    meta = tag_der_q_modes(
+        net, meta,
+        tso_q_mode=config.tso_q_mode,
+        dso_q_mode=config.dso_q_mode,
+        q_mode_overrides=config.der_q_mode_overrides,
+        tso_qv_slope_pu=config.tso_qv_slope_pu,
+        dso_qv_slope_pu=config.dso_qv_slope_pu,
+        qv_slope_pu_overrides=config.der_qv_slope_pu_overrides,
+        tso_qv_vref_pu=config.tso_qv_vref_pu,
+        dso_qv_vref_pu=config.dso_qv_vref_pu,
+        qv_vref_pu_overrides=config.der_qv_vref_pu_overrides,
+        tso_qv_deadband_pu=config.tso_qv_deadband_pu,
+        dso_qv_deadband_pu=config.dso_qv_deadband_pu,
+        qv_deadband_pu_overrides=config.der_qv_deadband_pu_overrides,
+        tso_cosphi=config.tso_cosphi,
+        dso_cosphi=config.dso_cosphi,
+        cosphi_overrides=config.der_cosphi_overrides,
+        tso_cosphi_sign=config.tso_cosphi_sign,
+        dso_cosphi_sign=config.dso_cosphi_sign,
+        cosphi_sign_overrides=config.der_cosphi_sign_overrides,
+        verbose=(verbose >= 1),
+    )
 
-        # NB: install_der_q_loops is deferred to AFTER the Phase 1/2 OLTC
-        # init phases run.  If we install now, the plant-side QVLocalLoops
-        # (one per TSO + DSO DER) would run during Phase 1 alongside the
-        # temp PV gens used to seed STATCOM Q, and the inner-loop dynamics
-        # destabilise the init.  See "[3c-deferred]" below.
-        if verbose >= 1:
-            print(
-                f"[3c] Q_cor mode: deferred plant-side loop install for "
-                f"{len(meta.tso_der_indices)} TSO + "
-                f"{len(meta.dso_der_indices)} DSO DERs until after "
-                f"Phase 1/2 OLTC init."
-            )
-    else:
-        # Legacy path (sgen→gen promotion + grid-forming/grid-following)
-        if verbose >= 1:
-            print()
-            print("[3b] Classifying DERs (grid-forming / grid-following) ...")
-        # Convenience: force every TSO-side DER to grid-following for the
-        # all-direct-Q ablation baseline.  Per-DER overrides still win for
-        # any keys already set in the dict.
-        _overrides = dict(config.der_mode_overrides)
-        if config.force_all_der_grid_following:
-            for s_id in meta.tso_der_indices:
-                _overrides.setdefault(int(s_id), "grid_following")
-            if verbose >= 1:
-                print(f"      force_all_der_grid_following=True: marked "
-                      f"{len(meta.tso_der_indices)} TSO sgens as grid-following")
-        meta = apply_der_classification(
-            net, meta,
-            overrides=_overrides,
-            enforce_q_lims_in_pf=config.enforce_q_lims_plant,
-            verbose=(verbose >= 1),
+    # NB: install_der_q_loops is deferred to AFTER the Phase 1/2 OLTC
+    # init phases run.  If we install now, the plant-side QVLocalLoops
+    # (one per TSO + DSO DER) would run during Phase 1 alongside the
+    # temp PV gens used to seed STATCOM Q, and the inner-loop dynamics
+    # destabilise the init.  See "[3c-deferred]" below.
+    if verbose >= 1:
+        print(
+            f"[3c] Deferred plant-side loop install for "
+            f"{len(meta.tso_der_indices)} TSO + "
+            f"{len(meta.dso_der_indices)} DSO DERs until after "
+            f"Phase 1/2 OLTC init."
         )
-
-        # ── Stage-2: Install plant-side Q(V) local loops on grid-following DERs ──
-        if config.use_qv_local_loop and meta.der_classification is not None:
-            gf_following_sgens = [
-                int(s) for s in meta.der_classification.grid_following_der_ids()
-                if s in net.sgen.index
-            ]
-            if gf_following_sgens:
-                n_qv = len(install_qv_local_loops(
-                    net, gf_following_sgens,
-                    slope_pu=config.qv_slope_pu,
-                    damping=config.qv_local_damping,
-                    max_step_frac=config.qv_local_max_step_frac,
-                    tol_mvar=config.qv_local_tol_mvar,
-                ))
-                if verbose >= 1:
-                    print(
-                        f"[3c] Installed {n_qv} Q(V) local loops "
-                        f"(slope={config.qv_slope_pu}, V_ref init=1.03 pu)"
-                    )
 
     # =========================================================================
     # STEP 4: Build ZoneDefinitions and TSOControllerConfigs
@@ -3550,25 +3502,29 @@ def main() -> None:
         g_q=200,  # DSO Q-tracking
         tso_g_q_tie=10,
         # ── DSO objective tuning ──
-        use_qv_local_loop=False,
-        force_all_der_grid_following=True,
+        # use_q_cor_actuator defaults to True (refactor_v2 Soleimani §III-B);
+        # use_qv_local_loop=True is implied so the plant-side QVLocalLoops
+        # install on every DER.
+        use_qv_local_loop=True,
         dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.9,  # leaky integrator decay
         dso_q_integral_max_mvar=50.0,  # anti-windup clamp
         dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
-        # ── TSO weights (alpha=1, spectral rho(C)/2) ──
-        g_w_der=10,   # single-DER zones; rho~C_jj=396 -> min 198
-        g_w_gridforming= 5E6,
-        g_w_gen=5e7,   # excluded from stability
-        g_w_pcc=50,   # 9 correlated PCCs; rho(C)=221 -> min 111
+        # ── TSO weights — re-tuned for Q_cor closed-loop curvature ──
+        # Under Q_cor the H matrix is post-multiplied by T'=(I+R*S_VQ)^-1,
+        # which reduces curvature by ~3x on DSO and ~80x on TSO.  Start
+        # at ~1/3 (DSO) to ~1/80 (TSO STATCOMs) of the legacy direct-Q
+        # values and sweep from there.
+        g_w_der=3,    # was 20 (direct-Q); T-STATCOM curvature ~80x lower under T'
+        g_w_gen=5e7,
+        g_w_pcc=50,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
-        g_w_tso_shunt=10000,   # bipolar tertiary shunts; mirror g_w_tso_oltc
-        # ── DSO weights (alpha=1, rho(C_DER)=790 -> min 395) ──
-        g_w_dso_der=2000,  # 2026-05-04: 500 caused massive DSO Q chatter; backed off toward 1000 per plan fallback. Per-step decay 0.286 (vs 0.20 at 1000, 0.40 at 500). Still > floor 395.
-        g_w_dso_der_vref=1E6,
-        g_w_dso_oltc=40,   # rho(C_OLTC)~1.1; higher for switching suppression
+        g_w_tso_shunt=10000,
+        # ── DSO weights ──
+        g_w_dso_der=600,  # was 1000 (direct-Q); ~3x lower curvature under T'
+        g_w_dso_oltc=40,
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps

@@ -449,7 +449,7 @@ class MultiTSOConfig:
     # ------------------------------------------------------------------
     #  Q_cor actuator master switch (refactor_v2, Soleimani §III-B)
     # ------------------------------------------------------------------
-    use_q_cor_actuator: bool = False
+    use_q_cor_actuator: bool = True
     """Master switch for the refactor_v2 Q_cor path.  When True, the
     runner:
 

@@ -1872,11 +1872,16 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # so each gets its level-appropriate convergence tolerance
     # (TSO: 0.1 Mvar, DSO: 0.01 Mvar by default).
     #
-    # Seed each DER's q_mvar with the steady-state droop target
-    # Q* = clip(q_cor − R·(V − V_ref), Q_min, Q_max) computed from the
-    # current bus voltage.  This way the QVLocalLoops are installed at
-    # their equilibrium and the post-Phase-2 re-converge runpp does
-    # not have to chase a 100-Mvar transient through 200 iterations.
+    # Seed each DER's q_mvar with a *damped* fraction of the steady-state
+    # droop target so the QVLocalLoops install close to (but not exactly
+    # at) their open-loop target.  The closed-loop equilibrium is
+    #     Q* = -R*(V_0 - V_ref) / (1 + R*S_VQ)
+    # which is ~1/(1+R*S_VQ) ≈ 10% of the open-loop droop response on
+    # TSO STATCOMs.  We seed at 0.1 * open-loop, which is small enough
+    # to keep the inner Newton-Raphson well-conditioned and large enough
+    # to skip the costly transient that q_mvar=0 would trigger.  The
+    # damping factor is conservative; the loops converge the rest in a
+    # few iterations.
     if config.use_q_cor_actuator:
         from controller.der_qv_local_loop import _qv_capability
         tso_sgens = [int(s) for s in meta.tso_der_indices
@@ -1915,7 +1920,12 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 op = (str(net.sgen.at[s, "op_diagram"])
                       if "op_diagram" in net.sgen.columns else "VDE-AR-N-4120-v2")
                 q_min, q_max = _qv_capability(sn, op, p)
-                q_star = float(max(min(q_star, q_max), q_min))
+                # Damp open-loop seed to ~10% so we land near the
+                # closed-loop equilibrium without breaking inner-NR
+                # convergence.  Empirically 0.1 keeps |delta-Q per DER|
+                # below ~10 Mvar even for STATCOMs and the QVLocalLoops
+                # converge the residual in ≤ 30 controller iterations.
+                q_star = 0.1 * float(max(min(q_star, q_max), q_min))
             net.sgen.at[s, "q_mvar"] = q_star
 
         n_tso = len(install_der_q_loops(
@@ -2001,8 +2011,16 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # state has changed since; running this PF again is redundant.
     if _run_control or _local_dso or _local_tso:
         _t = perf_counter()
-        pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
-                 max_iteration=50, max_iter=200,
+        # Q_cor mode: run PF *without* the plant-side controllers here.
+        # Phase 2 already left the network at a converged operating
+        # point; the QVLocalLoops install at a 10%-damped droop seed
+        # (above) and then iterate inside the first main-loop runpp.
+        # Running run_control=True here forces NR to digest a 44-DER
+        # Q step in one call, which makes inner NR ill-conditioned on
+        # large profiles (long sims with contingencies).
+        _rc_flag = False if config.use_q_cor_actuator else _run_control
+        pp.runpp(net, run_control=_rc_flag, calculate_voltage_angles=True,
+                 max_iteration=50,
                  distributed_slack=config.distributed_slack,
                  enforce_q_lims=config.enforce_q_lims_plant)
         if verbose >= 1:

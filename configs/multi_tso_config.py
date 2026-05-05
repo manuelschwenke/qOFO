@@ -703,17 +703,25 @@ class MultiTSOConfig:
 
     Upper bound on the DSO V_ref OFO variable (Stage 2)."""
 
-    qv_local_damping: float = 0.5
+    qv_local_damping: float = 0.05
     """Damping factor for the Q(V) local loop iteration.
 
-    Closed-loop iteration contraction factor: ``|1 − damping·(1 + K·S_VQ)|``.
-    With the corrected ``S_VQ`` units (``dV_pu / dQ_Mvar``, divided by
-    the system base ``net.sn_mva``), typical HV S_VQ ≈ 1e-3 pu/Mvar.
-    For ``K = S_n/0.07`` and S_n ~ 50 Mvar, ``K·S_VQ ≈ 0.7``, so
-    damping=0.5 gives contraction ≈ ``|1 − 0.5·1.7| = 0.15`` —
-    converges in ~10 iterations.  Larger damping (up to ~1.17) is also
-    stable but risks overshoot for STATCOM-class units (S_n ~600 Mvar)
-    where ``K·S_VQ`` can reach ~3-4."""
+    Per-DER contraction: ``|1 − damping·(1 + K·S_VQ)|`` where K = S_n/slope.
+    Multi-DER coupling makes the effective spectral radius of (R · S_VQ)
+    larger than the diagonal — empirically ~3–4× on the IEEE 39-bus
+    with 44 coupled DERs, so the per-DER damping that converges in
+    isolation can diverge under coupling.
+
+    Default 0.05 keeps the system stable at 24-hour profile sweeps with
+    DSO STATCOMs (R·S_VQ ≈ 0.7) and is paired with an additional
+    automatic clamp to 0.03 for TSO STATCOMs (R·S_VQ ≈ 8) inside the
+    runner's [3c-deferred] step.
+
+    Was 0.5 in the pre-refactor_v2 config.  That value was tuned for
+    the DSO-only STATCOM regime exercised by the legacy stage2 smoke
+    (where TSO converters were promoted to gens and never installed
+    QVLocalLoops), but is unstable under the refactor_v2 Q_cor path
+    where every DER — TSO + DSO — runs a QVLocalLoop concurrently."""
 
     qv_local_max_step_frac: float = 1.0
     """Per-iteration step cap on the Q(V) damped update, as a fraction

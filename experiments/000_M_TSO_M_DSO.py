@@ -1928,9 +1928,17 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 q_star = 0.1 * float(max(min(q_star, q_max), q_min))
             net.sgen.at[s, "q_mvar"] = q_star
 
+        # NOTE: with 44 DERs coupled via the bus admittance, the per-DER
+        # contraction analysis (|1 − α·(1+R·S_VQ)|) underestimates the
+        # actual closed-loop spectral radius; the largest eigenvalue of
+        # (R · S_VQ) on a 44-DER system can be 3–4× the diagonal value.
+        # Use a much smaller damping for TSO (where R is largest) than
+        # for DSO.  The legacy use_qv_local_loop=True path used a
+        # single global damping; here we set per-level values.
+        tso_damping = min(config.qv_local_damping, 0.03)
         n_tso = len(install_der_q_loops(
             net, tso_sgens,
-            qv_damping=config.qv_local_damping,
+            qv_damping=tso_damping,
             qv_max_step_frac=config.qv_local_max_step_frac,
             qv_tol_mvar=config.tso_qv_tol_mvar,
         )) if tso_sgens else 0

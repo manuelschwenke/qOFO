@@ -77,10 +77,9 @@ def main() -> None:
         # Default tso_q_mode="qv" — exercise QVLocalLoop on TSO STATCOMs too
         tso_qv_vref_pu=1.03,
         dso_qv_vref_pu=1.03,
-        qv_local_damping=0.1,
-        qv_local_max_step_frac=1.0,
-        # Per-level tolerances now come from MultiTSOConfig defaults:
-        # tso_qv_tol_mvar=0.1, dso_qv_tol_mvar=0.01.  No override here.
+        # qv_local_damping defaults to 0.05 (MultiTSOConfig); the runner
+        # also auto-clamps TSO DERs to 0.03.  No override needed.
+        # Per-level tolerances default to tso=0.1 / dso=0.01 Mvar.
     )
     print(f"\n[smoke_q_cor] use_q_cor_actuator={cfg.use_q_cor_actuator} "
           f"use_qv_local_loop={cfg.use_qv_local_loop}")

@@ -547,6 +547,19 @@ class MultiTSOConfig:
     der_cosphi_sign_overrides: Dict[int, int] = field(default_factory=dict)
     """Per-DER override of the cosphi sign."""
 
+    # -- Plant-side Q(V) loop convergence tolerance (per level) --------
+    tso_qv_tol_mvar: float = 0.1
+    """Convergence tolerance for the plant-side QVLocalLoop on TSO
+    DERs (Mvar).  Transmission STATCOMs are large (S_n ≈ 600 Mvar) so
+    very tight tolerances cost iterations without operational benefit;
+    0.1 Mvar is a reasonable T-side accuracy."""
+
+    dso_qv_tol_mvar: float = 0.01
+    """Convergence tolerance for the plant-side QVLocalLoop on DSO
+    DERs (Mvar).  DSO sgens are smaller (S_n ≈ 30–50 Mvar) and the
+    OFO benefits from sub-Mvar accuracy at the interface; keep tight
+    (0.01 Mvar)."""
+
     # ------------------------------------------------------------------
     #  Legacy fields (slated for removal in refactor_v2 commit 7)
     # ------------------------------------------------------------------

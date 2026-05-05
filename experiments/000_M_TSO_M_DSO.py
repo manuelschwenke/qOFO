@@ -142,7 +142,7 @@ from experiments.helpers import (
     prepare_load_contingencies,
 )
 from sensitivity.jacobian import JacobianSensitivities
-from core.message import ShuntDisturbanceMessage
+from core.message import SetpointMessage, ShuntDisturbanceMessage
 from controller.der_qv_local_loop import (
     CosPhiConstLoop,
     QVLocalLoop,
@@ -950,27 +950,18 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             verbose=(verbose >= 1),
         )
 
-        # Install plant-side controllers for every tagged DER.  Dispatcher
-        # picks QVLocalLoop or CosPhiConstLoop per row based on q_mode.
-        all_der_sgens = [
-            int(s) for s in (
-                list(meta.tso_der_indices) + list(meta.dso_der_indices)
+        # NB: install_der_q_loops is deferred to AFTER the Phase 1/2 OLTC
+        # init phases run.  If we install now, the plant-side QVLocalLoops
+        # (one per TSO + DSO DER) would run during Phase 1 alongside the
+        # temp PV gens used to seed STATCOM Q, and the inner-loop dynamics
+        # destabilise the init.  See "[3c-deferred]" below.
+        if verbose >= 1:
+            print(
+                f"[3c] Q_cor mode: deferred plant-side loop install for "
+                f"{len(meta.tso_der_indices)} TSO + "
+                f"{len(meta.dso_der_indices)} DSO DERs until after "
+                f"Phase 1/2 OLTC init."
             )
-            if int(s) in net.sgen.index
-        ]
-        if all_der_sgens:
-            n_loops = len(install_der_q_loops(
-                net, all_der_sgens,
-                qv_damping=config.qv_local_damping,
-                qv_max_step_frac=config.qv_local_max_step_frac,
-                qv_tol_mvar=config.qv_local_tol_mvar,
-            ))
-            if verbose >= 1:
-                print(
-                    f"[3c] Installed {n_loops} DER q_mode loops "
-                    f"({len(meta.tso_der_indices)} TSO + "
-                    f"{len(meta.dso_der_indices)} DSO)"
-                )
     else:
         # Legacy path (sgen→gen promotion + grid-forming/grid-following)
         if verbose >= 1:
@@ -1490,6 +1481,18 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     _t_step6 = perf_counter()
     cls = meta.der_classification
     for hv in meta.hv_networks if config.dso_mode != "local" else []:
+        # Allow-list filter: when ``config.dso_ids_to_run`` is non-empty the
+        # runner constructs OFO controllers only for the listed DSOs.  The
+        # remaining HV sub-networks still exist in the plant network and
+        # exchange power through their coupling 3W transformers, but they
+        # have no OFO controller — their DERs run only the plant-side
+        # Q(V) / cos(phi) loop and their OLTC taps stay at the value
+        # computed during the OLTC initialisation phase.  Used by
+        # ``003_M_DSO_CIGRE_2026.py`` to focus the optimisation on DSO_2.
+        if config.dso_ids_to_run and hv.net_id not in config.dso_ids_to_run:
+            if verbose >= 1:
+                print(f"  [6] {hv.net_id}: skipped (not in dso_ids_to_run)")
+            continue
         dso_id = hv.net_id  # e.g. "DSO_1"
         interface_trafos = list(hv.coupling_trafo_indices)
         # Split this HV's DERs by grid-forming / grid-following classification.
@@ -1903,13 +1906,52 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         if hasattr(net, "controller") and len(net.controller) > 0:
             drop_idx = [
                 idx for idx, row in net.controller.iterrows()
-                if not isinstance(row["object"], QVLocalLoop)
+                if not isinstance(row["object"], (QVLocalLoop, CosPhiConstLoop))
             ]
             if drop_idx:
                 net.controller.drop(index=drop_idx, inplace=True)
     elif verbose >= 1:
         print(f"  [local DSO] Kept {len(net.controller)} coupler OLTC "
               f"DiscreteTapControl(s) active for simulation.")
+
+    # ── refactor_v2 [3c-deferred]: install plant-side q_mode loops ──
+    # Phase 1/2 init has settled; now install QVLocalLoop / CosPhiConstLoop
+    # on every tagged DER so the local Q(V) feedback runs through the
+    # main loop alongside the OFO.  TSO and DSO DERs install separately
+    # so each gets its level-appropriate convergence tolerance
+    # (TSO: 0.1 Mvar, DSO: 0.01 Mvar by default).
+    if config.use_q_cor_actuator:
+        tso_sgens = [int(s) for s in meta.tso_der_indices
+                     if int(s) in net.sgen.index]
+        dso_sgens = [int(s) for s in meta.dso_der_indices
+                     if int(s) in net.sgen.index]
+        # Zero Q on every q_mode DER so the QVLocalLoops start from
+        # equilibrium with q_cor_mvar=0.  Phase 1 transferred a non-zero
+        # Q to TSO STATCOMs from the temp PV gens; in Q_cor mode that Q
+        # is reconstructed from the droop (Q = q_cor − R·(V−V_ref)) so
+        # we discard the transferred value and let the loop iterate.
+        for s in tso_sgens + dso_sgens:
+            net.sgen.at[s, "q_mvar"] = 0.0
+            net.sgen.at[s, "q_cor_mvar"] = 0.0
+        n_tso = len(install_der_q_loops(
+            net, tso_sgens,
+            qv_damping=config.qv_local_damping,
+            qv_max_step_frac=config.qv_local_max_step_frac,
+            qv_tol_mvar=config.tso_qv_tol_mvar,
+        )) if tso_sgens else 0
+        n_dso = len(install_der_q_loops(
+            net, dso_sgens,
+            qv_damping=config.qv_local_damping,
+            qv_max_step_frac=config.qv_local_max_step_frac,
+            qv_tol_mvar=config.dso_qv_tol_mvar,
+        )) if dso_sgens else 0
+        if verbose >= 1:
+            print(
+                f"[3c-deferred] Installed {n_tso + n_dso} DER q_mode loops "
+                f"({n_tso} TSO @ tol={config.tso_qv_tol_mvar} Mvar + "
+                f"{n_dso} DSO @ tol={config.dso_qv_tol_mvar} Mvar) "
+                f"post Phase 2; reset DER Q to 0."
+            )
 
     if _local_dso:
         n_dso_sgen = sum(len(hv.sgen_indices) for hv in meta.hv_networks)
@@ -1975,7 +2017,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     if _run_control or _local_dso or _local_tso:
         _t = perf_counter()
         pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
-                 max_iteration=50,
+                 max_iteration=50, max_iter=200,
                  distributed_slack=config.distributed_slack,
                  enforce_q_lims=config.enforce_q_lims_plant)
         if verbose >= 1:
@@ -2362,7 +2404,12 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     _tso_der_idx_list: List[int] = [int(s) for s in meta.tso_der_indices]
     if _local_tso:
         # (1) Windpark Q control
-        if _tso_der_idx_list:
+        # When the refactor_v2 q_mode plant model is active, every TSO
+        # sgen already has a QVLocalLoop / CosPhiConstLoop installed by
+        # ``install_der_q_loops`` in step [3c].  Installing the legacy
+        # CharacteristicControl on top would create two controllers per
+        # sgen and cause runaway Q oscillation, so skip the legacy path.
+        if _tso_der_idx_list and not config.use_q_cor_actuator:
             if config.tso_local_mode == "qv":
                 install_qv_characteristic_controllers(
                     net, _tso_der_idx_list,
@@ -2380,6 +2427,10 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 if verbose >= 1:
                     print(f"  [local TSO] Forced cos phi=1 (Q=0) on "
                           f"{len(_tso_der_idx_list)} windpark sgens")
+        elif _tso_der_idx_list and config.use_q_cor_actuator and verbose >= 1:
+            print(f"  [local TSO] q_mode plant model active "
+                  f"({len(_tso_der_idx_list)} sgens); legacy "
+                  f"CharacteristicControl install skipped.")
 
         # (2) Pin generator AVR setpoints
         net.gen.loc[:, "vm_pu"] = float(config.v_setpoint_pu)
@@ -2409,8 +2460,16 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
         every pp.runpp(run_control=True) using the current bus voltage.
         For cos phi=1 mode the profile may have rewritten q_mvar (e.g. via
         apply_profiles); re-zero it here so the next PF sees Q=0.
+
+        Under the refactor_v2 q_mode plant model
+        (``config.use_q_cor_actuator=True``), every TSO sgen runs its own
+        plant-side controller (QVLocalLoop / CosPhiConstLoop) which fully
+        replaces the legacy CharacteristicControl / cos_phi_one wiring,
+        so this re-apply step is a no-op then.
         """
         if not _local_tso or not _tso_der_idx_list:
+            return
+        if config.use_q_cor_actuator:
             return
         if config.tso_local_mode == "cos_phi_1":
             install_cos_phi_one(net, _tso_der_idx_list)
@@ -2828,6 +2887,35 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                             msg.q_setpoints_mvar.copy()
                         )
 
+        # Exogenous Q-setpoint injection for the no-TSO-OFO branch.  Used
+        # by 003_M_DSO_CIGRE_2026 to push externally-defined Q_PCC setpoints
+        # to one or more DSOs while ``tso_mode='local'`` keeps the TSO
+        # layer purely under local Q(V) control.  Only runs when the TSO
+        # OFO setpoint dispatch above is inactive (``_local_tso=True``)
+        # AND the runner config supplies a setpoint dictionary.
+        if (
+            run_tso
+            and _local_tso
+            and config.q_pcc_setpoints_mvar_per_dso
+        ):
+            for dso_id, q_vec in config.q_pcc_setpoints_mvar_per_dso.items():
+                if dso_id not in dso_controllers:
+                    continue
+                dso_ctrl_t = dso_controllers[dso_id]
+                msg = SetpointMessage(
+                    source_controller_id="exogenous",
+                    target_controller_id=dso_id,
+                    iteration=step,
+                    interface_transformer_indices=np.array(
+                        dso_ctrl_t.config.interface_trafo_indices,
+                        dtype=np.int64,
+                    ),
+                    q_setpoints_mvar=np.asarray(q_vec, dtype=np.float64),
+                )
+                dso_ctrl_t.receive_setpoint(msg)
+                rec.dso_q_set_mvar[dso_id] = float(msg.q_setpoints_mvar.sum())
+                last_dso_q_set_mvar[dso_id] = msg.q_setpoints_mvar.copy()
+
         # ── DSO step (all zones) ──────────────────────────────────────────────
         if run_dso and not _local_dso:
             for dso_id, dso_ctrl in dso_controllers.items():
@@ -2931,10 +3019,12 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 )
                 rec.dso_q_actual_mvar[dso_id] = q_actual_sum
 
+            # Iterate only over DSOs with constructed OFO controllers
+            # (``config.dso_ids_to_run`` may have restricted the set).
             _record_dso_group_and_transformer_data(
                 rec=rec,
                 net=net,
-                dso_ids=dso_ids,
+                dso_ids=list(dso_controllers.keys()),
                 dsocontrollers=dso_controllers,
                 dso_group_map=dso_group_map,
                 last_dso_q_set_mvar=last_dso_q_set_mvar,
@@ -3453,12 +3543,12 @@ def main() -> None:
     """
 
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 8,      # 720-min full simulation
+        n_total_s=60.0 * 60 * 24,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
-        dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
+        dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
         g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=200,  # DSO Q-tracking
-        tso_g_q_tie=1,
+        tso_g_q_tie=10,
         # ── DSO objective tuning ──
         use_qv_local_loop=False,
         force_all_der_grid_following=True,

@@ -609,6 +609,283 @@ def remove_qv_local_loops(net: pp.pandapowerNet) -> int:
     return len(drop_idx)
 
 
+def seed_qv_equilibrium(
+    net: pp.pandapowerNet,
+    sgen_indices: Sequence[int],
+    sensitivities,
+    *,
+    verbose: bool = False,
+) -> int:
+    """Seed ``net.sgen.q_mvar`` with the linear closed-loop equilibrium of
+    every q_mode == 'qv' DER in *sgen_indices*, plus the fixed-cosphi Q
+    for q_mode == 'cosphi' DERs.  Used as a warm start before
+    ``pp.runpp(run_control=True)`` so the QVLocalLoops install/iterate
+    near their attractor — drastically reducing the controller-iteration
+    count and avoiding the multi-DER coupling instability of pure
+    Gauss-Jacobi iteration on a stiff network.
+
+    Math (Soleimani §IV-B, eq. 18 generalised to arbitrary current state):
+
+    For DERs in the linear segment (no deadband, not saturated), the
+    closed-loop equilibrium around the *current* PF state ``(V_c, Q_c)``
+    is
+
+    ::
+
+        Q* = (I + R · S_VQ)^{-1} · [
+                q_cor − R·(V_c − V_ref) + R · S_VQ · Q_c
+             ]
+
+    where:
+
+    * ``R = diag(S_n,i / qv_slope_pu,i)`` per DER (Mvar/pu_v).
+    * ``S_VQ`` is the bus-to-bus voltage-Q sensitivity at the DER buses,
+      sliced from ``sensitivities.dV_dQ_reduced`` (units fix below).
+    * ``V_c`` is the current bus voltage from ``net.res_bus.vm_pu``.
+    * ``Q_c`` is the current sgen reactive power from
+      ``net.res_sgen.q_mvar``.  When called BEFORE the first PF (no
+      ``res_bus``/``res_sgen`` yet) the function falls back to
+      ``Q_c = 0`` and ``V_c = qv_vref_pu`` per DER, which makes the
+      formula collapse to ``Q* = (I + R·S_VQ)^{-1} · q_cor``.
+
+    Boundary handling (active set, single pass):
+
+    * **Deadband**: after the linear solve, recompute the predicted
+      ``V_eff = V_c + S_VQ·(Q*−Q_c) − V_ref − Q_cor/R`` per DER; if
+      ``|V_eff| ≤ qv_deadband_pu`` the DER is set to Q = 0.
+    * **Saturation**: clip per-DER to ``[Q_min(P), Q_max(P)]``.
+
+    Both clips are first-pass approximations; the QVLocalLoops still
+    iterate inside ``pp.runpp(run_control=True)`` to refine the residual.
+
+    For ``q_mode == 'cosphi'`` DERs Q is set directly to
+    ``sign · |P| · tan(acos(cosphi))``, clipped to capability.  These
+    DERs are excluded from the matrix solve (their Q is independent of
+    V and of other DERs' Q).
+
+    Returns the number of sgens whose ``q_mvar`` was written.
+    """
+    if not sgen_indices:
+        return 0
+    if "q_mode" not in net.sgen.columns:
+        if verbose:
+            print(
+                "[seed_qv_equilibrium] net.sgen.q_mode column missing; "
+                "call tag_der_q_modes(net, meta, ...) first."
+            )
+        return 0
+
+    has_res_bus = (
+        hasattr(net, "res_bus") and net.res_bus is not None
+        and len(net.res_bus) > 0 and "vm_pu" in net.res_bus.columns
+    )
+    has_res_sgen = (
+        hasattr(net, "res_sgen") and net.res_sgen is not None
+        and len(net.res_sgen) > 0 and "q_mvar" in net.res_sgen.columns
+    )
+
+    qv_sgens: List[int] = []
+    cosphi_sgens: List[int] = []
+    for s in sgen_indices:
+        s_int = int(s)
+        if s_int not in net.sgen.index:
+            continue
+        if not bool(net.sgen.at[s_int, "in_service"]):
+            continue
+        mode = str(net.sgen.at[s_int, "q_mode"])
+        if mode == "cosphi":
+            cosphi_sgens.append(s_int)
+        elif mode == "qv":
+            qv_sgens.append(s_int)
+        # other modes silently skipped
+
+    n_updated = 0
+
+    # ── cosphi-mode: simple per-DER calculation (no V dependence) ──
+    for s in cosphi_sgens:
+        cosphi = float(net.sgen.at[s, "cosphi"])
+        sign = int(net.sgen.at[s, "cosphi_sign"])
+        p_mw = (
+            float(net.res_sgen.at[s, "p_mw"])
+            if has_res_sgen and s in net.res_sgen.index
+            else float(net.sgen.at[s, "p_mw"])
+        )
+        cosphi = max(min(cosphi, 1.0), 1e-3)
+        if cosphi >= 1.0 - 1e-12:
+            q_target = 0.0
+        else:
+            q_target = float(sign) * abs(p_mw) * math.sqrt(1.0 / (cosphi ** 2) - 1.0)
+        sn = float(net.sgen.at[s, "sn_mva"])
+        op = (
+            str(net.sgen.at[s, "op_diagram"])
+            if "op_diagram" in net.sgen.columns
+               and not pd.isna(net.sgen.at[s, "op_diagram"])
+            else "VDE-AR-N-4120-v2"
+        )
+        q_min, q_max = _qv_capability(sn, op, p_mw)
+        net.sgen.at[s, "q_mvar"] = float(np.clip(q_target, q_min, q_max))
+        n_updated += 1
+
+    if not qv_sgens:
+        return n_updated
+
+    # ── qv-mode: linear closed-loop solve ──
+    n = len(qv_sgens)
+    der_buses = [int(net.sgen.at[s, "bus"]) for s in qv_sgens]
+
+    R_diag = np.zeros(n, dtype=np.float64)
+    V_ref = np.zeros(n, dtype=np.float64)
+    q_cor = np.zeros(n, dtype=np.float64)
+    V_current = np.zeros(n, dtype=np.float64)
+    Q_current = np.zeros(n, dtype=np.float64)
+    db_pu = np.zeros(n, dtype=np.float64)
+    p_mw = np.zeros(n, dtype=np.float64)
+    sn_mva = np.zeros(n, dtype=np.float64)
+    op_diagrams: List[str] = []
+
+    for i, s in enumerate(qv_sgens):
+        sn_mva[i] = float(net.sgen.at[s, "sn_mva"])
+        slope = (
+            float(net.sgen.at[s, "qv_slope_pu"])
+            if "qv_slope_pu" in net.sgen.columns
+               and not pd.isna(net.sgen.at[s, "qv_slope_pu"])
+            else 0.07
+        )
+        if slope <= 0.0:
+            slope = 0.07
+        R_diag[i] = sn_mva[i] / slope
+        V_ref[i] = (
+            float(net.sgen.at[s, "qv_vref_pu"])
+            if "qv_vref_pu" in net.sgen.columns
+               and not pd.isna(net.sgen.at[s, "qv_vref_pu"])
+            else 1.0
+        )
+        q_cor[i] = (
+            float(net.sgen.at[s, "q_cor_mvar"])
+            if "q_cor_mvar" in net.sgen.columns
+               and not pd.isna(net.sgen.at[s, "q_cor_mvar"])
+            else 0.0
+        )
+        db_pu[i] = (
+            float(net.sgen.at[s, "qv_deadband_pu"])
+            if "qv_deadband_pu" in net.sgen.columns
+               and not pd.isna(net.sgen.at[s, "qv_deadband_pu"])
+            else 0.0
+        )
+        bus = der_buses[i]
+        if has_res_bus and bus in net.res_bus.index:
+            V_current[i] = float(net.res_bus.at[bus, "vm_pu"])
+        else:
+            V_current[i] = V_ref[i]   # cold-start: assume V at V_ref
+        if has_res_sgen and s in net.res_sgen.index:
+            Q_current[i] = float(net.res_sgen.at[s, "q_mvar"])
+        else:
+            Q_current[i] = 0.0
+        if has_res_sgen and s in net.res_sgen.index:
+            p_mw[i] = float(net.res_sgen.at[s, "p_mw"])
+        else:
+            p_mw[i] = float(net.sgen.at[s, "p_mw"])
+        op = (
+            str(net.sgen.at[s, "op_diagram"])
+            if "op_diagram" in net.sgen.columns
+               and not pd.isna(net.sgen.at[s, "op_diagram"])
+            else "VDE-AR-N-4120-v2"
+        )
+        op_diagrams.append(op)
+
+    # Fetch S_VQ at the unique DER buses (units fix: dV_pu / dQ_Mvar)
+    unique_buses: List[int] = []
+    for b in der_buses:
+        if b not in unique_buses:
+            unique_buses.append(b)
+    try:
+        S_VQ_full, obs_map, der_map = sensitivities.compute_dV_dQ_der(
+            der_bus_indices=unique_buses,
+            observation_bus_indices=unique_buses,
+        )
+    except (ValueError, KeyError, AttributeError):
+        if verbose:
+            print(
+                "[seed_qv_equilibrium] S_VQ unavailable; falling back to "
+                "open-loop droop seed."
+            )
+        for i, s in enumerate(qv_sgens):
+            v_eff = V_current[i] - V_ref[i] - (
+                q_cor[i] / R_diag[i] if R_diag[i] > 0 else 0.0
+            )
+            if abs(v_eff) <= db_pu[i]:
+                q_t = 0.0
+            elif v_eff > db_pu[i]:
+                q_t = -R_diag[i] * (v_eff - db_pu[i])
+            else:
+                q_t = -R_diag[i] * (v_eff + db_pu[i])
+            q_min, q_max = _qv_capability(sn_mva[i], op_diagrams[i], p_mw[i])
+            net.sgen.at[s, "q_mvar"] = float(np.clip(q_t, q_min, q_max))
+            n_updated += 1
+        return n_updated
+
+    # Reorder S_VQ rows/cols to match unique_buses order
+    if obs_map != unique_buses or der_map != unique_buses:
+        try:
+            obs_perm = [obs_map.index(b) for b in unique_buses]
+            der_perm = [der_map.index(b) for b in unique_buses]
+            S_VQ_bus = S_VQ_full[np.ix_(obs_perm, der_perm)]
+        except ValueError:
+            if verbose:
+                print("[seed_qv_equilibrium] S_VQ buses missing; skipping seed.")
+            return n_updated
+    else:
+        S_VQ_bus = S_VQ_full
+    s_base = float(getattr(net, "sn_mva", 1.0))
+    if s_base > 0:
+        S_VQ_bus = S_VQ_bus / s_base
+
+    # Per-DER S_VQ: row i = V at DER i's bus, col j = Q at DER j's bus.
+    bus_to_idx = {b: i for i, b in enumerate(unique_buses)}
+    bus_perm = np.array([bus_to_idx[b] for b in der_buses], dtype=np.int64)
+    S_VQ_der = S_VQ_bus[np.ix_(bus_perm, bus_perm)]
+
+    # Linear closed-loop solve:
+    #   Q* = (I + R · S_VQ)^{-1} · [q_cor − R·(V_c − V_ref) + R · S_VQ · Q_c]
+    R = np.diag(R_diag)
+    M = np.eye(n) + R @ S_VQ_der
+    rhs = q_cor - R_diag * (V_current - V_ref) + R @ S_VQ_der @ Q_current
+    try:
+        Q_star = np.linalg.solve(M, rhs)
+    except np.linalg.LinAlgError:
+        if verbose:
+            print(
+                "[seed_qv_equilibrium] (I + R·S_VQ) singular; skipping seed."
+            )
+        return n_updated
+
+    # Apply per-DER deadband + saturation, then write q_mvar.
+    delta_Q = Q_star - Q_current
+    delta_V = S_VQ_der @ delta_Q
+    V_post = V_current + delta_V
+    for i, s in enumerate(qv_sgens):
+        v_cor_i = q_cor[i] / R_diag[i] if R_diag[i] > 0 else 0.0
+        v_eff = V_post[i] - V_ref[i] - v_cor_i
+        if abs(v_eff) <= db_pu[i]:
+            q_i = 0.0
+        else:
+            q_i = float(Q_star[i])
+        q_min, q_max = _qv_capability(sn_mva[i], op_diagrams[i], p_mw[i])
+        q_i = float(np.clip(q_i, q_min, q_max))
+        net.sgen.at[s, "q_mvar"] = q_i
+        n_updated += 1
+
+    if verbose:
+        max_dq = float(np.max(np.abs(Q_star - Q_current))) if n > 0 else 0.0
+        print(
+            f"[seed_qv_equilibrium] seeded {n_updated} DERs "
+            f"({len(qv_sgens)} qv + {len(cosphi_sgens)} cosphi); "
+            f"max |Q* − Q_c| = {max_dq:.3f} Mvar"
+        )
+
+    return n_updated
+
+
 def remove_der_q_loops(net: pp.pandapowerNet) -> int:
     """Remove every :class:`QVLocalLoop` and :class:`CosPhiConstLoop`
     from ``net.controller``.  Returns the number of controllers removed."""

@@ -147,6 +147,7 @@ from controller.der_qv_local_loop import (
     QVLocalLoop,
     install_der_q_loops,
     install_qv_local_loops,
+    seed_qv_equilibrium,
 )
 
 
@@ -1872,73 +1873,32 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # so each gets its level-appropriate convergence tolerance
     # (TSO: 0.1 Mvar, DSO: 0.01 Mvar by default).
     #
-    # Seed each DER's q_mvar with a *damped* fraction of the steady-state
-    # droop target so the QVLocalLoops install close to (but not exactly
-    # at) their open-loop target.  The closed-loop equilibrium is
-    #     Q* = -R*(V_0 - V_ref) / (1 + R*S_VQ)
-    # which is ~1/(1+R*S_VQ) ≈ 10% of the open-loop droop response on
-    # TSO STATCOMs.  We seed at 0.1 * open-loop, which is small enough
-    # to keep the inner Newton-Raphson well-conditioned and large enough
-    # to skip the costly transient that q_mvar=0 would trigger.  The
-    # damping factor is conservative; the loops converge the rest in a
-    # few iterations.
+    # Seed each DER's q_mvar with the *exact linear closed-loop
+    # equilibrium* (Soleimani §IV-B eq. 18) computed from the post-
+    # Phase-2 V via ``seed_qv_equilibrium``.  This bypasses the
+    # multi-DER Gauss-Jacobi instability that broke the 24-hour main()
+    # run with 500-iteration controller loops: the controllers install
+    # already at their attractor and only need to refine residual
+    # nonlinearity over a handful of iterations.
     if config.use_q_cor_actuator:
-        from controller.der_qv_local_loop import _qv_capability
         tso_sgens = [int(s) for s in meta.tso_der_indices
                      if int(s) in net.sgen.index]
         dso_sgens = [int(s) for s in meta.dso_der_indices
                      if int(s) in net.sgen.index]
+        # Reset q_cor_mvar (controller has not commanded yet) before
+        # the analytical seed.
         for s in tso_sgens + dso_sgens:
-            # Reset q_cor_mvar (controller has not commanded yet)
             net.sgen.at[s, "q_cor_mvar"] = 0.0
-            mode = str(net.sgen.at[s, "q_mode"])
-            if mode == "cosphi":
-                cosphi = float(net.sgen.at[s, "cosphi"])
-                sign = int(net.sgen.at[s, "cosphi_sign"])
-                p = float(net.res_sgen.at[s, "p_mw"]) if s in net.res_sgen.index else 0.0
-                cosphi = max(min(cosphi, 1.0), 1e-3)
-                if cosphi >= 1.0 - 1e-12:
-                    q_star = 0.0
-                else:
-                    q_star = sign * abs(p) * (1.0 / cosphi**2 - 1.0) ** 0.5
-            else:  # qv
-                slope = float(net.sgen.at[s, "qv_slope_pu"])
-                v_ref = float(net.sgen.at[s, "qv_vref_pu"])
-                db = float(net.sgen.at[s, "qv_deadband_pu"])
-                sn = float(net.sgen.at[s, "sn_mva"])
-                bus = int(net.sgen.at[s, "bus"])
-                v = float(net.res_bus.at[bus, "vm_pu"]) if bus in net.res_bus.index else v_ref
-                p = float(net.res_sgen.at[s, "p_mw"]) if s in net.res_sgen.index else 0.0
-                R = sn / slope if slope > 0 else 0.0
-                v_eff = v - v_ref  # q_cor=0 so V_cor=0
-                if v_eff > db:
-                    q_star = -R * (v_eff - db)
-                elif v_eff < -db:
-                    q_star = -R * (v_eff + db)
-                else:
-                    q_star = 0.0
-                op = (str(net.sgen.at[s, "op_diagram"])
-                      if "op_diagram" in net.sgen.columns else "VDE-AR-N-4120-v2")
-                q_min, q_max = _qv_capability(sn, op, p)
-                # Damp open-loop seed to ~10% so we land near the
-                # closed-loop equilibrium without breaking inner-NR
-                # convergence.  Empirically 0.1 keeps |delta-Q per DER|
-                # below ~10 Mvar even for STATCOMs and the QVLocalLoops
-                # converge the residual in ≤ 30 controller iterations.
-                q_star = 0.1 * float(max(min(q_star, q_max), q_min))
-            net.sgen.at[s, "q_mvar"] = q_star
-
-        # NOTE: with 44 DERs coupled via the bus admittance, the per-DER
-        # contraction analysis (|1 − α·(1+R·S_VQ)|) underestimates the
-        # actual closed-loop spectral radius; the largest eigenvalue of
-        # (R · S_VQ) on a 44-DER system can be 3–4× the diagonal value.
-        # Use a much smaller damping for TSO (where R is largest) than
-        # for DSO.  The legacy use_qv_local_loop=True path used a
-        # single global damping; here we set per-level values.
-        tso_damping = min(config.qv_local_damping, 0.03)
+        # Seed using a fresh Jacobian at the post-Phase-2 operating
+        # point so S_VQ matches the network state we'll iterate from.
+        _seed_jac = JacobianSensitivities(net)
+        seed_qv_equilibrium(
+            net, tso_sgens + dso_sgens, _seed_jac,
+            verbose=(verbose >= 1),
+        )
         n_tso = len(install_der_q_loops(
             net, tso_sgens,
-            qv_damping=tso_damping,
+            qv_damping=config.qv_local_damping,
             qv_max_step_frac=config.qv_local_max_step_frac,
             qv_tol_mvar=config.tso_qv_tol_mvar,
         )) if tso_sgens else 0
@@ -1953,7 +1913,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 f"[3c-deferred] Installed {n_tso + n_dso} DER q_mode loops "
                 f"({n_tso} TSO @ tol={config.tso_qv_tol_mvar} Mvar + "
                 f"{n_dso} DSO @ tol={config.dso_qv_tol_mvar} Mvar) "
-                f"post Phase 2; seeded q_mvar with droop equilibrium."
+                f"post Phase 2; seeded q_mvar with closed-loop equilibrium."
             )
 
     if _local_dso:
@@ -2563,6 +2523,16 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             if _local_der_active:
                 _apply_local_der()
             _apply_local_tso()
+            # Q_cor mode: warm-start the QVLocalLoops with the linear
+            # closed-loop equilibrium so the run_control iteration only
+            # has to refine the nonlinear residual.  Bypasses the
+            # multi-DER Gauss-Jacobi coupling instability.
+            if config.use_q_cor_actuator:
+                seed_qv_equilibrium(
+                    net,
+                    list(meta.tso_der_indices) + list(meta.dso_der_indices),
+                    shared_jac,
+                )
             pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
                      max_iteration=50,
                      max_iter=500,
@@ -2965,6 +2935,14 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             # running the final PF with DiscreteTapControl for coupler OLTCs.
             _apply_local_der()
         _apply_local_tso()
+        # Q_cor mode: warm-start QVLocalLoops from the linear closed-loop
+        # equilibrium so the run_control iteration only refines residuals.
+        if config.use_q_cor_actuator:
+            seed_qv_equilibrium(
+                net,
+                list(meta.tso_der_indices) + list(meta.dso_der_indices),
+                shared_jac,
+            )
         try:
             try:
                 pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
@@ -3558,14 +3536,14 @@ def main() -> None:
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
         g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
-        g_q=200,  # DSO Q-tracking
-        tso_g_q_tie=10,
+        g_q=800,  # DSO Q-tracking
+        tso_g_q_tie=1,
         # ── DSO objective tuning ──
         # use_q_cor_actuator defaults to True (refactor_v2 Soleimani §III-B);
         # use_qv_local_loop=True is implied so the plant-side QVLocalLoops
         # install on every DER.
         use_qv_local_loop=True,
-        dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
+        dso_g_v=10000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.9,  # leaky integrator decay
         dso_q_integral_max_mvar=50.0,  # anti-windup clamp

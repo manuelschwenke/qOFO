@@ -752,3 +752,189 @@ def apply_der_classification(
         dso_grid_forming_gen_buses=dso_gf_gen_buses,
         der_classification=classification,
     )
+
+
+# ---------------------------------------------------------------------------
+#  q_mode tagging (refactor_v2, Soleimani §III-B)
+# ---------------------------------------------------------------------------
+
+def tag_der_q_modes(
+    net: pp.pandapowerNet,
+    meta: IEEE39NetworkMeta,
+    *,
+    tso_q_mode: str = "qv",
+    dso_q_mode: str = "qv",
+    q_mode_overrides: Optional[Dict[int, str]] = None,
+    tso_qv_slope_pu: float = 0.07,
+    dso_qv_slope_pu: float = 0.07,
+    qv_slope_pu_overrides: Optional[Dict[int, float]] = None,
+    tso_qv_vref_pu: float = 1.00,
+    dso_qv_vref_pu: float = 1.00,
+    qv_vref_pu_overrides: Optional[Dict[int, float]] = None,
+    tso_qv_deadband_pu: float = 0.0,
+    dso_qv_deadband_pu: float = 0.0,
+    qv_deadband_pu_overrides: Optional[Dict[int, float]] = None,
+    tso_cosphi: float = 1.0,
+    dso_cosphi: float = 1.0,
+    cosphi_overrides: Optional[Dict[int, float]] = None,
+    tso_cosphi_sign: int = -1,
+    dso_cosphi_sign: int = -1,
+    cosphi_sign_overrides: Optional[Dict[int, int]] = None,
+    verbose: bool = False,
+) -> IEEE39NetworkMeta:
+    """Tag every TSO and DSO DER sgen with its q_mode and parameters.
+
+    Adds the following columns to ``net.sgen`` (creating them if absent):
+
+    * ``q_mode``        — ``"qv"`` (Q(V) droop) or ``"cosphi"`` (fixed PF).
+    * ``qv_slope_pu``   — droop slope (pu_q/pu_v).  Read only when ``q_mode=="qv"``.
+    * ``qv_vref_pu``    — droop centre voltage.  Read only when ``q_mode=="qv"``.
+    * ``qv_deadband_pu``— half-width of the symmetric deadband around V_ref.
+                          ``0.0`` ⇒ linear droop through V_ref.
+    * ``cosphi``        — power factor magnitude in [0, 1].  Read only when
+                          ``q_mode=="cosphi"``.
+    * ``cosphi_sign``   — ``+1`` over-excited (Q injection) / ``-1`` under-
+                          excited (Q absorption).
+    * ``q_cor_mvar``    — controller-commanded reactive-power offset (Mvar).
+                          Initialised to 0.0; the OFO writes here every step.
+
+    Hierarchy: per-DER override > level (TSO/DSO) default.  Keys in the
+    ``*_overrides`` maps are pandapower sgen indices.
+
+    This function is **additive**.  It does not modify ``meta`` and is
+    safe to call alongside (or after) :func:`apply_der_classification`.
+    The two coexist during the refactor_v2 transition; the legacy
+    promotion can later be turned off by simply not calling
+    ``apply_der_classification`` and reading the new columns instead.
+
+    Parameters
+    ----------
+    net, meta
+        Network and metadata catalogue.  ``meta.tso_der_indices`` and
+        ``meta.dso_der_indices`` define the populations being tagged.
+    tso_q_mode, dso_q_mode
+        Default q_mode for the level.  Must be ``"qv"`` or ``"cosphi"``.
+    q_mode_overrides
+        Per-sgen-index override of the level default.
+    tso_qv_*_pu, dso_qv_*_pu
+        Default qv parameters per level.
+    qv_*_pu_overrides
+        Per-sgen-index overrides of the qv parameters.
+    tso_cosphi, dso_cosphi, tso_cosphi_sign, dso_cosphi_sign
+        Default cosphi parameters per level.  Sign convention: ``+1``
+        over-excited, ``-1`` under-excited (DE LV grid-code default).
+    cosphi_*_overrides
+        Per-sgen-index overrides of the cosphi parameters.
+    verbose
+        Print a one-line summary of the tagged populations.
+
+    Returns
+    -------
+    IEEE39NetworkMeta
+        ``meta`` returned unchanged for caller chaining.
+
+    Notes
+    -----
+    The OFO controllers will exclude ``q_mode=="cosphi"`` DERs from
+    their action vectors (these DERs are not actuators); the OFO will
+    only write ``q_cor_mvar`` for ``q_mode=="qv"`` DERs.  See the
+    refactor_v2 plan §6a for the piecewise-linear Q(V) characteristic
+    and §6 for the H-matrix transform.
+    """
+    valid_modes = {"qv", "cosphi"}
+    for nm, mode in (("tso_q_mode", tso_q_mode), ("dso_q_mode", dso_q_mode)):
+        if mode not in valid_modes:
+            raise ValueError(
+                f"Invalid {nm} = {mode!r}; expected one of {sorted(valid_modes)}"
+            )
+
+    q_mode_overrides = q_mode_overrides or {}
+    qv_slope_pu_overrides = qv_slope_pu_overrides or {}
+    qv_vref_pu_overrides = qv_vref_pu_overrides or {}
+    qv_deadband_pu_overrides = qv_deadband_pu_overrides or {}
+    cosphi_overrides = cosphi_overrides or {}
+    cosphi_sign_overrides = cosphi_sign_overrides or {}
+
+    # Validate any override values up-front so the failure mode is clear.
+    for s, m in q_mode_overrides.items():
+        if m not in valid_modes:
+            raise ValueError(
+                f"q_mode_overrides[{s}] = {m!r}; expected one of "
+                f"{sorted(valid_modes)}"
+            )
+    for s, sg in cosphi_sign_overrides.items():
+        if sg not in (-1, +1):
+            raise ValueError(
+                f"cosphi_sign_overrides[{s}] = {sg!r}; expected +1 or -1"
+            )
+
+    # Ensure all columns exist with a sensible default for sgens not in
+    # tso_/dso_der_indices (e.g. equivalent units).  We use NaN for the
+    # numerics so an unintended read shows up clearly; q_mode defaults
+    # to "qv" and q_cor_mvar to 0.0 since those are also the safest
+    # values if a DER is later promoted into the controller without
+    # being re-tagged.
+    if "q_mode" not in net.sgen.columns:
+        net.sgen["q_mode"] = "qv"
+    if "qv_slope_pu" not in net.sgen.columns:
+        net.sgen["qv_slope_pu"] = float("nan")
+    if "qv_vref_pu" not in net.sgen.columns:
+        net.sgen["qv_vref_pu"] = float("nan")
+    if "qv_deadband_pu" not in net.sgen.columns:
+        net.sgen["qv_deadband_pu"] = float("nan")
+    if "cosphi" not in net.sgen.columns:
+        net.sgen["cosphi"] = float("nan")
+    if "cosphi_sign" not in net.sgen.columns:
+        net.sgen["cosphi_sign"] = 0
+    if "q_cor_mvar" not in net.sgen.columns:
+        net.sgen["q_cor_mvar"] = 0.0
+
+    def _tag(s: int, level_default_mode: str,
+             level_slope: float, level_vref: float, level_db: float,
+             level_cosphi: float, level_sign: int) -> None:
+        if s not in net.sgen.index:
+            return
+        mode = q_mode_overrides.get(s, level_default_mode)
+        net.sgen.at[s, "q_mode"] = mode
+        net.sgen.at[s, "qv_slope_pu"] = float(
+            qv_slope_pu_overrides.get(s, level_slope)
+        )
+        net.sgen.at[s, "qv_vref_pu"] = float(
+            qv_vref_pu_overrides.get(s, level_vref)
+        )
+        net.sgen.at[s, "qv_deadband_pu"] = float(
+            qv_deadband_pu_overrides.get(s, level_db)
+        )
+        net.sgen.at[s, "cosphi"] = float(
+            cosphi_overrides.get(s, level_cosphi)
+        )
+        net.sgen.at[s, "cosphi_sign"] = int(
+            cosphi_sign_overrides.get(s, level_sign)
+        )
+        # q_cor_mvar is a runtime state, not a config; the OFO
+        # overwrites it every step.  Initialise to 0.0 only — preserve
+        # any existing value so that re-calling tag_der_q_modes mid-run
+        # does not stomp on the controller's command.
+        if pd.isna(net.sgen.at[s, "q_cor_mvar"]):
+            net.sgen.at[s, "q_cor_mvar"] = 0.0
+
+    for s in meta.tso_der_indices:
+        _tag(int(s), tso_q_mode,
+             tso_qv_slope_pu, tso_qv_vref_pu, tso_qv_deadband_pu,
+             tso_cosphi, tso_cosphi_sign)
+    for s in meta.dso_der_indices:
+        _tag(int(s), dso_q_mode,
+             dso_qv_slope_pu, dso_qv_vref_pu, dso_qv_deadband_pu,
+             dso_cosphi, dso_cosphi_sign)
+
+    if verbose:
+        n_tso = len(meta.tso_der_indices)
+        n_dso = len(meta.dso_der_indices)
+        n_cosphi = int((net.sgen["q_mode"] == "cosphi").sum())
+        n_qv = int((net.sgen["q_mode"] == "qv").sum())
+        print(
+            f"[tag_der_q_modes] tagged {n_tso} TSO + {n_dso} DSO DERs; "
+            f"net.sgen now has {n_qv} qv-mode and {n_cosphi} cosphi-mode rows"
+        )
+
+    return meta

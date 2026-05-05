@@ -85,6 +85,40 @@ def _qv_capability(sn: float, op_diagram: str, p_mw: float) -> tuple[float, floa
     return -0.33 * sn, 0.41 * sn
 
 
+def compute_qcor_h_transform(
+    K_diag: np.ndarray,
+    S_VQ: np.ndarray,
+) -> Optional[np.ndarray]:
+    """Soleimani §IV-B eq. (18): closed-loop sensitivity from Q_cor to
+    realised Q under local Q(V) droop.
+
+    ::
+
+        T' = (I + diag(K) · S_VQ)^{-1}
+
+    where:
+
+    * ``K_diag`` (length n_b) — per-bus droop gain ``K_b = sum_i (S_n,i / slope_i)``
+      summed across DERs hosted at that bus (Mvar / pu_v).  Saturated DERs
+      contribute zero (active-set: at the rail Q does not respond).
+    * ``S_VQ`` (n_b × n_b) — bus-to-bus voltage-Q sensitivity at the DER
+      buses (pu_v / Mvar).
+    * ``T'`` (n_b × n_b) — multiplied into the DER columns of the OFO's
+      H matrix to map ``∂y/∂Q`` ⇒ ``∂y/∂Q_cor``.
+
+    Returns ``None`` on singular ``M = I + diag(K) · S_VQ`` so the caller
+    can fall back to identity.
+    """
+    n = len(K_diag)
+    if n == 0:
+        return np.zeros((0, 0))
+    M = np.eye(n) + np.diag(K_diag) @ S_VQ
+    try:
+        return np.linalg.inv(M)
+    except np.linalg.LinAlgError:
+        return None
+
+
 def _read_or(net: pp.pandapowerNet, sgen_idx: int, col: str,
              fallback: float) -> float:
     """Read net.sgen[col] for a row, returning *fallback* if column is

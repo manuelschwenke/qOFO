@@ -27,6 +27,7 @@ Date: 2025-02-06
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 from controller.base_controller import (
@@ -223,6 +224,31 @@ class DSOControllerConfig:
     (the DER's slope effectively becomes 0 — pulling V_ref no longer
     moves Q).  See the architectural plan, Risks #5."""
 
+    # ── refactor_v2 (Soleimani §III-B): Q_cor as actuator ──────────────────
+    use_q_cor_actuator: bool = False
+    """When True, the DER block of the OFO action vector is interpreted
+    as ``Q_cor`` (Mvar) — a reactive-power offset that shifts the local
+    Q(V) characteristic by ``V_cor = Q_cor / R``.  The H matrix's DER
+    columns are post-multiplied by
+
+        T' = (I + diag(K) · S_VQ)^{-1}                  (Soleimani eq. 18)
+
+    where ``K_b = Σ_i S_n,i / slope_pu,i`` per unique DER bus.  This
+    maps the network-level ``∂y/∂Q`` to the closed-loop ``∂y/∂Q_cor``
+    that the controller needs.  Saturated DERs contribute zero to
+    ``K_diag`` so their column of ``T'`` collapses to identity.
+
+    Mutually exclusive with the legacy ``ofo_in_v_ref_mode``: __post_init__
+    raises if both are active.  Default ``False`` keeps the legacy
+    behaviour (Stage-1 q_shim or Stage-2 V_ref-direct, depending on
+    ``use_qv_local_loop`` / ``qv_apply_mode``).
+
+    Set to ``True`` to enable the Q_cor path; the runner must also
+    populate ``net.sgen.q_cor_mvar`` / ``qv_slope_pu`` / ``qv_vref_pu``
+    (via :func:`network.ieee39.build.tag_der_q_modes`) and the apply
+    step must write the OFO output into ``net.sgen.q_cor_mvar``
+    (refactor_v2 commit 5)."""
+
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
         # When a DER mapping is provided, derive der_indices from it
@@ -305,6 +331,14 @@ class DSOControllerConfig:
             raise ValueError(
                 f"rho_q_gridforming must be non-negative, got "
                 f"{self.rho_q_gridforming}"
+            )
+        # ── refactor_v2: Q_cor mode is exclusive with V_ref mode ────────────
+        if self.use_q_cor_actuator and self.ofo_in_v_ref_mode:
+            raise ValueError(
+                "use_q_cor_actuator=True is mutually exclusive with "
+                "use_qv_local_loop=True + qv_apply_mode='v_ref' "
+                "(legacy V_ref-direct mode).  Pick one OFO actuator "
+                "interpretation for the DER block."
             )
 
 
@@ -1256,6 +1290,26 @@ class DSOController(BaseOFOController):
         # Stash T_qv for use by the post-splice Q_realized row block.
         self._qv_T_cache = T_qv
 
+        # ── refactor_v2: Q_cor closed-loop transform on DER columns ────
+        # When the DER actuator is interpreted as Q_cor (Soleimani §III-B
+        # eq. 18), post-multiply the DER columns of H by
+        #     T' = (I + diag(K) · S_VQ)^{-1}
+        # This maps the network-level ``∂y/∂Q`` to ``∂y/∂Q_cor``.  Mutually
+        # exclusive with ``ofo_in_v_ref_mode`` (validated in __post_init__).
+        if (
+            self.config.use_q_cor_actuator
+            and not self.config.ofo_in_v_ref_mode
+            and unique_buses
+        ):
+            T_prime = self._compute_qcor_transform_T_prime(
+                unique_buses, der_bus_indices,
+            )
+            if T_prime is not None:
+                n_b = len(unique_buses)
+                if T_qv is None:
+                    H = H.copy()
+                H[:, :n_b] = H[:, :n_b] @ T_prime
+
         # When a DER mapping is active, keep H at bus-level (unique buses).
         # The base class _expand_H_to_der_level will handle per-DER expansion
         # via the E matrix.  When no mapping is active, use legacy column
@@ -1500,6 +1554,110 @@ class DSOController(BaseOFOController):
             return np.linalg.solve(M.T, K.T).T
         except np.linalg.LinAlgError:
             return None
+
+    def _compute_qcor_transform_T_prime(
+        self,
+        unique_buses: List[int],
+        der_bus_indices: List[int],
+    ) -> Optional[NDArray[np.float64]]:
+        """Return the bus-level closed-loop Q_cor transform
+        ``T' = (I + diag(K) · S_VQ)^{-1}`` of shape ``(n_unique_bus,
+        n_unique_bus)`` (Soleimani §IV-B eq. 18).
+
+        This is the matrix that maps a per-bus Q_cor command (Mvar) to
+        the steady-state realised Q (Mvar) of the local Q(V) loop,
+        including network coupling.  Saturated DERs contribute 0 to
+        ``K_diag`` (active-set: at the rail Q does not respond to Q_cor).
+
+        Per-DER slope is read from ``net.sgen.qv_slope_pu`` if the column
+        is present (refactor_v2 path); otherwise falls back to
+        ``self.config.qv_slope_pu`` so legacy networks still get a
+        sensible matrix.
+
+        Returns ``None`` if ``S_VQ`` cannot be computed (e.g. one of the
+        DER buses is a PV bus and the reduced Jacobian skips it) or
+        ``M`` is singular.  Callers should fall back to identity (no
+        transform) in that case.
+        """
+        from controller.der_qv_local_loop import (
+            compute_qcor_h_transform,
+            _qv_capability,
+        )
+
+        n_b = len(unique_buses)
+        if n_b == 0:
+            return None
+
+        net = self.sensitivities.net
+        meas = getattr(self, "_last_measurement", None)
+        eps = self.config.qv_saturation_eps_mvar
+
+        # K_diag at bus level: sum S_n,i / slope_pu,i over DERs sharing the
+        # bus.  Skip saturated DERs so their k contribution is zero.
+        K_diag = np.zeros(n_b, dtype=np.float64)
+        sgen_has_slope_col = "qv_slope_pu" in net.sgen.columns
+        for d_idx, sgen_idx in enumerate(self.config.der_indices):
+            sn = float(net.sgen.at[int(sgen_idx), "sn_mva"])
+            if sgen_has_slope_col:
+                slope_v = net.sgen.at[int(sgen_idx), "qv_slope_pu"]
+                if pd.isna(slope_v) or float(slope_v) <= 0.0:
+                    slope = self.config.qv_slope_pu
+                else:
+                    slope = float(slope_v)
+            else:
+                slope = self.config.qv_slope_pu
+            if slope <= 0.0:
+                continue
+
+            saturated = False
+            if meas is not None and len(meas.der_q_mvar) > d_idx:
+                if "op_diagram" in net.sgen.columns:
+                    od = net.sgen.at[int(sgen_idx), "op_diagram"]
+                    op_diag = (
+                        str(od) if od is not None and str(od) != "nan"
+                        else "VDE-AR-N-4120-v2"
+                    )
+                else:
+                    op_diag = "VDE-AR-N-4120-v2"
+                p_mw = (
+                    float(meas.der_p_mw[d_idx])
+                    if d_idx < len(meas.der_p_mw) else 0.0
+                )
+                q_min, q_max = _qv_capability(sn, op_diag, p_mw)
+                q_act = float(meas.der_q_mvar[d_idx])
+                saturated = (q_act >= q_max - eps) or (q_act <= q_min + eps)
+
+            if not saturated:
+                b_pos = unique_buses.index(int(der_bus_indices[d_idx]))
+                K_diag[b_pos] += sn / slope
+
+        # Bus-to-bus S_VQ at the DER buses (units fix below).
+        try:
+            S_VQ_full, obs_map, der_map = (
+                self.sensitivities.compute_dV_dQ_der(
+                    der_bus_indices=unique_buses,
+                    observation_bus_indices=unique_buses,
+                )
+            )
+        except (ValueError, KeyError):
+            return None
+
+        if obs_map != unique_buses or der_map != unique_buses:
+            try:
+                obs_perm = [obs_map.index(b) for b in unique_buses]
+                der_perm = [der_map.index(b) for b in unique_buses]
+                S_VQ = S_VQ_full[np.ix_(obs_perm, der_perm)]
+            except ValueError:
+                return None
+        else:
+            S_VQ = S_VQ_full
+        # Units fix: ``compute_dV_dQ_der`` returns dV_pu/dQ_pu on system base.
+        # K is in Mvar/pu_v, so S_VQ must be in pu_v/Mvar — divide by S_base.
+        s_base = float(getattr(net, "sn_mva", 1.0))
+        if s_base > 0:
+            S_VQ = S_VQ / s_base
+
+        return compute_qcor_h_transform(K_diag, S_VQ)
 
     def _apply_qv_closed_loop_transform(
         self,

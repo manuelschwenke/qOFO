@@ -120,7 +120,12 @@ class MultiTSOConfig:
     — penalises Q dispatch deltas in Mvar.  Ignored under Stage 2."""
 
     g_w_dso_der_vref: float = 1.0
-    """Step-size penalty on the DSO DER block when
+    """**DEPRECATED — refactor_v2 commit 1.**  Slated for removal in
+    commit 7.  After the refactor the DSO DER actuator is Q_cor (Mvar)
+    so the step-size penalty is the existing ``g_w_dso_der`` (in
+    1/Mvar²); a separate V_ref-coordinate penalty is no longer needed.
+
+    Step-size penalty on the DSO DER block when
     ``use_qv_local_loop=True`` (Stage 2).  Units: 1/pu_v².
 
     **NOTE — empirically inert in the current controller setup.**
@@ -137,7 +142,10 @@ class MultiTSOConfig:
     ``tests/diag_stage2_steps.py`` for the validating sweep."""
 
     g_w_gridforming: float = 1.0e7
-    """Step-size penalty on the V_gf actuator block (grid-forming
+    """**DEPRECATED — refactor_v2 commit 1.**  Slated for removal in
+    commit 7.  No grid-forming actuator block exists post-refactor.
+
+    Step-size penalty on the V_gf actuator block (grid-forming
     converter ``vm_pu`` setpoint).  Same units as ``g_w_gen`` (1/pu_v²).
 
     Default ``1e7`` matches ``g_w_gen``.  Empirically the V_gf curvature
@@ -264,7 +272,11 @@ class MultiTSOConfig:
     g_z_interface: float = 0.0
     g_z_q_gen:     float = 1E2
     g_z_q_gridforming: float = 1E2
-    """Soft-constraint penalty for the Q_gf output (grid-forming converter
+    """**DEPRECATED — refactor_v2 commit 1.**  Slated for removal in
+    commit 7.  No Q_gf output exists post-refactor (every converter is
+    a ``pp.sgen`` whose Q is determined by the local q_mode loop).
+
+    Soft-constraint penalty for the Q_gf output (grid-forming converter
     realised Q vs the STATCOM ±sqrt(S^2-P^2) Q-circle).  Mirrors
     ``g_z_q_gen`` for synch machines.  Default 1E3 — a gentle nudge that
     lets voltage tracking dominate when the converter exceeds its Q
@@ -393,8 +405,90 @@ class MultiTSOConfig:
     the windpark dispatches Q = q_min (full inductive); at V = setpoint-slope
     the windpark dispatches Q = q_max (full capacitive)."""
 
+    # ------------------------------------------------------------------
+    #  q_mode hierarchy (refactor_v2, Soleimani §III-B)
+    # ------------------------------------------------------------------
+    #  Each DER's steady-state Q response is one of two modes:
+    #    "qv"     -- piecewise-linear Q(V) droop with optional symmetric
+    #                deadband; OFO commands Q_cor (Mvar) which shifts the
+    #                droop curve via V_cor = Q_cor / R.
+    #    "cosphi" -- fixed power factor: Q = sign * |P| * tan(acos(cosphi)).
+    #                Excluded from the OFO action vector (not an actuator).
+    #
+    #  Hierarchy: per-DER override > DSO/TSO default.
+    #  Keys in *_overrides dicts are pandapower sgen indices.
+    # ------------------------------------------------------------------
+    tso_q_mode: str = "qv"
+    """Default ``q_mode`` for every TSO-connected DER (sgen indices in
+    ``meta.tso_der_indices``).  ``"qv"`` or ``"cosphi"``."""
+
+    dso_q_mode: str = "qv"
+    """Default ``q_mode`` for every DSO-connected DER (sgen indices in
+    ``meta.dso_der_indices``).  ``"qv"`` or ``"cosphi"``."""
+
+    der_q_mode_overrides: Dict[int, str] = field(default_factory=dict)
+    """Per-DER override of the level default.  Map ``sgen_idx → "qv" | "cosphi"``."""
+
+    # -- qv parameters (used when q_mode == "qv") ----------------------
+    tso_qv_vref_pu: float = 1.00
+    """Droop centre voltage for TSO DERs in qv mode."""
+
+    dso_qv_vref_pu: float = 1.00
+    """Droop centre voltage for DSO DERs in qv mode."""
+
+    der_qv_vref_pu_overrides: Dict[int, float] = field(default_factory=dict)
+    """Per-DER override of the qv droop centre voltage."""
+
+    dso_qv_slope_pu: float = 0.07
+    """Droop slope (pu_q/pu_v) for DSO DERs in qv mode.  TSO side uses
+    the existing ``tso_qv_slope_pu`` field above."""
+
+    der_qv_slope_pu_overrides: Dict[int, float] = field(default_factory=dict)
+    """Per-DER override of the qv droop slope."""
+
+    tso_qv_deadband_pu: float = 0.0
+    """Half-width of the symmetric deadband around V_ref for TSO DERs.
+    ``0.0`` disables the deadband (linear droop through V_ref)."""
+
+    dso_qv_deadband_pu: float = 0.0
+    """Half-width of the symmetric deadband around V_ref for DSO DERs."""
+
+    der_qv_deadband_pu_overrides: Dict[int, float] = field(default_factory=dict)
+    """Per-DER override of the qv deadband half-width."""
+
+    # -- cosphi parameters (used when q_mode == "cosphi") --------------
+    tso_cosphi: float = 1.0
+    """Power factor magnitude for TSO DERs in cosphi mode (1.0 ⇒ Q = 0)."""
+
+    dso_cosphi: float = 1.0
+    """Power factor magnitude for DSO DERs in cosphi mode."""
+
+    der_cosphi_overrides: Dict[int, float] = field(default_factory=dict)
+    """Per-DER override of the cosphi value."""
+
+    tso_cosphi_sign: int = -1
+    """Sign convention for cosphi-mode Q on TSO DERs.  ``+1`` =
+    over-excited (Q injected, capacitive); ``-1`` = under-excited
+    (Q absorbed, inductive — typical DE LV grid-code default)."""
+
+    dso_cosphi_sign: int = -1
+    """Sign convention for cosphi-mode Q on DSO DERs."""
+
+    der_cosphi_sign_overrides: Dict[int, int] = field(default_factory=dict)
+    """Per-DER override of the cosphi sign."""
+
+    # ------------------------------------------------------------------
+    #  Legacy fields (slated for removal in refactor_v2 commit 7)
+    # ------------------------------------------------------------------
+
     tso_command_relaxation_alpha: float = 1.0
-    """Step-size relaxation factor on the TSO OFO command update for
+    """**DEPRECATED — refactor_v2 commit 1.**  Slated for removal in
+    commit 7 once all controllers stop reading it.  The Q_cor-driven
+    OFO does not use command-side relaxation; closed-loop stability
+    comes from the ``(I + R·S_VQ)^-1`` H transform plus the plant-side
+    Q(V) damping.
+
+    Step-size relaxation factor on the TSO OFO command update for
     *continuous* actuators only (Q_DER, Q_PCC, V_gen, V_gf).  Discrete
     actuators (OLTC, shunt) always step by their full integer increment
     because they cannot move "a fraction of a step".
@@ -414,7 +508,12 @@ class MultiTSOConfig:
 
     # -- Per-DER grid-forming / grid-following classification ----------------
     der_mode_overrides: Dict[int, str] = field(default_factory=dict)
-    """Optional per-DER override of the default grid-forming /
+    """**DEPRECATED — refactor_v2 commit 1.**  Slated for removal in
+    commit 7.  Replaced by :attr:`der_q_mode_overrides` (with values
+    ``"qv"`` / ``"cosphi"`` instead of ``"grid_forming"`` /
+    ``"grid_following"``).
+
+    Optional per-DER override of the default grid-forming /
     grid-following classification.  Keys are *original* pandapower sgen
     indices (before any build-time promotion); values are
     ``"grid_forming"`` or ``"grid_following"``.
@@ -435,7 +534,11 @@ class MultiTSOConfig:
     applied to the pandapower model."""
 
     force_all_der_grid_following: bool = False
-    """Convenience override: when True, every TSO-side DER in
+    """**DEPRECATED — refactor_v2 commit 1.**  Slated for removal in
+    commit 7.  After the refactor every DER is a ``pp.sgen`` by
+    construction (no sgen→gen promotion), so the flag has no role.
+
+    Convenience override: when True, every TSO-side DER in
     ``meta.tso_der_indices`` is forced to ``"grid_following"`` at
     classification time, regardless of ``der_mode_overrides``.  Combined
     with ``use_qv_local_loop=False`` this reproduces the pre-Stage-1
@@ -444,7 +547,14 @@ class MultiTSOConfig:
     baseline comparison."""
 
     use_qv_local_loop: bool = True
-    """Stage-2 master switch — controls **plant model** only.  When True,
+    """**DEPRECATED — refactor_v2 commit 1.**  Slated for removal in
+    commit 7.  After the refactor the local Q(V) loop is the *only*
+    plant model for ``q_mode == "qv"`` DERs (no Stage-1 fallback), and
+    cos(phi) DERs install a sibling controller — both are dispatched
+    automatically by ``install_der_q_loops`` based on
+    ``net.sgen.q_mode``.  The master switch has no role.
+
+    Stage-2 master switch — controls **plant model** only.  When True,
     every grid-following DSO DER sgen gets a local Q(V) controller
     installed in the simulated plant
     (:class:`controller.dso_qv_local_loop.QVLocalLoop`), so the
@@ -466,7 +576,12 @@ class MultiTSOConfig:
     ``qv_v_ref_init_pu``."""
 
     qv_apply_mode: str = "q_shim"
-    """How the DSO OFO drives the Q(V) plant model when
+    """**DEPRECATED — refactor_v2 commit 1.**  Slated for removal in
+    commit 7.  After the refactor the OFO writes ``q_cor_mvar``
+    directly into ``net.sgen``; there is no V_ref-direct or Q-shim
+    branch to choose between.
+
+    How the DSO OFO drives the Q(V) plant model when
     ``use_qv_local_loop=True``.  Two modes:
 
     * ``"v_ref"`` — OFO commands V_ref directly.  The MIQP solves over
@@ -492,12 +607,18 @@ class MultiTSOConfig:
     Ignored when ``use_qv_local_loop=False`` (Stage 1 path)."""
 
     qv_v_ref_min_pu: float = 0.90
-    """Lower bound on the DSO V_ref OFO variable (only used when
+    """**DEPRECATED — refactor_v2 commit 1.**  Slated for removal in
+    commit 7.  V_ref is no longer an OFO variable (Q_cor is).
+
+    Lower bound on the DSO V_ref OFO variable (only used when
     ``qv_apply_mode='v_ref'``).  Q+shim sets V_ref via the apply-step
     formula and uses Q-bounds on the OFO variable instead."""
 
     qv_v_ref_max_pu: float = 1.10
-    """Upper bound on the DSO V_ref OFO variable (Stage 2)."""
+    """**DEPRECATED — refactor_v2 commit 1.**  Slated for removal in
+    commit 7.
+
+    Upper bound on the DSO V_ref OFO variable (Stage 2)."""
 
     qv_local_damping: float = 0.5
     """Damping factor for the Q(V) local loop iteration.
@@ -527,7 +648,11 @@ class MultiTSOConfig:
     pre-step value regardless of V_ref change."""
 
     g_z_q_dso_der: float = 1e2
-    """Soft-constraint penalty for the realized-Q output of each
+    """**DEPRECATED — refactor_v2 commit 1.**  Slated for removal in
+    commit 7.  The Q_realized soft-constraint row only existed for the
+    V_ref-direct OFO path, which goes away.
+
+    Soft-constraint penalty for the realized-Q output of each
     grid-following DSO DER under the V_ref-mode (Stage 2).  The
     capability bound ``[Q_min, Q_max]`` from the op_diagram is enforced
     as a soft output via this slack penalty so the DSO OFO sees explicit

@@ -1080,7 +1080,7 @@ class DSOController(BaseOFOController):
                 else self.config.der_indices
             )
             meas = getattr(self, "_last_measurement", None)
-            from controller.dso_qv_local_loop import _qv_capability
+            from controller.der_qv_local_loop import _qv_capability
             for k, sgen_idx in enumerate(der_iter):
                 sn = float(net.sgen.at[int(sgen_idx), "sn_mva"])
                 if "op_diagram" in net.sgen.columns:
@@ -1503,7 +1503,7 @@ class DSOController(BaseOFOController):
                     )
                 else:
                     op_diag = "VDE-AR-N-4120-v2"
-                from controller.dso_qv_local_loop import _qv_capability
+                from controller.der_qv_local_loop import _qv_capability
                 p_mw = (
                     float(meas.der_p_mw[d_idx])
                     if d_idx < len(meas.der_p_mw) else 0.0

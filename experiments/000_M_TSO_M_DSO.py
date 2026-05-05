@@ -112,7 +112,6 @@ from core.profiles import (
 from network.ieee39.zonal_balancing import apply_gen_dispatch, compute_zonal_gen_dispatch
 from network.ieee39 import (
     add_hv_networks,
-    apply_der_classification,
     build_ieee39_net,
     HVNetworkInfo,
     IEEE39NetworkMeta,
@@ -1872,19 +1871,53 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # main loop alongside the OFO.  TSO and DSO DERs install separately
     # so each gets its level-appropriate convergence tolerance
     # (TSO: 0.1 Mvar, DSO: 0.01 Mvar by default).
+    #
+    # Seed each DER's q_mvar with the steady-state droop target
+    # Q* = clip(q_cor − R·(V − V_ref), Q_min, Q_max) computed from the
+    # current bus voltage.  This way the QVLocalLoops are installed at
+    # their equilibrium and the post-Phase-2 re-converge runpp does
+    # not have to chase a 100-Mvar transient through 200 iterations.
     if config.use_q_cor_actuator:
+        from controller.der_qv_local_loop import _qv_capability
         tso_sgens = [int(s) for s in meta.tso_der_indices
                      if int(s) in net.sgen.index]
         dso_sgens = [int(s) for s in meta.dso_der_indices
                      if int(s) in net.sgen.index]
-        # Zero Q on every q_mode DER so the QVLocalLoops start from
-        # equilibrium with q_cor_mvar=0.  Phase 1 transferred a non-zero
-        # Q to TSO STATCOMs from the temp PV gens; in Q_cor mode that Q
-        # is reconstructed from the droop (Q = q_cor − R·(V−V_ref)) so
-        # we discard the transferred value and let the loop iterate.
         for s in tso_sgens + dso_sgens:
-            net.sgen.at[s, "q_mvar"] = 0.0
+            # Reset q_cor_mvar (controller has not commanded yet)
             net.sgen.at[s, "q_cor_mvar"] = 0.0
+            mode = str(net.sgen.at[s, "q_mode"])
+            if mode == "cosphi":
+                cosphi = float(net.sgen.at[s, "cosphi"])
+                sign = int(net.sgen.at[s, "cosphi_sign"])
+                p = float(net.res_sgen.at[s, "p_mw"]) if s in net.res_sgen.index else 0.0
+                cosphi = max(min(cosphi, 1.0), 1e-3)
+                if cosphi >= 1.0 - 1e-12:
+                    q_star = 0.0
+                else:
+                    q_star = sign * abs(p) * (1.0 / cosphi**2 - 1.0) ** 0.5
+            else:  # qv
+                slope = float(net.sgen.at[s, "qv_slope_pu"])
+                v_ref = float(net.sgen.at[s, "qv_vref_pu"])
+                db = float(net.sgen.at[s, "qv_deadband_pu"])
+                sn = float(net.sgen.at[s, "sn_mva"])
+                bus = int(net.sgen.at[s, "bus"])
+                v = float(net.res_bus.at[bus, "vm_pu"]) if bus in net.res_bus.index else v_ref
+                p = float(net.res_sgen.at[s, "p_mw"]) if s in net.res_sgen.index else 0.0
+                R = sn / slope if slope > 0 else 0.0
+                v_eff = v - v_ref  # q_cor=0 so V_cor=0
+                if v_eff > db:
+                    q_star = -R * (v_eff - db)
+                elif v_eff < -db:
+                    q_star = -R * (v_eff + db)
+                else:
+                    q_star = 0.0
+                op = (str(net.sgen.at[s, "op_diagram"])
+                      if "op_diagram" in net.sgen.columns else "VDE-AR-N-4120-v2")
+                q_min, q_max = _qv_capability(sn, op, p)
+                q_star = float(max(min(q_star, q_max), q_min))
+            net.sgen.at[s, "q_mvar"] = q_star
+
         n_tso = len(install_der_q_loops(
             net, tso_sgens,
             qv_damping=config.qv_local_damping,
@@ -1902,7 +1935,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
                 f"[3c-deferred] Installed {n_tso + n_dso} DER q_mode loops "
                 f"({n_tso} TSO @ tol={config.tso_qv_tol_mvar} Mvar + "
                 f"{n_dso} DSO @ tol={config.dso_qv_tol_mvar} Mvar) "
-                f"post Phase 2; reset DER Q to 0."
+                f"post Phase 2; seeded q_mvar with droop equilibrium."
             )
 
     if _local_dso:

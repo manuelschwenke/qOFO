@@ -176,6 +176,8 @@ def apply_zone_tso_controls(
     net: pp.pandapowerNet,
     zone_def: "ZoneDefinition",
     tso_out,
+    *,
+    use_q_cor_actuator: bool = False,
 ) -> List[int]:
     """
     Write TSO control output for one zone back to the pandapower plant network.
@@ -185,6 +187,17 @@ def apply_zone_tso_controls(
 
     PCC Q setpoints are *not* applied here; they are communicated to the DSO
     via ``TSOController.generate_setpoint_messages()``.
+
+    Parameters
+    ----------
+    use_q_cor_actuator
+        When True (refactor_v2), the DER block of ``u`` is written into
+        ``net.sgen.q_cor_mvar`` (the controller-commanded Q offset that
+        shifts each DER's local Q(V) curve).  The plant-side
+        :class:`controller.der_qv_local_loop.QVLocalLoop` then converges
+        Q via the droop equation.  When False (default, legacy), the
+        DER block is written into ``net.sgen.q_mvar`` directly (Stage-1
+        direct-Q dispatch).
 
     Returns
     -------
@@ -203,8 +216,17 @@ def apply_zone_tso_controls(
     n_gf = len(zone_def.gridforming_gen_indices)
     off = 0
 
-    for k, s_idx in enumerate(zone_def.tso_der_indices):
-        net.sgen.at[s_idx, "q_mvar"] = float(u[off + k])
+    if use_q_cor_actuator:
+        # Q_cor path (Soleimani §III-B): write the OFO output directly
+        # into the q_cor_mvar column.  The plant-side QVLocalLoop reads
+        # this each PF iteration to shift the V_Q curve.
+        if "q_cor_mvar" not in net.sgen.columns:
+            net.sgen["q_cor_mvar"] = 0.0
+        for k, s_idx in enumerate(zone_def.tso_der_indices):
+            net.sgen.at[s_idx, "q_cor_mvar"] = float(u[off + k])
+    else:
+        for k, s_idx in enumerate(zone_def.tso_der_indices):
+            net.sgen.at[s_idx, "q_mvar"] = float(u[off + k])
     off += n_der
 
     # PCC Q setpoints are forwarded to DSO controllers, not written to net.
@@ -287,7 +309,17 @@ def apply_dso_controls(
     n_oltc = len(dso_cfg.oltc_trafo_indices)
     off = 0
 
-    if dso_cfg.use_qv_local_loop:
+    if dso_cfg.use_q_cor_actuator:
+        # Q_cor path (refactor_v2 / Soleimani §III-B): the OFO output
+        # for the DER block is Q_cor (Mvar) — written directly to
+        # ``net.sgen.q_cor_mvar``.  The plant-side QVLocalLoop reads it
+        # each PF iteration to shift the V_Q characteristic.  No
+        # vm_pu_ref / Q-shim inversion needed.
+        if "q_cor_mvar" not in net.sgen.columns:
+            net.sgen["q_cor_mvar"] = 0.0
+        for k, s_idx in enumerate(dso_cfg.der_indices):
+            net.sgen.at[s_idx, "q_cor_mvar"] = float(u[off + k])
+    elif dso_cfg.use_qv_local_loop:
         # Ensure the column exists even if the build didn't create it
         # (defensive: enables Stage 2 to be flipped on at runtime).
         if "vm_pu_ref" not in net.sgen.columns:

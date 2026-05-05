@@ -260,6 +260,47 @@ class MultiTSOConfig:
     # -- Zone partitioning -----------------------------------------------------
     use_fixed_zones:    bool  = True
 
+    # -- Single-DSO experiment selection (refactor_v2, used by 003_CIGRE_2026) --
+    dso_ids_to_run: List[str] = field(default_factory=list)
+    """Allow-list of DSO IDs (matching ``HVNetworkInfo.net_id`` such as
+    ``"DSO_2"``) for which the runner should construct an OFO
+    :class:`controller.dso_controller.DSOController`.
+
+    Empty list (default) means "build for every DSO in
+    ``meta.hv_networks``" — the legacy multi-DSO behaviour.  A non-empty
+    list restricts OFO construction to the listed DSOs; the remaining
+    HV sub-networks still exist in the plant network and exchange power
+    through their coupling trafos, but they have no OFO controller and
+    their DERs run only their plant-side Q(V) / cos(phi) loop.
+
+    Used by ``experiments/003_M_DSO_CIGRE_2026.py`` to focus the
+    optimisation on a single distribution system."""
+
+    q_pcc_setpoints_mvar_per_dso: Dict[str, List[float]] = field(
+        default_factory=dict
+    )
+    """Exogenous Q-setpoints at the TSO–DSO interface 3W transformers,
+    keyed by DSO ID.  Each value is a list of one Mvar setpoint per
+    coupling 3W transformer of that DSO, in the same order as
+    ``HVNetworkInfo.coupling_trafo_indices``.
+
+    Only consulted when ``tso_mode == 'local'`` (i.e., no TSO OFO is
+    generating ``SetpointMessage``\\s).  In that branch the runner
+    synthesises a :class:`core.message.SetpointMessage` from this dict
+    every step and delivers it to the named DSO controller via
+    ``receive_setpoint``.  Empty dict (default) skips the injection.
+
+    Used by ``experiments/003_M_DSO_CIGRE_2026.py`` to drive the DSO_2
+    controller toward ``[0, 0, 0]`` Mvar at its three interface
+    transformers."""
+
+    # NOTE: the refactor_v2 master switch for the q_mode plant model is
+    # ``use_q_cor_actuator`` (defined further below alongside the rest of
+    # the q_cor / actuator block).  When that flag is True the runner
+    # tags every DER's q_mode and installs the per-row plant-side loops
+    # in a single pass; the legacy classification / Stage-1 / Stage-2
+    # paths run only when ``use_q_cor_actuator`` is False.
+
     # -- Load pre-computed tuned params from a previous run --------------------
     load_tuned_params_path: Optional[str] = None
     """Path to a JSON file written by a previous run's delayed stability
@@ -404,6 +445,35 @@ class MultiTSOConfig:
     """Half-width of the Q(V) linear region (pu).  At V = setpoint+slope
     the windpark dispatches Q = q_min (full inductive); at V = setpoint-slope
     the windpark dispatches Q = q_max (full capacitive)."""
+
+    # ------------------------------------------------------------------
+    #  Q_cor actuator master switch (refactor_v2, Soleimani §III-B)
+    # ------------------------------------------------------------------
+    use_q_cor_actuator: bool = False
+    """Master switch for the refactor_v2 Q_cor path.  When True, the
+    runner:
+
+    * calls :func:`network.ieee39.build.tag_der_q_modes` to populate
+      ``net.sgen.q_mode`` / ``qv_slope_pu`` / ``qv_vref_pu`` /
+      ``qv_deadband_pu`` / ``cosphi`` / ``cosphi_sign`` / ``q_cor_mvar``;
+    * skips :func:`network.ieee39.build.apply_der_classification` so
+      every DER stays as ``pp.sgen`` (no sgen→gen promotion);
+    * installs :func:`controller.der_qv_local_loop.install_der_q_loops`
+      (which dispatches QVLocalLoop or CosPhiConstLoop per ``q_mode``)
+      instead of the legacy ``install_qv_local_loops``;
+    * sets ``use_q_cor_actuator=True`` on every
+      :class:`controller.tso_controller.TSOControllerConfig` and
+      :class:`controller.dso_controller.DSOControllerConfig`,
+      activating the H-matrix ``T' = (I + diag(K)·S_VQ)^{-1}`` transform
+      on the DER columns;
+    * passes ``use_q_cor_actuator=True`` to
+      :func:`experiments.helpers.plant_io.apply_zone_tso_controls`,
+      which writes the OFO output into ``net.sgen.q_cor_mvar``.
+
+    Default ``False`` keeps the legacy grid-forming/grid-following
+    classification path (with sgen→gen promotion and the Stage-2 Q-shim
+    apply step).  Set to ``True`` to exercise the Soleimani-style
+    Q_cor formulation end-to-end."""
 
     # ------------------------------------------------------------------
     #  q_mode hierarchy (refactor_v2, Soleimani §III-B)

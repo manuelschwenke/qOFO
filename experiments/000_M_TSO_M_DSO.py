@@ -117,6 +117,7 @@ from network.ieee39 import (
     HVNetworkInfo,
     IEEE39NetworkMeta,
     remove_generators,
+    tag_der_q_modes,
 )
 from network.zone_partition import (
     fixed_zone_partition_ieee39,
@@ -142,8 +143,10 @@ from experiments.helpers import (
 )
 from sensitivity.jacobian import JacobianSensitivities
 from core.message import ShuntDisturbanceMessage
-from controller.dso_qv_local_loop import (
+from controller.der_qv_local_loop import (
+    CosPhiConstLoop,
     QVLocalLoop,
+    install_der_q_loops,
     install_qv_local_loops,
 )
 
@@ -914,45 +917,101 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
     # ``config.der_mode_overrides``) from net.sgen → net.gen with vm_pu
     # control.  Classification result is stored on meta for downstream
     # zone partitioning to find the new gens.
-    if verbose >= 1:
-        print()
-        print("[3b] Classifying DERs (grid-forming / grid-following) ...")
-    # Convenience: force every TSO-side DER to grid-following for the
-    # all-direct-Q ablation baseline.  Per-DER overrides still win for
-    # any keys already set in the dict.
-    _overrides = dict(config.der_mode_overrides)
-    if config.force_all_der_grid_following:
-        for s_id in meta.tso_der_indices:
-            _overrides.setdefault(int(s_id), "grid_following")
+    if config.use_q_cor_actuator:
+        # ── refactor_v2 path: Q_cor actuator (Soleimani §III-B) ──
+        # All DERs stay as pp.sgen (no promotion).  Tag every TSO and
+        # DSO sgen with its q_mode and parameters from the runner-level
+        # MultiTSOConfig hierarchy.  The plant-side controllers
+        # (QVLocalLoop / CosPhiConstLoop) read these columns each PF
+        # iteration.
         if verbose >= 1:
-            print(f"      force_all_der_grid_following=True: marked "
-                  f"{len(meta.tso_der_indices)} TSO sgens as grid-following")
-    meta = apply_der_classification(
-        net, meta,
-        overrides=_overrides,
-        enforce_q_lims_in_pf=config.enforce_q_lims_plant,
-        verbose=(verbose >= 1),
-    )
+            print()
+            print("[3b] Tagging DER q_modes (refactor_v2 Q_cor path) ...")
+        meta = tag_der_q_modes(
+            net, meta,
+            tso_q_mode=config.tso_q_mode,
+            dso_q_mode=config.dso_q_mode,
+            q_mode_overrides=config.der_q_mode_overrides,
+            tso_qv_slope_pu=config.tso_qv_slope_pu,
+            dso_qv_slope_pu=config.dso_qv_slope_pu,
+            qv_slope_pu_overrides=config.der_qv_slope_pu_overrides,
+            tso_qv_vref_pu=config.tso_qv_vref_pu,
+            dso_qv_vref_pu=config.dso_qv_vref_pu,
+            qv_vref_pu_overrides=config.der_qv_vref_pu_overrides,
+            tso_qv_deadband_pu=config.tso_qv_deadband_pu,
+            dso_qv_deadband_pu=config.dso_qv_deadband_pu,
+            qv_deadband_pu_overrides=config.der_qv_deadband_pu_overrides,
+            tso_cosphi=config.tso_cosphi,
+            dso_cosphi=config.dso_cosphi,
+            cosphi_overrides=config.der_cosphi_overrides,
+            tso_cosphi_sign=config.tso_cosphi_sign,
+            dso_cosphi_sign=config.dso_cosphi_sign,
+            cosphi_sign_overrides=config.der_cosphi_sign_overrides,
+            verbose=(verbose >= 1),
+        )
 
-    # ── Stage-2: Install plant-side Q(V) local loops on grid-following DERs ──
-    if config.use_qv_local_loop and meta.der_classification is not None:
-        gf_following_sgens = [
-            int(s) for s in meta.der_classification.grid_following_der_ids()
-            if s in net.sgen.index
+        # Install plant-side controllers for every tagged DER.  Dispatcher
+        # picks QVLocalLoop or CosPhiConstLoop per row based on q_mode.
+        all_der_sgens = [
+            int(s) for s in (
+                list(meta.tso_der_indices) + list(meta.dso_der_indices)
+            )
+            if int(s) in net.sgen.index
         ]
-        if gf_following_sgens:
-            n_qv = len(install_qv_local_loops(
-                net, gf_following_sgens,
-                slope_pu=config.qv_slope_pu,
-                damping=config.qv_local_damping,
-                max_step_frac=config.qv_local_max_step_frac,
-                tol_mvar=config.qv_local_tol_mvar,
+        if all_der_sgens:
+            n_loops = len(install_der_q_loops(
+                net, all_der_sgens,
+                qv_damping=config.qv_local_damping,
+                qv_max_step_frac=config.qv_local_max_step_frac,
+                qv_tol_mvar=config.qv_local_tol_mvar,
             ))
             if verbose >= 1:
                 print(
-                    f"[3c] Installed {n_qv} Q(V) local loops "
-                    f"(slope={config.qv_slope_pu}, V_ref init=1.03 pu)"
+                    f"[3c] Installed {n_loops} DER q_mode loops "
+                    f"({len(meta.tso_der_indices)} TSO + "
+                    f"{len(meta.dso_der_indices)} DSO)"
                 )
+    else:
+        # Legacy path (sgen→gen promotion + grid-forming/grid-following)
+        if verbose >= 1:
+            print()
+            print("[3b] Classifying DERs (grid-forming / grid-following) ...")
+        # Convenience: force every TSO-side DER to grid-following for the
+        # all-direct-Q ablation baseline.  Per-DER overrides still win for
+        # any keys already set in the dict.
+        _overrides = dict(config.der_mode_overrides)
+        if config.force_all_der_grid_following:
+            for s_id in meta.tso_der_indices:
+                _overrides.setdefault(int(s_id), "grid_following")
+            if verbose >= 1:
+                print(f"      force_all_der_grid_following=True: marked "
+                      f"{len(meta.tso_der_indices)} TSO sgens as grid-following")
+        meta = apply_der_classification(
+            net, meta,
+            overrides=_overrides,
+            enforce_q_lims_in_pf=config.enforce_q_lims_plant,
+            verbose=(verbose >= 1),
+        )
+
+        # ── Stage-2: Install plant-side Q(V) local loops on grid-following DERs ──
+        if config.use_qv_local_loop and meta.der_classification is not None:
+            gf_following_sgens = [
+                int(s) for s in meta.der_classification.grid_following_der_ids()
+                if s in net.sgen.index
+            ]
+            if gf_following_sgens:
+                n_qv = len(install_qv_local_loops(
+                    net, gf_following_sgens,
+                    slope_pu=config.qv_slope_pu,
+                    damping=config.qv_local_damping,
+                    max_step_frac=config.qv_local_max_step_frac,
+                    tol_mvar=config.qv_local_tol_mvar,
+                ))
+                if verbose >= 1:
+                    print(
+                        f"[3c] Installed {n_qv} Q(V) local loops "
+                        f"(slope={config.qv_slope_pu}, V_ref init=1.03 pu)"
+                    )
 
     # =========================================================================
     # STEP 4: Build ZoneDefinitions and TSOControllerConfigs
@@ -1323,6 +1382,8 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             gridforming_gen_buses=zd.gridforming_gen_buses,
             gridforming_gen_sn_mva=zd.gridforming_gen_sn_mva,
             gridforming_gen_op_diagrams=zd.gridforming_gen_op_diagrams,
+            use_q_cor_actuator=config.use_q_cor_actuator,
+            qv_slope_pu=config.tso_qv_slope_pu,
         )
 
         # ActuatorBounds for DERs in this zone
@@ -1513,9 +1574,11 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             gridforming_gen_op_diagrams=dso_gf_gen_op,
             use_qv_local_loop=config.use_qv_local_loop,
             qv_apply_mode=config.qv_apply_mode,
-            qv_slope_pu=config.qv_slope_pu,
+            qv_slope_pu=config.dso_qv_slope_pu if config.use_q_cor_actuator
+                        else config.qv_slope_pu,
             qv_v_ref_min_pu=config.qv_v_ref_min_pu,
             qv_v_ref_max_pu=config.qv_v_ref_max_pu,
+            use_q_cor_actuator=config.use_q_cor_actuator,
         )
 
         dso_s_rated = np.array(
@@ -2601,6 +2664,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             for z, tso_out in tso_outputs.items():
                 prev_shunt_steps = apply_zone_tso_controls(
                     net, zone_defs[z], tso_out,
+                    use_q_cor_actuator=config.use_q_cor_actuator,
                 )
 
                 # Record per-zone results.
@@ -3405,8 +3469,8 @@ def main() -> None:
         dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
         # ── TSO weights (alpha=1, spectral rho(C)/2) ──
         g_w_der=10,   # single-DER zones; rho~C_jj=396 -> min 198
-        g_w_gridforming= 5E12,
-        g_w_gen=5e12,   # excluded from stability
+        g_w_gridforming= 5E6,
+        g_w_gen=5e7,   # excluded from stability
         g_w_pcc=50,   # 9 correlated PCCs; rho(C)=221 -> min 111
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
@@ -3414,7 +3478,7 @@ def main() -> None:
         # ── DSO weights (alpha=1, rho(C_DER)=790 -> min 395) ──
         g_w_dso_der=2000,  # 2026-05-04: 500 caused massive DSO Q chatter; backed off toward 1000 per plan fallback. Per-step decay 0.286 (vs 0.20 at 1000, 0.40 at 500). Still > floor 395.
         g_w_dso_der_vref=1E6,
-        g_w_dso_oltc=20,   # rho(C_OLTC)~1.1; higher for switching suppression
+        g_w_dso_oltc=40,   # rho(C_OLTC)~1.1; higher for switching suppression
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps

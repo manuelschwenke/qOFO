@@ -182,6 +182,14 @@ LINE_LENGTHS_KM: Dict[Tuple[int, int], float] = {
     (26, 29): 418.9, (28, 29): 101.2,
 }
 
+# Experimental knob: scales total R, X, B/G of every TN line linearly without
+# touching LINE_LENGTHS_KM. 1.0 reproduces case39 totals at the realistic
+# distances above; values >1 lengthen the lines electrically (long-line /
+# Ferranti regime). Applied in fix_line_lengths() to length_km only — the
+# per-km columns are derived from case39 totals and the realistic distance.
+# Caveat: lumped-π breaks down beyond ~1500 km (50 Hz quarter wavelength), so
+# factors of ~3–10 are physically meaningful; larger values are illustrative.
+LINE_LENGTH_FACTOR: float = 1.0
 
 # ── TUDA HV network topology (reused for all sub-networks) ───────────────
 

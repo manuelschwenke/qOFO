@@ -248,12 +248,12 @@ class _OLTCRateLimiter:
     Usage pattern (once per outer simulation step, around every plant
     PF):
 
-    >>> limiter = _OLTCRateLimiter(max_step=1, cooldown_s=30.0)
-    >>> # at the top of every step:
-    >>> limiter.snapshot(net)
-    >>> # after every pp.runpp(run_control=True):
-    >>> moved = limiter.clamp(net, time_s)
-    >>> if moved:
+     limiter = _OLTCRateLimiter(max_step=1, cooldown_s=30.0)
+     # at the top of every step:
+     limiter.snapshot(net)
+     # after every pp.runpp(run_control=True):
+     moved = limiter.clamp(net, time_s)
+     if moved:
     ...     pp.runpp(net, run_control=False, ...)
     """
 
@@ -450,6 +450,13 @@ def _record_dso_group_and_transformer_data(
         # Retrieve per-trafo Q setpoints (vector or None)
         q_set_vec = last_dso_q_set_mvar.get(dso_id)
 
+        # Last absolute capability envelope reported upward by this DSO
+        # (set by :meth:`DSOController.generate_capability_message`).  May
+        # be ``None`` for the very first record before any capability
+        # message has been generated.
+        cap_min_vec = dso_ctrl._last_capability_q_iface_min_mvar
+        cap_max_vec = dso_ctrl._last_capability_q_iface_max_mvar
+
         rec.dso_controller_group[dso_id] = group_id
 
         # Per-trafo recording
@@ -463,6 +470,10 @@ def _record_dso_group_and_transformer_data(
                 rec.dso_trafo_q_set_mvar[trafo_key] = float(q_set_vec[k])
             elif q_set_vec is not None:
                 rec.dso_trafo_q_set_mvar[trafo_key] = float(q_set_vec[0])
+
+            if cap_min_vec is not None and k < len(cap_min_vec):
+                rec.dso_trafo_q_cap_min_mvar[trafo_key] = float(cap_min_vec[k])
+                rec.dso_trafo_q_cap_max_mvar[trafo_key] = float(cap_max_vec[k])
 
             if trafo_idx in net.res_trafo3w.index:
                 rec.dso_trafo_q_actual_mvar[trafo_key] = float(
@@ -1266,7 +1277,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
             g_w=gw_diag,
             g_z=gz_diag,
             g_u=np.zeros_like(gw_diag),
-            alpha=1.0,
+            alpha=config.tso_command_relaxation_alpha,
             int_max_step=config.int_max_step,
             int_cooldown=config.int_cooldown,
             int_cooldown_s=config.oltc_cooldown_s,
@@ -1807,7 +1818,7 @@ def run_multi_tso_dso(config: MultiTSOConfig) -> List[MultiTSOIterationRecord]:
 
     _t = perf_counter()
     pp.runpp(net, run_control=True, calculate_voltage_angles=True,
-             max_iteration=50, distributed_slack=config.distributed_slack,
+             max_iteration=100, distributed_slack=config.distributed_slack,
              enforce_q_lims=config.enforce_q_lims_plant)
     if verbose >= 1:
         print(f"  [T] Phase 2 pp.runpp(run_control=True): {perf_counter() - _t:.2f} s")
@@ -3381,66 +3392,29 @@ def main() -> None:
         n_total_s=60.0 * 60 * 8,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
-        g_v=500000.0,  # TSO voltage tracking; drives PCC Q dispatch
+        g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=200,  # DSO Q-tracking
+        tso_g_q_tie=1,
         # ── DSO objective tuning ──
-        use_qv_local_loop=True,
-        force_all_der_grid_following=False,
+        use_qv_local_loop=False,
+        force_all_der_grid_following=True,
         dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.9,  # leaky integrator decay
         dso_q_integral_max_mvar=50.0,  # anti-windup clamp
-        dso_gamma_oltc_q=1.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
+        dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
         # ── TSO weights (alpha=1, spectral rho(C)/2) ──
         g_w_der=10,   # single-DER zones; rho~C_jj=396 -> min 198
-        g_w_gridforming= 5E6,
-        g_w_gen=5e7,   # excluded from stability
+        g_w_gridforming= 5E12,
+        g_w_gen=5e12,   # excluded from stability
         g_w_pcc=50,   # 9 correlated PCCs; rho(C)=221 -> min 111
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,   # bipolar tertiary shunts; mirror g_w_tso_oltc
         # ── DSO weights (alpha=1, rho(C_DER)=790 -> min 395) ──
-        g_w_dso_der=200,  # 8 correlated DER; sf~2.5 for smooth tracking
+        g_w_dso_der=2000,  # 2026-05-04: 500 caused massive DSO Q chatter; backed off toward 1000 per plan fallback. Per-step decay 0.286 (vs 0.20 at 1000, 0.40 at 500). Still > floor 395.
         g_w_dso_der_vref=1E6,
         g_w_dso_oltc=20,   # rho(C_OLTC)~1.1; higher for switching suppression
-        # ── Adaptive g_w (paper Eq.16, sign-only) — all continuous classes ──
-        # `g_w_*` values above become the warm-start; the meta below
-        # controls the multiplicative rate and clip box.  Discrete
-        # actuators (OLTC, shunt) intentionally left static.
-        adapt_g_w_der=False,
-        adapt_g_w_pcc=False,
-        adapt_g_w_gen=False,
-        adapt_g_w_dso_der=False,
-        # ── Shared scalars (used as fallbacks) ──
-        # g_w_adapt_beta1=0.02,
-        # g_w_adapt_beta2=0.2,
-        # g_w_adapt_t_min=100.0,  # fallback floor
-        g_w_adapt_t_max=5e7,
-        g_w_adapt_deadband_rel=1e-4,
-        # ── Per-class clip floors at each class's stability minimum ──
-        g_w_adapt_t_min_per_class={
-            "der": 10.0,
-            "pcc": 10.0,
-            "gen": 1.0e4,
-            "dso_der": 100.0,
-        },
-        g_w_adapt_t_max_per_class={
-            "der": 1e4,  # cap at 1.5× warm-start to limit β2 overshoot
-            "pcc": 1e4,
-            "dso_der": 1e4,  # this is the key: cap DSO_4 at ~1e4, not 1e8
-        },
-        g_w_adapt_beta1_per_class={
-            "der": 0.05,
-            "pcc": 0.02,
-            "gen": 0.1,  # 3 h adapt time so it stays under 0.3
-            "dso_der": 0.002,
-        },
-        g_w_adapt_beta2_per_class={
-            "der": 0.3,
-            "pcc": 0.15,
-            "gen": 0.2,
-            "dso_der": 0.03,
-        },
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -3449,7 +3423,7 @@ def main() -> None:
         live_plot_cascade=True,
         live_plot_system=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 7, 5, 6, 0),
+        start_time=datetime(2016, 4, 15, 10, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies           = [

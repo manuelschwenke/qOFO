@@ -124,6 +124,11 @@ class CascadeDSOLivePlotter:
         self._trafo_q_set:    Dict[str, List[float]] = {}
         self._trafo_q_actual: Dict[str, List[float]] = {}
         self._trafo_tap:      Dict[str, List[float]] = {}
+        # DSO-reported PCC capability envelope (absolute Mvar at HV side):
+        # the band between min and max is what the TSO solver may dispatch
+        # within for that PCC at the moment the capability message was sent.
+        self._trafo_q_cap_min: Dict[str, List[float]] = {}
+        self._trafo_q_cap_max: Dict[str, List[float]] = {}
 
         # ── Figure + GridSpec ────────────────────────────────────────────
         n = len(self._dso_ids)
@@ -265,21 +270,27 @@ class CascadeDSOLivePlotter:
                 dso_id = trafo_key.split("|", 1)[0]
                 if dso_id in self._dso_trafo_ids and trafo_key not in self._dso_trafo_ids[dso_id]:
                     self._dso_trafo_ids[dso_id].append(trafo_key)
-                self._trafo_q_set   [trafo_key] = [np.nan] * (len(self._t_dso))
-                self._trafo_q_actual[trafo_key] = [np.nan] * (len(self._t_dso))
-                self._trafo_tap     [trafo_key] = [np.nan] * (len(self._t_dso))
+                self._trafo_q_set     [trafo_key] = [np.nan] * (len(self._t_dso))
+                self._trafo_q_actual  [trafo_key] = [np.nan] * (len(self._t_dso))
+                self._trafo_tap       [trafo_key] = [np.nan] * (len(self._t_dso))
+                self._trafo_q_cap_min [trafo_key] = [np.nan] * (len(self._t_dso))
+                self._trafo_q_cap_max [trafo_key] = [np.nan] * (len(self._t_dso))
 
         if rec.dso_active or any(
             (k in rec.dso_trafo_q_actual_mvar) for k in self._trafo_q_actual.keys()
         ):
             self._t_dso.append(t_unit)
             for trafo_key in self._trafo_q_actual.keys():
-                self._trafo_q_set   [trafo_key].append(
-                    rec.dso_trafo_q_set_mvar   .get(trafo_key, np.nan))
-                self._trafo_q_actual[trafo_key].append(
-                    rec.dso_trafo_q_actual_mvar.get(trafo_key, np.nan))
-                self._trafo_tap     [trafo_key].append(
-                    rec.dso_trafo_tap_pos      .get(trafo_key, np.nan))
+                self._trafo_q_set     [trafo_key].append(
+                    rec.dso_trafo_q_set_mvar     .get(trafo_key, np.nan))
+                self._trafo_q_actual  [trafo_key].append(
+                    rec.dso_trafo_q_actual_mvar  .get(trafo_key, np.nan))
+                self._trafo_tap       [trafo_key].append(
+                    rec.dso_trafo_tap_pos        .get(trafo_key, np.nan))
+                self._trafo_q_cap_min [trafo_key].append(
+                    rec.dso_trafo_q_cap_min_mvar .get(trafo_key, np.nan))
+                self._trafo_q_cap_max [trafo_key].append(
+                    rec.dso_trafo_q_cap_max_mvar .get(trafo_key, np.nan))
 
         self._call_count += 1
         if self._call_count % self._update_every == 0:
@@ -350,25 +361,59 @@ class CascadeDSOLivePlotter:
             return
         t = np.asarray(self._t_dso, dtype=float)
         n = t.size
-        # One line per coupling transformer: solid = actual, dashed = setpoint.
+        # One line per coupling transformer: solid = actual, dashed = setpoint,
+        # translucent fill = DSO-reported PCC capability envelope.
         # Colour-cycle per trafo index so the three trafos of a given DSO are
         # visually distinct; the same colour ordering is reused across DSOs.
+        # Y-limits are pinned to the setpoint/actual envelope (with a small
+        # margin) so the wide capability band cannot crush the visible
+        # tracking detail.
+        line_min = np.inf
+        line_max = -np.inf
         for k, trafo_key in enumerate(trafo_ids):
             c = _c(3 + k)
             set_vals = np.asarray(self._trafo_q_set[trafo_key],    dtype=float)
             act_vals = np.asarray(self._trafo_q_actual[trafo_key], dtype=float)
+            cap_min  = np.asarray(self._trafo_q_cap_min[trafo_key], dtype=float)
+            cap_max  = np.asarray(self._trafo_q_cap_max[trafo_key], dtype=float)
             if set_vals.size < n:
                 set_vals = np.concatenate([set_vals, np.full(n - set_vals.size, np.nan)])
             if act_vals.size < n:
                 act_vals = np.concatenate([act_vals, np.full(n - act_vals.size, np.nan)])
+            if cap_min.size < n:
+                cap_min  = np.concatenate([cap_min,  np.full(n - cap_min.size,  np.nan)])
+            if cap_max.size < n:
+                cap_max  = np.concatenate([cap_max,  np.full(n - cap_max.size,  np.nan)])
             set_vals = set_vals[:n]
             act_vals = act_vals[:n]
+            cap_min  = cap_min [:n]
+            cap_max  = cap_max [:n]
             t_label = _trafo_short(trafo_key)
+            # Band first so it sits behind the lines.
+            ax.fill_between(
+                t, cap_min, cap_max,
+                color=c, alpha=0.10, linewidth=0,
+                step="post",
+            )
             ax.plot(t, act_vals, color=c, lw=1.0, label=t_label)
             ax.plot(t, set_vals, color=c, lw=0.8, ls="--", drawstyle="steps-post")
+            # Track envelope of the lines (ignore the band) for y-axis pinning.
+            for vals in (set_vals, act_vals):
+                finite = vals[np.isfinite(vals)]
+                if finite.size > 0:
+                    line_min = min(line_min, float(finite.min()))
+                    line_max = max(line_max, float(finite.max()))
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper left", fontsize=6,
                   ncol=min(len(trafo_ids), 3), frameon=False)
+        # Pin y-limits to the setpoint/actual envelope so the wide capability
+        # band cannot collapse the visible tracking detail.  Add a 5 % margin
+        # (or 1 Mvar floor) and let matplotlib clip the band where it extends
+        # beyond.  Skip if no finite line data accumulated yet.
+        if np.isfinite(line_min) and np.isfinite(line_max):
+            span = max(line_max - line_min, 1.0)
+            margin = 0.05 * span
+            ax.set_ylim(line_min - margin, line_max + margin)
 
     def _redraw_line_currents(self) -> None:
         ax = self._ax_iline

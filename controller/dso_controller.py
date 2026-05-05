@@ -389,7 +389,16 @@ class DSOController(BaseOFOController):
         self._H_cache: Optional[NDArray[np.float64]] = None
         self._H_mappings: Optional[Dict] = None
         self._sensitivity_updater: Optional[SensitivityUpdater] = None
-    
+
+        # Last absolute interface-Q capability bounds (Mvar) reported upward
+        # via :meth:`generate_capability_message`.  Stored for live-plot
+        # diagnostics so the cascade plotter can show the envelope the TSO
+        # solver was given.  ``None`` until the first capability message is
+        # generated; one entry per ``interface_trafo_indices`` thereafter,
+        # ordered to match.
+        self._last_capability_q_iface_min_mvar: Optional[NDArray[np.float64]] = None
+        self._last_capability_q_iface_max_mvar: Optional[NDArray[np.float64]] = None
+
     def receive_setpoint(self, message: SetpointMessage) -> None:
         """
         Receive a setpoint message from the TSO controller.
@@ -538,6 +547,18 @@ class DSOController(BaseOFOController):
                 else:
                     q_interface_min[i] += sensitivity * dq_max
                     q_interface_max[i] += sensitivity * dq_min
+
+        # Cache the absolute interface-Q capability envelope (Mvar) so the
+        # cascade live plot can overlay it on the per-PCC Q traces.  The
+        # message itself ships deltas; the absolute bound the TSO will use
+        # is q_iface_now + delta, so we store that form.
+        q_iface_now = (
+            measurement.interface_q_hv_side_mvar.copy()
+            if measurement.interface_q_hv_side_mvar is not None
+            else np.zeros(n_interfaces, dtype=np.float64)
+        )
+        self._last_capability_q_iface_min_mvar = q_iface_now + q_interface_min
+        self._last_capability_q_iface_max_mvar = q_iface_now + q_interface_max
 
         return CapabilityMessage(
             source_controller_id=self.controller_id,

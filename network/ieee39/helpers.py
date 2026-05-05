@@ -16,6 +16,7 @@ from typing import List, Tuple
 
 import pandapower as pp
 
+from network.ieee39 import constants as _ieee39_constants
 from network.ieee39.constants import GEN_NAMEPLATE, LINE_LENGTHS_KM
 from network.ieee39.meta import IEEE39NetworkMeta
 
@@ -25,15 +26,20 @@ from network.ieee39.meta import IEEE39NetworkMeta
 # ---------------------------------------------------------------------------
 
 def fix_line_lengths(net: pp.pandapowerNet) -> None:
-    """Replace default 1-km lengths with real distances, preserving total Z.
+    """Replace default 1-km lengths with real distances; optionally scale totals.
 
     pandapower case39() stores total impedance as per-km values with
     length_km = 1.0.  This function sets the real length and rescales the
     per-km values so that ``per_km * length_km`` (the total impedance seen
-    by the power flow) is exactly preserved.
+    by the power flow) matches the case39 totals at LINE_LENGTH_FACTOR = 1.
 
-    Lines without a matching entry in ``LINE_LENGTHS_KM`` (e.g. line 29
-    which is a generator step-up connection) are left unchanged.
+    When LINE_LENGTH_FACTOR != 1, length_km is additionally multiplied by
+    the factor while the per-km columns are not. Pandapower computes total
+    R, X, B as per_km * length_km, so totals scale linearly with the factor
+    (long-line / Ferranti regime experiments).
+
+    Lines without a matching entry in ``LINE_LENGTHS_KM`` (e.g. the
+    generator step-up connections) are left unchanged.
     """
     for li in net.line.index:
         fb_1 = int(net.line.at[li, "from_bus"]) + 1
@@ -52,7 +58,7 @@ def fix_line_lengths(net: pp.pandapowerNet) -> None:
         net.line.at[li, "x_ohm_per_km"] = float(net.line.at[li, "x_ohm_per_km"]) * scale
         net.line.at[li, "c_nf_per_km"]  = float(net.line.at[li, "c_nf_per_km"]) * scale
         net.line.at[li, "g_us_per_km"]  = float(net.line.at[li, "g_us_per_km"]) * scale
-        net.line.at[li, "length_km"]    = new_len
+        net.line.at[li, "length_km"]    = new_len * _ieee39_constants.LINE_LENGTH_FACTOR
 
 
 # ---------------------------------------------------------------------------

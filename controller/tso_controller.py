@@ -195,7 +195,7 @@ class TSOControllerConfig:
     to get the realised-Q envelope.  If empty, defaults to ``STATCOM``
     for every gen."""
 
-    gridforming_vm_min_pu: float = 0.95
+    gridforming_vm_min_pu: float = 0.90
     """Lower bound on the V_gf voltage setpoint [pu].  Wider than the
     synch-machine ``gen_vm_min_pu`` because grid-forming converters
     typically have looser AVR limits."""
@@ -203,7 +203,7 @@ class TSOControllerConfig:
     gridforming_vm_max_pu: float = 1.10
     """Upper bound on the V_gf voltage setpoint [pu]."""
 
-    rho_q_gridforming: float = 1e2
+    rho_q_gridforming: float = 1e-2
     """Soft-constraint penalty for the Q_gf output (analogous to
     ``rho_q_gen``).  Bounds come from the STATCOM Q-circle each
     iteration."""

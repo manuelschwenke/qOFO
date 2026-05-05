@@ -194,6 +194,13 @@ class MultiTSOIterationRecord:
     dso_trafo_q_actual_mvar: Dict[str, float] = field(default_factory=dict)
     dso_trafo_tap_pos:       Dict[str, int] = field(default_factory=dict)
 
+    # DSO-reported PCC Q-capability envelope, in absolute Mvar at the HV side
+    # of the interface trafo (i.e. q_iface_now + reported delta).  Same key
+    # convention as ``dso_trafo_q_set_mvar``.  Used by the cascade live plot
+    # to overlay the achievable band behind the setpoint and actual traces.
+    dso_trafo_q_cap_min_mvar: Dict[str, float] = field(default_factory=dict)
+    dso_trafo_q_cap_max_mvar: Dict[str, float] = field(default_factory=dict)
+
     # Explicit grouping metadata for fail-fast plotting
     dso_trafo_group:      Dict[str, str] = field(default_factory=dict)
     dso_controller_group: Dict[str, str] = field(default_factory=dict)

@@ -587,6 +587,14 @@ def apply_der_classification(
 
     # Build a snapshot of the sgen attributes we need BEFORE we drop
     # anything (pandas index lookups become invalid mid-loop otherwise).
+    # ``profile`` and ``base_p_mw`` are carried forward so the promoted
+    # gen's active power can keep tracking the original wind/PV profile
+    # via :func:`core.profiles.apply_profiles` — a promoted DER must
+    # behave as an exogenous P injector, not as a dispatchable
+    # generator.  ``compute_zonal_gen_dispatch`` looks at
+    # ``net.gen.profile`` to decide whether a gen takes part in zonal
+    # dispatch (no, when profile is set) or absorbs zone residual
+    # (yes, otherwise).
     sgen_snapshot: Dict[int, Dict[str, object]] = {}
     for s in grid_forming_ids:
         if s not in net.sgen.index:
@@ -594,9 +602,26 @@ def apply_der_classification(
                 f"Grid-forming DER id {s} not found in net.sgen — was the "
                 f"classification built from a stale meta?"
             )
+        # ``snapshot_base_values`` runs AFTER apply_der_classification,
+        # so ``base_p_mw`` may not yet exist on net.sgen.  Fall back to
+        # the current ``p_mw`` (the build-time base case).
+        if "base_p_mw" in net.sgen.columns and not pd.isna(
+            net.sgen.at[s, "base_p_mw"]
+        ):
+            base_p = float(net.sgen.at[s, "base_p_mw"])
+        else:
+            base_p = float(net.sgen.at[s, "p_mw"])
+        prof = (
+            net.sgen.at[s, "profile"]
+            if "profile" in net.sgen.columns else None
+        )
+        if pd.isna(prof):
+            prof = None
         sgen_snapshot[s] = {
             "bus": int(net.sgen.at[s, "bus"]),
             "p_mw": float(net.sgen.at[s, "p_mw"]),
+            "base_p_mw": base_p,
+            "profile": prof,
             "sn_mva": float(net.sgen.at[s, "sn_mva"]),
             "name": str(net.sgen.at[s, "name"]),
             "op_diagram": (
@@ -649,6 +674,17 @@ def apply_der_classification(
         if "op_diagram" not in net.gen.columns:
             net.gen["op_diagram"] = None
         net.gen.at[int(gidx), "op_diagram"] = snap["op_diagram"]
+        # Carry the wind/PV profile linkage forward.  ``apply_profiles``
+        # keys off these two columns to scale ``p_mw`` over time, and
+        # ``compute_zonal_gen_dispatch`` keys off ``profile`` to skip
+        # this gen from zonal dispatch (the wind P is exogenous, not
+        # dispatchable).
+        if "profile" not in net.gen.columns:
+            net.gen["profile"] = None
+        if "base_p_mw" not in net.gen.columns:
+            net.gen["base_p_mw"] = float("nan")
+        net.gen.at[int(gidx), "profile"] = snap["profile"]
+        net.gen.at[int(gidx), "base_p_mw"] = float(snap["base_p_mw"])
         classification.record_promotion(der_id=der_id, gen_idx=int(gidx))
 
     # Verification PF. enforce_q_lims clips the new gens at their Q

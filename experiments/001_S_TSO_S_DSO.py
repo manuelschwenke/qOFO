@@ -11,7 +11,7 @@ TSO every 3 min, DSO every 1 min. Combined network for everything
 TSO actuators: gen AVR voltages, machine trafo OLTCs (2W), TS-DER Q, 380 kV shunts
 DSO actuators: DN-DER Q, 3W coupler OLTCs, tertiary winding shunts
 
-Author: Manuel Schwenke / Claude Code
+Author: Manuel Schwenke
 
 Note: All helper functions have been moved to sibling modules in the ``run/``
 package.  This module contains only the main ``run_cascade`` and ``main``

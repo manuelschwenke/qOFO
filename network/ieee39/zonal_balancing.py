@@ -129,6 +129,25 @@ def compute_zonal_gen_dispatch(
             prof = None
         zone_sgens[z].append((base_p, prof))
 
+    # Promoted DER gens (wind/PV originally on net.sgen, promoted to
+    # pp.gen by apply_der_classification) carry a ``profile`` column.
+    # Treat them as exogenous P injectors (sgen-equivalent) for zone
+    # residual computation — they MUST NOT take part in zonal dispatch
+    # because their P is the wind/PV resource, not a dispatchable
+    # quantity.  Synchronous-machine gens have no ``profile`` and fall
+    # through to the dispatched-gen list below.
+    if "profile" in net.gen.columns and "base_p_mw" in net.gen.columns:
+        for gi in net.gen.index:
+            prof = net.gen.at[gi, "profile"]
+            if pd.isna(prof):
+                continue
+            bus = int(net.gen.at[gi, "bus"])
+            z = bus_zone.get(bus)
+            if z is None:
+                continue
+            base_p = float(net.gen.at[gi, "base_p_mw"])
+            zone_sgens[z].append((base_p, str(prof)))
+
     ext_grid_buses = set(int(net.ext_grid.at[e, "bus"]) for e in net.ext_grid.index)
     zone_gens: Dict[int, List[int]] = {z: [] for z in zone_map}
 
@@ -136,6 +155,12 @@ def compute_zonal_gen_dispatch(
         bus = int(net.gen.at[gi, "bus"])
         if bus in ext_grid_buses:
             continue
+        # Skip promoted DER gens — they are wind/PV injectors, not
+        # dispatchable.  Their P is set by apply_profiles.
+        if "profile" in net.gen.columns:
+            prof = net.gen.at[gi, "profile"]
+            if not pd.isna(prof):
+                continue
         z = bus_zone.get(bus)
         if z is None:
             continue

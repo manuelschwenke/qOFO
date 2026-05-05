@@ -262,8 +262,8 @@ class MultiTSOConfig:
     g_z_voltage:   float = 1E-12
     g_z_current:   float = 0.0
     g_z_interface: float = 0.0
-    g_z_q_gen:     float = 1E3
-    g_z_q_gridforming: float = 1E3
+    g_z_q_gen:     float = 1E2
+    g_z_q_gridforming: float = 1E2
     """Soft-constraint penalty for the Q_gf output (grid-forming converter
     realised Q vs the STATCOM ±sqrt(S^2-P^2) Q-circle).  Mirrors
     ``g_z_q_gen`` for synch machines.  Default 1E3 — a gentle nudge that
@@ -393,6 +393,25 @@ class MultiTSOConfig:
     the windpark dispatches Q = q_min (full inductive); at V = setpoint-slope
     the windpark dispatches Q = q_max (full capacitive)."""
 
+    tso_command_relaxation_alpha: float = 1.0
+    """Step-size relaxation factor on the TSO OFO command update for
+    *continuous* actuators only (Q_DER, Q_PCC, V_gen, V_gf).  Discrete
+    actuators (OLTC, shunt) always step by their full integer increment
+    because they cannot move "a fraction of a step".
+
+    Update rule:
+        u^(k+1)[continuous] = u^(k)[continuous] + alpha * w^(k)[continuous]
+        u^(k+1)[integer]    = u^(k)[integer]    +         w^(k)[integer]
+
+    where ``w^(k)`` is the OFO MIQP step direction.
+
+    Default ``1.0`` reproduces the unrelaxed update of the PSCC 2026
+    paper.  Values in [0.1, 0.7] add stability margin against modelling
+    error (e.g. when the cached open-loop sensitivity does not include
+    the response of an installed plant-side Q(V) droop, as in T-OFO).
+    Lower values converge more slowly but tolerate larger model error.
+    """
+
     # -- Per-DER grid-forming / grid-following classification ----------------
     der_mode_overrides: Dict[int, str] = field(default_factory=dict)
     """Optional per-DER override of the default grid-forming /
@@ -472,7 +491,7 @@ class MultiTSOConfig:
 
     Ignored when ``use_qv_local_loop=False`` (Stage 1 path)."""
 
-    qv_v_ref_min_pu: float = 0.95
+    qv_v_ref_min_pu: float = 0.90
     """Lower bound on the DSO V_ref OFO variable (only used when
     ``qv_apply_mode='v_ref'``).  Q+shim sets V_ref via the apply-step
     formula and uses Q-bounds on the OFO variable instead."""
@@ -498,7 +517,7 @@ class MultiTSOConfig:
     by the capability clip).  Lower values further restrict per-iteration
     swing; raise to disable."""
 
-    qv_local_tol_mvar: float = 0.01
+    qv_local_tol_mvar: float = 0.1
     """Convergence tolerance for the Q(V) local loop (Mvar).
 
     Tight default (0.01 Mvar) so that small Q-shim commands (e.g. 0.5
@@ -527,7 +546,7 @@ class MultiTSOConfig:
     Sign convention follows pandapower load convention: ``step = +1``
     injects +q_mvar (reactor), ``step = -1`` injects −q_mvar (capacitor)."""
 
-    tso_g_q_pcc: float = 5.0
+    tso_g_q_pcc: float = 0.0
     """Q-tracking weight on the (re-enabled) Q_PCC output rows of the TSO
     H matrix.  Scales the gradient contribution of
     ``(Q_PCC_actual − Q_PCC_set)^2`` in the TSO objective.  Default 1.0

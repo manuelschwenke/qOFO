@@ -36,7 +36,7 @@ class TestDefaults:
         tag_der_q_modes(net, meta)
         for col in [
             "q_mode", "qv_slope_pu", "qv_vref_pu", "qv_deadband_pu",
-            "cosphi", "cosphi_sign", "q_cor_mvar",
+            "cosphi", "cosphi_sign", "q_set_mvar",
         ]:
             assert col in net.sgen.columns
 
@@ -55,7 +55,7 @@ class TestDefaults:
             assert net.sgen.at[s, "qv_deadband_pu"] == pytest.approx(0.0)
             assert net.sgen.at[s, "cosphi"] == pytest.approx(1.0)
             assert net.sgen.at[s, "cosphi_sign"] == -1
-            assert net.sgen.at[s, "q_cor_mvar"] == pytest.approx(0.0)
+            assert net.sgen.at[s, "q_set_mvar"] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -119,16 +119,16 @@ class TestOverrides:
 # ---------------------------------------------------------------------------
 
 class TestReInvocation:
-    def test_q_cor_mvar_preserved_across_calls(self, base_net_meta):
+    def test_q_set_mvar_preserved_across_calls(self, base_net_meta):
         net, meta = base_net_meta
         tag_der_q_modes(net, meta)
-        # Simulate a controller writing a Q_cor command
+        # Simulate a controller writing a Q_set command
         first_tso = int(meta.tso_der_indices[0])
-        net.sgen.at[first_tso, "q_cor_mvar"] = 5.5
+        net.sgen.at[first_tso, "q_set_mvar"] = 5.5
         # Re-tag with different parameters
         tag_der_q_modes(net, meta, tso_qv_slope_pu=0.04)
-        # q_cor_mvar must NOT be reset to 0 — it's runtime state
-        assert net.sgen.at[first_tso, "q_cor_mvar"] == pytest.approx(5.5)
+        # q_set_mvar must NOT be reset to 0 — it's runtime state
+        assert net.sgen.at[first_tso, "q_set_mvar"] == pytest.approx(5.5)
         # But qv_slope_pu picks up the new level default
         assert net.sgen.at[first_tso, "qv_slope_pu"] == pytest.approx(0.04)
 

@@ -255,12 +255,12 @@ class MultiTSOConfig:
     controller toward ``[0, 0, 0]`` Mvar at its three interface
     transformers."""
 
-    # NOTE: the refactor_v2 master switch for the q_mode plant model is
-    # ``use_q_cor_actuator`` (defined further below alongside the rest of
-    # the q_cor / actuator block).  When that flag is True the runner
-    # tags every DER's q_mode and installs the per-row plant-side loops
-    # in a single pass; the legacy classification / Stage-1 / Stage-2
-    # paths run only when ``use_q_cor_actuator`` is False.
+    # refactor_v3: the q_mode plant model is now the only path.  The
+    # runner unconditionally tags every DER's q_mode and installs the
+    # per-row plant-side loops; the OFO commands ``q_set_mvar`` and the
+    # plant-side QVLocalLoop applies the Q(V) characteristic with
+    # deadband.  The legacy refactor_v2 ``use_q_cor_actuator`` flag,
+    # along with the H@T' transform, was removed.
 
     # -- Load pre-computed tuned params from a previous run --------------------
     load_tuned_params_path: Optional[str] = None
@@ -397,36 +397,7 @@ class MultiTSOConfig:
     the windpark dispatches Q = q_max (full capacitive)."""
 
     # ------------------------------------------------------------------
-    #  Q_cor actuator master switch (refactor_v2, Soleimani §III-B)
-    # ------------------------------------------------------------------
-    use_q_cor_actuator: bool = True
-    """Master switch for the refactor_v2 Q_cor path.  When True, the
-    runner:
-
-    * calls :func:`network.ieee39.build.tag_der_q_modes` to populate
-      ``net.sgen.q_mode`` / ``qv_slope_pu`` / ``qv_vref_pu`` /
-      ``qv_deadband_pu`` / ``cosphi`` / ``cosphi_sign`` / ``q_cor_mvar``;
-    * skips :func:`network.ieee39.build.apply_der_classification` so
-      every DER stays as ``pp.sgen`` (no sgen→gen promotion);
-    * installs :func:`controller.der_qv_local_loop.install_der_q_loops`
-      (which dispatches QVLocalLoop or CosPhiConstLoop per ``q_mode``)
-      instead of the legacy ``install_qv_local_loops``;
-    * sets ``use_q_cor_actuator=True`` on every
-      :class:`controller.tso_controller.TSOControllerConfig` and
-      :class:`controller.dso_controller.DSOControllerConfig`,
-      activating the H-matrix ``T' = (I + diag(K)·S_VQ)^{-1}`` transform
-      on the DER columns;
-    * passes ``use_q_cor_actuator=True`` to
-      :func:`experiments.helpers.plant_io.apply_zone_tso_controls`,
-      which writes the OFO output into ``net.sgen.q_cor_mvar``.
-
-    Default ``False`` keeps the legacy grid-forming/grid-following
-    classification path (with sgen→gen promotion and the Stage-2 Q-shim
-    apply step).  Set to ``True`` to exercise the Soleimani-style
-    Q_cor formulation end-to-end."""
-
-    # ------------------------------------------------------------------
-    #  q_mode hierarchy (refactor_v2, Soleimani §III-B)
+    #  q_mode hierarchy (refactor_v3: Q(V) with deadband + Q_set commanding)
     # ------------------------------------------------------------------
     #  Each DER's steady-state Q response is one of two modes:
     #    "qv"     -- piecewise-linear Q(V) droop with optional symmetric
@@ -466,12 +437,15 @@ class MultiTSOConfig:
     der_qv_slope_pu_overrides: Dict[int, float] = field(default_factory=dict)
     """Per-DER override of the qv droop slope."""
 
-    tso_qv_deadband_pu: float = 0.005
+    tso_qv_deadband_pu: float = 0.03
     """Half-width of the symmetric deadband around V_ref for TSO DERs.
-    ``0.0`` disables the deadband (linear droop through V_ref)."""
+    ``0.0`` disables the deadband (linear droop through V_ref).  Default
+    0.02 pu (i.e. ±0.02 around 1.03 ⇒ deadband 1.01..1.05) per VDE-AR-N
+    4120 *Blindleistung mit Spannungsbegrenzungsfunktion*."""
 
-    dso_qv_deadband_pu: float = 0.005
-    """Half-width of the symmetric deadband around V_ref for DSO DERs."""
+    dso_qv_deadband_pu: float = 0.03
+    """Half-width of the symmetric deadband around V_ref for DSO DERs.
+    Default 0.02 pu — see :attr:`tso_qv_deadband_pu`."""
 
     der_qv_deadband_pu_overrides: Dict[int, float] = field(default_factory=dict)
     """Per-DER override of the qv deadband half-width."""

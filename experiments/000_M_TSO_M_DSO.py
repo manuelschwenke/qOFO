@@ -1300,7 +1300,6 @@ def run_multi_tso_dso(
             q_tie_setpoints_mvar=zd.q_tie_setpoints_mvar,
             g_q_tie=config.tso_g_q_tie,
             g_z_q_tie=config.g_z_q_tie,
-            use_q_cor_actuator=config.use_q_cor_actuator,
             qv_slope_pu=config.tso_qv_slope_pu,
         )
 
@@ -1457,7 +1456,6 @@ def run_multi_tso_dso(
             g_v=config.dso_g_v,
             gamma_oltc_q=config.dso_gamma_oltc_q,
             qv_slope_pu=config.dso_qv_slope_pu,
-            use_q_cor_actuator=config.use_q_cor_actuator,
         )
 
         dso_s_rated = np.array(
@@ -1660,12 +1658,11 @@ def run_multi_tso_dso(
     # (DiscreteTapControl on couplers), TSO local Q(V) mode
     # (CharacteristicControl on TSO windparks), AND Stage-2 DSO Q(V) local
     # loops (one QVLocalLoop per grid-following DSO sgen).
-    # Q_cor mode always installs plant-side Q(V) loops; local-DSO/-TSO
-    # modes install legacy CharacteristicControl-style loops.  Either
-    # way we need run_control=True to iterate them inside pp.runpp.
-    _run_control = (
-        _local_dso or _local_tso or config.use_q_cor_actuator
-    )
+    # The refactor_v3 q_mode plant model always installs plant-side
+    # Q(V) loops; local-DSO/-TSO modes install legacy
+    # CharacteristicControl-style loops.  Either way we need
+    # run_control=True to iterate them inside pp.runpp.
+    _run_control = True
 
     # -- Phase 1: STATCOM Q + machine 2W OLTC -----------------------------
     # TSO-side only: HV-side (subnet=="DN") STATCOMs stay at q_mvar=0
@@ -1797,15 +1794,15 @@ def run_multi_tso_dso(
     # run with 500-iteration controller loops: the controllers install
     # already at their attractor and only need to refine residual
     # nonlinearity over a handful of iterations.
-    if config.use_q_cor_actuator:
-        tso_sgens = [int(s) for s in meta.tso_der_indices
-                     if int(s) in net.sgen.index]
-        dso_sgens = [int(s) for s in meta.dso_der_indices
-                     if int(s) in net.sgen.index]
-        # Reset q_cor_mvar (controller has not commanded yet) before
+    tso_sgens = [int(s) for s in meta.tso_der_indices
+                 if int(s) in net.sgen.index]
+    dso_sgens = [int(s) for s in meta.dso_der_indices
+                 if int(s) in net.sgen.index]
+    if tso_sgens or dso_sgens:
+        # Reset q_set_mvar (controller has not commanded yet) before
         # the analytical seed.
         for s in tso_sgens + dso_sgens:
-            net.sgen.at[s, "q_cor_mvar"] = 0.0
+            net.sgen.at[s, "q_set_mvar"] = 0.0
         # Seed using a fresh Jacobian at the post-Phase-2 operating
         # point so S_VQ matches the network state we'll iterate from.
         _seed_jac = JacobianSensitivities(net)
@@ -1903,8 +1900,7 @@ def run_multi_tso_dso(
         # Running run_control=True here forces NR to digest a 44-DER
         # Q step in one call, which makes inner NR ill-conditioned on
         # large profiles (long sims with contingencies).
-        _rc_flag = False if config.use_q_cor_actuator else _run_control
-        pp.runpp(net, run_control=_rc_flag, calculate_voltage_angles=True,
+        pp.runpp(net, run_control=False, calculate_voltage_angles=True,
                  max_iteration=50,
                  distributed_slack=config.distributed_slack,
                  enforce_q_lims=config.enforce_q_lims_plant)
@@ -2039,29 +2035,6 @@ def run_multi_tso_dso(
     # operating point produces misleading curvature matrices.
     stab_result = None
     _stability_analysis_done = False
-
-    # ── Optionally load tuned params from a previous run ────────────────
-    # If ``config.load_tuned_params_path`` is set and points to a valid
-    # JSON snapshot, apply those g_w / alpha values directly to the
-    # controllers.  The delayed stability analysis still runs for
-    # documentation.
-    _tuned_params_loaded = False
-    if config.load_tuned_params_path:
-        if verbose >= 1:
-            print(f"[7.3] Loading tuned params from "
-                  f"{config.load_tuned_params_path} ...")
-        try:
-            _tuned_params_loaded = load_and_apply_tuned_params(
-                config.load_tuned_params_path,
-                zone_defs=zone_defs,
-                tso_controllers=tso_controllers,
-                dso_controllers=dso_controllers,
-                verbose=verbose,
-            )
-        except Exception as _exc:
-            if verbose >= 1:
-                print(f"  ERROR loading tuned params: {_exc}")
-            _tuned_params_loaded = False
 
     if contingencies and verbose >= 1:
         print(f"  Scheduled contingencies ({len(contingencies)}):")
@@ -2280,30 +2253,13 @@ def run_multi_tso_dso(
     _tso_der_idx_list: List[int] = [int(s) for s in meta.tso_der_indices]
     if _local_tso:
         # (1) Windpark Q control
-        # When the refactor_v2 q_mode plant model is active, every TSO
-        # sgen already has a QVLocalLoop / CosPhiConstLoop installed by
-        # ``install_der_q_loops`` in step [3c].  Installing the legacy
+        # Under the refactor_v3 q_mode plant model, every TSO sgen
+        # already has a QVLocalLoop / CosPhiConstLoop installed by
+        # ``install_der_q_loops`` in step [3c]; installing the legacy
         # CharacteristicControl on top would create two controllers per
-        # sgen and cause runaway Q oscillation, so skip the legacy path.
-        if _tso_der_idx_list and not config.use_q_cor_actuator:
-            if config.tso_local_mode == "qv":
-                install_qv_characteristic_controllers(
-                    net, _tso_der_idx_list,
-                    v_set=config.tso_qv_setpoint_pu,
-                    slope=config.tso_qv_slope_pu,
-                    name_prefix="qv_tso",
-                )
-                if verbose >= 1:
-                    print(f"  [local TSO] Installed Q(V) CharacteristicControl on "
-                          f"{len(_tso_der_idx_list)} windpark sgens "
-                          f"(V_set={config.tso_qv_setpoint_pu:.3f}, "
-                          f"slope={config.tso_qv_slope_pu:.3f})")
-            else:  # "cos_phi_1"
-                install_cos_phi_one(net, _tso_der_idx_list)
-                if verbose >= 1:
-                    print(f"  [local TSO] Forced cos phi=1 (Q=0) on "
-                          f"{len(_tso_der_idx_list)} windpark sgens")
-        elif _tso_der_idx_list and config.use_q_cor_actuator and verbose >= 1:
+        # sgen and cause runaway Q oscillation, so the legacy path is
+        # gone.
+        if _tso_der_idx_list and verbose >= 1:
             print(f"  [local TSO] q_mode plant model active "
                   f"({len(_tso_der_idx_list)} sgens); legacy "
                   f"CharacteristicControl install skipped.")
@@ -2330,25 +2286,14 @@ def run_multi_tso_dso(
                   f"{_mt_tol_pu:.3f} p.u.)")
 
     def _apply_local_tso() -> None:
-        """Re-apply TSO local-mode constraints after profile updates.
+        """No-op under refactor_v3.
 
-        For Q(V) mode this is a no-op: CharacteristicControl iterates inside
-        every pp.runpp(run_control=True) using the current bus voltage.
-        For cos phi=1 mode the profile may have rewritten q_mvar (e.g. via
-        apply_profiles); re-zero it here so the next PF sees Q=0.
-
-        Under the refactor_v2 q_mode plant model
-        (``config.use_q_cor_actuator=True``), every TSO sgen runs its own
-        plant-side controller (QVLocalLoop / CosPhiConstLoop) which fully
-        replaces the legacy CharacteristicControl / cos_phi_one wiring,
-        so this re-apply step is a no-op then.
+        Every TSO sgen runs its own plant-side controller
+        (QVLocalLoop / CosPhiConstLoop) installed in step [3c]; the
+        legacy CharacteristicControl / cos_phi_one paths that this
+        function used to maintain are gone.
         """
-        if not _local_tso or not _tso_der_idx_list:
-            return
-        if config.use_q_cor_actuator:
-            return
-        if config.tso_local_mode == "cos_phi_1":
-            install_cos_phi_one(net, _tso_der_idx_list)
+        return
 
     # ── Persistent OLTC rate-limiter for local-control mode ──────────────
     # Wraps the existing per-step ±max_step clamp with a wall-clock
@@ -2446,16 +2391,15 @@ def run_multi_tso_dso(
             if _local_der_active:
                 _apply_local_der()
             _apply_local_tso()
-            # Q_cor mode: warm-start the QVLocalLoops with the linear
-            # closed-loop equilibrium so the run_control iteration only
-            # has to refine the nonlinear residual.  Bypasses the
-            # multi-DER Gauss-Jacobi coupling instability.
-            if config.use_q_cor_actuator:
-                seed_qv_equilibrium(
-                    net,
-                    list(meta.tso_der_indices) + list(meta.dso_der_indices),
-                    shared_jac,
-                )
+            # Warm-start the QVLocalLoops with the linear closed-loop
+            # equilibrium so the run_control iteration only has to
+            # refine the nonlinear residual.  Bypasses the multi-DER
+            # Gauss-Jacobi coupling instability on stiff networks.
+            seed_qv_equilibrium(
+                net,
+                list(meta.tso_der_indices) + list(meta.dso_der_indices),
+                shared_jac,
+            )
             pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
                      max_iteration=50,
                      max_iter=500,
@@ -2627,7 +2571,6 @@ def run_multi_tso_dso(
             for z, tso_out in tso_outputs.items():
                 prev_shunt_steps = apply_zone_tso_controls(
                     net, zone_defs[z], tso_out,
-                    use_q_cor_actuator=config.use_q_cor_actuator,
                 )
 
                 # Record per-zone results.
@@ -2853,14 +2796,13 @@ def run_multi_tso_dso(
             # running the final PF with DiscreteTapControl for coupler OLTCs.
             _apply_local_der()
         _apply_local_tso()
-        # Q_cor mode: warm-start QVLocalLoops from the linear closed-loop
+        # Warm-start QVLocalLoops from the linear closed-loop
         # equilibrium so the run_control iteration only refines residuals.
-        if config.use_q_cor_actuator:
-            seed_qv_equilibrium(
-                net,
-                list(meta.tso_der_indices) + list(meta.dso_der_indices),
-                shared_jac,
-            )
+        seed_qv_equilibrium(
+            net,
+            list(meta.tso_der_indices) + list(meta.dso_der_indices),
+            shared_jac,
+        )
         try:
             try:
                 pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
@@ -3436,7 +3378,6 @@ def main() -> None:
         g_q=200,  # DSO Q-tracking
         tso_g_q_tie=1,
         # ── DSO objective tuning ──
-        # use_q_cor_actuator defaults to True (refactor_v2 Soleimani §III-B).
         dso_g_v=30000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.95,  # leaky integrator decay
@@ -3447,24 +3388,24 @@ def main() -> None:
         # which reduces curvature by ~3x on DSO and ~80x on TSO.  Start
         # at ~1/3 (DSO) to ~1/80 (TSO STATCOMs) of the legacy direct-Q
         # values and sweep from there.
-        g_w_der=10,    # was 20 (direct-Q); T-STATCOM curvature ~80x lower under T'
+        g_w_der=100,    # was 20 (direct-Q); T-STATCOM curvature ~80x lower under T'
         g_w_gen=5e7,
         g_w_pcc=50,
-        g_w_tso_oltc=100,
+        g_w_tso_oltc=200,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,
         # ── DSO weights ──
-        g_w_dso_der=1000,  # was 1000 (direct-Q); ~3x lower curvature under T'
-        g_w_dso_oltc=40,
+        g_w_dso_der=2000,  # was 1000 (direct-Q); ~3x lower curvature under T'
+        g_w_dso_oltc=50,
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
-        run_stability_analysis=True,
+        run_stability_analysis=False,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
         verbose=1,
         live_plot_controller=True,
         live_plot_cascade=True,
         live_plot_system=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 8, 0),
+        start_time=datetime(2016, 4, 15, 12, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies           = [

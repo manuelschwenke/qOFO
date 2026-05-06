@@ -256,38 +256,11 @@ class TSOControllerConfig:
     optional).  Mirrors ``g_z_q_pcc``.  Default 0.0 = no slack-based
     bound enforcement on Q_tie."""
 
-    # ── refactor_v2 (Soleimani §III-B): Q_cor as actuator ──────────────────
-    use_q_cor_actuator: bool = False
-    """When True, the DER block of the TSO action vector is interpreted
-    as ``Q_cor`` (Mvar): a reactive-power offset that shifts each TSO
-    DER's local Q(V) characteristic.  The H matrix's DER columns are
-    post-multiplied by the closed-loop transform
-
-        T' = (I + diag(K) · S_VQ)^{-1}                  (Soleimani eq. 18)
-
-    where ``K_b = Σ_i S_n,i / slope_pu,i`` per unique TSO DER bus.  The
-    apply step writes to ``net.sgen.q_cor_mvar`` (instead of
-    ``q_mvar``).  Saturated DERs zero their K_diag so the corresponding
-    column of ``T'`` collapses to identity.
-
-    Default ``False`` keeps the legacy direct-Q dispatch (``q_mvar``
-    written to grid-following sgens; or, under
-    ``apply_der_classification`` promotion, the V_gen path on grid-
-    forming gens).  Set to ``True`` after calling
-    :func:`network.ieee39.build.tag_der_q_modes` to populate the
-    ``q_cor_mvar`` / ``qv_slope_pu`` columns."""
-
     qv_slope_pu: float = 0.07
     """Default Q(V) droop slope for TSO DERs (pu_q/pu_v) used when the
     ``net.sgen.qv_slope_pu`` column is missing (legacy networks).  When
     the column is present the per-DER value is read from there and this
     field is ignored."""
-
-    qv_saturation_eps_mvar: float = 1.0
-    """Tolerance for the active-set saturation detector.  When realised
-    Q is within this tolerance of either capability rail, the
-    corresponding diagonal of K is zeroed in the closed-loop transform
-    (DER's slope effectively becomes 0 — Q_cor no longer moves Q)."""
 
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
@@ -2121,17 +2094,10 @@ class TSOController(BaseOFOController):
             if self._oos_oltc_mask[k]:
                 H[:, col_oltc_start + k] = 0.0
 
-        # ── refactor_v2: Q_cor closed-loop transform on TSO DER columns ──
-        # When the DER actuator is interpreted as Q_cor (Soleimani §III-B
-        # eq. 18), post-multiply the DER columns of H by
-        #     T' = (I + diag(K) · S_VQ)^{-1}
-        # which maps the network-level ``∂y/∂Q`` to ``∂y/∂Q_cor`` under
-        # local Q(V) droop.  Operates at the DER-bus level (mirrors the
-        # DSO controller).
-        if self.config.use_q_cor_actuator and n_der > 0:
-            T_prime = self._compute_qcor_transform_T_prime(der_bus_indices)
-            if T_prime is not None:
-                H[:, :n_der] = H[:, :n_der] @ T_prime
+        # refactor_v3: H stays open-loop (∂y/∂Q_DER).  The TSO commands
+        # Q_set directly into ``net.sgen.q_set_mvar``; the plant-side
+        # QVLocalLoop feeds in Q_set inside the deadband and overrides
+        # via local droop outside.
 
         if not np.all(np.isfinite(H)):
             nan_rows, nan_cols = np.where(~np.isfinite(H))
@@ -2157,149 +2123,6 @@ class TSOController(BaseOFOController):
         )
 
         return H
-
-    def _compute_qcor_transform_T_prime(
-        self,
-        der_bus_indices: List[int],
-    ) -> Optional[NDArray[np.float64]]:
-        """Return the Q_cor closed-loop transform
-        ``T' = (I + diag(K) · S_VQ)^{-1}`` of shape ``(n_der, n_der)``
-        for the TSO DER block (Soleimani §IV-B eq. 18).
-
-        Per-DER slope is read from ``net.sgen.qv_slope_pu`` if the
-        column is present (refactor_v2 path); otherwise the fallback
-        ``self.config.qv_slope_pu`` is used.  Saturated DERs zero
-        their K_diag entry so their column of ``T'`` collapses to
-        identity.
-
-        Returns ``None`` if S_VQ cannot be computed (e.g. DER bus is a
-        PV bus the reduced Jacobian skips) or M is singular.  Callers
-        fall back to identity (no transform) in that case.
-        """
-        from controller.der_qv_local_loop import (
-            compute_qcor_h_transform,
-            _qv_capability,
-        )
-        import pandas as pd
-
-        n_der = len(der_bus_indices)
-        if n_der == 0:
-            return None
-
-        net = self.sensitivities.net
-        meas = getattr(self, "_last_measurement", None)
-        eps = self.config.qv_saturation_eps_mvar
-
-        # Build K_diag at DER-bus level.  When der_mapping is active each
-        # entry of der_bus_indices is a unique DER bus and we sum the
-        # per-DER S_n / slope; without mapping each entry is a per-DER
-        # column so K_diag has one entry per DER.
-        K_diag = np.zeros(n_der, dtype=np.float64)
-        sgen_has_slope_col = "qv_slope_pu" in net.sgen.columns
-
-        # Two paths: with / without der_mapping.
-        if self.config.der_mapping is not None:
-            # Map: der_bus_indices = unique_bus_indices.  Sum across DERs
-            # at each unique bus.
-            for d_idx, sgen_idx in enumerate(self.config.der_indices):
-                sgen_idx = int(sgen_idx)
-                sn = float(net.sgen.at[sgen_idx, "sn_mva"])
-                if sgen_has_slope_col:
-                    slope_v = net.sgen.at[sgen_idx, "qv_slope_pu"]
-                    if pd.isna(slope_v) or float(slope_v) <= 0.0:
-                        slope = self.config.qv_slope_pu
-                    else:
-                        slope = float(slope_v)
-                else:
-                    slope = self.config.qv_slope_pu
-                if slope <= 0.0:
-                    continue
-
-                saturated = False
-                if meas is not None and len(meas.der_q_mvar) > d_idx:
-                    if "op_diagram" in net.sgen.columns:
-                        od = net.sgen.at[sgen_idx, "op_diagram"]
-                        op_diag = (
-                            str(od) if od is not None and str(od) != "nan"
-                            else "VDE-AR-N-4120-v2"
-                        )
-                    else:
-                        op_diag = "VDE-AR-N-4120-v2"
-                    p_mw = (
-                        float(meas.der_p_mw[d_idx])
-                        if d_idx < len(meas.der_p_mw) else 0.0
-                    )
-                    q_min, q_max = _qv_capability(sn, op_diag, p_mw)
-                    q_act = float(meas.der_q_mvar[d_idx])
-                    saturated = (q_act >= q_max - eps) or (q_act <= q_min + eps)
-
-                if not saturated:
-                    bus = int(net.sgen.at[sgen_idx, "bus"])
-                    if bus in der_bus_indices:
-                        b_pos = der_bus_indices.index(bus)
-                        K_diag[b_pos] += sn / slope
-        else:
-            # No mapping: one column per DER, K_diag[i] = S_n,i / slope_i.
-            for d_idx, sgen_idx in enumerate(self.config.der_indices):
-                sgen_idx = int(sgen_idx)
-                sn = float(net.sgen.at[sgen_idx, "sn_mva"])
-                if sgen_has_slope_col:
-                    slope_v = net.sgen.at[sgen_idx, "qv_slope_pu"]
-                    if pd.isna(slope_v) or float(slope_v) <= 0.0:
-                        slope = self.config.qv_slope_pu
-                    else:
-                        slope = float(slope_v)
-                else:
-                    slope = self.config.qv_slope_pu
-                if slope <= 0.0:
-                    continue
-
-                saturated = False
-                if meas is not None and len(meas.der_q_mvar) > d_idx:
-                    if "op_diagram" in net.sgen.columns:
-                        od = net.sgen.at[sgen_idx, "op_diagram"]
-                        op_diag = (
-                            str(od) if od is not None and str(od) != "nan"
-                            else "VDE-AR-N-4120-v2"
-                        )
-                    else:
-                        op_diag = "VDE-AR-N-4120-v2"
-                    p_mw = (
-                        float(meas.der_p_mw[d_idx])
-                        if d_idx < len(meas.der_p_mw) else 0.0
-                    )
-                    q_min, q_max = _qv_capability(sn, op_diag, p_mw)
-                    q_act = float(meas.der_q_mvar[d_idx])
-                    saturated = (q_act >= q_max - eps) or (q_act <= q_min + eps)
-
-                if not saturated and d_idx < n_der:
-                    K_diag[d_idx] = sn / slope
-
-        # S_VQ at the DER buses (units fix: divide by S_base).
-        try:
-            S_VQ_full, obs_map, der_map = (
-                self.sensitivities.compute_dV_dQ_der(
-                    der_bus_indices=der_bus_indices,
-                    observation_bus_indices=der_bus_indices,
-                )
-            )
-        except (ValueError, KeyError):
-            return None
-
-        if obs_map != der_bus_indices or der_map != der_bus_indices:
-            try:
-                obs_perm = [obs_map.index(b) for b in der_bus_indices]
-                der_perm = [der_map.index(b) for b in der_bus_indices]
-                S_VQ = S_VQ_full[np.ix_(obs_perm, der_perm)]
-            except ValueError:
-                return None
-        else:
-            S_VQ = S_VQ_full
-        s_base = float(getattr(net, "sn_mva", 1.0))
-        if s_base > 0:
-            S_VQ = S_VQ / s_base
-
-        return compute_qcor_h_transform(K_diag, S_VQ)
 
     def apply_avt_reset(self, measurement: Measurement) -> None:
         """Replace PCC-Q entries in _u_current with measured achieved values.

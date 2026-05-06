@@ -105,24 +105,32 @@ class QVLocalLoop(Controller):
     """One pandapower controller per ``q_mode == "qv"`` DER sgen.
 
     Reads parameters from columns on ``net.sgen`` each PF iteration so
-    the OFO can update ``q_cor_mvar`` (and, in principle, the V_ref /
+    the OFO can update ``q_set_mvar`` (and, in principle, the V_ref /
     slope / deadband settings) between simulation steps without
     re-creating the controller object.
 
-    Steady-state target Q (Soleimani §III-A, eq. (2), with V_cor shift):
+    Steady-state target Q (VDE-AR-N 4120 *Spannungsbegrenzungsfunktion*
+    with central Q_set commanding):
 
     ::
 
-        V_eff = V − V_ref − V_cor    where V_cor = q_cor_mvar / R
-        Q_d(V_eff) =
-            −R · (V_eff − db)        if V_eff >  db
-             0                       if |V_eff| ≤ db
-            −R · (V_eff + db)        if V_eff < −db
+        V_eff = V − V_ref + Q_set / R       (R = S_n / qv_slope_pu, Mvar/pu_v)
+        Q_d =
+            Q_set − R · (V_eff − db)        if V_eff >  db   (V high → absorb)
+            Q_set                           if |V_eff| ≤ db
+            Q_set − R · (V_eff + db)        if V_eff < −db   (V low  → inject)
         Q = clip(Q_d, Q_min(P), Q_max(P))
 
-    where ``R = S_n / qv_slope_pu`` (Mvar/pu_v) and ``db = qv_deadband_pu``.
+    where ``db = qv_deadband_pu``.
 
-    Setting ``db = 0`` recovers the smooth linear droop through V_ref.
+    Geometric reading: the deadband endpoints in V are
+    ``[V_ref − db − Q_set/R, V_ref + db − Q_set/R]`` and inside the
+    deadband ``Q == Q_set``.  Outside the deadband the linear segments
+    coincide with the lines ``Q = −R·(V − V_ref ± db)`` for any value of
+    Q_set (slope is fixed; only the deadband — both its V-extent and its
+    Q-level — shifts).  Setting ``db = 0`` recovers the smooth linear
+    droop ``Q_d = Q_set − R · (V − V_ref) − R · (Q_set/R) ≡ −R·(V − V_ref)``,
+    which is the standard refactor_v2 baseline.
     """
 
     def __init__(
@@ -195,21 +203,24 @@ class QVLocalLoop(Controller):
         slope_pu = _read_or(net, s, "qv_slope_pu", self.slope_fallback)
         v_ref    = _read_or(net, s, "qv_vref_pu",
                             _read_or(net, s, "vm_pu_ref", 1.0))
-        q_cor    = _read_or(net, s, "q_cor_mvar", 0.0)
+        q_set    = _read_or(net, s, "q_set_mvar", 0.0)
         db       = _read_or(net, s, "qv_deadband_pu", 0.0)
 
         R = self.sn_mva / slope_pu if slope_pu > 0.0 else 0.0
-        v_cor = (q_cor / R) if R > 0.0 else 0.0
-        v_eff = v_pu - v_ref - v_cor
+        # v_eff = V_meas − V_ref − V_shift, where V_shift = −Q_set/R places
+        # the deadband centre at the V where the shared linear segment
+        # crosses Q = Q_set.  Hence v_eff = V − V_ref + Q_set/R.
+        q_set_v_offset = (q_set / R) if R > 0.0 else 0.0
+        v_eff = v_pu - v_ref + q_set_v_offset
 
         q_min, q_max = _qv_capability(self.sn_mva, self.op_diagram, p_mw)
 
         if v_eff > db:
-            q_target = -R * (v_eff - db)
+            q_target = q_set - R * (v_eff - db)
         elif v_eff < -db:
-            q_target = -R * (v_eff + db)
+            q_target = q_set - R * (v_eff + db)
         else:
-            q_target = 0.0
+            q_target = q_set
 
         return float(np.clip(q_target, q_min, q_max))
 
@@ -362,64 +373,6 @@ class CosPhiConstLoop(Controller):
         target = self._compute_target(net)
         q_current = float(net.sgen.at[s, "q_mvar"])
         return abs(target - q_current) < self.tol_mvar
-
-
-# ---------------------------------------------------------------------------
-#  S_VQ self-bus cache (legacy Q-shim helper, kept for back-compat)
-# ---------------------------------------------------------------------------
-
-def cache_per_sgen_svq(
-    net: pp.pandapowerNet,
-    sgen_indices: Sequence[int],
-    sensitivities,
-) -> None:
-    """Compute the self-bus voltage-Q sensitivity for each sgen and
-    cache it as ``net.sgen.loc[s, 'svq_self_pu_per_mvar']``.
-
-    Used by the legacy Q+shim apply step (Stage 2 V_ref-via-Q-shim
-    path).  The refactor_v2 plant-side controllers do not need it; it
-    is kept here so the legacy diagnostic scripts under ``tests/diag_*``
-    continue to import successfully.
-
-    Units note: ``JacobianSensitivities.compute_dV_dQ_der`` returns
-    sensitivities in pu (``dV_pu / dQ_pu`` on the system base
-    ``net.sn_mva``).  This helper divides by ``sn_mva`` once to yield
-    ``dV_pu / dQ_Mvar`` which is what the Q+shim apply step needs.
-    """
-    if "svq_self_pu_per_mvar" not in net.sgen.columns:
-        net.sgen["svq_self_pu_per_mvar"] = float("nan")
-
-    if not sgen_indices:
-        return
-
-    der_buses_unique: list[int] = []
-    for s in sgen_indices:
-        b = int(net.sgen.at[int(s), "bus"])
-        if b not in der_buses_unique:
-            der_buses_unique.append(b)
-
-    try:
-        S_VQ_full, obs_map, der_map = sensitivities.compute_dV_dQ_der(
-            der_bus_indices=der_buses_unique,
-            observation_bus_indices=der_buses_unique,
-        )
-    except Exception:
-        # Fall back to NaN — apply step will treat NaN as "use legacy
-        # V_ref = V_bus + Q/k (no S_VQ correction)".
-        return
-
-    obs_perm = [obs_map.index(b) for b in der_buses_unique]
-    der_perm = [der_map.index(b) for b in der_buses_unique]
-    S_VQ_pu_per_pu = S_VQ_full[np.ix_(obs_perm, der_perm)]
-    s_base = float(getattr(net, "sn_mva", 1.0))
-    if s_base <= 0:
-        s_base = 1.0
-    diag = np.diag(S_VQ_pu_per_pu) / s_base
-    bus_to_svq = {b: float(diag[i]) for i, b in enumerate(der_buses_unique)}
-
-    for s in sgen_indices:
-        b = int(net.sgen.at[int(s), "bus"])
-        net.sgen.at[int(s), "svq_self_pu_per_mvar"] = bus_to_svq.get(b, float("nan"))
 
 
 # ---------------------------------------------------------------------------
@@ -589,17 +542,22 @@ def seed_qv_equilibrium(
     count and avoiding the multi-DER coupling instability of pure
     Gauss-Jacobi iteration on a stiff network.
 
-    Math (Soleimani §IV-B, eq. 18 generalised to arbitrary current state):
+    Math (refactor_v3, Q_set semantics):
 
-    For DERs in the linear segment (no deadband, not saturated), the
-    closed-loop equilibrium around the *current* PF state ``(V_c, Q_c)``
-    is
+    For DERs on a linear segment (V outside the shifted deadband, not
+    saturated), the closed-loop equilibrium around the current PF state
+    ``(V_c, Q_c)`` is independent of ``Q_set``:  on the linear segment
+    ``Q = −R · (V − V_ref ± db)``, and substituting the bus-voltage
+    sensitivity ``V = V_c + S_VQ · (Q − Q_c)`` yields
 
     ::
 
-        Q* = (I + R · S_VQ)^{-1} · [
-                q_cor − R·(V_c − V_ref) + R · S_VQ · Q_c
-             ]
+        (I + R · S_VQ) · Q* = R · S_VQ · Q_c − R · (V_c − V_ref)
+
+    (the ``± R · db`` term is dropped — it's a small bias of one
+    deadband-width on each segment that the QVLocalLoop refines in a
+    handful of iterations).  Inside the deadband the equilibrium is the
+    commanded value: ``Q* = Q_set``.
 
     where:
 
@@ -610,14 +568,13 @@ def seed_qv_equilibrium(
     * ``Q_c`` is the current sgen reactive power from
       ``net.res_sgen.q_mvar``.  When called BEFORE the first PF (no
       ``res_bus``/``res_sgen`` yet) the function falls back to
-      ``Q_c = 0`` and ``V_c = qv_vref_pu`` per DER, which makes the
-      formula collapse to ``Q* = (I + R·S_VQ)^{-1} · q_cor``.
+      ``Q_c = 0`` and ``V_c = qv_vref_pu`` per DER.
 
     Boundary handling (active set, single pass):
 
     * **Deadband**: after the linear solve, recompute the predicted
-      ``V_eff = V_c + S_VQ·(Q*−Q_c) − V_ref − Q_cor/R`` per DER; if
-      ``|V_eff| ≤ qv_deadband_pu`` the DER is set to Q = 0.
+      ``V_eff = V_c + S_VQ·(Q*−Q_c) − V_ref + Q_set/R`` per DER; if
+      ``|V_eff| ≤ qv_deadband_pu`` the DER is overridden to ``Q = Q_set``.
     * **Saturation**: clip per-DER to ``[Q_min(P), Q_max(P)]``.
 
     Both clips are first-pass approximations; the QVLocalLoops still
@@ -700,7 +657,7 @@ def seed_qv_equilibrium(
 
     R_diag = np.zeros(n, dtype=np.float64)
     V_ref = np.zeros(n, dtype=np.float64)
-    q_cor = np.zeros(n, dtype=np.float64)
+    q_set = np.zeros(n, dtype=np.float64)
     V_current = np.zeros(n, dtype=np.float64)
     Q_current = np.zeros(n, dtype=np.float64)
     db_pu = np.zeros(n, dtype=np.float64)
@@ -725,10 +682,10 @@ def seed_qv_equilibrium(
                and not pd.isna(net.sgen.at[s, "qv_vref_pu"])
             else 1.0
         )
-        q_cor[i] = (
-            float(net.sgen.at[s, "q_cor_mvar"])
-            if "q_cor_mvar" in net.sgen.columns
-               and not pd.isna(net.sgen.at[s, "q_cor_mvar"])
+        q_set[i] = (
+            float(net.sgen.at[s, "q_set_mvar"])
+            if "q_set_mvar" in net.sgen.columns
+               and not pd.isna(net.sgen.at[s, "q_set_mvar"])
             else 0.0
         )
         db_pu[i] = (
@@ -775,15 +732,15 @@ def seed_qv_equilibrium(
                 "open-loop droop seed."
             )
         for i, s in enumerate(qv_sgens):
-            v_eff = V_current[i] - V_ref[i] - (
-                q_cor[i] / R_diag[i] if R_diag[i] > 0 else 0.0
+            v_eff = V_current[i] - V_ref[i] + (
+                q_set[i] / R_diag[i] if R_diag[i] > 0 else 0.0
             )
             if abs(v_eff) <= db_pu[i]:
-                q_t = 0.0
+                q_t = q_set[i]
             elif v_eff > db_pu[i]:
-                q_t = -R_diag[i] * (v_eff - db_pu[i])
+                q_t = q_set[i] - R_diag[i] * (v_eff - db_pu[i])
             else:
-                q_t = -R_diag[i] * (v_eff + db_pu[i])
+                q_t = q_set[i] - R_diag[i] * (v_eff + db_pu[i])
             q_min, q_max = _qv_capability(sn_mva[i], op_diagrams[i], p_mw[i])
             net.sgen.at[s, "q_mvar"] = float(np.clip(q_t, q_min, q_max))
             n_updated += 1
@@ -810,11 +767,12 @@ def seed_qv_equilibrium(
     bus_perm = np.array([bus_to_idx[b] for b in der_buses], dtype=np.int64)
     S_VQ_der = S_VQ_bus[np.ix_(bus_perm, bus_perm)]
 
-    # Linear closed-loop solve:
-    #   Q* = (I + R · S_VQ)^{-1} · [q_cor − R·(V_c − V_ref) + R · S_VQ · Q_c]
+    # Linear-segment closed-loop solve (refactor_v3: Q_set drops out;
+    # the linear segments coincide for every Q_set).
+    #   (I + R · S_VQ) · Q* = R · S_VQ · Q_c − R · (V_c − V_ref)
     R = np.diag(R_diag)
     M = np.eye(n) + R @ S_VQ_der
-    rhs = q_cor - R_diag * (V_current - V_ref) + R @ S_VQ_der @ Q_current
+    rhs = -R_diag * (V_current - V_ref) + R @ S_VQ_der @ Q_current
     try:
         Q_star = np.linalg.solve(M, rhs)
     except np.linalg.LinAlgError:
@@ -824,15 +782,16 @@ def seed_qv_equilibrium(
             )
         return n_updated
 
-    # Apply per-DER deadband + saturation, then write q_mvar.
+    # Apply per-DER deadband override + saturation, then write q_mvar.
+    # Inside the (Q_set-shifted) deadband, the equilibrium is Q* = Q_set.
     delta_Q = Q_star - Q_current
     delta_V = S_VQ_der @ delta_Q
     V_post = V_current + delta_V
     for i, s in enumerate(qv_sgens):
-        v_cor_i = q_cor[i] / R_diag[i] if R_diag[i] > 0 else 0.0
-        v_eff = V_post[i] - V_ref[i] - v_cor_i
+        q_set_offset = q_set[i] / R_diag[i] if R_diag[i] > 0 else 0.0
+        v_eff = V_post[i] - V_ref[i] + q_set_offset
         if abs(v_eff) <= db_pu[i]:
-            q_i = 0.0
+            q_i = float(q_set[i])
         else:
             q_i = float(Q_star[i])
         q_min, q_max = _qv_capability(sn_mva[i], op_diagrams[i], p_mw[i])

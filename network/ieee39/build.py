@@ -795,17 +795,17 @@ def tag_der_q_modes(
                           ``q_mode=="cosphi"``.
     * ``cosphi_sign``   — ``+1`` over-excited (Q injection) / ``-1`` under-
                           excited (Q absorption).
-    * ``q_cor_mvar``    — controller-commanded reactive-power offset (Mvar).
-                          Initialised to 0.0; the OFO writes here every step.
+    * ``q_set_mvar``    — central Q setpoint (Mvar, sgen sign convention:
+                          positive = inject).  This is the Q value the
+                          inverter feeds in while V stays inside the
+                          deadband.  Initialised to 0.0; the OFO writes
+                          here every step.
 
     Hierarchy: per-DER override > level (TSO/DSO) default.  Keys in the
     ``*_overrides`` maps are pandapower sgen indices.
 
     This function is **additive**.  It does not modify ``meta`` and is
     safe to call alongside (or after) :func:`apply_der_classification`.
-    The two coexist during the refactor_v2 transition; the legacy
-    promotion can later be turned off by simply not calling
-    ``apply_der_classification`` and reading the new columns instead.
 
     Parameters
     ----------
@@ -837,9 +837,7 @@ def tag_der_q_modes(
     -----
     The OFO controllers will exclude ``q_mode=="cosphi"`` DERs from
     their action vectors (these DERs are not actuators); the OFO will
-    only write ``q_cor_mvar`` for ``q_mode=="qv"`` DERs.  See the
-    refactor_v2 plan §6a for the piecewise-linear Q(V) characteristic
-    and §6 for the H-matrix transform.
+    only write ``q_set_mvar`` for ``q_mode=="qv"`` DERs.
     """
     valid_modes = {"qv", "cosphi"}
     for nm, mode in (("tso_q_mode", tso_q_mode), ("dso_q_mode", dso_q_mode)):
@@ -871,7 +869,7 @@ def tag_der_q_modes(
     # Ensure all columns exist with a sensible default for sgens not in
     # tso_/dso_der_indices (e.g. equivalent units).  We use NaN for the
     # numerics so an unintended read shows up clearly; q_mode defaults
-    # to "qv" and q_cor_mvar to 0.0 since those are also the safest
+    # to "qv" and q_set_mvar to 0.0 since those are also the safest
     # values if a DER is later promoted into the controller without
     # being re-tagged.
     if "q_mode" not in net.sgen.columns:
@@ -886,8 +884,13 @@ def tag_der_q_modes(
         net.sgen["cosphi"] = float("nan")
     if "cosphi_sign" not in net.sgen.columns:
         net.sgen["cosphi_sign"] = 0
-    if "q_cor_mvar" not in net.sgen.columns:
-        net.sgen["q_cor_mvar"] = 0.0
+    if "q_set_mvar" not in net.sgen.columns:
+        net.sgen["q_set_mvar"] = 0.0
+    # refactor_v3 cleanup: drop the legacy q_cor_mvar column if a
+    # network was previously tagged under refactor_v2.  The OFO no
+    # longer reads/writes it; leaving it would just be confusing.
+    if "q_cor_mvar" in net.sgen.columns:
+        net.sgen.drop(columns=["q_cor_mvar"], inplace=True)
 
     def _tag(s: int, level_default_mode: str,
              level_slope: float, level_vref: float, level_db: float,
@@ -911,12 +914,12 @@ def tag_der_q_modes(
         net.sgen.at[s, "cosphi_sign"] = int(
             cosphi_sign_overrides.get(s, level_sign)
         )
-        # q_cor_mvar is a runtime state, not a config; the OFO
+        # q_set_mvar is a runtime state, not a config; the OFO
         # overwrites it every step.  Initialise to 0.0 only — preserve
         # any existing value so that re-calling tag_der_q_modes mid-run
         # does not stomp on the controller's command.
-        if pd.isna(net.sgen.at[s, "q_cor_mvar"]):
-            net.sgen.at[s, "q_cor_mvar"] = 0.0
+        if pd.isna(net.sgen.at[s, "q_set_mvar"]):
+            net.sgen.at[s, "q_set_mvar"] = 0.0
 
     for s in meta.tso_der_indices:
         _tag(int(s), tso_q_mode,

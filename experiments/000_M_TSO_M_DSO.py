@@ -1813,9 +1813,14 @@ def run_multi_tso_dso(
             net, tso_sgens + dso_sgens, _seed_jac,
             verbose=(verbose >= 1),
         )
+        # TSO STATCOMs have R*S_VQ ~ 8 vs DSO ~ 0.7, so cap TSO damping
+        # to 0.03 to keep the per-DER contraction stable under multi-DER
+        # coupling (commit e2746fe rationale; previously documented in
+        # qv_local_damping docstring but not enforced in code).
+        _tso_damp = min(float(config.qv_local_damping), 0.03)
         n_tso = len(install_der_q_loops(
             net, tso_sgens,
-            qv_damping=config.qv_local_damping,
+            qv_damping=_tso_damp,
             qv_max_step_frac=config.qv_local_max_step_frac,
             qv_tol_mvar=config.tso_qv_tol_mvar,
         )) if tso_sgens else 0
@@ -1828,12 +1833,18 @@ def run_multi_tso_dso(
         if verbose >= 1:
             print(
                 f"[3c-deferred] Installed {n_tso + n_dso} DER q_mode loops "
-                f"({n_tso} TSO @ tol={config.tso_qv_tol_mvar} Mvar + "
-                f"{n_dso} DSO @ tol={config.dso_qv_tol_mvar} Mvar) "
+                f"({n_tso} TSO @ tol={config.tso_qv_tol_mvar} Mvar damp={_tso_damp:.3f} + "
+                f"{n_dso} DSO @ tol={config.dso_qv_tol_mvar} Mvar damp={float(config.qv_local_damping):.3f}) "
                 f"post Phase 2; seeded q_mvar with closed-loop equilibrium."
             )
 
-    if _local_dso:
+    # Pre-loop manual Q(V)+OLTC sweep is a legacy convergence aid that
+    # writes ``net.sgen.q_mvar`` directly.  Under the q_mode plant model
+    # (``config.use_q_cor_actuator=True``) the QVLocalLoop / CosPhiConstLoop
+    # owns ``q_mvar`` and ``seed_qv_equilibrium`` provides the warm start;
+    # running this sweep on top would clobber the seed before the main
+    # loop ever starts, so skip it then.
+    if _local_dso and not config.use_q_cor_actuator:
         n_dso_sgen = sum(len(hv.sgen_indices) for hv in meta.hv_networks)
         if config.local_der_mode == "qv":
             _v_set = config.qv_setpoint_pu
@@ -2252,7 +2263,20 @@ def run_multi_tso_dso(
     _local_der_active = _local_dso and config.warmup_s <= 0
 
     def _apply_local_der() -> None:
-        """Dispatch HV-DER baseline per ``config.local_der_mode``."""
+        """Dispatch HV-DER baseline per ``config.local_der_mode``.
+
+        Under the refactor_v2 q_mode plant model
+        (``config.use_q_cor_actuator=True``), every DSO sgen runs its
+        own ``QVLocalLoop`` / ``CosPhiConstLoop`` (installed at
+        [3c-deferred] above) which fully replaces the legacy
+        ``apply_qv_local_control`` / ``apply_cos_phi_one_local_control``
+        wiring.  Calling those baseline writers here would overwrite
+        ``net.sgen.q_mvar`` between every step and clobber the analytical
+        seed, so this dispatch is a no-op then.  Mirrors the guard in
+        :func:`_apply_local_tso` below.
+        """
+        if config.use_q_cor_actuator:
+            return
         if config.local_der_mode == "qv":
             apply_qv_local_control(
                 net, meta.hv_networks,
@@ -2510,6 +2534,19 @@ def run_multi_tso_dso(
                 if _local_der_active:
                     _apply_local_der()
                 _apply_local_tso()
+                # Q_cor mode: re-seed the QVLocalLoops with the analytical
+                # closed-loop equilibrium at the post-contingency operating
+                # point.  Without this the per-DER damped iteration starts
+                # from the pre-contingency Q values and can hit the 501-
+                # iteration controller cap on severe topology changes
+                # (gen+trafo trips).  Mirrors the post-profile seed at the
+                # top of the step.
+                if config.use_q_cor_actuator:
+                    seed_qv_equilibrium(
+                        net,
+                        list(meta.tso_der_indices) + list(meta.dso_der_indices),
+                        shared_jac,
+                    )
                 try:
                     # First attempt: no Q-limit enforcement so that gens
                     # transiently producing Q outside their static box
@@ -3429,15 +3466,15 @@ def main() -> None:
     """
 
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 24,      # 720-min full simulation
+        n_total_s=60.0 * 60 * 6,      # 720-min full simulation
         tso_period_s=60.0 * 6,    # TSO every 3 minutes
         dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
         g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
-        g_q=200,  # DSO Q-tracking
-        tso_g_q_tie=1,
+        g_q=250,  # DSO Q-tracking
+        tso_g_q_tie=100,
         # ── DSO objective tuning ──
         # use_q_cor_actuator defaults to True (refactor_v2 Soleimani §III-B).
-        dso_g_v=50000.0,  # reduced to avoid competing with Q tracking
+        dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.95,  # leaky integrator decay
         dso_q_integral_max_mvar=200.0,  # anti-windup clamp
@@ -3470,8 +3507,8 @@ def main() -> None:
         contingencies           = [
             ContingencyEvent(minute=60,  element_type="gen",  element_index=2, action="trip"),
             ContingencyEvent(minute=100, element_type="gen",  element_index=2, action="restore"),
-            ContingencyEvent(minute=120, element_type="load", bus=2,  p_mw=300, q_mvar=150, action="connect"),
-            ContingencyEvent(minute=240, element_type="load", bus=2,  p_mw=300, q_mvar=150, action="trip"),
+            ContingencyEvent(minute=75, element_type="load", bus=2,  p_mw=400, q_mvar=200, action="connect"),
+            ContingencyEvent(minute=120, element_type="load", bus=2,  p_mw=400, q_mvar=200, action="trip"),
             ContingencyEvent(minute=150, element_type="load", bus=14, p_mw=100, q_mvar=50, action="connect"),
             ContingencyEvent(minute=160, element_type="load", bus=14, p_mw=100, q_mvar=50, action="trip"),
             ContingencyEvent(minute=180, element_type="gen",  element_index=5, action="trip"),

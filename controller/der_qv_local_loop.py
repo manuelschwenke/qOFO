@@ -880,7 +880,7 @@ def seed_qv_equilibrium(
         print(
             f"[seed_qv_equilibrium] seeded {n_updated} DERs "
             f"({len(qv_sgens)} qv + {len(cosphi_sgens)} cosphi); "
-            f"max |Q* − Q_c| = {max_dq:.3f} Mvar"
+            f"max |Q* - Q_c| = {max_dq:.3f} Mvar"
         )
 
     return n_updated

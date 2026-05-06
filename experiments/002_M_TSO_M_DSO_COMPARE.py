@@ -3,47 +3,39 @@
 """
 experiments/002_M_TSO_M_DSO_COMPARE.py
 ======================================
-Compare the Multi-TSO / Multi-DSO OFO controller against four
-local-control baselines on the IEEE 39-bus ``wind_replace`` scenario.
+Compare the Multi-TSO / Multi-DSO OFO controller against local-control
+baselines on the IEEE 39-bus ``wind_replace`` scenario.
 
-The L family is split along two axes — TSO statcom partition and DSO
-local control — so the partition asymmetry between the legacy
-``pp.sgen`` model and the promoted ``pp.gen`` model used by the OFO is
-explicitly represented in the comparison.
+The five-scenario design factors out two axes:
+
+* **TSO control**: local Q(V) droop (L) vs zone-level OFO MIQP (T, C).
+* **DSO control**: cos phi=1 (suffix ``0``), local Q(V) droop
+  (suffix ``1``), or DSO OFO MIQP (cascade ``C``).
+
+Plant-side Q is driven by the refactor_v2 q_mode loops
+(``QVLocalLoop`` / ``CosPhiConstLoop``) installed at [3c-deferred]
+in ``experiments/000_M_TSO_M_DSO.py``; the OFO scenarios additionally
+command ``q_cor_mvar`` per DER from the MIQP layer above.
 
 Scenarios
 ---------
-* **L0**     -- Legacy partition: TSO statcoms stay as ``pp.sgen`` with
-                local Q(V) droop (V_set=1.03 pu, slope=0.07 pu); DSO
-                SGENs at cos phi=1.
-* **L1**     -- Legacy partition (TSO sgens with local Q(V) droop) and
-                DSO SGENs also under Q(V) droop.
-* **L2**     -- Promoted-gen partition: TSO statcoms promoted to
-                ``pp.gen`` (PV) with constant AVR ``vm_pu = 1.03``
-                (no Q control loop at the TSO layer); DSO SGENs at
-                cos phi=1.
-* **L3**     -- Promoted-gen partition (constant-AVR TSO gens) and
-                DSO SGENs under Q(V) droop.
-* **T-OFO**  -- TSO-only OFO: zone-level OFO MIQP at the TSO layer;
-                DSO SGENs follow Q(V) droop (V_set=1.03, slope=0.07)
-                without interface-Q tracking.  Ablation between L3
-                and C-OFO.
-* **C-OFO**  -- Cascade OFO: multi-zone OFO MIQP at the TSO and DSO
-                layers (default behaviour).
+* **L0**  -- TSO local Q(V) (V_set=1.03, deadband ±0.005,
+             slope=q_max/0.05); DSO SGENs at cos phi=1.
+* **L1**  -- TSO and DSO both under local Q(V) droop with the same
+             parameters as L0.
+* **T0**  -- TSO OFO MIQP; DSO SGENs at cos phi=1.  Mitigation H
+             pin ``g_w_pcc=1e8`` keeps Q_PCC near its current value
+             (no DSO MIQP to track Q_PCC,set).
+* **T1**  -- TSO OFO MIQP; DSO SGENs under local Q(V) droop with the
+             same parameters as L0.  Mitigation H pin retained.
+* **C**   -- Cascade OFO: OFO MIQP at both TSO and DSO layers.
 
-The L0/L1 vs L2/L3/T-OFO/C-OFO grouping aligns the active-power
-dispatch across the four "promoted" scenarios so that
-``compute_zonal_gen_dispatch`` sees the same residual on each (no
-``net.sgen`` ↔ ``net.gen`` partition asymmetry); L0 and L1 retain the
-legacy partition as the "before-promotion" reference.
-
-All six scenarios share the OFO base configuration from
-``experiments/000_M_TSO_M_DSO.main()`` (16-hour profile, 10-event
-contingency timeline, identical TSO/DSO weights and timing) and only
-the control mode and partition are varied; this guarantees a fair
-comparison.  Each scenario runs ``run_multi_tso_dso(cfg)`` with the
-scenario-specific overrides; the six record lists are persisted as
-pickle and aggregated into:
+All five scenarios share the OFO base configuration from
+``make_base_config()`` (160-min profile, 8-event contingency timeline,
+identical TSO/DSO weights and timing) and only the control mode is
+varied; this guarantees a fair comparison.  Each scenario runs
+``run_multi_tso_dso(cfg)`` with the scenario-specific overrides; the
+five record lists are persisted as pickle and aggregated into:
 
 * ``results/002_compare/summary.csv``           -- one row per scenario.
 * ``results/002_compare/compare_voltage_envelope.{png,pdf}``
@@ -57,13 +49,13 @@ persisted as empty logs, and annotated in the comparison plots.
 
 CLI flags
 ---------
-* ``--replot``           -- skip simulation, regenerate plots from
-                            the existing ``log.pkl`` files in
-                            ``results/002_compare/``.
-* ``--only L1,L3,T-OFO`` -- run only the named scenarios.  Existing
-                            pickles for the other scenarios are still
-                            picked up by the comparison plots.
-* ``--skip L0,L2``       -- inverse of ``--only``.
+* ``--replot``         -- skip simulation, regenerate plots from
+                          the existing ``log.pkl`` files in
+                          ``results/002_compare/``.
+* ``--only L0,L1,T1``  -- run only the named scenarios.  Existing
+                          pickles for the other scenarios are still
+                          picked up by the comparison plots.
+* ``--skip L0,T0``     -- inverse of ``--only``.
 
 Author: Manuel Schwenke / Claude Code
 """
@@ -106,7 +98,7 @@ def make_base_config() -> MultiTSOConfig:
 
     Notes
     -----
-    * The OFO weights (g_v, g_q, g_w_*) are no-ops in the L0/L1/L2/L3
+    * The OFO weights (g_v, g_q, g_w_*) are no-ops in the L0/L1
       scenarios because the OFO TSO and DSO controllers are not stepped.
       Keeping them in the shared base config simplifies maintenance and
       guarantees that the OFO scenarios use the user's tuned values
@@ -117,41 +109,50 @@ def make_base_config() -> MultiTSOConfig:
       for post-hoc comparison plots instead.
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 4,      # 720-min full simulation
+        n_total_s=60*160, #60.0 * 60 * 24,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
-        dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
+        dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
         g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
-        g_q=200,  # DSO Q-tracking
+        g_q=250,  # DSO Q-tracking
+        tso_g_q_tie=1,
         # ── DSO objective tuning ──
-        dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
+        # use_q_cor_actuator defaults to True (refactor_v2 Soleimani §III-B).
+        dso_g_v=25000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
-        dso_lambda_qi=0.9,  # leaky integrator decay
-        dso_q_integral_max_mvar=50.0,  # anti-windup clamp
+        dso_lambda_qi=0.95,  # leaky integrator decay
+        dso_q_integral_max_mvar=200.0,  # anti-windup clamp
         dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
-        # ── TSO weights (alpha=1, spectral rho(C)/2) ──
-        g_w_der=10,
+        # ── TSO weights — re-tuned for Q_cor closed-loop curvature ──
+        # Under Q_cor the H matrix is post-multiplied by T'=(I+R*S_VQ)^-1,
+        # which reduces curvature by ~3x on DSO and ~80x on TSO.  Start
+        # at ~1/3 (DSO) to ~1/80 (TSO STATCOMs) of the legacy direct-Q
+        # values and sweep from there.
+        g_w_der=10,    # was 20 (direct-Q); T-STATCOM curvature ~80x lower under T'
         g_w_gen=5e7,
         g_w_pcc=50,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,
         # ── DSO weights ──
-        g_w_dso_der=2000,
-        g_w_dso_oltc=20,
-        # ── Adaptive g_w (paper Eq.16, sign-only) — all continuous classes ──
-        # `g_w_*` values above become the warm-start; the meta below
-        # controls the multiplicative rate and clip box.  Discrete
-        # actuators (OLTC, shunt) intentionally left static.
-        use_fixed_zones              = True,
-        run_stability_analysis       = False,
-        sensitivity_update_interval  = int(1e6),
-        verbose                      = 1,
-        # Live plots forced OFF for sequential comparison sweep.
-        live_plot_controller = True,
-        live_plot_cascade    = True,
-        live_plot_system     = False,
-        # ── Profile & contingency settings ───────────────────────────
-        start_time              = datetime(2016, 4, 15, 8, 0),
+        g_w_dso_der=1000,  # was 1000 (direct-Q); ~3x lower curvature under T'
+        g_w_dso_oltc=40,
+        # ── QVLocalLoop damping (refactor_v2, commit e2746fe) ──
+        # Docstring default 0.05 keeps the multi-DER coupled iteration
+        # stable on IEEE 39 (44 DERs).  TSO STATCOMs get an additional
+        # clamp to 0.03 inside the [3c-deferred] install (R*S_VQ ~ 8 on
+        # 600 Mvar units, vs ~0.7 on DSO STATCOMs).  The dataclass
+        # default is currently 0.3 — that was the pre-clamp value and
+        # is unstable under L0/L1 + contingencies.
+        qv_local_damping=0.05,
+        use_fixed_zones=True,      # literature 3-area partition (not spectral)
+        run_stability_analysis=True,
+        sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
+        verbose=1,
+        live_plot_controller=False,
+        live_plot_cascade=False,
+        live_plot_system=False,
+        # ── Profile & contingency settings ───────────────────────────────
+        start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles            = True,
         use_zonal_gen_dispatch  = True,
         contingencies           = [
@@ -175,71 +176,50 @@ def make_base_config() -> MultiTSOConfig:
 
 
 SCENARIOS: Dict[str, Dict[str, Any]] = {
-    # ── Legacy partition (L0, L1) ───────────────────────────────────────
-    # ``force_all_der_grid_following=True`` keeps every TSO converter as
-    # a current-source ``pp.sgen``.  The legacy local-controller install
-    # path (``install_qv_characteristic_controllers`` / ``install_cos_phi_one``
-    # in ``experiments/000_M_TSO_M_DSO.py``) sets the plant-side Q(V)
-    # behavior on those sgens, so disable the new plant-side Q(V) local
-    # loop to avoid duplicate Q(V) controllers per sgen.
-    "L0":  dict(
+    # ── Local-control baselines (L0, L1) ─────────────────────────────────
+    # No OFO at any layer.  Plant-side Q control is provided by the
+    # refactor_v2 q_mode loops (QVLocalLoop / CosPhiConstLoop installed
+    # at [3c-deferred] in experiments/000_M_TSO_M_DSO.py).
+    # Q(V) parameters: V_set=1.03 pu, deadband ±0.005 pu,
+    # slope=q_max/0.05 (i.e. ``qv_slope_pu=0.05``).
+    "L0": dict(
         tso_mode="local", tso_local_mode="qv",
-        tso_qv_setpoint_pu=1.03, tso_qv_slope_pu=0.07,
         dso_mode="local", local_der_mode="cos_phi_1",
+        tso_q_mode="qv",  dso_q_mode="cosphi",
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.05, tso_qv_deadband_pu=0.005,
     ),
-    "L1":  dict(
+    "L1": dict(
         tso_mode="local", tso_local_mode="qv",
-        tso_qv_setpoint_pu=1.03, tso_qv_slope_pu=0.07,
         dso_mode="local", local_der_mode="qv",
-        qv_setpoint_pu=1.03, qv_slope_pu=0.07,
+        tso_q_mode="qv",  dso_q_mode="qv",
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.05, tso_qv_deadband_pu=0.005,
+        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.05, dso_qv_deadband_pu=0.005,
     ),
-    # ── L2 / L3 (legacy promoted-gen partition) collapsed to L0 / L1 ──
-    # Pre-refactor_v2 these scenarios used ``apply_der_classification`` to
-    # promote TSO converters into ``pp.gen``.  Q_cor mode keeps every DER
-    # as ``pp.sgen``, so L2 ≡ L0 and L3 ≡ L1 — kept for backwards-compatible
-    # result archives but functionally redundant.
-    "L2":  dict(
-        tso_mode="local",
-        dso_mode="local", local_der_mode="cos_phi_1",
-    ),
-    "L3":  dict(
-        tso_mode="local",
-        dso_mode="local", local_der_mode="qv",
-        qv_setpoint_pu=1.03, qv_slope_pu=0.07,
-    ),
-    # ── OFO scenarios ───────────────────────────────────────────────────
-    # T-OFO: TSO uses the new OFO (grid-forming gens stay).  DSO is
-    # local with legacy Q(V) install, so disable the new plant loop here
-    # too to avoid duplicate Q(V) controllers per sgen.
-    #
-    # Mitigations against the TSO-OFO / legacy-droop closed-loop
-    # sensitivity error documented in
-    # ``tests/diag_t_ofo_oscillation.py`` and
+    # ── TSO-only OFO (T0, T1) ───────────────────────────────────────────
+    # OFO MIQP active at the transmission layer; DSO uses the local
+    # plant-side controllers (no DSO MIQP).  Mitigation H from
     # ``experiments/results/002_compare/diagnostics_T-OFO/summary.md``:
-    #
-    # H. g_w_pcc=1e8
-    #    The DSO has no MIQP that tracks Q_PCC,set, so optimising it
-    #    only winds up an unobservable variable (diagnostic 3 showed
-    #    Q_PCC swing ~131 GVar with windup index 1.00).  A very large
-    #    g_w_pcc pins each Q_PCC,set near its current value via the
-    #    OFO regulariser — pure config override, no controller code
-    #    changes.  Q_PCC stays effectively immobile while the OFO
-    #    uses its physical actuators (V_gen, OLTC, shunt) to track V.
-    #
-    # D. tso_command_relaxation_alpha=0.3
-    #    Under-relax the OFO step on continuous actuators only.
-    #    Discrete actuators (OLTC, shunt) keep alpha=1 (cannot move
-    #    fractional steps).  Damps the V_gen limit cycle at the AVR
-    #    upper box bound (sign-flip fraction was 0.91 in zone 2).
-    "T-OFO": dict(
+    # the DSO has no MIQP tracking Q_PCC,set, so the OFO regulariser
+    # pin (``g_w_pcc=1e8``) keeps each Q_PCC setpoint near its current
+    # value while the TSO OFO drives V via V_gen / OLTC / shunt.
+    "T0": dict(
         tso_mode="ofo",
-        dso_mode="local", local_der_mode="qv",
-        qv_setpoint_pu=1.03, qv_slope_pu=0.07,
+        dso_mode="local", local_der_mode="cos_phi_1",
+        tso_q_mode="qv",  dso_q_mode="cosphi",
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.05, tso_qv_deadband_pu=0.005,
         g_w_pcc=1.0e8,
     ),
-    # C-OFO: full Stage-1 + Stage-2 cascade architecture; keep the base
-    # config's use_qv_local_loop=True / force_all_der_grid_following=False.
-    "C-OFO": dict(
+    "T1": dict(
+        tso_mode="ofo",
+        dso_mode="local", local_der_mode="qv",
+        tso_q_mode="qv",  dso_q_mode="qv",
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.05, tso_qv_deadband_pu=0.005,
+        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.05, dso_qv_deadband_pu=0.005,
+        g_w_pcc=1.0e8,
+    ),
+    # ── Cascade OFO (C) ─────────────────────────────────────────────────
+    # OFO MIQP active at both TSO and DSO layers (default behaviour).
+    "C": dict(
         tso_mode="ofo",
         dso_mode="ofo",
     ),
@@ -293,7 +273,7 @@ def load_logs(out_root: str = os.path.join("results", "002_compare"),
         Directory containing one ``<name>/log.pkl`` per scenario.
     names : list of str, optional
         Subset of scenarios to load.  Defaults to all keys in
-        :data:`SCENARIOS` (L0, L1, L2, L3, T-OFO, C-OFO).  Missing logs
+        :data:`SCENARIOS` (L0, L1, T0, T1, C).  Missing logs
         are returned as empty lists (treated as "scenario diverged" by
         the plotter).
 

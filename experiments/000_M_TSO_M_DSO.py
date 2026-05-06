@@ -3432,12 +3432,12 @@ def main() -> None:
         n_total_s=60.0 * 60 * 24,      # 720-min full simulation
         tso_period_s=60.0 * 6,    # TSO every 3 minutes
         dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
-        g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
+        g_v=5E5,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=200,  # DSO Q-tracking
         tso_g_q_tie=1,
         # ── DSO objective tuning ──
         # use_q_cor_actuator defaults to True (refactor_v2 Soleimani §III-B).
-        dso_g_v=50000.0,  # reduced to avoid competing with Q tracking
+        dso_g_v=30000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.95,  # leaky integrator decay
         dso_q_integral_max_mvar=200.0,  # anti-windup clamp
@@ -3455,7 +3455,7 @@ def main() -> None:
         g_w_tso_shunt=10000,
         # ── DSO weights ──
         g_w_dso_der=1000,  # was 1000 (direct-Q); ~3x lower curvature under T'
-        g_w_dso_oltc=100,
+        g_w_dso_oltc=40,
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -3464,7 +3464,7 @@ def main() -> None:
         live_plot_cascade=True,
         live_plot_system=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 12, 0),
+        start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies           = [

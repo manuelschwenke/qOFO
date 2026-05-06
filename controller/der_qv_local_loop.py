@@ -1,5 +1,5 @@
 """
-DER plant-side reactive-power controllers (refactor_v2).
+DER plant-side reactive-power controllers (refactor_v3).
 ========================================================
 
 Pandapower controllers that simulate each DER's converter response in
@@ -7,23 +7,25 @@ steady state — one controller per ``net.sgen`` row.  Two flavours are
 provided, dispatched by ``net.sgen.q_mode``:
 
 * :class:`QVLocalLoop` (``q_mode == "qv"``) — piecewise-linear V_Q
-  characteristic with optional symmetric deadband, shifted horizontally
-  by ``V_cor = q_cor_mvar / R``.  Matches Soleimani & Van Cutsem,
-  *Combined Local and Centralized Voltage Control*, eq. (1)–(2) for the
-  shifted curve and eq. (15)/(17)/(18) for the linearised closed-loop
-  response.
+  characteristic with symmetric deadband around V_ref.  The supervising
+  OFO commands ``Q_set`` (``net.sgen.q_set_mvar``, sgen sign convention:
+  positive = inject), interpreted as the Q value the inverter feeds in
+  while V stays inside the deadband.  Slope is fixed; the deadband
+  endpoints in V shift by ``-Q_set / R`` so the linear segments lie on
+  the same lines for every Q_set (equivalent to a V_ref shift).  Matches
+  VDE-AR-N 4120 *Blindleistung mit Spannungsbegrenzungsfunktion*.
 
 * :class:`CosPhiConstLoop` (``q_mode == "cosphi"``) — fixed power factor
   ``Q = sign · |P| · tan(acos(cosφ))`` with ``sign ∈ {+1, −1}``
   (over- vs. under-excited).  Q is independent of voltage; the
-  controller does not see Q_cor (cos-phi DERs are excluded from the
+  controller does not see Q_set (cos-phi DERs are excluded from the
   OFO action vector).
 
 Both loops read their parameters from columns on ``net.sgen`` populated
 by :func:`network.ieee39.build.tag_der_q_modes`:
 
   q_mode, qv_slope_pu, qv_vref_pu, qv_deadband_pu, cosphi, cosphi_sign,
-  q_cor_mvar.
+  q_set_mvar.
 
 The convergence loop uses damped fixed-point iteration to keep the
 inner ``run_control=True`` loop stable for STATCOM-class units.
@@ -32,16 +34,13 @@ Backward compatibility
 ----------------------
 For networks that have only the legacy ``vm_pu_ref`` column (the
 pre-refactor Stage-2 system), :class:`QVLocalLoop` falls back to
-reading ``vm_pu_ref`` and treats ``q_cor_mvar`` and ``qv_deadband_pu``
+reading ``vm_pu_ref`` and treats ``q_set_mvar`` and ``qv_deadband_pu``
 as zero.  This preserves the original Q = clip(−k·(V−V_ref), Q_min, Q_max)
 behaviour so existing call sites that have not yet migrated to
 ``tag_der_q_modes`` keep working.
 
-The legacy module path ``controller.dso_qv_local_loop`` is preserved
-as a thin shim that re-exports from this module.
-
 Author: Manuel Schwenke
-Date: 2026-05-05 (refactor_v2 commit 3)
+Date: 2026-05-06 (refactor_v3: Q_set semantics, deadband-shift)
 """
 
 from __future__ import annotations
@@ -83,40 +82,6 @@ def _qv_capability(sn: float, op_diagram: str, p_mw: float) -> tuple[float, floa
         q_max = (0.10 + t * (0.41 - 0.10)) * sn
         return q_min, q_max
     return -0.33 * sn, 0.41 * sn
-
-
-def compute_qcor_h_transform(
-    K_diag: np.ndarray,
-    S_VQ: np.ndarray,
-) -> Optional[np.ndarray]:
-    """Soleimani §IV-B eq. (18): closed-loop sensitivity from Q_cor to
-    realised Q under local Q(V) droop.
-
-    ::
-
-        T' = (I + diag(K) · S_VQ)^{-1}
-
-    where:
-
-    * ``K_diag`` (length n_b) — per-bus droop gain ``K_b = sum_i (S_n,i / slope_i)``
-      summed across DERs hosted at that bus (Mvar / pu_v).  Saturated DERs
-      contribute zero (active-set: at the rail Q does not respond).
-    * ``S_VQ`` (n_b × n_b) — bus-to-bus voltage-Q sensitivity at the DER
-      buses (pu_v / Mvar).
-    * ``T'`` (n_b × n_b) — multiplied into the DER columns of the OFO's
-      H matrix to map ``∂y/∂Q`` ⇒ ``∂y/∂Q_cor``.
-
-    Returns ``None`` on singular ``M = I + diag(K) · S_VQ`` so the caller
-    can fall back to identity.
-    """
-    n = len(K_diag)
-    if n == 0:
-        return np.zeros((0, 0))
-    M = np.eye(n) + np.diag(K_diag) @ S_VQ
-    try:
-        return np.linalg.inv(M)
-    except np.linalg.LinAlgError:
-        return None
 
 
 def _read_or(net: pp.pandapowerNet, sgen_idx: int, col: str,

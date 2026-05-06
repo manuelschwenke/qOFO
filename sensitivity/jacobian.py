@@ -1109,8 +1109,15 @@ class JacobianSensitivities:
                               g_meas * V_i_meas * V_j_meas * np.sin(theta_i_meas - theta_j_meas) / tau_meas**2)
             direct_effect = dQ_dtau_direct * delta_tau_chg
 
-        # Total sensitivity (Equation 17), scaled from per-unit to Mvar
-        sensitivity = (indirect_effect + direct_effect)
+        # Total sensitivity (Equation 17), scaled from per-unit to Mvar.
+        # ``indirect_effect`` and ``direct_effect`` accumulate per-unit Q
+        # derivatives (``dQ_dx`` in pu/pu, ``J_inv`` dimensionless, ``dg_dtau``
+        # in pu/dimensionless τ) times the dimensionless τ-per-tap step --
+        # the result is therefore in [pu Q] / [tap].  Multiply by
+        # ``s_base`` to convert to [Mvar / tap] so the entry composes
+        # correctly with the rest of the H matrix's Q rows.
+        s_base = float(self.net.sn_mva)
+        sensitivity = (indirect_effect + direct_effect) * s_base
 
         return sensitivity
 
@@ -2221,7 +2228,14 @@ class JacobianSensitivities:
             )
             direct = dQ_dtau_direct * d_meas['delta_tau']
 
-        return (indirect + direct)
+        # Units: ``dQ_dx`` and ``dQ_dtau_direct`` are in per-unit Q, ``J_inv``
+        # is dimensionless, ``dg_dtau`` is per-unit power per dimensionless tau,
+        # and ``delta_tau`` is dimensionless per tap.  The accumulated product
+        # is therefore ``[pu Q] / [tap]`` -- multiply by ``s_base`` to convert
+        # to ``[Mvar / tap]`` so the entry composes correctly with the rest
+        # of the H matrix's Q rows (which are in Mvar / actuator-unit).
+        s_base = float(self.net.sn_mva)
+        return (indirect + direct) * s_base
 
     def compute_dQtrafo3w_hv_ds_matrix(
         self,
@@ -2417,7 +2431,11 @@ class JacobianSensitivities:
             dV_star_dVgen = dV_full[v_aux_jac]
             sensitivity += dQ_dV_star * dV_star_dVgen
 
-        return sensitivity
+        # ``dQ_dV_*`` is per-unit Q per per-unit V; multiplied by pu/pu V
+        # transfers gives [pu Q] / [pu V_gen].  Convert to Mvar/pu by
+        # multiplying with the system base.
+        s_base = float(self.net.sn_mva)
+        return sensitivity * s_base
 
     def compute_dQtrafo3w_hv_dVgen_matrix(
         self,
@@ -2738,6 +2756,11 @@ class JacobianSensitivities:
                 if meas == chg_ppc:
                     matrix[i, j] += dQl_dVl
 
+        # ``_compute_dQgen_dx`` and ``_compute_dg_dVk`` work in per-unit
+        # power; the matrix product is therefore in [pu Q] / [pu V].
+        # Convert to the documented [Mvar / pu] units by multiplying with
+        # the system base.
+        matrix *= float(self.net.sn_mva)
         return matrix, list(gen_bus_indices_pp_meas), list(gen_bus_indices_pp_chg)
 
     def compute_dQgen_ds_2w_matrix(
@@ -2781,6 +2804,9 @@ class JacobianSensitivities:
                 if int(gb) in dQ_direct:
                     matrix[i, j] += dQ_direct[int(gb)] * delta_tau
 
+        # Per-unit Q derivatives times pu state response yield [pu Q]/[tap].
+        # Convert to the documented [Mvar/tap] by multiplying with s_base.
+        matrix *= float(self.net.sn_mva)
         return matrix, list(gen_bus_indices_pp), list(oltc_trafo_indices)
 
     def compute_dQgen_ds_3w_matrix(
@@ -2818,6 +2844,8 @@ class JacobianSensitivities:
             dx_ds = -self.J_inv @ dg_dtau * delta_tau
             matrix[:, j] = dQgen_dx_cache @ dx_ds
 
+        # Same per-unit-to-Mvar conversion as the 2W sibling.
+        matrix *= float(self.net.sn_mva)
         return matrix, list(gen_bus_indices_pp), list(oltc_trafo3w_indices)
 
     def compute_dQgen_dQ_shunt_matrix(
@@ -3246,7 +3274,12 @@ class JacobianSensitivities:
         dtheta_endp = dx_ds[theta_endp_idx] if theta_endp_idx is not None else 0.0
         dtheta_other = dx_ds[theta_other_idx] if theta_other_idx is not None else 0.0
 
-        return (
+        # ``dQ_dU`` and ``dQ_dtheta`` are pu/pu derivatives, ``dx_ds`` is
+        # already a pu-state per tap step (J_inv · dg_dtau · delta_tau),
+        # so the dot product is in [pu Q] / [tap].  Multiply by ``s_base``
+        # to convert to [Mvar / tap].
+        s_base = float(self.net.sn_mva)
+        return s_base * (
             dQ_dU_endp * dU_endp
             + dQ_dU_other * dU_other
             + dQ_dtheta_endp * dtheta_endp
@@ -3320,7 +3353,11 @@ class JacobianSensitivities:
         dtheta_endp = dx_ds[theta_endp_idx] if theta_endp_idx is not None else 0.0
         dtheta_other = dx_ds[theta_other_idx] if theta_other_idx is not None else 0.0
 
-        return (
+        # Same s_base scaling rationale as the 2W sibling: per-unit Q
+        # derivatives times pu state response = pu Q per tap; multiply
+        # by ``s_base`` to convert to Mvar/tap.
+        s_base = float(self.net.sn_mva)
+        return s_base * (
             dQ_dU_endp * dU_endp
             + dQ_dU_other * dU_other
             + dQ_dtheta_endp * dtheta_endp

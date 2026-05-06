@@ -117,31 +117,27 @@ def make_base_config() -> MultiTSOConfig:
       for post-hoc comparison plots instead.
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 2,      # 720-min full simulation
+        n_total_s=60.0 * 60 * 4,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
         g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=200,  # DSO Q-tracking
         # ── DSO objective tuning ──
-        use_qv_local_loop=True,
-        force_all_der_grid_following=False,
         dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.9,  # leaky integrator decay
         dso_q_integral_max_mvar=50.0,  # anti-windup clamp
         dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
         # ── TSO weights (alpha=1, spectral rho(C)/2) ──
-        g_w_der=10,   # single-DER zones; rho~C_jj=396 -> min 198
-        g_w_gridforming= 5E6,
-        g_w_gen=5e7,   # excluded from stability
-        g_w_pcc=50,   # 9 correlated PCCs; rho(C)=221 -> min 111
+        g_w_der=10,
+        g_w_gen=5e7,
+        g_w_pcc=50,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
-        g_w_tso_shunt=10000,   # bipolar tertiary shunts; mirror g_w_tso_oltc
-        # ── DSO weights (alpha=1, rho(C_DER)=790 -> min 395) ──
-        g_w_dso_der=2000,  # 2026-05-04: 500 caused massive DSO Q chatter; backed off toward 1000 per plan fallback. Per-step decay 0.286 (vs 0.20 at 1000, 0.40 at 500). Still > floor 395.
-        g_w_dso_der_vref=1E6,
-        g_w_dso_oltc=20,   # rho(C_OLTC)~1.1; higher for switching suppression
+        g_w_tso_shunt=10000,
+        # ── DSO weights ──
+        g_w_dso_der=2000,
+        g_w_dso_oltc=20,
         # ── Adaptive g_w (paper Eq.16, sign-only) — all continuous classes ──
         # `g_w_*` values above become the warm-start; the meta below
         # controls the multiplicative rate and clip box.  Discrete
@@ -151,8 +147,8 @@ def make_base_config() -> MultiTSOConfig:
         sensitivity_update_interval  = int(1e6),
         verbose                      = 1,
         # Live plots forced OFF for sequential comparison sweep.
-        live_plot_controller = False,
-        live_plot_cascade    = False,
+        live_plot_controller = True,
+        live_plot_cascade    = True,
         live_plot_system     = False,
         # ── Profile & contingency settings ───────────────────────────
         start_time              = datetime(2016, 4, 15, 8, 0),
@@ -190,37 +186,26 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
         tso_mode="local", tso_local_mode="qv",
         tso_qv_setpoint_pu=1.03, tso_qv_slope_pu=0.07,
         dso_mode="local", local_der_mode="cos_phi_1",
-        use_qv_local_loop=False,
-        force_all_der_grid_following=True,
     ),
     "L1":  dict(
         tso_mode="local", tso_local_mode="qv",
         tso_qv_setpoint_pu=1.03, tso_qv_slope_pu=0.07,
         dso_mode="local", local_der_mode="qv",
         qv_setpoint_pu=1.03, qv_slope_pu=0.07,
-        use_qv_local_loop=False,
-        force_all_der_grid_following=True,
     ),
-    # ── Promoted-gen partition (L2, L3) ─────────────────────────────────
-    # ``force_all_der_grid_following`` defaults to False (base config),
-    # so every TSO converter classified GRID_FORMING is promoted into a
-    # ``pp.gen`` (PV bus) by ``apply_der_classification``.  ``tso_mode=
-    # "local"`` means no OFO step ever writes ``net.gen.vm_pu``, so the
-    # promoted-gen AVR setpoint stays at the default 1.03 pu set by
-    # ``apply_der_classification`` for the entire run.  The TSO-side
-    # ``install_qv_characteristic_controllers`` / ``install_cos_phi_one``
-    # paths are gated on a non-empty list of TSO sgens and become no-ops
-    # here (``_tso_der_idx_list`` is empty after promotion).
+    # ── L2 / L3 (legacy promoted-gen partition) collapsed to L0 / L1 ──
+    # Pre-refactor_v2 these scenarios used ``apply_der_classification`` to
+    # promote TSO converters into ``pp.gen``.  Q_cor mode keeps every DER
+    # as ``pp.sgen``, so L2 ≡ L0 and L3 ≡ L1 — kept for backwards-compatible
+    # result archives but functionally redundant.
     "L2":  dict(
         tso_mode="local",
         dso_mode="local", local_der_mode="cos_phi_1",
-        use_qv_local_loop=False,
     ),
     "L3":  dict(
         tso_mode="local",
         dso_mode="local", local_der_mode="qv",
         qv_setpoint_pu=1.03, qv_slope_pu=0.07,
-        use_qv_local_loop=False,
     ),
     # ── OFO scenarios ───────────────────────────────────────────────────
     # T-OFO: TSO uses the new OFO (grid-forming gens stay).  DSO is
@@ -250,15 +235,7 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
         tso_mode="ofo",
         dso_mode="local", local_der_mode="qv",
         qv_setpoint_pu=1.03, qv_slope_pu=0.07,
-        # Must be False: dso_mode="local" + local_der_mode="qv" already
-        # runs apply_qv_local_control() at every DSO tick (manual q_mvar
-        # update).  Leaving use_qv_local_loop=True would *additionally*
-        # install a QVLocalLoop pp.controller per DSO sgen that iterates
-        # inside every pp.runpp(run_control=True), and the two paths
-        # fight each other -> ControllerNotConverged on step 1.
-        use_qv_local_loop=False,
         g_w_pcc=1.0e8,
-        tso_command_relaxation_alpha=1.0,
     ),
     # C-OFO: full Stage-1 + Stage-2 cascade architecture; keep the base
     # config's use_qv_local_loop=True / force_all_der_grid_following=False.

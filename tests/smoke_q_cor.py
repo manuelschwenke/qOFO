@@ -69,7 +69,6 @@ def main() -> None:
         contingencies=[],
         # ── refactor_v2 Q_cor path ────────────────────────────────────
         use_q_cor_actuator=True,
-        use_qv_local_loop=True,
         # Test profile: TSO DERs at unity power factor (Q=0 always),
         # DSO DERs on Q(V) droop at V_ref=1.03.  This isolates the
         # DSO-side Q_cor path and matches the regime where the legacy
@@ -81,8 +80,7 @@ def main() -> None:
         # also auto-clamps TSO DERs to 0.03.  No override needed.
         # Per-level tolerances default to tso=0.1 / dso=0.01 Mvar.
     )
-    print(f"\n[smoke_q_cor] use_q_cor_actuator={cfg.use_q_cor_actuator} "
-          f"use_qv_local_loop={cfg.use_qv_local_loop}")
+    print(f"\n[smoke_q_cor] use_q_cor_actuator={cfg.use_q_cor_actuator}")
     print(f"[smoke_q_cor] tso_q_mode={cfg.tso_q_mode} "
           f"dso_q_mode={cfg.dso_q_mode}")
     print(f"[smoke_q_cor] tso_qv_vref_pu={cfg.tso_qv_vref_pu} "

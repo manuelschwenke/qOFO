@@ -118,24 +118,6 @@ class TestSaturationHandling:
 # ---------------------------------------------------------------------------
 
 class TestConfigFlagValidation:
-    def test_q_cor_and_v_ref_mutually_exclusive(self):
-        """DSOControllerConfig.__post_init__ must reject the combination
-        use_q_cor_actuator=True + ofo_in_v_ref_mode=True."""
-        from controller.dso_controller import DSOControllerConfig
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            DSOControllerConfig(
-                interface_trafo_indices=[],
-                der_indices=[],
-                voltage_bus_indices=[],
-                current_line_indices=[],
-                oltc_trafo_indices=[],
-                shunt_bus_indices=[],
-                shunt_q_steps_mvar=[],
-                use_qv_local_loop=True,
-                qv_apply_mode="v_ref",
-                use_q_cor_actuator=True,
-            )
-
     def test_q_cor_alone_accepted(self):
         from controller.dso_controller import DSOControllerConfig
         cfg = DSOControllerConfig(
@@ -146,14 +128,13 @@ class TestConfigFlagValidation:
             oltc_trafo_indices=[],
             shunt_bus_indices=[],
             shunt_q_steps_mvar=[],
-            use_qv_local_loop=False,
             use_q_cor_actuator=True,
         )
         assert cfg.use_q_cor_actuator is True
 
-    def test_default_is_legacy(self):
-        """Default DSOControllerConfig has use_q_cor_actuator=False so
-        the new code path is dormant unless explicitly opted in."""
+    def test_default_is_q_cor(self):
+        """Default DSOControllerConfig has use_q_cor_actuator=True
+        (refactor_v2: Q_cor is the only path)."""
         from controller.dso_controller import DSOControllerConfig
         cfg = DSOControllerConfig(
             interface_trafo_indices=[],
@@ -164,4 +145,74 @@ class TestConfigFlagValidation:
             shunt_bus_indices=[],
             shunt_q_steps_mvar=[],
         )
-        assert cfg.use_q_cor_actuator is False
+        assert cfg.use_q_cor_actuator is True
+
+
+# ---------------------------------------------------------------------------
+#  Regression: source-level pin -- saturation check is gone from T_prime
+# ---------------------------------------------------------------------------
+
+class TestNoSaturationHackInTransform:
+    """Bug fix 2026-05: the DSO Q-tracking regression was rooted in two
+    coupled defects in ``_compute_qcor_transform_T_prime`` and
+    ``generate_capability_message``.  The architectural fix removes the
+    saturation active-set logic from T' / T_qv entirely (saturation is
+    now handled by the Q_cor input bounds in ``_compute_input_bounds``)
+    and switches capability to use the open-loop ∂Q_iface/∂Q_DER block.
+    A full functional-level regression lives in
+    ``tests/diag_h_qcor_fd_validate.py`` (which compares the H column
+    and capability envelope against finite-difference ground truth on
+    the IEEE 39 multi-zone scenario).  This test pins the source-level
+    invariant: those methods no longer touch ``_last_measurement`` or
+    ``_qv_capability`` for saturation purposes.
+    """
+
+    def test_qcor_transform_does_not_consult_measurement(self):
+        """``_compute_qcor_transform_T_prime`` must not read
+        ``_last_measurement`` for saturation gating.  If it does, the
+        DSO controller's ``_last_measurement`` (which was historically
+        never written) silently becomes a load-bearing variable, and a
+        future caller forgetting to set it re-introduces the bug."""
+        import inspect
+        from controller.dso_controller import DSOController
+
+        src = inspect.getsource(DSOController._compute_qcor_transform_T_prime)
+        # The post-fix function should not branch on saturation state.
+        assert "saturated" not in src, (
+            "_compute_qcor_transform_T_prime regained saturation logic; "
+            "saturation should be enforced by _compute_input_bounds via "
+            "the T'_bb scaling of the Q_DER envelope, not by zeroing K."
+        )
+        assert "_qv_capability" not in src, (
+            "_compute_qcor_transform_T_prime is calling _qv_capability; "
+            "the per-DER capability envelope belongs in the bound calc, "
+            "not in the H-matrix transform."
+        )
+
+    def test_qv_transform_does_not_consult_measurement(self):
+        """Same invariant for the V_ref-mode sibling
+        ``_compute_qv_transform_T``."""
+        import inspect
+        from controller.dso_controller import DSOController
+
+        src = inspect.getsource(DSOController._compute_qv_transform_T)
+        assert "saturated" not in src, (
+            "_compute_qv_transform_T regained saturation logic; "
+            "see the docstring on the Q_cor sibling for the rationale."
+        )
+        assert "_qv_capability" not in src
+
+    def test_capability_uses_open_loop_block(self):
+        """``generate_capability_message`` must read from
+        ``_H_iface_der_open_bus`` (the pre-T' snapshot) when populated;
+        mixing the post-T' ``_H_cache`` block with ΔQ_DER under-reports
+        the envelope by a factor of T'_bb (~0.3 in practice)."""
+        import inspect
+        from controller.dso_controller import DSOController
+
+        src = inspect.getsource(DSOController.generate_capability_message)
+        assert "_H_iface_der_open_bus" in src, (
+            "generate_capability_message no longer references the "
+            "open-loop snapshot; capability will be under-reported by "
+            "factor T'_bb when use_q_cor_actuator=True."
+        )

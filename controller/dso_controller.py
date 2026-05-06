@@ -135,87 +135,31 @@ class DSOControllerConfig:
     and factorises the sensitivity matrix as H_der = H_bus @ E.
     If None, the controller uses the legacy sgen-index-based control."""
 
-    # ── Grid-forming converter gens (PV-bus voltage actuators) ──────────────
+    qv_slope_pu: float = 0.07
+    """Q(V) droop slope [pu_q / pu_v].  Fallback when
+    ``net.sgen.qv_slope_pu`` column is missing (legacy networks)."""
+
+    # ── Vestigial fields (kept empty under Q_cor mode; consumed by ─────────
+    # legacy gridforming + V_ref-direct branches in DSOController that
+    # become no-ops when these defaults are used).  Slated for full removal
+    # together with their reader code in a follow-up cleanup.
     gridforming_gen_indices: List[int] = field(default_factory=list)
-    """``net.gen`` row indices for grid-forming converter gens managed by
-    this DSO controller (e.g. STATCOM-capable units classified as
-    grid-forming via ``MultiTSOConfig.der_mode_overrides``).  The DSO
-    OFO commands ``vm_pu`` on each, in a separate ``V_gf`` actuator
-    block.  Empty list ⇒ no grid-forming converters at this DSO
-    (default — the legacy classification puts every DSO DER in
-    grid-following mode)."""
-
     gridforming_gen_buses: List[int] = field(default_factory=list)
-    """Bus index for each entry in ``gridforming_gen_indices``."""
-
     gridforming_gen_sn_mva: List[float] = field(default_factory=list)
-    """Rated apparent power [MVA] per grid-forming gen.  Used to compute
-    the STATCOM Q capability ``±sqrt(Sn² − P²)`` enforced as a soft
-    output constraint on the realised Q."""
-
     gridforming_gen_op_diagrams: List[str] = field(default_factory=list)
-    """Per-gen operating-diagram label (default ``"STATCOM"``)."""
-
     gridforming_vm_min_pu: float = 0.95
-    """Lower bound on the V_gf voltage setpoint [pu]."""
-
     gridforming_vm_max_pu: float = 1.10
-    """Upper bound on the V_gf voltage setpoint [pu]."""
-
     rho_q_gridforming: float = 1e2
-    """Soft-constraint penalty for the Q_gf output."""
-
-    # ── Stage-2: Q(V) plant model + how the OFO drives it ──────────────────
     use_qv_local_loop: bool = False
-    """Stage-2 master switch — controls **plant model** only.  When True,
-    the plant has a local Q(V) loop on every grid-following DSO sgen.
-    See :attr:`qv_apply_mode` for how the OFO interacts with that
-    plant model (V_ref-direct or Q+shim).
-
-    Default ``False`` keeps the Stage-1 direct-Q path (no Q(V) plant)."""
-
     qv_apply_mode: str = "q_shim"
-    """How the OFO drives the Q(V) plant when ``use_qv_local_loop=True``.
-
-    * ``"v_ref"`` — OFO commands per-sgen V_ref (pu_v).  Activates the
-      K-transform on the H matrix, Q_realized soft output rows, and
-      V_ref bounds on the input vector.  Q tracking is structurally
-      capped by the V_ref bound + closed-loop V_bus feedback; tuning
-      ``g_q`` and ``g_w_dso_der_vref`` has limited effect (see the
-      empirical sweeps in ``tests/diag_final_tuning_sweep.py``).
-      Highest physical fidelity (the OFO output IS the V_ref the
-      converter would receive in the real system).
-
-    * ``"q_shim"`` (default) — OFO solves the same MIQP as Stage 1:
-      DER block is Q (Mvar), no K-transform, no Q_realized rows,
-      ``g_w_dso_der`` units are 1/Mvar², capability bounds are
-      ``[Q_min(P), Q_max(P)]``.  The plant-side apply step inverts the
-      droop locally (``vm_pu_ref = V_bus_meas + Q_cmd / k``) so the
-      Q(V) loop converges to ``Q ≈ Q_cmd``.  Recovers Stage-1 Q
-      tracking quality while keeping the realistic Q(V) plant model.
-
-    Ignored when ``use_qv_local_loop=False``."""
+    qv_v_ref_min_pu: float = 0.95
+    qv_v_ref_max_pu: float = 1.10
 
     @property
     def ofo_in_v_ref_mode(self) -> bool:
-        """True iff the OFO operates over V_ref (vs Q) for DSO DERs.
-
-        Equivalent to ``use_qv_local_loop and qv_apply_mode == 'v_ref'``.
-        Used throughout the controller to gate the K-transform,
-        Q_realized rows, V_ref bounds, V_ref-from-measurement reads,
-        and the ``"dso_der_vref"`` g_w-adapter class name."""
+        """Always False under refactor_v2 Q_cor mode (legacy V_ref-direct
+        path is dead but its consumers still query this property)."""
         return bool(self.use_qv_local_loop and self.qv_apply_mode == "v_ref")
-
-    qv_slope_pu: float = 0.07
-    """Q(V) droop slope [pu_q / pu_v].  Must match the value passed to
-    :func:`controller.dso_qv_local_loop.install_qv_local_loops` so the
-    OFO's K-transform agrees with the plant-side loop."""
-
-    qv_v_ref_min_pu: float = 0.95
-    """Lower bound on the per-DER V_ref MIQP control variable."""
-
-    qv_v_ref_max_pu: float = 1.10
-    """Upper bound on the per-DER V_ref MIQP control variable."""
 
     qv_saturation_eps_mvar: float = 1.0
     """Tolerance for the active-set saturation detector.  When realized
@@ -224,30 +168,12 @@ class DSOControllerConfig:
     (the DER's slope effectively becomes 0 — pulling V_ref no longer
     moves Q).  See the architectural plan, Risks #5."""
 
-    # ── refactor_v2 (Soleimani §III-B): Q_cor as actuator ──────────────────
-    use_q_cor_actuator: bool = False
-    """When True, the DER block of the OFO action vector is interpreted
-    as ``Q_cor`` (Mvar) — a reactive-power offset that shifts the local
-    Q(V) characteristic by ``V_cor = Q_cor / R``.  The H matrix's DER
-    columns are post-multiplied by
-
-        T' = (I + diag(K) · S_VQ)^{-1}                  (Soleimani eq. 18)
-
-    where ``K_b = Σ_i S_n,i / slope_pu,i`` per unique DER bus.  This
-    maps the network-level ``∂y/∂Q`` to the closed-loop ``∂y/∂Q_cor``
-    that the controller needs.  Saturated DERs contribute zero to
-    ``K_diag`` so their column of ``T'`` collapses to identity.
-
-    Mutually exclusive with the legacy ``ofo_in_v_ref_mode``: __post_init__
-    raises if both are active.  Default ``False`` keeps the legacy
-    behaviour (Stage-1 q_shim or Stage-2 V_ref-direct, depending on
-    ``use_qv_local_loop`` / ``qv_apply_mode``).
-
-    Set to ``True`` to enable the Q_cor path; the runner must also
-    populate ``net.sgen.q_cor_mvar`` / ``qv_slope_pu`` / ``qv_vref_pu``
-    (via :func:`network.ieee39.build.tag_der_q_modes`) and the apply
-    step must write the OFO output into ``net.sgen.q_cor_mvar``
-    (refactor_v2 commit 5)."""
+    use_q_cor_actuator: bool = True
+    """Default-True master switch for the Q_cor actuator (Soleimani
+    §III-B).  The DER block of the OFO action vector is Q_cor (Mvar);
+    the H matrix's DER columns are post-multiplied by
+    ``T' = (I + diag(K) · S_VQ)^{-1}``.  Set False only for legacy
+    direct-Q ablation."""
 
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
@@ -298,48 +224,6 @@ class DSOControllerConfig:
                     f"must match voltage_bus_indices length "
                     f"({len(self.voltage_bus_indices)})"
                 )
-        # ── Grid-forming gen field consistency ──────────────────────────────
-        n_gf = len(self.gridforming_gen_indices)
-        if len(self.gridforming_gen_buses) != n_gf:
-            raise ValueError(
-                f"gridforming_gen_buses length "
-                f"({len(self.gridforming_gen_buses)}) must match "
-                f"gridforming_gen_indices length ({n_gf})"
-            )
-        if len(self.gridforming_gen_sn_mva) != n_gf:
-            raise ValueError(
-                f"gridforming_gen_sn_mva length "
-                f"({len(self.gridforming_gen_sn_mva)}) must match "
-                f"gridforming_gen_indices length ({n_gf})"
-            )
-        if self.gridforming_gen_op_diagrams and \
-                len(self.gridforming_gen_op_diagrams) != n_gf:
-            raise ValueError(
-                f"gridforming_gen_op_diagrams length "
-                f"({len(self.gridforming_gen_op_diagrams)}) must match "
-                f"gridforming_gen_indices length ({n_gf})"
-            )
-        if not self.gridforming_gen_op_diagrams and n_gf > 0:
-            self.gridforming_gen_op_diagrams = ["STATCOM"] * n_gf
-        if self.gridforming_vm_min_pu >= self.gridforming_vm_max_pu:
-            raise ValueError(
-                f"gridforming_vm_min_pu ({self.gridforming_vm_min_pu}) must "
-                f"be less than gridforming_vm_max_pu "
-                f"({self.gridforming_vm_max_pu})"
-            )
-        if self.rho_q_gridforming < 0:
-            raise ValueError(
-                f"rho_q_gridforming must be non-negative, got "
-                f"{self.rho_q_gridforming}"
-            )
-        # ── refactor_v2: Q_cor mode is exclusive with V_ref mode ────────────
-        if self.use_q_cor_actuator and self.ofo_in_v_ref_mode:
-            raise ValueError(
-                "use_q_cor_actuator=True is mutually exclusive with "
-                "use_qv_local_loop=True + qv_apply_mode='v_ref' "
-                "(legacy V_ref-direct mode).  Pick one OFO actuator "
-                "interpretation for the DER block."
-            )
 
 
 
@@ -432,6 +316,38 @@ class DSOController(BaseOFOController):
         # ordered to match.
         self._last_capability_q_iface_min_mvar: Optional[NDArray[np.float64]] = None
         self._last_capability_q_iface_max_mvar: Optional[NDArray[np.float64]] = None
+
+        # Last measurement seen by this controller, used by
+        # :meth:`_compute_input_bounds` to derive Q_cor bounds from the
+        # current Q_DER measurement and the closed-loop sensitivity.
+        # Set at the entry of :meth:`step` and
+        # :meth:`generate_capability_message`.
+        self._last_measurement: Optional[Measurement] = None
+
+        # Bus-level open-loop interface-Q vs DER-Q sensitivity snapshot,
+        # captured BEFORE the Q_cor / V_ref T-transform is applied to
+        # ``_H_cache``.  Used by :meth:`generate_capability_message` so
+        # the reported envelope is in actual ``ΔQ_DER × ΔQ_iface`` units
+        # (capability is bounded by physical DER Q rails, not by Q_cor).
+        # ``None`` until :meth:`_build_sensitivity_matrix` runs.
+        self._H_iface_der_open_bus: Optional[NDArray[np.float64]] = None
+        self._H_iface_der_unique_buses: Optional[List[int]] = None
+        self._H_iface_der_to_unique: Optional[List[int]] = None
+
+        # Cached bus-level Q_cor closed-loop transform
+        # ``T' = (I + diag(K)·S_VQ)^{-1}`` and the corresponding unique
+        # DER-bus list.  Populated on each :meth:`_build_sensitivity_matrix`
+        # call when ``use_q_cor_actuator=True``.  Used by
+        # :meth:`_compute_input_bounds` to map physical Q_DER bounds to
+        # Q_cor bounds (since the actuator commanded by the OFO is
+        # ``q_cor_mvar`` and ``ΔQ_DER ≈ T'_bb · ΔQ_cor`` at the closed-loop
+        # equilibrium) and by :meth:`_apply_qcor_closedloop_to_non_der`
+        # to fold the local Q(V) loop's reaction into the OLTC / shunt
+        # columns of H.  ``None`` when the transform was not built
+        # (e.g.  legacy direct-Q mode or singular ``M``).
+        self._T_prime_cache: Optional[NDArray[np.float64]] = None
+        self._T_prime_unique_buses: Optional[List[int]] = None
+        self._T_prime_K_diag: Optional[NDArray[np.float64]] = None
 
     def receive_setpoint(self, message: SetpointMessage) -> None:
         """
@@ -541,17 +457,21 @@ class DSOController(BaseOFOController):
         CapabilityMessage
             Message containing interface Q capability bounds.
         """
+        # Snapshot the measurement so downstream sensitivity / bound
+        # computations triggered from this call see the same state.
+        self._last_measurement = measurement
+
         # Get DER P for capability calculation
         der_p = self._extract_der_active_power(measurement)
-        
+
         # Get DER Q capability bounds
         q_der_min, q_der_max = self.actuator_bounds.compute_der_q_bounds(der_p)
-        # Build sensitivity matrix if not cached
+        # Build sensitivity matrix if not cached.  This also populates
+        # ``_H_iface_der_open_bus`` -- the open-loop ∂Q_iface/∂Q_DER
+        # block snapshot we use below.
         if self._H_cache is None:
             self._build_sensitivity_matrix()
 
-        # Extract dQ_interface/dQ_DER from H matrix (expanded to per-DER)
-        # The first n_interfaces rows of H correspond to Q_interface outputs
         n_interfaces = len(self.config.interface_trafo_indices)
         mapping = self.config.der_mapping
         if mapping is not None:
@@ -559,8 +479,36 @@ class DSOController(BaseOFOController):
         else:
             n_der = len(self.config.der_indices)
 
-        H_expanded = self._expand_H_to_der_level(self._H_cache)
-        dQ_interface_dQ_der = H_expanded[:n_interfaces, :n_der]
+        # Capability is bounded by the physical DER Q rail (ΔQ_DER), so
+        # the sensitivity multiplied by ΔQ_DER must be the OPEN-LOOP
+        # ``∂Q_iface/∂Q_DER`` (network-only), NOT the closed-loop
+        # ``∂Q_iface/∂Q_cor`` that lives in ``_H_cache`` after the T'
+        # transform.  Mixing post-T' sensitivity with ΔQ_DER under-
+        # reports the envelope by a factor T'_bb (~0.3-0.5 in practice).
+        #
+        # Use the bus-level open-loop snapshot captured before T' was
+        # applied, then expand to per-DER columns via the same E-matrix
+        # / legacy duplication path used elsewhere.  Falls back to the
+        # post-T' cache if the snapshot is unavailable (e.g. legacy
+        # direct-Q mode where open-loop = closed-loop).
+        if (
+            self._H_iface_der_open_bus is not None
+            and self._H_iface_der_unique_buses is not None
+            and self._H_iface_der_to_unique is not None
+        ):
+            H_iface_open_bus = self._H_iface_der_open_bus
+            if mapping is not None:
+                # E-mapping: H_open_bus @ E -> per-DER columns
+                dQ_interface_dQ_der = H_iface_open_bus @ mapping.E
+            else:
+                # Legacy duplication: per-DER column inherits its bus column.
+                dQ_interface_dQ_der = H_iface_open_bus[
+                    :, self._H_iface_der_to_unique
+                ]
+        else:
+            # Fallback path: post-T' cache (legacy / direct-Q mode).
+            H_expanded = self._expand_H_to_der_level(self._H_cache)
+            dQ_interface_dQ_der = H_expanded[:n_interfaces, :n_der]
         
         # Map DER capability to interface capability using delta from current
         # operating point.  The TSO applies these as:
@@ -955,11 +903,82 @@ class DSOController(BaseOFOController):
         u_lower = np.zeros(n_total)
         u_upper = np.zeros(n_total)
 
-        # DER block: Q-bounds (legacy) or V_ref-bounds (Stage 2)
+        # DER block: V_ref bounds (Stage 2) / Q_cor bounds (refactor_v2)
+        # / direct Q_DER bounds (legacy).
         if self.config.ofo_in_v_ref_mode:
             u_lower[:n_der] = self.config.qv_v_ref_min_pu
             u_upper[:n_der] = self.config.qv_v_ref_max_pu
+        elif self.config.use_q_cor_actuator:
+            # ``u[:n_der]`` is Q_cor (Mvar offset commanded into the
+            # plant-side QVLocalLoop).  The physical bound is the Q_DER
+            # envelope from the converter operating diagram.  Map it to
+            # Q_cor space via the per-bus closed-loop sensitivity
+            # ``T'_bb = ΔQ_DER_b / ΔQ_cor_b`` so the optimiser can
+            # actually push Q_DER to its rails:
+            #
+            #   Q_DER(u_new) ≈ Q_DER_current + T'_bb · (u_new - u_old)
+            #   ⇒ u_new_max[j] = u_old[j] + (Q_DER_max[j] - Q_DER_current[j]) / T'_bb
+            #
+            # Falls back to direct Q_DER bounds when the T' cache is
+            # unavailable (first call, or T' was singular).  Saturated
+            # DERs end up with ``u_lower[j] ≈ u_upper[j]`` because the
+            # difference (Q_max - Q_current) collapses, so the optimiser
+            # naturally pins them -- no separate active-set logic needed.
+            q_min, q_max = self.actuator_bounds.compute_der_q_bounds(
+                der_p_current,
+            )
+
+            T_cache = self._T_prime_cache
+            T_buses = self._T_prime_unique_buses
+            meas = self._last_measurement
+            net = self.sensitivities.net
+            u_old = self._u_current
+            der_indices_list = list(self.config.der_indices)
+
+            if (
+                T_cache is not None
+                and T_buses is not None
+                and meas is not None
+                and u_old is not None
+                and len(meas.der_q_mvar) >= len(der_indices_list)
+            ):
+                # Per-DER bus lookup -> T'_bb from cached T_prime.
+                u_min_qcor = np.empty(n_der, dtype=np.float64)
+                u_max_qcor = np.empty(n_der, dtype=np.float64)
+                # Floor T'_bb away from zero to avoid pathological
+                # blow-up when a bus is fully saturated.  0.05 is
+                # roughly the smallest non-zero T'_bb seen in the
+                # IEEE 39 multi-zone scenario; below that the bound
+                # would balloon and the optimiser could over-shoot
+                # into nonlinear territory.  ``T'_bb`` is bounded
+                # above by 1.0 (passive network), so no upper clip.
+                T_floor = 0.05
+                for j, sgen_idx in enumerate(der_indices_list):
+                    bus_j = int(net.sgen.at[int(sgen_idx), "bus"])
+                    try:
+                        b_pos = T_buses.index(bus_j)
+                    except ValueError:
+                        # Bus missing from T' (e.g. PV-classified):
+                        # fall back to direct Q_DER bound for this DER.
+                        u_min_qcor[j] = q_min[j]
+                        u_max_qcor[j] = q_max[j]
+                        continue
+                    T_jj = max(float(T_cache[b_pos, b_pos]), T_floor)
+                    q_now = float(meas.der_q_mvar[j])
+                    u_now = float(u_old[j]) if j < len(u_old) else 0.0
+                    u_min_qcor[j] = u_now + (q_min[j] - q_now) / T_jj
+                    u_max_qcor[j] = u_now + (q_max[j] - q_now) / T_jj
+                u_lower[:n_der] = u_min_qcor
+                u_upper[:n_der] = u_max_qcor
+            else:
+                # No T' cache yet (first call, before any sensitivity
+                # build).  Use the physical Q_DER envelope as a safe
+                # initial bound; the next iteration will tighten with
+                # the proper T' scaling.
+                u_lower[:n_der] = q_min
+                u_upper[:n_der] = q_max
         else:
+            # Legacy direct-Q mode: ``u`` is the DER Q (Mvar) directly.
             q_min, q_max = self.actuator_bounds.compute_der_q_bounds(
                 der_p_current,
             )
@@ -1265,6 +1284,21 @@ class DSOController(BaseOFOController):
 
         H, mappings = self.sensitivities.build_sensitivity_matrix_H(**kw)
 
+        # ── Open-loop snapshot of the iface-Q vs DER-Q bus block ──────
+        # Capture BEFORE any T_qv / T_prime transform is applied so
+        # :meth:`generate_capability_message` can compute a physically-
+        # correct envelope (capability is bounded by the ΔQ_DER rail,
+        # not by ΔQ_cor; mixing post-T' sensitivity with ΔQ_DER under-
+        # reports the envelope by a factor T'_bb).
+        n_iface_local = len(self.config.interface_trafo_indices)
+        n_b_local = len(unique_buses)
+        if n_iface_local > 0 and n_b_local > 0:
+            self._H_iface_der_open_bus = H[:n_iface_local, :n_b_local].copy()
+        else:
+            self._H_iface_der_open_bus = None
+        self._H_iface_der_unique_buses = list(unique_buses)
+        self._H_iface_der_to_unique = list(der_to_unique)
+
         # ── Stage-2: Q(V) closed-loop transform on the DER column block ──
         # When the V_ref-mode is active, the DER columns of H represent
         # ∂y/∂Q_DER.  Map them to ∂y/∂V_ref via the closed-loop chain rule
@@ -1278,8 +1312,8 @@ class DSOController(BaseOFOController):
         # The transform is applied at the bus level, BEFORE the legacy
         # per-DER column duplication, so DERs sharing a bus get the same
         # transformed bus-column (matching the closed-loop invariance).
-        # Saturated DERs zero their k contribution to capture the
-        # active-set effect (V_ref shift no longer moves Q at the rail).
+        # K_diag includes every in-service DER; saturation is enforced by
+        # :meth:`_compute_input_bounds`, not by zeroing K.
         T_qv: Optional[NDArray[np.float64]] = None
         if self.config.ofo_in_v_ref_mode and unique_buses:
             T_qv = self._compute_qv_transform_T(unique_buses, der_bus_indices)
@@ -1296,6 +1330,9 @@ class DSOController(BaseOFOController):
         #     T' = (I + diag(K) · S_VQ)^{-1}
         # This maps the network-level ``∂y/∂Q`` to ``∂y/∂Q_cor``.  Mutually
         # exclusive with ``ofo_in_v_ref_mode`` (validated in __post_init__).
+        # K_diag in T' includes every in-service DER -- saturation is
+        # enforced by :meth:`_compute_input_bounds`, which maps the
+        # physical Q_DER envelope to Q_cor bounds via T'_bb.
         if (
             self.config.use_q_cor_actuator
             and not self.config.ofo_in_v_ref_mode
@@ -1306,9 +1343,42 @@ class DSOController(BaseOFOController):
             )
             if T_prime is not None:
                 n_b = len(unique_buses)
+                # Snapshot the FULL open-loop DER block (all output rows)
+                # BEFORE T' is applied, so the closed-loop correction for
+                # non-DER columns can use it.
+                H_DER_open_full = H[:, :n_b].copy()
                 if T_qv is None:
                     H = H.copy()
+                # Apply T' to the DER columns: ∂y/∂Q -> ∂y/∂Q_cor.
                 H[:, :n_b] = H[:, :n_b] @ T_prime
+
+                # Closed-loop correction for non-DER columns (OLTC, shunt):
+                # when an OLTC tap or shunt step changes, V at DER buses
+                # shifts by ΔV_open, the local Q(V) loop responds with
+                # ΔQ_DER = -T'·diag(K)·ΔV_open, and that DER reaction
+                # propagates back into the network (and Q_iface).  The
+                # open-loop H column captures only the network response,
+                # not the DER reaction.  Add the DER-reaction term:
+                #     ΔH[:, j] = -H_DER_open · T' · diag(K) · ∂V_DER/∂j
+                # so that the OFO's predicted ΔQ_iface from a non-DER
+                # action matches the actual closed-loop response.
+                #
+                # NOTE 2026-05-06: temporarily gated by env var while we
+                # debug a sign / magnitude issue surfaced by FD validation
+                # (V_obs × OLTC entries flip sign and over-shoot by ~600x).
+                import os as _os
+                if _os.environ.get("DSO_CLOSED_LOOP_OLTC", "0") == "1":
+                    self._apply_qcor_closedloop_to_non_der(
+                        H, H_DER_open_full, T_prime,
+                        self._T_prime_K_diag, unique_buses,
+                        n_b=n_b, oltc_are_3w=oltc_are_3w,
+                    )
+            else:
+                # Fall back: clear the cache so :meth:`_compute_input_bounds`
+                # reverts to physical Q_DER bounds without scaling.
+                self._T_prime_cache = None
+                self._T_prime_unique_buses = None
+                self._T_prime_K_diag = None
 
         # When a DER mapping is active, keep H at bus-level (unique buses).
         # The base class _expand_H_to_der_level will handle per-DER expansion
@@ -1432,6 +1502,12 @@ class DSOController(BaseOFOController):
             :meth:`BaseOFOController.step` to drive the wall-clock OLTC
             cooldown (see :attr:`OFOParameters.int_cooldown_s`).
         """
+        # Snapshot the measurement so :meth:`_compute_input_bounds`
+        # (called downstream from ``super().step``) can read the current
+        # Q_DER state when mapping the physical Q_DER envelope to Q_cor
+        # bounds via T'.
+        self._last_measurement = measurement
+
         # Ensure H is built
         if self._H_cache is None:
             self._build_sensitivity_matrix()
@@ -1450,13 +1526,21 @@ class DSOController(BaseOFOController):
 
         Also clears the per-DER expansion cache on the base class so the
         next ``step()`` rebuilds ``H_der`` from the freshly computed
-        ``H_bus`` (e.g. after a contingency or topology change).
+        ``H_bus`` (e.g. after a contingency or topology change), plus
+        the open-loop iface-DER snapshot and the Q_cor T_prime cache
+        used by :meth:`_compute_input_bounds`.
         """
         self._H_cache = None
         self._H_mappings = None
         self._sensitivity_updater = None
         self._H_der_cache = None
         self._H_der_cache_base_id = None
+        self._H_iface_der_open_bus = None
+        self._H_iface_der_unique_buses = None
+        self._H_iface_der_to_unique = None
+        self._T_prime_cache = None
+        self._T_prime_unique_buses = None
+        self._T_prime_K_diag = None
 
     # =========================================================================
     # Stage-2 Q(V) closed-loop sensitivity transform
@@ -1473,8 +1557,13 @@ class DSOController(BaseOFOController):
 
         This is the matrix that maps a per-bus V_ref shift to the
         steady-state Q response of the local Q(V) loop, including the
-        network coupling.  Saturated DERs contribute 0 to ``K_diag``
-        (active-set: V_ref no longer moves Q at the rail).
+        network coupling.
+
+        ``K_diag`` includes every in-service DER at the bus regardless
+        of whether the DER is currently at its Q rail.  Saturation is
+        instead enforced by :meth:`_compute_input_bounds`.  This keeps
+        the linearised model a clean Jacobian and lets the optimiser
+        handle the active set.
 
         Returns ``None`` if the helper cannot compute S_VQ (e.g. one of
         the DER buses is a PV bus and the reduced Jacobian skips it).
@@ -1485,35 +1574,14 @@ class DSOController(BaseOFOController):
         if slope <= 0.0:
             return None
 
-        # K_diag at bus level: sum over DERs at that bus.  Drop saturated
-        # DERs from the sum so their column-contribution becomes zero.
+        # K_diag at bus level: sum S_n/slope over every in-service DER
+        # at the bus.  No saturation special-case -- bounds handle it.
         K_diag = np.zeros(n_b, dtype=np.float64)
         net = self.sensitivities.net
-        meas = getattr(self, "_last_measurement", None)
-        eps = self.config.qv_saturation_eps_mvar
         for d_idx, sgen_idx in enumerate(self.config.der_indices):
             sn = float(net.sgen.at[int(sgen_idx), "sn_mva"])
-            saturated = False
-            if meas is not None and len(meas.der_q_mvar) > d_idx:
-                if "op_diagram" in net.sgen.columns:
-                    od = net.sgen.at[int(sgen_idx), "op_diagram"]
-                    op_diag = (
-                        str(od) if od is not None and str(od) != "nan"
-                        else "VDE-AR-N-4120-v2"
-                    )
-                else:
-                    op_diag = "VDE-AR-N-4120-v2"
-                from controller.der_qv_local_loop import _qv_capability
-                p_mw = (
-                    float(meas.der_p_mw[d_idx])
-                    if d_idx < len(meas.der_p_mw) else 0.0
-                )
-                q_min, q_max = _qv_capability(sn, op_diag, p_mw)
-                q_act = float(meas.der_q_mvar[d_idx])
-                saturated = (q_act >= q_max - eps) or (q_act <= q_min + eps)
-            if not saturated:
-                b_pos = unique_buses.index(int(der_bus_indices[d_idx]))
-                K_diag[b_pos] += sn / slope
+            b_pos = unique_buses.index(int(der_bus_indices[d_idx]))
+            K_diag[b_pos] += sn / slope
 
         # Compute S_VQ (bus → bus) at the DER buses.
         try:
@@ -1566,8 +1634,14 @@ class DSOController(BaseOFOController):
 
         This is the matrix that maps a per-bus Q_cor command (Mvar) to
         the steady-state realised Q (Mvar) of the local Q(V) loop,
-        including network coupling.  Saturated DERs contribute 0 to
-        ``K_diag`` (active-set: at the rail Q does not respond to Q_cor).
+        including network coupling.
+
+        ``K_diag`` includes every in-service DER at the bus regardless
+        of whether the DER is currently at its Q rail.  Saturation is
+        instead enforced by :meth:`_compute_input_bounds`, which maps
+        the physical Q_DER envelope to Q_cor input bounds via this T'.
+        That keeps the linearised model a clean Jacobian around the
+        operating point and lets the optimiser handle the active set.
 
         Per-DER slope is read from ``net.sgen.qv_slope_pu`` if the column
         is present (refactor_v2 path); otherwise falls back to
@@ -1579,21 +1653,16 @@ class DSOController(BaseOFOController):
         ``M`` is singular.  Callers should fall back to identity (no
         transform) in that case.
         """
-        from controller.der_qv_local_loop import (
-            compute_qcor_h_transform,
-            _qv_capability,
-        )
+        from controller.der_qv_local_loop import compute_qcor_h_transform
 
         n_b = len(unique_buses)
         if n_b == 0:
             return None
 
         net = self.sensitivities.net
-        meas = getattr(self, "_last_measurement", None)
-        eps = self.config.qv_saturation_eps_mvar
 
-        # K_diag at bus level: sum S_n,i / slope_pu,i over DERs sharing the
-        # bus.  Skip saturated DERs so their k contribution is zero.
+        # K_diag at bus level: sum S_n,i / slope_pu,i over every in-service
+        # DER at the bus.  No saturation special-case -- bounds handle it.
         K_diag = np.zeros(n_b, dtype=np.float64)
         sgen_has_slope_col = "qv_slope_pu" in net.sgen.columns
         for d_idx, sgen_idx in enumerate(self.config.der_indices):
@@ -1608,28 +1677,8 @@ class DSOController(BaseOFOController):
                 slope = self.config.qv_slope_pu
             if slope <= 0.0:
                 continue
-
-            saturated = False
-            if meas is not None and len(meas.der_q_mvar) > d_idx:
-                if "op_diagram" in net.sgen.columns:
-                    od = net.sgen.at[int(sgen_idx), "op_diagram"]
-                    op_diag = (
-                        str(od) if od is not None and str(od) != "nan"
-                        else "VDE-AR-N-4120-v2"
-                    )
-                else:
-                    op_diag = "VDE-AR-N-4120-v2"
-                p_mw = (
-                    float(meas.der_p_mw[d_idx])
-                    if d_idx < len(meas.der_p_mw) else 0.0
-                )
-                q_min, q_max = _qv_capability(sn, op_diag, p_mw)
-                q_act = float(meas.der_q_mvar[d_idx])
-                saturated = (q_act >= q_max - eps) or (q_act <= q_min + eps)
-
-            if not saturated:
-                b_pos = unique_buses.index(int(der_bus_indices[d_idx]))
-                K_diag[b_pos] += sn / slope
+            b_pos = unique_buses.index(int(der_bus_indices[d_idx]))
+            K_diag[b_pos] += sn / slope
 
         # Bus-to-bus S_VQ at the DER buses (units fix below).
         try:
@@ -1657,7 +1706,18 @@ class DSOController(BaseOFOController):
         if s_base > 0:
             S_VQ = S_VQ / s_base
 
-        return compute_qcor_h_transform(K_diag, S_VQ)
+        T_prime = compute_qcor_h_transform(K_diag, S_VQ)
+        # Cache for downstream consumers (input-bound calculation in
+        # :meth:`_compute_input_bounds`, closed-loop correction for
+        # non-DER columns in :meth:`_apply_qcor_closedloop_to_non_der`).
+        # Note: we cache the most recent successful computation; if T'
+        # is None, leave the previous cache intact so the bound calc
+        # can still operate.
+        if T_prime is not None:
+            self._T_prime_cache = T_prime
+            self._T_prime_unique_buses = list(unique_buses)
+            self._T_prime_K_diag = K_diag.copy()
+        return T_prime
 
     def _apply_qv_closed_loop_transform(
         self,
@@ -1678,6 +1738,147 @@ class DSOController(BaseOFOController):
         H = H_legacy.copy()
         H[:, :n_b] = H_legacy[:, :n_b] @ T
         return H
+
+    def _apply_qcor_closedloop_to_non_der(
+        self,
+        H: NDArray[np.float64],
+        H_DER_open_full: NDArray[np.float64],
+        T_prime: NDArray[np.float64],
+        K_diag: NDArray[np.float64],
+        unique_buses: List[int],
+        *,
+        n_b: int,
+        oltc_are_3w: bool,
+    ) -> None:
+        """Apply the local-Q(V)-loop closed-loop correction to the
+        non-DER columns (OLTC, shunt) of the OFO sensitivity matrix.
+
+        When ``use_q_cor_actuator=True`` the DER columns of H have already
+        been post-multiplied by ``T'`` to express ``∂y/∂Q_cor`` instead
+        of ``∂y/∂Q``.  The non-DER columns (OLTC tap, shunt step) still
+        carry their open-loop sensitivity, but in reality those actions
+        also perturb V at the DER buses, the local Q(V) loops respond,
+        and the resulting ΔQ_DER feeds back into Q_iface and the rest of
+        ``y``.  Add that DER-reaction term:
+
+        .. math::
+            \\Delta H_{:,j} = -H_{\\rm DER,open} \\cdot T' \\cdot
+                \\mathrm{diag}(K) \\cdot \\frac{\\partial V_{\\rm DER}}{\\partial j}
+
+        The matrix :math:`H_{\\rm DER,open}` is the **pre-T'** snapshot of
+        the DER bus-column block (every output row), captured by the caller
+        right before :meth:`_compute_qcor_transform_T_prime` was applied.
+        Modifies ``H`` in place.
+        """
+        n_oltc = len(self.config.oltc_trafo_indices)
+        n_shunt = len(self.config.shunt_bus_indices)
+        if n_oltc == 0 and n_shunt == 0:
+            return
+        if K_diag is None or T_prime is None:
+            return
+
+        W = self._compute_dV_DER_per_non_der_action(
+            unique_buses=unique_buses,
+            oltc_are_3w=oltc_are_3w,
+        )
+        if W is None or W.shape[1] == 0:
+            return
+
+        # Correction = -H_DER_open · T' · diag(K) · W
+        T_K = T_prime * K_diag.reshape(1, n_b)  # (n_b, n_b) -- right-mult by diag
+        correction = -H_DER_open_full @ T_K @ W
+        n_non_der = correction.shape[1]
+        # The non-DER columns sit immediately after the DER block in H.
+        # Layout at this point: [DER (n_b) | OLTC (n_oltc) | shunt (n_shunt)].
+        H[:, n_b:n_b + n_non_der] += correction
+
+    def _compute_dV_DER_per_non_der_action(
+        self,
+        unique_buses: List[int],
+        oltc_are_3w: bool,
+    ) -> Optional[NDArray[np.float64]]:
+        """Return ``∂V_at_unique_DER_buses / ∂non_DER_actuator`` of shape
+        ``(n_unique_bus, n_oltc + n_shunt)``.
+
+        Concatenates OLTC and shunt columns in the same order they appear
+        in the H matrix's non-DER block.  Falls back to zero columns for
+        any actuator whose helper raises (e.g. shunt bus not in the
+        reduced Jacobian).
+        """
+        n_b = len(unique_buses)
+        if n_b == 0:
+            return None
+
+        blocks: List[NDArray[np.float64]] = []
+
+        # ── OLTC block ─────────────────────────────────────────────────
+        oltc_indices = list(self.config.oltc_trafo_indices)
+        n_oltc = len(oltc_indices)
+        if n_oltc > 0:
+            try:
+                if oltc_are_3w:
+                    W_oltc, obs_map, t_map = (
+                        self.sensitivities.compute_dV_ds_trafo3w_matrix(
+                            trafo3w_indices=oltc_indices,
+                            observation_bus_indices=unique_buses,
+                        )
+                    )
+                else:
+                    W_oltc, obs_map, t_map = (
+                        self.sensitivities.compute_dV_ds_2w_matrix(
+                            trafo_indices=oltc_indices,
+                            observation_bus_indices=unique_buses,
+                        )
+                    )
+                # Reorder rows to match unique_buses if helper returned
+                # a different ordering.
+                if obs_map and obs_map != unique_buses:
+                    try:
+                        perm = [obs_map.index(b) for b in unique_buses]
+                        W_oltc = W_oltc[perm, :]
+                    except ValueError:
+                        W_oltc = np.zeros((n_b, n_oltc))
+                # Pad columns if the helper dropped any OLTCs from t_map.
+                if t_map and t_map != oltc_indices:
+                    full = np.zeros((n_b, n_oltc), dtype=np.float64)
+                    for j_full, t in enumerate(oltc_indices):
+                        if t in t_map:
+                            full[:, j_full] = W_oltc[:, t_map.index(t)]
+                    W_oltc = full
+                blocks.append(W_oltc)
+            except (ValueError, AttributeError):
+                blocks.append(np.zeros((n_b, n_oltc)))
+
+        # ── Shunt block ────────────────────────────────────────────────
+        shunt_buses = list(self.config.shunt_bus_indices)
+        shunt_steps = list(self.config.shunt_q_steps_mvar)
+        n_shunt = len(shunt_buses)
+        if n_shunt > 0:
+            W_shunt = np.zeros((n_b, n_shunt), dtype=np.float64)
+            for k, sb in enumerate(shunt_buses):
+                q_step = (
+                    float(shunt_steps[k]) if k < len(shunt_steps) else 1.0
+                )
+                try:
+                    col, obs_map = self.sensitivities.compute_dV_dQ_shunt(
+                        shunt_bus_idx=int(sb),
+                        observation_bus_indices=unique_buses,
+                        q_step_mvar=q_step,
+                    )
+                    if obs_map and obs_map != unique_buses:
+                        try:
+                            perm = [obs_map.index(b) for b in unique_buses]
+                            col = col[perm]
+                        except ValueError:
+                            col = np.zeros(n_b, dtype=np.float64)
+                    W_shunt[:, k] = col
+                except (ValueError, AttributeError, IndexError):
+                    pass
+            blocks.append(W_shunt)
+
+        if not blocks:
+            return None
+        return np.hstack(blocks)
 
     # =========================================================================
     # Grid-forming converter (V_gf / Q_gf) splicing helper

@@ -366,15 +366,14 @@ class MultiTSOConfig:
     ``"local"`` -- Local controllers only: DiscreteTapControl for coupler OLTCs
                   and Q(V) droop for HV-connected DER.  No TSO->DSO coordination.
     """
-    qv_setpoint_pu: float = 1.03
-    qv_slope_pu:    float = 0.07
     warmup_s:       float = 0.0
 
     local_der_mode: str = "cos_phi_1"
-    """HV-connected DER control mode in ``dso_mode='local'`` baseline.
-    ``'cos_phi_1'`` -- unity power factor (Q=0 Mvar); no V-dependence (standard).
-    ``'qv'``        -- linear Q(V) droop around ``qv_setpoint_pu`` with
-                       slope ``qv_slope_pu`` (previous baseline).
+    """HV-connected DER control mode in ``dso_mode='local'`` baseline,
+    diagnostic flag only -- the plant-side q_mode loops drive Q under
+    the Q_cor path; this label is printed for scenario provenance.
+    ``'cos_phi_1'`` -- unity power factor (Q=0 Mvar); no V-dependence.
+    ``'qv'``        -- linear Q(V) droop (parameters in ``dso_qv_*``).
     """
 
     # -- TSO local-control baseline (for comparison experiments) --------------
@@ -391,7 +390,7 @@ class MultiTSOConfig:
     ``'cos_phi_1'`` -- unity power factor (Q=0)."""
     tso_qv_setpoint_pu: float = 1.03
     """Voltage setpoint of the Q(V) droop applied to TSO windparks."""
-    tso_qv_slope_pu: float = 0.07
+    tso_qv_slope_pu: float = 0.06
     """Half-width of the Q(V) linear region (pu).  At V = setpoint+slope
     the windpark dispatches Q = q_min (full inductive); at V = setpoint-slope
     the windpark dispatches Q = q_max (full capacitive)."""
@@ -459,18 +458,18 @@ class MultiTSOConfig:
     der_qv_vref_pu_overrides: Dict[int, float] = field(default_factory=dict)
     """Per-DER override of the qv droop centre voltage."""
 
-    dso_qv_slope_pu: float = 0.07
+    dso_qv_slope_pu: float = 0.06
     """Droop slope (pu_q/pu_v) for DSO DERs in qv mode.  TSO side uses
     the existing ``tso_qv_slope_pu`` field above."""
 
     der_qv_slope_pu_overrides: Dict[int, float] = field(default_factory=dict)
     """Per-DER override of the qv droop slope."""
 
-    tso_qv_deadband_pu: float = 0.005
+    tso_qv_deadband_pu: float = 0.01
     """Half-width of the symmetric deadband around V_ref for TSO DERs.
     ``0.0`` disables the deadband (linear droop through V_ref)."""
 
-    dso_qv_deadband_pu: float = 0.005
+    dso_qv_deadband_pu: float = 0.01
     """Half-width of the symmetric deadband around V_ref for DSO DERs."""
 
     der_qv_deadband_pu_overrides: Dict[int, float] = field(default_factory=dict)
@@ -510,7 +509,7 @@ class MultiTSOConfig:
     OFO benefits from sub-Mvar accuracy at the interface; keep tight
     (0.01 Mvar)."""
 
-    qv_local_damping: float = 0.3
+    qv_local_damping: float = 0.25
     """Damping factor for the Q(V) local loop iteration.
 
     Per-DER contraction: ``|1 − damping·(1 + K·S_VQ)|`` where K = S_n/slope.
@@ -530,7 +529,7 @@ class MultiTSOConfig:
     QVLocalLoops), but is unstable under the refactor_v2 Q_cor path
     where every DER — TSO + DSO — runs a QVLocalLoop concurrently."""
 
-    qv_local_max_step_frac: float = 1.0
+    qv_local_max_step_frac: float = 1E8
     """Per-iteration step cap on the Q(V) damped update, as a fraction
     of S_n.  Default ``1.0`` (= no effective cap, since ``|target| ≤ S_n``
     by the capability clip).  Lower values further restrict per-iteration
@@ -546,7 +545,7 @@ class MultiTSOConfig:
     pre-step value regardless of V_ref change."""
 
     # -- TSO-owned bipolar shunts at DSO tertiaries ----------------------------
-    install_tso_tertiary_shunts: bool = True
+    install_tso_tertiary_shunts: bool = False
     """Install one bipolar 50 Mvar shunt per active DSO sub-network at
     the first 20 kV tertiary, switched by the TSO controller.  DSOs see
     it as a disturbance (``DSOControllerConfig.shunt_bus_indices`` stays

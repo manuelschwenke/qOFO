@@ -95,8 +95,6 @@ local_der_mode: cos_phi_1
 n_total_s: 21600.0
 oltc_init_v_target_pu: 1.03
 profiles_csv: ''
-qv_setpoint_pu: 1.03
-qv_slope_pu: 0.07
 result_dir: results
 run_stability_analysis: false
 scenario: wind_replace

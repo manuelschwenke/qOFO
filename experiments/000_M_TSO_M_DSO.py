@@ -698,7 +698,7 @@ def _run_delayed_stability_analysis(
 
     if verbose >= 1:
         print()
-        print(f"[9] Running multi-zone stability analysis at t = {time_s/60.0:.1f} min ...")
+        print(f"  [stability] Running multi-zone stability analysis at t = {time_s/60.0:.1f} min ...")
 
     # Refresh the coordinator's cross-sensitivity blocks so the analysis
     # reflects the current operating point (profiles + controller state).
@@ -952,17 +952,17 @@ def run_multi_tso_dso(
         verbose=(verbose >= 1),
     )
 
-    # NB: install_der_q_loops is deferred to AFTER the Phase 1/2 OLTC
-    # init phases run.  If we install now, the plant-side QVLocalLoops
+    # NB: install_der_q_loops is deferred to step [10.3], AFTER the
+    # Phase 1/2 OLTC init.  If we install now, the plant-side QVLocalLoops
     # (one per TSO + DSO DER) would run during Phase 1 alongside the
     # temp PV gens used to seed STATCOM Q, and the inner-loop dynamics
-    # destabilise the init.  See "[3c-deferred]" below.
+    # destabilise the init.
     if verbose >= 1:
         print(
-            f"[3c] Deferred plant-side loop install for "
+            f"[4b] Deferred plant-side loop install for "
             f"{len(meta.tso_der_indices)} TSO + "
             f"{len(meta.dso_der_indices)} DSO DERs until after "
-            f"Phase 1/2 OLTC init."
+            f"step [10] OLTC init."
         )
 
     # =========================================================================
@@ -1376,6 +1376,7 @@ def run_multi_tso_dso(
 
     # =========================================================================
     # STEP 7: Initialise DSO controllers (one per HV sub-network, all zones)
+    #         (skipped when dso_mode='local'; see local-mode print branch)
     # =========================================================================
     dso_controllers: Dict[str, DSOController] = {}
 
@@ -1385,12 +1386,14 @@ def run_multi_tso_dso(
             print("[7] DSO mode = 'local' — skipping OFO DSO controllers.")
             print("    Coupler OLTCs: pandapower DiscreteTapControl (AVR)")
             n_der_total = sum(len(hv.sgen_indices) for hv in meta.hv_networks)
-            if config.local_der_mode == "qv":
+            if config.dso_q_mode == "qv":
                 print(f"    DER Q control: Q(V) linear droop, "
-                      f"V_set={config.qv_setpoint_pu:.3f} p.u., "
-                      f"slope={config.qv_slope_pu:.3f}  ({n_der_total} DER)")
+                      f"V_set={config.dso_qv_vref_pu:.3f} p.u., "
+                      f"slope={config.dso_qv_slope_pu:.3f}, "
+                      f"deadband={config.dso_qv_deadband_pu:.3f}  "
+                      f"({n_der_total} DER)")
             else:
-                print(f"    DER Q control: cos phi = 1 (Q = 0 Mvar)  "
+                print(f"    DER Q control: cos phi = {config.dso_cosphi:.2f} "
                       f"({n_der_total} DER)")
 
     if config.dso_mode == "local":
@@ -1399,7 +1402,7 @@ def run_multi_tso_dso(
     else:
         if verbose >= 1:
             print()
-            print("[6] Initialising DSO controllers (5 HV sub-networks) ...")
+            print("[7] Initialising DSO controllers (5 HV sub-networks) ...")
 
     _t_step6 = perf_counter()
     for hv in meta.hv_networks if config.dso_mode != "local" else []:
@@ -1413,7 +1416,7 @@ def run_multi_tso_dso(
         # ``003_M_DSO_CIGRE_2026.py`` to focus the optimisation on DSO_2.
         if config.dso_ids_to_run and hv.net_id not in config.dso_ids_to_run:
             if verbose >= 1:
-                print(f"  [6] {hv.net_id}: skipped (not in dso_ids_to_run)")
+                print(f"  [7] {hv.net_id}: skipped (not in dso_ids_to_run)")
             continue
         dso_id = hv.net_id  # e.g. "DSO_1"
         interface_trafos = list(hv.coupling_trafo_indices)
@@ -1530,7 +1533,7 @@ def run_multi_tso_dso(
                   f"{n_iface} PCC trafos, {n_v} V-buses, {n_i} lines")
 
     if verbose >= 1 and config.dso_mode != "local":
-        print(f"  [T] step [6] DSO controller construction: {perf_counter() - _t_step6:.2f} s")
+        print(f"  [T] step [7] DSO controller construction: {perf_counter() - _t_step6:.2f} s")
 
     # Map each DSO controller ID to the ID of its supervising TSO controller.
     # TSO controller IDs follow the pattern "tso_zone_{z}" (see TSOController init above).
@@ -1546,11 +1549,11 @@ def run_multi_tso_dso(
     }
 
     # =========================================================================
-    # STEP 7: Initialise MultiTSOCoordinator
+    # STEP 8: Initialise MultiTSOCoordinator
     # =========================================================================
     if verbose >= 1:
         print()
-        print("[7] Initialising MultiTSOCoordinator ...")
+        print("[8] Initialising MultiTSOCoordinator ...")
 
     coordinator = MultiTSOCoordinator(
         zones=list(zone_defs.values()),
@@ -1561,7 +1564,7 @@ def run_multi_tso_dso(
         coordinator.register_tso_controller(z, ctrl)
 
     # =========================================================================
-    # STEP 7b: Load profiles and compute zonal generator dispatch
+    # STEP 9: Load profiles and compute zonal generator dispatch
     # =========================================================================
     use_profiles = config.use_profiles
     start_time = config.start_time
@@ -1574,7 +1577,7 @@ def run_multi_tso_dso(
         profiles_csv = config.profiles_csv or DEFAULT_PROFILES_CSV
         if verbose >= 1:
             print()
-            print(f"[7b] Loading profiles from {profiles_csv}")
+            print(f"[9] Loading profiles from {profiles_csv}")
             print(f"     start_time = {start_time:%d.%m.%Y %H:%M}")
 
         _t_init_total = perf_counter()
@@ -1631,15 +1634,19 @@ def run_multi_tso_dso(
         if verbose >= 1:
             print(f"  [T] post-profile pp.runpp: {perf_counter() - _t:.2f} s")
 
-    # ── STEP 7c: Combined operating-point init (two phases) ─────────────
-    # After profiles, bring STATCOM Q and OLTC taps to a self-consistent
-    # state at the profile-scaled operating point.  Done in two phases so
-    # the TN operating point settles *before* the coupler 3W OLTCs adjust:
+    # ── STEP 10: Combined operating-point init (three phases) ────────────
+    # After profiles, bring STATCOM Q, OLTC taps, and plant-side Q(V)
+    # loops to a self-consistent state at the profile-scaled operating
+    # point.  Done in three phases so the TN settles *before* the coupler
+    # 3W OLTCs adjust, and the plant-side q_mode loops install AFTER both:
     #
     #   Phase 1 (TSO):  STATCOM Q (temp-PV-gen trick) + machine 2W OLTC
     #                   → one run_control PF at v_setpoint_pu.
     #   Phase 2 (DSO):  coupler 3W OLTC
     #                   → one run_control PF at oltc_init_v_target_pu.
+    #   Phase 3 (DER):  install QVLocalLoop / CosPhiConstLoop per DER
+    #                   (deferred from step [4]) and seed q_mvar with
+    #                   the analytical closed-loop equilibrium.
     #
     # In "cascade" DSO mode the coupler controllers are dropped after
     # Phase 2 (OFO takes over).  In "local" DSO mode they stay active
@@ -1688,7 +1695,7 @@ def run_multi_tso_dso(
         )
 
     if verbose >= 1:
-        print(f"[7c.1] Phase 1 (TSO): {len(_tmp_map)} STATCOM Q via temp-PV-gens + "
+        print(f"[10.1] Phase 1 (TSO): {len(_tmp_map)} STATCOM Q via temp-PV-gens + "
               f"{len(meta.machine_trafo_indices)} machine OLTC "
               f"-> target {v_init_mt:.3f} +-{tol_pu:.3f} p.u.")
 
@@ -1707,8 +1714,9 @@ def run_multi_tso_dso(
         net.gen.drop(index=list(_tmp_map.keys()), inplace=True)
 
     # Drop machine-trafo controllers — but preserve any plant-side
-    # QVLocalLoops installed earlier at step [3c] (they must survive into
-    # the experiment loop so the local Q(V) feedback runs after each apply).
+    # QVLocalLoops if they were already installed (defensive: under the
+    # current flow they install at [10.3], after this drop, so this is a
+    # no-op unless an external pre_loop_hook seeded them earlier).
     if hasattr(net, "controller") and len(net.controller) > 0:
         drop_idx = [
             idx for idx, row in net.controller.iterrows()
@@ -1718,7 +1726,7 @@ def run_multi_tso_dso(
             net.controller.drop(index=drop_idx, inplace=True)
 
     if verbose >= 2:
-        print("[7c.1] Phase 1 result (machine 2W OLTC):")
+        print("[10.1] Phase 1 result (machine 2W OLTC):")
         for tidx, gidx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
             tap = int(net.trafo.at[tidx, "tap_pos"])
             hv_bus = int(net.trafo.at[tidx, "hv_bus"])
@@ -1738,7 +1746,7 @@ def run_multi_tso_dso(
 
     if verbose >= 1:
         n_coup = sum(len(hv.coupling_trafo_indices) for hv in meta.hv_networks)
-        print(f"[7c.2] Phase 2 (DSO): {n_coup} coupler 3W OLTC "
+        print(f"[10.2] Phase 2 (DSO): {n_coup} coupler 3W OLTC "
               f"-> target {v_init_dso:.3f} +-{tol_pu:.3f} p.u.")
 
     _t = perf_counter()
@@ -1759,8 +1767,8 @@ def run_multi_tso_dso(
 
     # In "cascade" DSO mode, drop coupler controllers (OFO takes over).
     # In "local" DSO mode, keep them active as local AVR.  Either way
-    # preserve the plant-side QVLocalLoops installed at step [3c] so
-    # they survive into the experiment loop.
+    # preserve the plant-side QVLocalLoops if any are present (defensive;
+    # under the current flow they install at [10.3] AFTER this drop).
     if not _local_dso:
         if hasattr(net, "controller") and len(net.controller) > 0:
             drop_idx = [
@@ -1773,7 +1781,7 @@ def run_multi_tso_dso(
         print(f"  [local DSO] Kept {len(net.controller)} coupler OLTC "
               f"DiscreteTapControl(s) active for simulation.")
 
-    # ── refactor_v2 [3c-deferred]: install plant-side q_mode loops ──
+    # ── Phase 3 (DER): install plant-side q_mode loops ──
     # Phase 1/2 init has settled; now install QVLocalLoop / CosPhiConstLoop
     # on every tagged DER so the local Q(V) feedback runs through the
     # main loop alongside the OFO.  TSO and DSO DERs install separately
@@ -1821,7 +1829,7 @@ def run_multi_tso_dso(
     )) if dso_sgens else 0
     if verbose >= 1:
         print(
-            f"[3c-deferred] Installed {n_tso + n_dso} DER q_mode loops "
+            f"[10.3] Phase 3 (DER): installed {n_tso + n_dso} DER q_mode loops "
             f"({n_tso} TSO @ tol={config.tso_qv_tol_mvar} Mvar damp={_tso_damp:.3f} + "
             f"{n_dso} DSO @ tol={config.dso_qv_tol_mvar} Mvar damp={float(config.qv_local_damping):.3f}) "
             f"post Phase 2; seeded q_mvar with closed-loop equilibrium."
@@ -1960,7 +1968,7 @@ def run_multi_tso_dso(
     contraction_info = coordinator.check_contraction()
     if verbose >= 1:
         print(f"  [T] coordinator.check_contraction: {perf_counter() - _t:.2f} s")
-        print(f"  [T] TOTAL init after [7b]: {perf_counter() - _t_init_total:.2f} s")
+        print(f"  [T] TOTAL init after [9]: {perf_counter() - _t_init_total:.2f} s")
 
     # Stability analysis is deferred until ``config.stability_analysis_at_s``
     # simulated seconds.  Running it at t=0 with an uncontrolled initial
@@ -1976,7 +1984,7 @@ def run_multi_tso_dso(
     _tuned_params_loaded = False
     if config.load_tuned_params_path:
         if verbose >= 1:
-            print(f"[7.3] Loading tuned params from "
+            print(f"[11] Loading tuned params from "
                   f"{config.load_tuned_params_path} ...")
         try:
             _tuned_params_loaded = load_and_apply_tuned_params(
@@ -1999,12 +2007,12 @@ def run_multi_tso_dso(
 
 
     # =========================================================================
-    # STEP 7d: Q-tracking capacity diagnostic
+    # STEP 12: Q-tracking capacity diagnostic
     # =========================================================================
     if verbose >= 2:
         import math as _math
         print()
-        print("[7d] Q-tracking capacity diagnostic")
+        print("[12] Q-tracking capacity diagnostic")
         # DER Q capacity (VDE-AR-N 4120 v2)
         for did, hv in hv_info_map.items():
             sgens = net.sgen.loc[list(hv.sgen_indices)]
@@ -2064,14 +2072,14 @@ def run_multi_tso_dso(
 
 
     # =========================================================================
-    # STEP 8: Main simulation loop
+    # STEP 13: Main simulation loop
     # =========================================================================
     if verbose >= 1:
         n_steps = int(config.n_total_s / config.dt_s)
         dur_str = f"start={start_time:%d.%m.%Y %H:%M}  " if use_profiles else ""
         print()
         warmup_str = f", warmup={config.warmup_s:.0f}s" if config.warmup_s > 0 else ""
-        print(f"[8] Starting simulation: {n_steps} steps  "
+        print(f"[13] Starting simulation: {n_steps} steps  "
               f"({dur_str}dt={config.dt_s:.0f}s, TSO/{config.tso_period_s/60:.0f}min, "
               f"DSO/{config.dso_period_s/60:.0f}min{warmup_str})")
         print()
@@ -2180,7 +2188,7 @@ def run_multi_tso_dso(
     # When the OFO TSO controller is skipped, two pieces keep TSO-side
     # primary voltage control alive (the windpark sgens already have
     # QVLocalLoop / CosPhiConstLoop installed by ``install_der_q_loops``
-    # in step [3c-deferred]):
+    # in step [10.3]):
     #
     #   (1) Generator AVR setpoints pinned to ``config.v_setpoint_pu``
     #       (1.03 pu by default).  Without OFO, nothing else writes
@@ -3056,7 +3064,7 @@ def run_multi_tso_dso(
                         print(f"  WARNING: delayed stability analysis failed: {_exc}")
 
     # =========================================================================
-    # STEP 9: Print final summary
+    # STEP 14: Print final summary
     # =========================================================================
     if verbose >= 1:
         print()
@@ -3279,7 +3287,7 @@ def main() -> None:
         dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
         g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=250,  # DSO Q-tracking
-        tso_g_q_tie=100,
+        tso_g_q_tie=1,
         # ── DSO objective tuning ──
         # use_q_cor_actuator defaults to True (refactor_v2 Soleimani §III-B).
         dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
@@ -3309,7 +3317,7 @@ def main() -> None:
         live_plot_cascade=True,
         live_plot_system=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 8, 0),
+        start_time=datetime(2016, 1, 4, 10, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies           = [

@@ -132,12 +132,8 @@ from experiments.helpers import (
     MultiTSOIterationRecord,
     _apply_contingency,
     _network_state,
-    apply_cos_phi_one_local_control,
     apply_dso_controls,
-    apply_qv_local_control,
     apply_zone_tso_controls,
-    install_cos_phi_one,
-    install_qv_characteristic_controllers,
     prepare_load_contingencies,
 )
 from sensitivity.jacobian import JacobianSensitivities
@@ -1655,17 +1651,11 @@ def run_multi_tso_dso(
     tol_pu     = config.dso_oltc_init_tol_pu
     _local_dso = config.dso_mode == "local"
     _local_tso = config.tso_mode == "local"
-    # Combined "any local controller in net.controller table that should be
-    # iterated by pp.runpp(run_control=...)".  True for cascade-DSO local mode
-    # (DiscreteTapControl on couplers), TSO local Q(V) mode
-    # (CharacteristicControl on TSO windparks), AND Stage-2 DSO Q(V) local
-    # loops (one QVLocalLoop per grid-following DSO sgen).
-    # Q_cor mode always installs plant-side Q(V) loops; local-DSO/-TSO
-    # modes install legacy CharacteristicControl-style loops.  Either
-    # way we need run_control=True to iterate them inside pp.runpp.
-    _run_control = (
-        _local_dso or _local_tso or config.use_q_cor_actuator
-    )
+    # Plant-side Q(V) loops (QVLocalLoop / CosPhiConstLoop) plus any
+    # DiscreteTapControl on couplers / machine trafos must be iterated
+    # by pp.runpp(run_control=True) every step.  Always True under the
+    # Q_cor plant model.
+    _run_control = True
 
     # -- Phase 1: STATCOM Q + machine 2W OLTC -----------------------------
     # TSO-side only: HV-side (subnet=="DN") STATCOMs stay at q_mvar=0
@@ -1797,133 +1787,60 @@ def run_multi_tso_dso(
     # run with 500-iteration controller loops: the controllers install
     # already at their attractor and only need to refine residual
     # nonlinearity over a handful of iterations.
-    if config.use_q_cor_actuator:
-        tso_sgens = [int(s) for s in meta.tso_der_indices
-                     if int(s) in net.sgen.index]
-        dso_sgens = [int(s) for s in meta.dso_der_indices
-                     if int(s) in net.sgen.index]
-        # Reset q_cor_mvar (controller has not commanded yet) before
-        # the analytical seed.
-        for s in tso_sgens + dso_sgens:
-            net.sgen.at[s, "q_cor_mvar"] = 0.0
-        # Seed using a fresh Jacobian at the post-Phase-2 operating
-        # point so S_VQ matches the network state we'll iterate from.
-        _seed_jac = JacobianSensitivities(net)
-        seed_qv_equilibrium(
-            net, tso_sgens + dso_sgens, _seed_jac,
-            verbose=(verbose >= 1),
+    tso_sgens = [int(s) for s in meta.tso_der_indices
+                 if int(s) in net.sgen.index]
+    dso_sgens = [int(s) for s in meta.dso_der_indices
+                 if int(s) in net.sgen.index]
+    # Reset q_cor_mvar (controller has not commanded yet) before
+    # the analytical seed.
+    for s in tso_sgens + dso_sgens:
+        net.sgen.at[s, "q_cor_mvar"] = 0.0
+    # Seed using a fresh Jacobian at the post-Phase-2 operating
+    # point so S_VQ matches the network state we'll iterate from.
+    _seed_jac = JacobianSensitivities(net)
+    seed_qv_equilibrium(
+        net, tso_sgens + dso_sgens, _seed_jac,
+        verbose=(verbose >= 1),
+    )
+    # TSO STATCOMs have R*S_VQ ~ 8 vs DSO ~ 0.7, so cap TSO damping
+    # to 0.03 to keep the per-DER contraction stable under multi-DER
+    # coupling (commit e2746fe rationale; previously documented in
+    # qv_local_damping docstring but not enforced in code).
+    _tso_damp = min(float(config.qv_local_damping), 0.03)
+    n_tso = len(install_der_q_loops(
+        net, tso_sgens,
+        qv_damping=_tso_damp,
+        qv_max_step_frac=config.qv_local_max_step_frac,
+        qv_tol_mvar=config.tso_qv_tol_mvar,
+    )) if tso_sgens else 0
+    n_dso = len(install_der_q_loops(
+        net, dso_sgens,
+        qv_damping=config.qv_local_damping,
+        qv_max_step_frac=config.qv_local_max_step_frac,
+        qv_tol_mvar=config.dso_qv_tol_mvar,
+    )) if dso_sgens else 0
+    if verbose >= 1:
+        print(
+            f"[3c-deferred] Installed {n_tso + n_dso} DER q_mode loops "
+            f"({n_tso} TSO @ tol={config.tso_qv_tol_mvar} Mvar damp={_tso_damp:.3f} + "
+            f"{n_dso} DSO @ tol={config.dso_qv_tol_mvar} Mvar damp={float(config.qv_local_damping):.3f}) "
+            f"post Phase 2; seeded q_mvar with closed-loop equilibrium."
         )
-        # TSO STATCOMs have R*S_VQ ~ 8 vs DSO ~ 0.7, so cap TSO damping
-        # to 0.03 to keep the per-DER contraction stable under multi-DER
-        # coupling (commit e2746fe rationale; previously documented in
-        # qv_local_damping docstring but not enforced in code).
-        _tso_damp = min(float(config.qv_local_damping), 0.03)
-        n_tso = len(install_der_q_loops(
-            net, tso_sgens,
-            qv_damping=_tso_damp,
-            qv_max_step_frac=config.qv_local_max_step_frac,
-            qv_tol_mvar=config.tso_qv_tol_mvar,
-        )) if tso_sgens else 0
-        n_dso = len(install_der_q_loops(
-            net, dso_sgens,
-            qv_damping=config.qv_local_damping,
-            qv_max_step_frac=config.qv_local_max_step_frac,
-            qv_tol_mvar=config.dso_qv_tol_mvar,
-        )) if dso_sgens else 0
-        if verbose >= 1:
-            print(
-                f"[3c-deferred] Installed {n_tso + n_dso} DER q_mode loops "
-                f"({n_tso} TSO @ tol={config.tso_qv_tol_mvar} Mvar damp={_tso_damp:.3f} + "
-                f"{n_dso} DSO @ tol={config.dso_qv_tol_mvar} Mvar damp={float(config.qv_local_damping):.3f}) "
-                f"post Phase 2; seeded q_mvar with closed-loop equilibrium."
-            )
 
-    # Pre-loop manual Q(V)+OLTC sweep is a legacy convergence aid that
-    # writes ``net.sgen.q_mvar`` directly.  Under the q_mode plant model
-    # (``config.use_q_cor_actuator=True``) the QVLocalLoop / CosPhiConstLoop
-    # owns ``q_mvar`` and ``seed_qv_equilibrium`` provides the warm start;
-    # running this sweep on top would clobber the seed before the main
-    # loop ever starts, so skip it then.
-    if _local_dso and not config.use_q_cor_actuator:
-        n_dso_sgen = sum(len(hv.sgen_indices) for hv in meta.hv_networks)
-        if config.local_der_mode == "qv":
-            _v_set = config.qv_setpoint_pu
-            _slope = config.qv_slope_pu
-            # Converge Q(V) + OLTC iteratively: the Q(V) droop gain is too
-            # high for pandapower's CharacteristicControl (inner NR diverges).
-            # Instead, alternate between: (1) set Q from Q(V) characteristic
-            # at current V, (2) run PF with DiscreteTapControl active.  This
-            # converges because each step makes a bounded Q adjustment and
-            # the OLTC settles taps to the resulting voltage.
-            if verbose >= 1:
-                print(f"  [local DSO] Converging Q(V) + OLTC iteratively "
-                      f"({n_dso_sgen} DER, V_set={_v_set:.3f}, slope={_slope:.3f})")
-            for _qv_iter in range(20):
-                # Run PF with OLTC active (adjusts taps to current Q/V)
-                pp.runpp(net, run_control=True, calculate_voltage_angles=True,
-                         max_iteration=50,
-                         enforce_q_lims=config.enforce_q_lims_plant)
-                # Compute Q(V) from post-PF voltages
-                max_dq = 0.0
-                for hv in meta.hv_networks:
-                    for s_idx in hv.sgen_indices:
-                        bus = int(net.sgen.at[s_idx, "bus"])
-                        v_pu = float(net.res_bus.at[bus, "vm_pu"])
-                        sn = float(net.sgen.at[s_idx, "sn_mva"])
-                        od = (net.sgen.at[s_idx, "op_diagram"]
-                              if "op_diagram" in net.sgen.columns else None)
-                        if str(od) == "STATCOM":
-                            q_min, q_max = -sn, sn
-                        else:
-                            q_min, q_max = -0.33 * sn, 0.41 * sn
-                        dv = v_pu - _v_set
-                        frac = max(min(dv / _slope, 1.0), -1.0) if _slope > 0 else 0.0
-                        q_new = q_min * frac if frac > 0 else q_max * (-frac)
-                        max_dq = max(max_dq, abs(q_new - float(net.sgen.at[s_idx, "q_mvar"])))
-                        net.sgen.at[s_idx, "q_mvar"] = float(q_new)
-                if max_dq < 1.0:  # converged within 1 Mvar
-                    break
-            if verbose >= 1:
-                total_q = sum(float(net.sgen.at[s, "q_mvar"])
-                              for hv in meta.hv_networks for s in hv.sgen_indices)
-                print(f"  [local DSO] Q(V)+OLTC converged in {_qv_iter+1} iter "
-                      f"(max_dq={max_dq:.2f} Mvar, total Q={total_q:.1f} Mvar)")
-        else:  # "cos_phi_1" (default)
-            # Unity power factor: force Q=0 on every HV DER, then let
-            # DiscreteTapControl settle OLTC taps to the resulting voltages.
-            apply_cos_phi_one_local_control(net, meta.hv_networks)
-            pp.runpp(net, run_control=True, calculate_voltage_angles=True,
-                     max_iteration=50,
-                     enforce_q_lims=config.enforce_q_lims_plant)
-            if verbose >= 1:
-                print(f"  [local DSO] cos phi=1 init: Q=0 Mvar on "
-                      f"{n_dso_sgen} HV DER; OLTCs settled via DiscreteTapControl")
-
-    # Re-converge with final Q and tap positions.
-    # Pure-cascade mode skip: when both DSO and TSO are non-local, every
-    # controller was dropped above (machine OLTC at line ~1384, coupler
-    # OLTC at line ~1426) and Phase 2's pp.runpp(run_control=True) already
-    # converged the network at the final operating point.  No actuator
-    # state has changed since; running this PF again is redundant.
-    if _run_control or _local_dso or _local_tso:
-        _t = perf_counter()
-        # Q_cor mode: run PF *without* the plant-side controllers here.
-        # Phase 2 already left the network at a converged operating
-        # point; the QVLocalLoops install at a 10%-damped droop seed
-        # (above) and then iterate inside the first main-loop runpp.
-        # Running run_control=True here forces NR to digest a 44-DER
-        # Q step in one call, which makes inner NR ill-conditioned on
-        # large profiles (long sims with contingencies).
-        _rc_flag = False if config.use_q_cor_actuator else _run_control
-        pp.runpp(net, run_control=_rc_flag, calculate_voltage_angles=True,
-                 max_iteration=50,
-                 distributed_slack=config.distributed_slack,
-                 enforce_q_lims=config.enforce_q_lims_plant)
-        if verbose >= 1:
-            print(f"  [T] final re-converge pp.runpp: {perf_counter() - _t:.2f} s")
-    elif verbose >= 1:
-        print("  [T] final re-converge pp.runpp: skipped (pure cascade mode, "
-              "Phase 2 PF still current)")
+    # Re-converge with final Q and tap positions.  Run *without* the
+    # plant-side controllers here: Phase 2 left the network at a
+    # converged operating point and the QVLocalLoops install at a damped
+    # droop seed (above), then iterate inside the first main-loop runpp.
+    # Running run_control=True here would force NR to digest a 44-DER Q
+    # step in one call, making inner NR ill-conditioned on large profiles
+    # (long sims with contingencies).
+    _t = perf_counter()
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True,
+             max_iteration=50,
+             distributed_slack=config.distributed_slack,
+             enforce_q_lims=config.enforce_q_lims_plant)
+    if verbose >= 1:
+        print(f"  [T] final re-converge pp.runpp: {perf_counter() - _t:.2f} s")
 
     # ── Slack bus diagnostic after OLTC init ──────────────────────────────
     if verbose >= 1:
@@ -2258,87 +2175,31 @@ def run_multi_tso_dso(
             ])
 
     n_steps = int(config.n_total_s / config.dt_s)
-    # Local-mode HV DER baseline (Q(V) droop or cos phi=1); active immediately
-    # when no warmup, else enabled once warmup expires.
-    _local_der_active = _local_dso and config.warmup_s <= 0
-
-    def _apply_local_der() -> None:
-        """Dispatch HV-DER baseline per ``config.local_der_mode``.
-
-        Under the refactor_v2 q_mode plant model
-        (``config.use_q_cor_actuator=True``), every DSO sgen runs its
-        own ``QVLocalLoop`` / ``CosPhiConstLoop`` (installed at
-        [3c-deferred] above) which fully replaces the legacy
-        ``apply_qv_local_control`` / ``apply_cos_phi_one_local_control``
-        wiring.  Calling those baseline writers here would overwrite
-        ``net.sgen.q_mvar`` between every step and clobber the analytical
-        seed, so this dispatch is a no-op then.  Mirrors the guard in
-        :func:`_apply_local_tso` below.
-        """
-        if config.use_q_cor_actuator:
-            return
-        if config.local_der_mode == "qv":
-            apply_qv_local_control(
-                net, meta.hv_networks,
-                v_set=config.qv_setpoint_pu,
-                slope=config.qv_slope_pu,
-            )
-        else:  # "cos_phi_1" (default)
-            apply_cos_phi_one_local_control(net, meta.hv_networks)
 
     # ── TSO local-mode setup (one-shot, before main loop) ─────────────────
-    # In TSO local mode (L0/L1/L2 of the comparison experiment) the OFO
-    # controllers are skipped entirely.  To keep the TSO-side primary
-    # voltage control alive, three local-AVR pieces are installed here:
+    # When the OFO TSO controller is skipped, two pieces keep TSO-side
+    # primary voltage control alive (the windpark sgens already have
+    # QVLocalLoop / CosPhiConstLoop installed by ``install_der_q_loops``
+    # in step [3c-deferred]):
     #
-    #   (1) Q(V) or cos phi=1 on every TSO-connected windpark sgen.
-    #   (2) Generator AVR setpoints pinned to ``config.v_setpoint_pu``
+    #   (1) Generator AVR setpoints pinned to ``config.v_setpoint_pu``
     #       (1.03 pu by default).  Without OFO, nothing else writes
     #       net.gen.vm_pu, but we re-pin defensively in case a profile
     #       update touches it.
-    #   (3) DiscreteTapControl on every machine 2W trafo, V_target =
+    #   (2) DiscreteTapControl on every machine 2W trafo, V_target =
     #       v_setpoint_pu, controlling the HV (grid) side.  These are
     #       the same controllers used in the Phase 1 OLTC init at
     #       lines ~1323; they were dropped after that init phase but
     #       must be re-installed to stay active for the simulation.
     _tso_der_idx_list: List[int] = [int(s) for s in meta.tso_der_indices]
     if _local_tso:
-        # (1) Windpark Q control
-        # When the refactor_v2 q_mode plant model is active, every TSO
-        # sgen already has a QVLocalLoop / CosPhiConstLoop installed by
-        # ``install_der_q_loops`` in step [3c].  Installing the legacy
-        # CharacteristicControl on top would create two controllers per
-        # sgen and cause runaway Q oscillation, so skip the legacy path.
-        if _tso_der_idx_list and not config.use_q_cor_actuator:
-            if config.tso_local_mode == "qv":
-                install_qv_characteristic_controllers(
-                    net, _tso_der_idx_list,
-                    v_set=config.tso_qv_setpoint_pu,
-                    slope=config.tso_qv_slope_pu,
-                    name_prefix="qv_tso",
-                )
-                if verbose >= 1:
-                    print(f"  [local TSO] Installed Q(V) CharacteristicControl on "
-                          f"{len(_tso_der_idx_list)} windpark sgens "
-                          f"(V_set={config.tso_qv_setpoint_pu:.3f}, "
-                          f"slope={config.tso_qv_slope_pu:.3f})")
-            else:  # "cos_phi_1"
-                install_cos_phi_one(net, _tso_der_idx_list)
-                if verbose >= 1:
-                    print(f"  [local TSO] Forced cos phi=1 (Q=0) on "
-                          f"{len(_tso_der_idx_list)} windpark sgens")
-        elif _tso_der_idx_list and config.use_q_cor_actuator and verbose >= 1:
-            print(f"  [local TSO] q_mode plant model active "
-                  f"({len(_tso_der_idx_list)} sgens); legacy "
-                  f"CharacteristicControl install skipped.")
-
-        # (2) Pin generator AVR setpoints
+        # (1) Pin generator AVR setpoints
         net.gen.loc[:, "vm_pu"] = float(config.v_setpoint_pu)
         if verbose >= 1:
             print(f"  [local TSO] Pinned net.gen.vm_pu = {config.v_setpoint_pu:.3f} "
                   f"on {len(net.gen)} synchronous machines")
 
-        # (3) Machine 2W OLTC DiscreteTapControl, HV side -> v_setpoint_pu
+        # (2) Machine 2W OLTC DiscreteTapControl, HV side -> v_setpoint_pu
         _mt_tol_pu = config.dso_oltc_init_tol_pu
         for _tidx in meta.machine_trafo_indices:
             DiscreteTapControl(
@@ -2352,27 +2213,6 @@ def run_multi_tso_dso(
                   f"{len(meta.machine_trafo_indices)} machine 2W trafos "
                   f"(target HV side = {config.v_setpoint_pu:.3f} +/- "
                   f"{_mt_tol_pu:.3f} p.u.)")
-
-    def _apply_local_tso() -> None:
-        """Re-apply TSO local-mode constraints after profile updates.
-
-        For Q(V) mode this is a no-op: CharacteristicControl iterates inside
-        every pp.runpp(run_control=True) using the current bus voltage.
-        For cos phi=1 mode the profile may have rewritten q_mvar (e.g. via
-        apply_profiles); re-zero it here so the next PF sees Q=0.
-
-        Under the refactor_v2 q_mode plant model
-        (``config.use_q_cor_actuator=True``), every TSO sgen runs its own
-        plant-side controller (QVLocalLoop / CosPhiConstLoop) which fully
-        replaces the legacy CharacteristicControl / cos_phi_one wiring,
-        so this re-apply step is a no-op then.
-        """
-        if not _local_tso or not _tso_der_idx_list:
-            return
-        if config.use_q_cor_actuator:
-            return
-        if config.tso_local_mode == "cos_phi_1":
-            install_cos_phi_one(net, _tso_der_idx_list)
 
     # ── Persistent OLTC rate-limiter for local-control mode ──────────────
     # Wraps the existing per-step ±max_step clamp with a wall-clock
@@ -2413,20 +2253,6 @@ def run_multi_tso_dso(
         run_dso = _is_period_hit(time_s, config.dso_period_s)
         _in_warmup = time_s <= config.warmup_s
 
-        # ── Local-DER activation after warmup ─────────────────────────────
-        if _local_dso and not _local_der_active and not _in_warmup:
-            _local_der_active = True
-            # Re-evaluate HV-DER baseline once from the settled TSO state
-            _apply_local_der()
-            pp.runpp(net, run_control=True, calculate_voltage_angles=True,
-                     max_iteration=50,
-                     distributed_slack=config.distributed_slack,
-                     enforce_q_lims=config.enforce_q_lims_plant)
-            if verbose >= 1:
-                print(f"  -- local DER mode '{config.local_der_mode}' "
-                      f"activated at t={time_s:.0f}s after "
-                      f"{config.warmup_s:.0f}s warmup --")
-
         # ── g_z warmup → activate output constraints ─────────────────────
         if not _gz_warmup_done and time_s >= config.g_z_warmup_s:
             _gz_warmup_done = True
@@ -2463,23 +2289,15 @@ def run_multi_tso_dso(
                 apply_gen_dispatch(net, gen_dispatch, t_now)
             # Converge PF so that measurements (q_pcc, voltages) reflect the
             # new profiles/dispatch BEFORE controllers read them.
-            # In local-DSO mode, re-evaluate the HV-DER baseline before the PF
-            # so that Q is consistent with the current state after the profile
-            # change. During warmup the baseline is inactive (DER Q follows
-            # the profile).
-            if _local_der_active:
-                _apply_local_der()
-            _apply_local_tso()
-            # Q_cor mode: warm-start the QVLocalLoops with the linear
-            # closed-loop equilibrium so the run_control iteration only
-            # has to refine the nonlinear residual.  Bypasses the
-            # multi-DER Gauss-Jacobi coupling instability.
-            if config.use_q_cor_actuator:
-                seed_qv_equilibrium(
-                    net,
-                    list(meta.tso_der_indices) + list(meta.dso_der_indices),
-                    shared_jac,
-                )
+            # Warm-start the QVLocalLoops with the linear closed-loop
+            # equilibrium so the run_control iteration only has to refine
+            # the nonlinear residual.  Bypasses the multi-DER Gauss-Jacobi
+            # coupling instability.
+            seed_qv_equilibrium(
+                net,
+                list(meta.tso_der_indices) + list(meta.dso_der_indices),
+                shared_jac,
+            )
             pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
                      max_iteration=50,
                      max_iter=500,
@@ -2531,22 +2349,18 @@ def run_multi_tso_dso(
 
                 # Re-converge PF with new topology so measurements
                 # reflect the post-contingency operating point.
-                if _local_der_active:
-                    _apply_local_der()
-                _apply_local_tso()
-                # Q_cor mode: re-seed the QVLocalLoops with the analytical
-                # closed-loop equilibrium at the post-contingency operating
-                # point.  Without this the per-DER damped iteration starts
-                # from the pre-contingency Q values and can hit the 501-
+                # Re-seed the QVLocalLoops with the analytical closed-loop
+                # equilibrium at the post-contingency operating point.
+                # Without this the per-DER damped iteration starts from
+                # the pre-contingency Q values and can hit the 501-
                 # iteration controller cap on severe topology changes
                 # (gen+trafo trips).  Mirrors the post-profile seed at the
                 # top of the step.
-                if config.use_q_cor_actuator:
-                    seed_qv_equilibrium(
-                        net,
-                        list(meta.tso_der_indices) + list(meta.dso_der_indices),
-                        shared_jac,
-                    )
+                seed_qv_equilibrium(
+                    net,
+                    list(meta.tso_der_indices) + list(meta.dso_der_indices),
+                    shared_jac,
+                )
                 try:
                     # First attempt: no Q-limit enforcement so that gens
                     # transiently producing Q outside their static box
@@ -2885,19 +2699,13 @@ def run_multi_tso_dso(
                 )
 
         # ── Power flow ────────────────────────────────────────────────────────
-        if _local_der_active:
-            # Local DSO mode: apply HV-DER baseline (Q(V) or cos phi=1) before
-            # running the final PF with DiscreteTapControl for coupler OLTCs.
-            _apply_local_der()
-        _apply_local_tso()
-        # Q_cor mode: warm-start QVLocalLoops from the linear closed-loop
-        # equilibrium so the run_control iteration only refines residuals.
-        if config.use_q_cor_actuator:
-            seed_qv_equilibrium(
-                net,
-                list(meta.tso_der_indices) + list(meta.dso_der_indices),
-                shared_jac,
-            )
+        # Warm-start QVLocalLoops from the linear closed-loop equilibrium
+        # so the run_control iteration only refines residuals.
+        seed_qv_equilibrium(
+            net,
+            list(meta.tso_der_indices) + list(meta.dso_der_indices),
+            shared_jac,
+        )
         try:
             try:
                 pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,

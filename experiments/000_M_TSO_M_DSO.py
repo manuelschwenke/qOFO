@@ -3455,7 +3455,7 @@ def main() -> None:
         g_w_tso_shunt=10000,
         # ── DSO weights ──
         g_w_dso_der=1000,  # was 1000 (direct-Q); ~3x lower curvature under T'
-        g_w_dso_oltc=100,
+        g_w_dso_oltc=40,
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=True,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -3464,7 +3464,7 @@ def main() -> None:
         live_plot_cascade=True,
         live_plot_system=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 12, 0),
+        start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies           = [

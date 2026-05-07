@@ -64,7 +64,6 @@ from __future__ import annotations
 import os
 import pickle
 import sys
-import importlib
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -74,12 +73,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from configs.multi_tso_config import MultiTSOConfig
 from experiments.helpers.records import ContingencyEvent, MultiTSOIterationRecord
+from experiments.runners import run_multi_tso_dso
 from visualisation.plot_compare_scenarios import plot_scenario_comparison
-
-# 000_M_TSO_M_DSO.py starts with a digit, so the import has to go through
-# importlib rather than a normal `from ... import ...`.
-_runner = importlib.import_module("experiments.000_M_TSO_M_DSO")
-run_multi_tso_dso = _runner.run_multi_tso_dso
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +104,7 @@ def make_base_config() -> MultiTSOConfig:
       for post-hoc comparison plots instead.
     """
     cfg = MultiTSOConfig(
-        n_total_s=60*160, #60.0 * 60 * 24,      # 720-min full simulation
+        n_total_s=60*110, #60.0 * 60 * 24,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
         g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
@@ -136,23 +131,15 @@ def make_base_config() -> MultiTSOConfig:
         # ── DSO weights ──
         g_w_dso_der=1000,  # was 1000 (direct-Q); ~3x lower curvature under T'
         g_w_dso_oltc=40,
-        # ── QVLocalLoop damping (refactor_v2, commit e2746fe) ──
-        # Docstring default 0.05 keeps the multi-DER coupled iteration
-        # stable on IEEE 39 (44 DERs).  TSO STATCOMs get an additional
-        # clamp to 0.03 inside the [3c-deferred] install (R*S_VQ ~ 8 on
-        # 600 Mvar units, vs ~0.7 on DSO STATCOMs).  The dataclass
-        # default is currently 0.3 — that was the pre-clamp value and
-        # is unstable under L0/L1 + contingencies.
-        qv_local_damping=0.05,
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
-        run_stability_analysis=True,
+        run_stability_analysis=False,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
         verbose=1,
-        live_plot_controller=False,
-        live_plot_cascade=False,
+        live_plot_controller=True,
+        live_plot_cascade=True,
         live_plot_system=False,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 8, 0),
+        start_time=datetime(2016, 9, 7, 10, 0),
         use_profiles            = True,
         use_zonal_gen_dispatch  = True,
         contingencies           = [
@@ -186,14 +173,14 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
         tso_mode="local", tso_local_mode="qv",
         dso_mode="local", local_der_mode="cos_phi_1",
         tso_q_mode="qv",  dso_q_mode="cosphi",
-        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.05, tso_qv_deadband_pu=0.005,
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
     ),
     "L1": dict(
         tso_mode="local", tso_local_mode="qv",
         dso_mode="local", local_der_mode="qv",
         tso_q_mode="qv",  dso_q_mode="qv",
-        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.05, tso_qv_deadband_pu=0.005,
-        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.05, dso_qv_deadband_pu=0.005,
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
     ),
     # ── TSO-only OFO (T0, T1) ───────────────────────────────────────────
     # OFO MIQP active at the transmission layer; DSO uses the local
@@ -206,15 +193,15 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
         tso_mode="ofo",
         dso_mode="local", local_der_mode="cos_phi_1",
         tso_q_mode="qv",  dso_q_mode="cosphi",
-        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.05, tso_qv_deadband_pu=0.005,
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
         g_w_pcc=1.0e8,
     ),
     "T1": dict(
         tso_mode="ofo",
         dso_mode="local", local_der_mode="qv",
         tso_q_mode="qv",  dso_q_mode="qv",
-        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.05, tso_qv_deadband_pu=0.005,
-        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.05, dso_qv_deadband_pu=0.005,
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
         g_w_pcc=1.0e8,
     ),
     # ── Cascade OFO (C) ─────────────────────────────────────────────────

@@ -228,7 +228,7 @@ TUDA_PV_PLANTS: List[Tuple[int, float]] = [
 ]
 
 # STATCOM-capable wind park at each HV coupling bus (MVA rating)
-HV_COUPLING_WP_MVA: float = 30.0
+HV_COUPLING_WP_MVA: float = 40.0
 
 # HV buses with concentrated load (P and Q multiplied by the factor below).
 # Used to create an intentional load–generation asymmetry across the HV

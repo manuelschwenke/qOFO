@@ -234,7 +234,7 @@ class MultiTSOConfig:
     through their coupling trafos, but they have no OFO controller and
     their DERs run only their plant-side Q(V) / cos(phi) loop.
 
-    Used by ``experiments/003_M_DSO_CIGRE_2026.py`` to focus the
+    Used by ``experiments/003_S_DSO_CIGRE_2026.py`` to focus the
     optimisation on a single distribution system."""
 
     q_pcc_setpoints_mvar_per_dso: Dict[str, List[float]] = field(
@@ -251,7 +251,7 @@ class MultiTSOConfig:
     every step and delivers it to the named DSO controller via
     ``receive_setpoint``.  Empty dict (default) skips the injection.
 
-    Used by ``experiments/003_M_DSO_CIGRE_2026.py`` to drive the DSO_2
+    Used by ``experiments/003_S_DSO_CIGRE_2026.py`` to drive the DSO_2
     controller toward ``[0, 0, 0]`` Mvar at its three interface
     transformers."""
 
@@ -497,19 +497,19 @@ class MultiTSOConfig:
     """Per-DER override of the cosphi sign."""
 
     # -- Plant-side Q(V) loop convergence tolerance (per level) --------
-    tso_qv_tol_mvar: float = 0.1
+    tso_qv_tol_mvar: float = 0.2
     """Convergence tolerance for the plant-side QVLocalLoop on TSO
     DERs (Mvar).  Transmission STATCOMs are large (S_n ≈ 600 Mvar) so
     very tight tolerances cost iterations without operational benefit;
     0.1 Mvar is a reasonable T-side accuracy."""
 
-    dso_qv_tol_mvar: float = 0.01
+    dso_qv_tol_mvar: float = 0.02
     """Convergence tolerance for the plant-side QVLocalLoop on DSO
     DERs (Mvar).  DSO sgens are smaller (S_n ≈ 30–50 Mvar) and the
     OFO benefits from sub-Mvar accuracy at the interface; keep tight
     (0.01 Mvar)."""
 
-    qv_local_damping: float = 0.25
+    qv_local_damping: float = 0.1
     """Damping factor for the Q(V) local loop iteration.
 
     Per-DER contraction: ``|1 − damping·(1 + K·S_VQ)|`` where K = S_n/slope.

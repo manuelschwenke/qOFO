@@ -141,6 +141,7 @@ from core.message import SetpointMessage, ShuntDisturbanceMessage
 from controller.der_qv_local_loop import (
     CosPhiConstLoop,
     QVLocalLoop,
+    clear_seed_lu_cache,
     install_der_q_loops,
     install_qv_local_loops,
     seed_qv_equilibrium,
@@ -1905,6 +1906,9 @@ def run_multi_tso_dso(
     # _build_sensitivity_matrix will rebuild from the fresh shared_jac.
     _t = perf_counter()
     shared_jac = JacobianSensitivities(net)
+    # Invalidate the seed_qv_equilibrium LU cache: a new sensitivities
+    # object was constructed, so its id() changes and S_VQ_der may move.
+    clear_seed_lu_cache()
     for ctrl in tso_controllers.values():
         ctrl.sensitivities = shared_jac
         ctrl.invalidate_sensitivity_cache()
@@ -2256,10 +2260,16 @@ def run_multi_tso_dso(
             return []
 
     for step in range(1, n_steps + 1):
+        _t_step = perf_counter()
         time_s  = step * config.dt_s
         run_tso = (step == 1) or _is_period_hit(time_s, config.tso_period_s)
         run_dso = _is_period_hit(time_s, config.dso_period_s)
         _in_warmup = time_s <= config.warmup_s
+        # Track whether anything wrote new actuator commands this step.
+        # Used to decide whether the end-of-step PF is needed: if no
+        # MIQP fired and no contingency was applied, the post-profile
+        # PF already reflects the final state.
+        _contingency_fired_this_step = False
 
         # ── g_z warmup → activate output constraints ─────────────────────
         if not _gz_warmup_done and time_s >= config.g_z_warmup_s:
@@ -2308,7 +2318,7 @@ def run_multi_tso_dso(
             )
             pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
                      max_iteration=50,
-                     max_iter=500,
+                     max_iter=300,
                      distributed_slack=config.distributed_slack,
                      enforce_q_lims=config.enforce_q_lims_plant)
             if _oltc_limiter_active:
@@ -2351,6 +2361,7 @@ def run_multi_tso_dso(
                         watch_bus_0idx=watch_buses,
                     )
 
+                _contingency_fired_this_step = True
                 for ev in fired:
                     _apply_contingency(net, ev, verbose,
                                        gen_trafo_map=gen_trafo_map)
@@ -2384,7 +2395,7 @@ def run_multi_tso_dso(
                     pp.runpp(net, run_control=_run_control,
                              calculate_voltage_angles=True,
                              max_iteration=50,
-                             max_iter=500,
+                             max_iter=300,
                              distributed_slack=config.distributed_slack)
                     pf_converged = True
                 except LoadflowNotConverged:
@@ -2404,7 +2415,7 @@ def run_multi_tso_dso(
                         pp.runpp(net, run_control=_run_control,
                                  calculate_voltage_angles=True,
                                  max_iteration=100,
-                                 max_iter=500,
+                                 max_iter=300,
                                  distributed_slack=config.distributed_slack,
                                  enforce_q_lims=True,
                                  init="flat")
@@ -2706,45 +2717,58 @@ def run_multi_tso_dso(
                     sensitivities=getattr(dso_ctrl, "sensitivities", None),
                 )
 
-        # ── Power flow ────────────────────────────────────────────────────────
-        # Warm-start QVLocalLoops from the linear closed-loop equilibrium
-        # so the run_control iteration only refines residuals.
-        seed_qv_equilibrium(
-            net,
-            list(meta.tso_der_indices) + list(meta.dso_der_indices),
-            shared_jac,
+        # ── End-of-step Power flow ─────────────────────────────────────
+        # Skip when nothing wrote new actuator commands this step: the
+        # post-profile (and post-contingency, if any) PFs already left
+        # the network at its final operating point.  This is the typical
+        # case for L0/L1 (no MIQP at all) and the off-cycle steps of
+        # T0/T1 where DSO is local.  An MIQP fired ⇒ end-of-step PF is
+        # required to propagate the new q_cor / V_set / OLTC commands.
+        _miqp_acted = (
+            (run_tso and not _local_tso)
+            or (run_dso and not _local_dso)
         )
+        _needs_end_pf = _miqp_acted or _contingency_fired_this_step
+        if _needs_end_pf:
+            # Warm-start QVLocalLoops from the linear closed-loop
+            # equilibrium so run_control only refines residuals.
+            seed_qv_equilibrium(
+                net,
+                list(meta.tso_der_indices) + list(meta.dso_der_indices),
+                shared_jac,
+            )
         try:
-            try:
-                pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
-                         max_iteration=50,
-                         max_iter=500,
-                         distributed_slack=config.distributed_slack,
-                         enforce_q_lims=config.enforce_q_lims_plant)
-            except LoadflowNotConverged:
-                # End-of-step PF with enforce_q_lims=True can fail to
-                # converge on stressful events (e.g., a heavy load
-                # connect) when run_control=True is also active: the
-                # local Q(V) droop and the PV→PQ flips from
-                # enforce_q_lims interact and oscillate within the 50-NR
-                # iteration budget.  Fall back to a flat-start retry
-                # without Q-limit enforcement so the timestep still
-                # records a converged state; the next step's PFs (post-
-                # profile, post-contingency, or the next end-of-step PF
-                # itself) re-attempt with the clamp on a more relaxed
-                # operating point.
-                if verbose >= 1:
-                    print(f"  [Step {step}] end-of-step PF with "
-                          f"enforce_q_lims={config.enforce_q_lims_plant} "
-                          f"diverged; retrying flat-start unclipped...")
-                pp.runpp(net, run_control=_run_control,
-                         calculate_voltage_angles=True,
-                         max_iteration=100,
-                         max_iter=500,
-                         distributed_slack=config.distributed_slack,
-                         enforce_q_lims=False,
-                         init='flat')
-            if _oltc_limiter_active:
+            if _needs_end_pf:
+                try:
+                    pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
+                             max_iteration=50,
+                             max_iter=300,
+                             distributed_slack=config.distributed_slack,
+                             enforce_q_lims=config.enforce_q_lims_plant)
+                except LoadflowNotConverged:
+                    # End-of-step PF with enforce_q_lims=True can fail to
+                    # converge on stressful events (e.g., a heavy load
+                    # connect) when run_control=True is also active: the
+                    # local Q(V) droop and the PV→PQ flips from
+                    # enforce_q_lims interact and oscillate within the 50-NR
+                    # iteration budget.  Fall back to a flat-start retry
+                    # without Q-limit enforcement so the timestep still
+                    # records a converged state; the next step's PFs (post-
+                    # profile, post-contingency, or the next end-of-step PF
+                    # itself) re-attempt with the clamp on a more relaxed
+                    # operating point.
+                    if verbose >= 1:
+                        print(f"  [Step {step}] end-of-step PF with "
+                              f"enforce_q_lims={config.enforce_q_lims_plant} "
+                              f"diverged; retrying flat-start unclipped...")
+                    pp.runpp(net, run_control=_run_control,
+                             calculate_voltage_angles=True,
+                             max_iteration=100,
+                             max_iter=300,
+                             distributed_slack=config.distributed_slack,
+                             enforce_q_lims=False,
+                             init='flat')
+            if _oltc_limiter_active and _needs_end_pf:
                 _moved = _oltc_limiter.clamp(net, time_s)
                 if _moved:
                     if verbose >= 1:
@@ -3024,6 +3048,21 @@ def run_multi_tso_dso(
 
         if not _in_warmup:
             log.append(rec)
+
+        if verbose >= 1:
+            _dt_step = perf_counter() - _t_step
+            _flags = []
+            if run_tso:
+                _flags.append("T")
+            if run_dso:
+                _flags.append("D")
+            if _contingency_fired_this_step:
+                _flags.append("X")
+            if not _needs_end_pf:
+                _flags.append("skip-endPF")
+            _flag_str = ",".join(_flags) if _flags else "-"
+            print(f"  [T] step {step:4d} t={time_s/60.0:6.1f} min  "
+                  f"wall={_dt_step:5.2f} s  [{_flag_str}]")
 
         # ── Delayed auto-tune + stability analysis ──────────────────────
         # Triggered once when the simulated time crosses
@@ -3315,16 +3354,16 @@ def main() -> None:
         verbose=1,
         live_plot_controller=True,
         live_plot_cascade=True,
-        live_plot_system=False,
+        live_plot_system=True,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 4, 10, 0),
+        start_time=datetime(2016, 9, 7, 8, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies           = [
             ContingencyEvent(minute=60,  element_type="gen",  element_index=2, action="trip"),
             ContingencyEvent(minute=100, element_type="gen",  element_index=2, action="restore"),
-            ContingencyEvent(minute=75, element_type="load", bus=2,  p_mw=400, q_mvar=200, action="connect"),
-            ContingencyEvent(minute=120, element_type="load", bus=2,  p_mw=400, q_mvar=200, action="trip"),
+            # ContingencyEvent(minute=75, element_type="load", bus=2,  p_mw=200, q_mvar=100, action="connect"),
+            # ContingencyEvent(minute=120, element_type="load", bus=2,  p_mw=200, q_mvar=100, action="trip"),
             ContingencyEvent(minute=150, element_type="load", bus=14, p_mw=100, q_mvar=50, action="connect"),
             ContingencyEvent(minute=160, element_type="load", bus=14, p_mw=100, q_mvar=50, action="trip"),
             ContingencyEvent(minute=180, element_type="gen",  element_index=5, action="trip"),

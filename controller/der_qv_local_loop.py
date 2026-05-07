@@ -47,10 +47,27 @@ Date: 2026-05-05 (refactor_v2 commit 3)
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy.linalg import lu_factor as scipy_lu_factor, lu_solve as scipy_lu_solve
+
+
+# Module-level cache for seed_qv_equilibrium's (I + R·S_VQ) LU factor.
+# Keyed on (id(sensitivities), tuple(qv_sgens), R_diag.tobytes()).  See
+# the comment at the cache lookup site for invalidation rules.  Call
+# ``clear_seed_lu_cache()`` after replacing the JacobianSensitivities
+# object or changing per-DER qv_slope_pu / sn_mva mid-simulation.
+_SEED_LU_CACHE: Dict[Tuple, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+
+
+def clear_seed_lu_cache() -> None:
+    """Drop every cached LU factorisation used by
+    :func:`seed_qv_equilibrium`.  Call this when the global
+    ``shared_jac`` is rebuilt (e.g. after a sensitivity refresh) or
+    when DER capability/slope data changes between calls."""
+    _SEED_LU_CACHE.clear()
 import pandapower as pp
 from pandapower.control.basic_controller import Controller
 
@@ -824,38 +841,74 @@ def seed_qv_equilibrium(
             n_updated += 1
         return n_updated
 
-    # Reorder S_VQ rows/cols to match unique_buses order
-    if obs_map != unique_buses or der_map != unique_buses:
-        try:
-            obs_perm = [obs_map.index(b) for b in unique_buses]
-            der_perm = [der_map.index(b) for b in unique_buses]
-            S_VQ_bus = S_VQ_full[np.ix_(obs_perm, der_perm)]
-        except ValueError:
-            if verbose:
-                print("[seed_qv_equilibrium] S_VQ buses missing; skipping seed.")
-            return n_updated
-    else:
-        S_VQ_bus = S_VQ_full
-    s_base = float(getattr(net, "sn_mva", 1.0))
-    if s_base > 0:
-        S_VQ_bus = S_VQ_bus / s_base
+    # The matrices R_diag and S_VQ_der depend only on
+    #   * the DER list (qv_sgens, der_buses),
+    #   * the per-DER qv_slope_pu / sn_mva, and
+    #   * the cached Jacobian (sensitivities object).
+    # When all three are stable across calls -- which is the usual case
+    # within one ``sensitivity_update_interval`` -- the LU factorisation
+    # of M = I + R·S_VQ can be reused.  Cache keyed on the sensitivities
+    # object identity plus the tuple of sgen indices and the rounded
+    # R_diag fingerprint to detect any unexpected drift.
+    _cache_key = (
+        id(sensitivities),
+        tuple(qv_sgens),
+        np.asarray(R_diag).tobytes(),
+    )
+    _cached = _SEED_LU_CACHE.get(_cache_key)
+    if _cached is None:
+        # Reorder S_VQ rows/cols to match unique_buses order
+        if obs_map != unique_buses or der_map != unique_buses:
+            try:
+                obs_perm = [obs_map.index(b) for b in unique_buses]
+                der_perm = [der_map.index(b) for b in unique_buses]
+                S_VQ_bus = S_VQ_full[np.ix_(obs_perm, der_perm)]
+            except ValueError:
+                if verbose:
+                    print("[seed_qv_equilibrium] S_VQ buses missing; skipping seed.")
+                return n_updated
+        else:
+            S_VQ_bus = S_VQ_full
+        s_base = float(getattr(net, "sn_mva", 1.0))
+        if s_base > 0:
+            S_VQ_bus = S_VQ_bus / s_base
 
-    # Per-DER S_VQ: row i = V at DER i's bus, col j = Q at DER j's bus.
-    bus_to_idx = {b: i for i, b in enumerate(unique_buses)}
-    bus_perm = np.array([bus_to_idx[b] for b in der_buses], dtype=np.int64)
-    S_VQ_der = S_VQ_bus[np.ix_(bus_perm, bus_perm)]
+        # Per-DER S_VQ: row i = V at DER i's bus, col j = Q at DER j's bus.
+        bus_to_idx = {b: i for i, b in enumerate(unique_buses)}
+        bus_perm = np.array([bus_to_idx[b] for b in der_buses], dtype=np.int64)
+        S_VQ_der = S_VQ_bus[np.ix_(bus_perm, bus_perm)]
+
+        # Build M = I + R·S_VQ and factor once.
+        R = np.diag(R_diag)
+        M = np.eye(n) + R @ S_VQ_der
+        try:
+            _lu, _piv = scipy_lu_factor(M)
+        except (np.linalg.LinAlgError, ValueError):
+            if verbose:
+                print(
+                    "[seed_qv_equilibrium] (I + R·S_VQ) singular; skipping seed."
+                )
+            return n_updated
+        # Pre-compute R @ S_VQ_der so the per-call rhs build is just
+        # vector ops.
+        R_SVQ = R @ S_VQ_der
+        _SEED_LU_CACHE[_cache_key] = (_lu, _piv, S_VQ_der, R_SVQ)
+        if verbose:
+            print(
+                f"[seed_qv_equilibrium] cached LU(I + R·S_VQ) for "
+                f"{n} DERs (cache miss)"
+            )
+    _lu, _piv, S_VQ_der, R_SVQ = _SEED_LU_CACHE[_cache_key]
 
     # Linear closed-loop solve:
     #   Q* = (I + R · S_VQ)^{-1} · [q_cor − R·(V_c − V_ref) + R · S_VQ · Q_c]
-    R = np.diag(R_diag)
-    M = np.eye(n) + R @ S_VQ_der
-    rhs = q_cor - R_diag * (V_current - V_ref) + R @ S_VQ_der @ Q_current
+    rhs = q_cor - R_diag * (V_current - V_ref) + R_SVQ @ Q_current
     try:
-        Q_star = np.linalg.solve(M, rhs)
-    except np.linalg.LinAlgError:
+        Q_star = scipy_lu_solve((_lu, _piv), rhs)
+    except (np.linalg.LinAlgError, ValueError):
         if verbose:
             print(
-                "[seed_qv_equilibrium] (I + R·S_VQ) singular; skipping seed."
+                "[seed_qv_equilibrium] cached LU solve failed; skipping seed."
             )
         return n_updated
 

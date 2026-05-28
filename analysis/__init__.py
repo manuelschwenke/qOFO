@@ -2,8 +2,7 @@
 Analysis package for the cascaded OFO controller.
 
 Provides:
-    stability_analysis  — Three-condition stability framework (Theorem 3.3).
-    auto_tune           — Parameter tuning for C1/C2/C3 conditions.
+    stability_analysis  -- Three-condition stability framework (Theorem 3.3).
 """
 
 from analysis.stability_analysis import (
@@ -17,18 +16,6 @@ from analysis.stability_analysis import (
     DiscreteSmallGainResult,
     ZoneStabilityResult,
 )
-from analysis.auto_tune import (
-    auto_tune,
-    tune_continuous_gw,
-    tune_discrete_gw,
-    tune_dso_gw,
-    recommend_dso_weights,
-    filter_stability_inputs,
-    expand_gw_with_excluded,
-    TuningConfig,
-    TuningResult,
-    DSOTuneInput,
-)
 
 __all__ = [
     'analyse_multi_zone_stability',
@@ -40,14 +27,4 @@ __all__ = [
     'ContinuousStabilityResult',
     'DiscreteSmallGainResult',
     'ZoneStabilityResult',
-    'auto_tune',
-    'tune_continuous_gw',
-    'tune_discrete_gw',
-    'tune_dso_gw',
-    'recommend_dso_weights',
-    'filter_stability_inputs',
-    'expand_gw_with_excluded',
-    'TuningConfig',
-    'TuningResult',
-    'DSOTuneInput',
 ]

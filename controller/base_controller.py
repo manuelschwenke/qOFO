@@ -24,8 +24,8 @@ Date: 2025-02-06
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict, Union
+from dataclasses import dataclass, field
+from typing import Optional, List, Tuple, Dict, Mapping, Union
 import numpy as np
 from numpy.typing import NDArray
 
@@ -39,6 +39,11 @@ from optimisation.miqp_solver import (
     MIQPProblem,
     MIQPResult,
     build_miqp_problem,
+)
+from controller.g_w_adapter import (
+    GwAdaptMeta,
+    GwAdapter,
+    make_adapter_from_class_indices,
 )
 
 
@@ -89,6 +94,35 @@ class OFOParameters:
     solver_verbose: bool = False
     int_max_step: int = 1
     int_cooldown: int = 6
+    int_cooldown_s: float = 0.0
+    """Wall-clock cooldown (simulation seconds) for OLTC integer
+    variables.  When > 0 and the caller threads ``sim_time_s`` into
+    :meth:`BaseOFOController.step`, every OLTC index reported by
+    :meth:`_get_oltc_integer_indices` is locked for ``int_cooldown_s``
+    seconds after each tap change, in addition to the iteration-based
+    :attr:`int_cooldown` lock that governs all integer variables
+    (including shunts).  Default 0 keeps the wall-clock cooldown
+    disabled — existing call sites and tests that pass ``Measurement``
+    positionally see no behaviour change."""
+    adapt_g_w_classes: tuple[str, ...] = ()
+    """Tuple of actuator-class names whose g_w entries are updated online
+    by :class:`controller.g_w_adapter.GwAdapter` (paper Eq. 16, sign-only
+    rule).  Each subclass exposes the available class names via
+    :meth:`BaseOFOController._actuator_class_indices`.  Empty by default,
+    which disables adaptation and preserves the static baseline behaviour."""
+    g_w_adapt_meta: Union[
+        GwAdaptMeta, Mapping[str, GwAdaptMeta]
+    ] = field(default_factory=GwAdaptMeta)
+    """Meta-parameters for the per-class adaptation rule.
+
+    Either a single :class:`GwAdaptMeta` applied uniformly to every
+    adapted class (v1 form), **or** a ``Mapping[class_name, GwAdaptMeta]``
+    selecting per-class β₁, β₂, t_min, t_max.  ``deadband_rel`` is a
+    property of the adapter as a whole, so when a mapping is provided
+    the kernel uses the value from the first class (callers should set
+    it uniformly across classes; see
+    :meth:`configs.multi_tso_config.MultiTSOConfig.make_g_w_adapt_meta`).
+    """
 
     def __post_init__(self) -> None:
         """Validate parameters after initialisation."""
@@ -105,6 +139,18 @@ class OFOParameters:
         g_z_arr = np.asarray(self.g_z)
         if np.any(g_z_arr < 0):
             raise ValueError(f"g_z must be non-negative, got {self.g_z}")
+        # Coerce list/sequence inputs to a hashable tuple for the frozen
+        # dataclass and validate names are strings.
+        if not isinstance(self.adapt_g_w_classes, tuple):
+            object.__setattr__(
+                self, "adapt_g_w_classes", tuple(self.adapt_g_w_classes),
+            )
+        for name in self.adapt_g_w_classes:
+            if not isinstance(name, str) or not name:
+                raise ValueError(
+                    f"adapt_g_w_classes must be a tuple of non-empty "
+                    f"strings, got {self.adapt_g_w_classes!r}"
+                )
 
 
 @dataclass
@@ -271,6 +317,10 @@ class BaseOFOController(ABC):
         self._cont_idx_arr: Optional[NDArray[np.int64]] = None
         self._int_idx_arr: Optional[NDArray[np.int64]] = None
         # (alpha_vec removed: step-size is absorbed into per-actuator g_w)
+        # Online adaptive g_w (paper Eq. 16, sign-only rule).  None unless
+        # ``params.adapt_g_w_classes`` is non-empty and the subclass
+        # exposes matching actuator-class indices.
+        self._g_w_adapter: Optional[GwAdapter] = None
     
     @property
     def u_current(self) -> NDArray[np.float64]:
@@ -330,6 +380,19 @@ class BaseOFOController(ABC):
         self._int_max_step = self.params.int_max_step
         self._int_lock_until: dict[int, int] = {}   # idx -> iteration when lock expires
 
+        # Wall-clock cooldown for OLTC integer variables only.
+        # Activated when params.int_cooldown_s > 0 AND the caller threads
+        # ``sim_time_s`` into ``step()``.  Gated on the OLTC-only index
+        # set returned by ``_get_oltc_integer_indices`` so that shunt
+        # switching cadence (governed by ``int_cooldown`` in iterations)
+        # is unaffected.
+        self._int_cooldown_s: float = float(self.params.int_cooldown_s)
+        self._int_lock_until_time_s: dict[int, float] = {}
+        self._oltc_int_indices: set[int] = {
+            int(i) for i in self._get_oltc_integer_indices()
+        }
+        self._sim_time_warned: bool = False
+
         # ---- Vectorised continuous/integer index arrays for step() ----
         # Used to replace `for i in range(n_controls): if i in integer_indices`
         # Python loops with pure numpy indexing.
@@ -351,6 +414,12 @@ class BaseOFOController(ABC):
         self._g_w_vector_cache, self._g_u_vector_cache = \
             self._compute_per_variable_weights()
 
+        # ---- Build the adaptive g_w adapter, if requested ----
+        # Must happen after the per-variable weight cache so the adapter
+        # initial state matches whatever the MIQP would otherwise see on
+        # the first step.
+        self._init_g_w_adapter()
+
         # Expanded H cache is invalidated on re-init (new operating point).
         self._H_der_cache = None
         self._H_der_cache_base_id = None
@@ -369,7 +438,12 @@ class BaseOFOController(ABC):
         import dataclasses
         self.params = dataclasses.replace(self.params, g_z=g_z)
 
-    def step(self, measurement: Measurement) -> ControllerOutput:
+    def step(
+        self,
+        measurement: Measurement,
+        *,
+        sim_time_s: Optional[float] = None,
+    ) -> ControllerOutput:
         """
         Execute one OFO iteration.
 
@@ -379,17 +453,24 @@ class BaseOFOController(ABC):
             3. Compute sensitivity matrix H
             4. Build and solve MIQP problem
             5. Apply update: u^{k+1} = u^k + σ^k
-        
+
         Parameters
         ----------
         measurement : Measurement
             Current system measurements at iteration k.
-        
+        sim_time_s : float, optional
+            Wall-clock simulation time at which this step is taken
+            (seconds since simulation start).  Required to activate the
+            wall-clock OLTC cooldown configured via
+            :attr:`OFOParameters.int_cooldown_s`.  When ``None`` and the
+            cooldown is configured, a one-time warning is emitted and
+            only the iteration-based cooldown is enforced.
+
         Returns
         -------
         ControllerOutput
             Results of this iteration including new setpoints.
-        
+
         Raises
         ------
         RuntimeError
@@ -401,6 +482,22 @@ class BaseOFOController(ABC):
             raise RuntimeError(
                 "Controller not initialised. Call initialise() first."
             )
+
+        if (
+            self._int_cooldown_s > 0.0
+            and sim_time_s is None
+            and not self._sim_time_warned
+            and self._oltc_int_indices
+        ):
+            import warnings
+            warnings.warn(
+                f"[{self.controller_id}] int_cooldown_s={self._int_cooldown_s} "
+                f"is configured but step() was called without sim_time_s; "
+                f"wall-clock OLTC cooldown is inactive for this controller.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._sim_time_warned = True
         
         # Step 1: Extract current outputs from measurements
         y_current = self._extract_outputs(measurement)
@@ -424,6 +521,21 @@ class BaseOFOController(ABC):
             if idx in self._int_lock_until and self.iteration < self._int_lock_until[idx]:
                 u_lower[idx] = self._u_current[idx]
                 u_upper[idx] = self._u_current[idx]
+
+        # Step 3d: Wall-clock OLTC cooldown — pin OLTC bounds to the
+        # current value while the per-OLTC simulation-time lock has not
+        # elapsed.  Layered on top of (3b)/(3c); does not relax the
+        # iteration-based lock that also applies to shunts.
+        if (
+            sim_time_s is not None
+            and self._int_cooldown_s > 0.0
+            and self._oltc_int_indices
+        ):
+            for idx in self._oltc_int_indices:
+                lock_until = self._int_lock_until_time_s.get(idx)
+                if lock_until is not None and sim_time_s < lock_until:
+                    u_lower[idx] = self._u_current[idx]
+                    u_upper[idx] = self._u_current[idx]
 
         # Step 4: Get output bounds
         y_lower, y_upper = self._get_output_limits()
@@ -487,6 +599,14 @@ class BaseOFOController(ABC):
         if int_idx.size > 0:
             sigma[int_idx] = result.w_integer.astype(np.float64)
 
+        # Step 8b: Adapt ``g_w`` for the next MIQP build using the just-
+        # solved step and the gradient at (u_k, y_k).  The sign rule
+        # (paper Eq. 16) ignores α, so feeding ``sigma`` is equivalent
+        # to feeding the raw QP ``w``.  See ``controller.g_w_adapter``
+        # for the rule and its derivation.
+        if self._g_w_adapter is not None:
+            self._g_w_adapter.update(grad_f, sigma)
+
         # Step 9: OFO update.
         #   Continuous: u_new = u + α·w   (alpha controls step size)
         #   Discrete:   u_new = u + w     (full step, cannot move fractionally)
@@ -505,11 +625,20 @@ class BaseOFOController(ABC):
         # Step 11: Cooldown bookkeeping for integer switches.
         if int_idx.size > 0:
             switched = u_new[int_idx] != self._u_current[int_idx]
+            wallclock_active = (
+                sim_time_s is not None
+                and self._int_cooldown_s > 0.0
+                and bool(self._oltc_int_indices)
+            )
             for j in np.flatnonzero(switched):
                 idx = int(int_idx[j])
                 self._int_lock_until[idx] = (
                     self.iteration + 1 + self._int_cooldown
                 )
+                if wallclock_active and idx in self._oltc_int_indices:
+                    self._int_lock_until_time_s[idx] = (
+                        sim_time_s + self._int_cooldown_s
+                    )
 
         self._u_current = u_new.copy()
         self.iteration += 1
@@ -878,8 +1007,158 @@ class BaseOFOController(ABC):
     def _get_per_variable_weights(
         self,
     ) -> Tuple[Optional[NDArray[np.float64]], Optional[NDArray[np.float64]]]:
-        """Return the cached per-variable weight vectors (or None/None)."""
+        """Return the per-variable weight vectors, preferring the live
+        adapter state when adaptive ``g_w`` is enabled.
+
+        When :attr:`_g_w_adapter` is active, its read-only ``g_w_live``
+        view is returned as the change-weight vector; the regularisation
+        cache ``_g_u_vector_cache`` is unaffected.  When the adapter is
+        not active, the static caches populated in :meth:`initialise`
+        are returned (which may be ``None`` when no DER mapping is in
+        play).
+        """
+        if self._g_w_adapter is not None:
+            # Return a writable copy: ``build_miqp_problem`` may call
+            # ``np.asarray`` on this and assemble it into ``G_w`` without
+            # mutating it, but cvxpy / numpy occasionally do in-place
+            # work on diagonal-from-vector constructions.  A fresh copy
+            # also keeps the adapter state private from the solver path.
+            return (
+                np.asarray(self._g_w_adapter.g_w_live).copy(),
+                self._g_u_vector_cache,
+            )
         return self._g_w_vector_cache, self._g_u_vector_cache
+
+    # ------------------------------------------------------------------
+    #  Adaptive g_w (paper Eq. 16, sign-only rule)
+    # ------------------------------------------------------------------
+
+    def _actuator_class_indices(self) -> Dict[str, NDArray[np.int64]]:
+        """Return per-actuator-class indices into the ``(n_total,)``
+        control vector for adaptive ``g_w``.
+
+        Subclasses that participate in adaptive ``g_w`` override this to
+        expose their layout, for example ``{"der": [0..n_der), "pcc":
+        [n_der..n_der+n_pcc), "tso_oltc": [...], ...}``.
+
+        The default returns an empty dict, which keeps adaptation a
+        no-op even if the operator switches it on for a controller that
+        has not yet been wired up.
+        """
+        return {}
+
+    def _get_oltc_integer_indices(self) -> List[int]:
+        """Return the subset of ``_integer_indices`` that correspond to
+        OLTC tap positions (i.e. discrete actuators governed by the
+        wall-clock :attr:`OFOParameters.int_cooldown_s` lock).
+
+        Subclasses with OLTC tap controls override this to return the
+        OLTC slice of their integer block — typically the contiguous
+        range immediately preceding the shunt slice (TSO ordering
+        ``[Q_DER | Q_PCC | V_gen | s_OLTC | s_shunt]``, DSO ordering
+        ``[Q_DER | s_OLTC | s_shunt]``).  Returning ``[]`` (the default)
+        disables the wall-clock cooldown for any subclass that does not
+        manage OLTCs, while leaving the iteration-based ``int_cooldown``
+        lock intact for every integer variable.
+        """
+        return []
+
+    def _build_per_variable_g_w_init(self) -> NDArray[np.float64]:
+        """Materialise a per-variable initial ``g_w`` vector for the
+        adapter.
+
+        Prefers the cached ``_g_w_vector_cache`` (built from the DER
+        mapping with per-DER weighting in :meth:`initialise`).  Falls
+        back to broadcasting :attr:`OFOParameters.g_w` to ``(n_total,)``
+        when no DER mapping is active.  Off-diagonal entries of a 2-D
+        ``params.g_w`` are dropped: the adapter operates on the diagonal
+        only, consistent with paper Section 3.1's "diagonal formulation".
+        """
+        if self._g_w_vector_cache is not None:
+            return self._g_w_vector_cache.astype(np.float64).copy()
+        n_total = self.n_controls
+        g_w_arr = np.asarray(self.params.g_w, dtype=np.float64)
+        if g_w_arr.ndim == 0:
+            return np.full(n_total, float(g_w_arr), dtype=np.float64)
+        if g_w_arr.ndim == 1:
+            if g_w_arr.shape != (n_total,):
+                raise ValueError(
+                    f"params.g_w 1-D length {g_w_arr.shape[0]} does not "
+                    f"match n_total {n_total}"
+                )
+            return g_w_arr.copy()
+        if g_w_arr.ndim == 2:
+            if g_w_arr.shape != (n_total, n_total):
+                raise ValueError(
+                    f"params.g_w 2-D shape {g_w_arr.shape} does not "
+                    f"match ({n_total}, {n_total})"
+                )
+            return np.diag(g_w_arr).astype(np.float64).copy()
+        raise ValueError(
+            f"params.g_w has unsupported ndim={g_w_arr.ndim}"
+        )
+
+    def adapter_summary(self) -> Optional[Dict[str, NDArray[np.float64]]]:
+        """Per-actuator-class slice of the adapted ``g_w`` vector.
+
+        Returns ``None`` when no adapter is active (either because
+        ``params.adapt_g_w_classes`` was empty or because the subclass
+        exposed no matching class indices).  Otherwise returns a dict
+        ``{class_name: g_w_live[idx]}`` (a plain ``np.ndarray`` copy
+        per class) for every adapted class in iteration order — useful
+        for compact per-step debug prints showing min/max/spread.
+        """
+        if self._g_w_adapter is None:
+            return None
+        cls_idx = self._actuator_class_indices()
+        if not cls_idx:
+            return None
+        live = self._g_w_adapter.g_w_live
+        out: Dict[str, NDArray[np.float64]] = {}
+        for name, idx in cls_idx.items():
+            if name not in self.params.adapt_g_w_classes:
+                continue
+            if len(idx) == 0:
+                continue
+            out[name] = np.asarray(live[idx], dtype=np.float64).copy()
+        return out if out else None
+
+    def _init_g_w_adapter(self) -> None:
+        """Build :attr:`_g_w_adapter` from ``params.adapt_g_w_classes``
+        and the subclass-provided actuator-class index map.
+
+        No-op when:
+          * ``params.adapt_g_w_classes`` is empty (default),
+          * the subclass returns an empty class-index map, or
+          * none of the requested classes appear in the subclass's map
+            (in which case the adapter would have an all-False mask and
+            be wasteful to build).
+
+        On success, the adapter starts from the same per-variable ``g_w``
+        the static MIQP would have used, ensuring the first step is
+        identical to the non-adaptive baseline.
+        """
+        self._g_w_adapter = None
+        if not self.params.adapt_g_w_classes:
+            return
+        cls_idx = self._actuator_class_indices()
+        if not cls_idx:
+            return
+        active = {
+            name: idx for name, idx in cls_idx.items()
+            if name in self.params.adapt_g_w_classes
+        }
+        if not active:
+            return
+
+        g_w_init = self._build_per_variable_g_w_init()
+        flags = {name: True for name in active}
+        self._g_w_adapter = make_adapter_from_class_indices(
+            g_w_init=g_w_init,
+            class_indices=active,
+            adapt_flags=flags,
+            metas=self.params.g_w_adapt_meta,
+        )
 
     def get_bus_level_sensitivity(
         self,

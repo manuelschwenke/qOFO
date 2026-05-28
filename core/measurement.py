@@ -41,7 +41,8 @@ class Measurement:
         Pandapower transformer indices for TSO-DSO coupling transformers.
     interface_q_hv_side_mvar : NDArray[np.float64]
         Measured reactive power flow at HV side of interface transformers in Mvar.
-        Positive value indicates Q flowing into the HV bus from the transformer.
+        Pandapower load convention: positive = Q flowing from HV bus into
+        the transformer (i.e. EHV network feeds Q into the distribution system).
     der_indices : NDArray[np.int64]
         Indices of DERs (as sgen or gen in pandapower).
     der_q_mvar : NDArray[np.float64]
@@ -62,6 +63,16 @@ class Measurement:
         Generator active power output [MW].
     gen_q_mvar : NDArray[np.float64]
         Generator reactive power output [Mvar].
+    tie_line_indices : NDArray[np.int64]
+        Pandapower line indices for inter-zone tie lines monitored by
+        this zone.  Empty for non-zone (single-network) measurements.
+    tie_line_endpoint_buses : NDArray[np.int64]
+        Bus indices identifying which endpoint of each tie line lies
+        inside this zone (same length as ``tie_line_indices``).
+    tie_line_q_mvar : NDArray[np.float64]
+        Measured reactive power on each tie line at the in-zone
+        endpoint, in load convention: positive = Q flowing FROM the
+        endpoint bus INTO the line (i.e. leaving the zone).
     """
 
     def __init__(
@@ -84,6 +95,14 @@ class Measurement:
         gen_vm_pu: NDArray[np.float64],
         gen_p_mw: NDArray[np.float64] = None,
         gen_q_mvar: NDArray[np.float64] = None,
+        tie_line_indices: NDArray[np.int64] = None,
+        tie_line_endpoint_buses: NDArray[np.int64] = None,
+        tie_line_q_mvar: NDArray[np.float64] = None,
+        gridforming_gen_indices: NDArray[np.int64] = None,
+        gridforming_gen_vm_pu: NDArray[np.float64] = None,
+        gridforming_gen_p_mw: NDArray[np.float64] = None,
+        gridforming_gen_q_mvar: NDArray[np.float64] = None,
+        der_vm_pu_ref: NDArray[np.float64] = None,
     ) -> None:
         """
         Initialise a Measurement instance.
@@ -149,6 +168,44 @@ class Measurement:
         self.gen_q_mvar = (
             gen_q_mvar if gen_q_mvar is not None else np.array([], dtype=np.float64)
         )
+        self.tie_line_indices = (
+            tie_line_indices if tie_line_indices is not None
+            else np.array([], dtype=np.int64)
+        )
+        self.tie_line_endpoint_buses = (
+            tie_line_endpoint_buses if tie_line_endpoint_buses is not None
+            else np.array([], dtype=np.int64)
+        )
+        self.tie_line_q_mvar = (
+            tie_line_q_mvar if tie_line_q_mvar is not None
+            else np.array([], dtype=np.float64)
+        )
+        # ── Grid-forming converter gens (V_gf actuator block) ──────────────
+        self.gridforming_gen_indices = (
+            gridforming_gen_indices if gridforming_gen_indices is not None
+            else np.array([], dtype=np.int64)
+        )
+        self.gridforming_gen_vm_pu = (
+            gridforming_gen_vm_pu if gridforming_gen_vm_pu is not None
+            else np.array([], dtype=np.float64)
+        )
+        self.gridforming_gen_p_mw = (
+            gridforming_gen_p_mw if gridforming_gen_p_mw is not None
+            else np.array([], dtype=np.float64)
+        )
+        self.gridforming_gen_q_mvar = (
+            gridforming_gen_q_mvar if gridforming_gen_q_mvar is not None
+            else np.array([], dtype=np.float64)
+        )
+        # ── Stage-2: V_ref setpoint for grid-following sgens ───────────────
+        # Same length and ordering as ``der_indices``.  Populated from
+        # ``net.sgen.vm_pu_ref`` by ``measure_*`` helpers.  Only meaningful
+        # when ``use_qv_local_loop=True`` on the runner side; otherwise it
+        # holds the cold-start defaults and is ignored by the controller.
+        self.der_vm_pu_ref = (
+            der_vm_pu_ref if der_vm_pu_ref is not None
+            else np.array([], dtype=np.float64)
+        )
 
     @property
     def n_bus_measurements(self) -> int:
@@ -204,6 +261,21 @@ def measure_tso(net, cfg, it: int):
     gen_q = np.array(
         [float(net.res_gen.at[g, "q_mvar"]) for g in cfg.gen_indices], dtype=np.float64
     )
+    gf_indices = list(getattr(cfg, "gridforming_gen_indices", []) or [])
+    if gf_indices:
+        gf_vm = np.array(
+            [float(net.gen.at[g, "vm_pu"]) for g in gf_indices], dtype=np.float64
+        )
+        gf_p = np.array(
+            [float(net.res_gen.at[g, "p_mw"]) for g in gf_indices], dtype=np.float64
+        )
+        gf_q = np.array(
+            [float(net.res_gen.at[g, "q_mvar"]) for g in gf_indices], dtype=np.float64
+        )
+    else:
+        gf_vm = np.array([], dtype=np.float64)
+        gf_p = np.array([], dtype=np.float64)
+        gf_q = np.array([], dtype=np.float64)
     return Measurement(
         iteration=it,
         bus_indices=all_bus,
@@ -223,11 +295,19 @@ def measure_tso(net, cfg, it: int):
         gen_vm_pu=gen_vm,
         gen_p_mw=gen_p,
         gen_q_mvar=gen_q,
+        gridforming_gen_indices=np.array(gf_indices, dtype=np.int64),
+        gridforming_gen_vm_pu=gf_vm,
+        gridforming_gen_p_mw=gf_p,
+        gridforming_gen_q_mvar=gf_q,
     )
 
 
 def measure_dso(net, cfg, it: int):
-    """Build a DSO Measurement from a converged combined pandapower network."""
+    """Build a DSO Measurement from a converged combined pandapower network.
+
+    Also pulls per-sgen ``vm_pu_ref`` for Stage-2 V_ref-mode controllers
+    (defaults to 1.03 pu when the build did not add the column yet).
+    """
     import numpy as np
 
     all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
@@ -258,6 +338,21 @@ def measure_dso(net, cfg, it: int):
         mask = net.shunt["bus"] == sb
         if mask.any():
             shunt_states[k] = int(net.shunt.at[net.shunt.index[mask][0], "step"])
+    gf_indices = list(getattr(cfg, "gridforming_gen_indices", []) or [])
+    if gf_indices:
+        gf_vm = np.array(
+            [float(net.gen.at[g, "vm_pu"]) for g in gf_indices], dtype=np.float64
+        )
+        gf_p = np.array(
+            [float(net.res_gen.at[g, "p_mw"]) for g in gf_indices], dtype=np.float64
+        )
+        gf_q = np.array(
+            [float(net.res_gen.at[g, "q_mvar"]) for g in gf_indices], dtype=np.float64
+        )
+    else:
+        gf_vm = np.array([], dtype=np.float64)
+        gf_p = np.array([], dtype=np.float64)
+        gf_q = np.array([], dtype=np.float64)
     return Measurement(
         iteration=it,
         bus_indices=all_bus,
@@ -277,4 +372,257 @@ def measure_dso(net, cfg, it: int):
         shunt_states=shunt_states,
         gen_indices=np.array([], dtype=np.int64),
         gen_vm_pu=np.array([], dtype=np.float64),
+        gridforming_gen_indices=np.array(gf_indices, dtype=np.int64),
+        gridforming_gen_vm_pu=gf_vm,
+        gridforming_gen_p_mw=gf_p,
+        gridforming_gen_q_mvar=gf_q,
+    )
+
+
+def measure_zone_tso(net, zone_def, it: int) -> "Measurement":
+    """
+    Build a TSO ``Measurement`` for one zone in a multi-zone IEEE 39-bus run.
+
+    Reads the already converged pandapower result tables (``net.res_bus``,
+    ``net.res_line``, ``net.res_trafo3w`` for 3-winding PCC trafos, ``net.res_sgen``,
+    ``net.res_gen``), plus parameter columns (``net.gen.vm_pu``,
+    ``net.trafo.tap_pos``, ``net.shunt.step``).
+
+    Parameters
+    ----------
+    net : pandapowerNet
+        Combined plant network after a converged power flow.
+    zone_def : ZoneDefinition
+        Index sets for this zone.
+    it : int
+        Current iteration (step) number.
+    """
+    all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
+    vm_all = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
+
+    i_ka = np.array(
+        [float(net.res_line.at[li, "i_from_ka"]) for li in zone_def.line_indices],
+        dtype=np.float64,
+    ) if zone_def.line_indices else np.array([], dtype=np.float64)
+
+    q_iface = np.zeros(len(zone_def.pcc_trafo_indices), dtype=np.float64)
+    for k, t in enumerate(zone_def.pcc_trafo_indices):
+        if t in net.res_trafo3w.index:
+            q_iface[k] = float(net.res_trafo3w.at[t, "q_hv_mvar"])
+
+    der_q = np.array(
+        [float(net.res_sgen.at[s, "q_mvar"]) for s in zone_def.tso_der_indices],
+        dtype=np.float64,
+    ) if zone_def.tso_der_indices else np.array([], dtype=np.float64)
+    der_p = np.array(
+        [float(net.res_sgen.at[s, "p_mw"]) for s in zone_def.tso_der_indices],
+        dtype=np.float64,
+    ) if zone_def.tso_der_indices else np.array([], dtype=np.float64)
+
+    shunt_states = np.zeros(len(zone_def.shunt_bus_indices), dtype=np.int64)
+    for k, sb in enumerate(zone_def.shunt_bus_indices):
+        mask = net.shunt["bus"] == sb
+        if mask.any():
+            shunt_states[k] = int(net.shunt.at[net.shunt.index[mask][0], "step"])
+
+    if zone_def.gen_indices:
+        gen_vm = np.empty(len(zone_def.gen_indices), dtype=np.float64)
+        gen_p = np.empty(len(zone_def.gen_indices), dtype=np.float64)
+        gen_q = np.empty(len(zone_def.gen_indices), dtype=np.float64)
+        for k, g in enumerate(zone_def.gen_indices):
+            gen_vm[k] = float(net.gen.at[g, "vm_pu"])
+            if net.gen.at[g, "in_service"]:
+                gen_p[k] = float(net.res_gen.at[g, "p_mw"])
+                gen_q[k] = float(net.res_gen.at[g, "q_mvar"])
+            else:
+                gen_p[k] = 0.0
+                gen_q[k] = 0.0
+    else:
+        gen_vm = np.array([], dtype=np.float64)
+        gen_p = np.array([], dtype=np.float64)
+        gen_q = np.array([], dtype=np.float64)
+
+    oltc_taps = np.array(
+        [int(net.trafo.at[t, "tap_pos"]) for t in zone_def.oltc_trafo_indices],
+        dtype=np.int64,
+    ) if zone_def.oltc_trafo_indices else np.array([], dtype=np.int64)
+
+    # Tie-line reactive power at the zone-internal endpoint.
+    # Pandapower load convention: q_from_mvar is positive when Q flows
+    # FROM the from-bus INTO the line; q_to_mvar likewise for the to-bus.
+    # We pick whichever endpoint is inside the zone.
+    tie_line_indices = list(getattr(zone_def, "tie_line_indices", []) or [])
+    tie_line_endpoint_buses = list(
+        getattr(zone_def, "tie_line_endpoint_buses", []) or []
+    )
+    if tie_line_indices:
+        tie_q = np.zeros(len(tie_line_indices), dtype=np.float64)
+        for k, (li, endp) in enumerate(zip(tie_line_indices, tie_line_endpoint_buses)):
+            if li not in net.res_line.index:
+                continue
+            from_bus = int(net.line.at[li, "from_bus"])
+            to_bus = int(net.line.at[li, "to_bus"])
+            if int(endp) == from_bus:
+                tie_q[k] = float(net.res_line.at[li, "q_from_mvar"])
+            elif int(endp) == to_bus:
+                tie_q[k] = float(net.res_line.at[li, "q_to_mvar"])
+            else:
+                raise ValueError(
+                    f"Tie-line {li} endpoint bus {endp} matches neither "
+                    f"from_bus ({from_bus}) nor to_bus ({to_bus})."
+                )
+        tie_lines_arr = np.array(tie_line_indices, dtype=np.int64)
+        tie_endp_arr = np.array(tie_line_endpoint_buses, dtype=np.int64)
+    else:
+        tie_q = np.array([], dtype=np.float64)
+        tie_lines_arr = np.array([], dtype=np.int64)
+        tie_endp_arr = np.array([], dtype=np.int64)
+
+    gf_indices = list(getattr(zone_def, "gridforming_gen_indices", []) or [])
+    if gf_indices:
+        gf_vm = np.empty(len(gf_indices), dtype=np.float64)
+        gf_p = np.empty(len(gf_indices), dtype=np.float64)
+        gf_q = np.empty(len(gf_indices), dtype=np.float64)
+        for k, g in enumerate(gf_indices):
+            gf_vm[k] = float(net.gen.at[g, "vm_pu"])
+            if net.gen.at[g, "in_service"]:
+                gf_p[k] = float(net.res_gen.at[g, "p_mw"])
+                gf_q[k] = float(net.res_gen.at[g, "q_mvar"])
+            else:
+                gf_p[k] = 0.0
+                gf_q[k] = 0.0
+    else:
+        gf_vm = np.array([], dtype=np.float64)
+        gf_p = np.array([], dtype=np.float64)
+        gf_q = np.array([], dtype=np.float64)
+
+    if zone_def.tso_der_indices and "vm_pu_ref" in net.sgen.columns:
+        der_vm_ref_zone = np.array(
+            [float(net.sgen.at[s, "vm_pu_ref"]) for s in zone_def.tso_der_indices],
+            dtype=np.float64,
+        )
+    else:
+        der_vm_ref_zone = np.full(len(zone_def.tso_der_indices), 1.03, dtype=np.float64)
+
+    return Measurement(
+        iteration=it,
+        bus_indices=all_bus,
+        voltage_magnitudes_pu=vm_all,
+        branch_indices=np.array(zone_def.line_indices, dtype=np.int64),
+        current_magnitudes_ka=i_ka,
+        interface_transformer_indices=np.array(zone_def.pcc_trafo_indices, dtype=np.int64),
+        interface_q_hv_side_mvar=q_iface,
+        der_indices=np.array(zone_def.tso_der_indices, dtype=np.int64),
+        der_q_mvar=der_q,
+        der_p_mw=der_p,
+        oltc_indices=np.array(zone_def.oltc_trafo_indices, dtype=np.int64),
+        oltc_tap_positions=oltc_taps,
+        shunt_indices=np.array(zone_def.shunt_bus_indices, dtype=np.int64),
+        shunt_states=shunt_states,
+        gen_indices=np.array(zone_def.gen_indices, dtype=np.int64),
+        gen_vm_pu=gen_vm,
+        gen_p_mw=gen_p,
+        gen_q_mvar=gen_q,
+        tie_line_indices=tie_lines_arr,
+        tie_line_endpoint_buses=tie_endp_arr,
+        tie_line_q_mvar=tie_q,
+        gridforming_gen_indices=np.array(gf_indices, dtype=np.int64),
+        gridforming_gen_vm_pu=gf_vm,
+        gridforming_gen_p_mw=gf_p,
+        gridforming_gen_q_mvar=gf_q,
+        der_vm_pu_ref=der_vm_ref_zone,
+    )
+
+
+def measure_zone_dso(net, dso_cfg, it: int) -> "Measurement":
+    """
+    Build a DSO ``Measurement`` for one HV sub-network from the combined plant network.
+
+    Uses ``net.res_trafo3w`` for interface Q at 3-winding couplers and ``net.trafo3w``
+    for coupling-trafo tap positions.
+    """
+    all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
+    vm_all = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
+
+    i_ka = np.array(
+        [float(net.res_line.at[li, "i_from_ka"]) for li in dso_cfg.current_line_indices],
+        dtype=np.float64,
+    ) if dso_cfg.current_line_indices else np.array([], dtype=np.float64)
+
+    q_iface = np.array(
+        [float(net.res_trafo3w.at[t, "q_hv_mvar"]) for t in dso_cfg.interface_trafo_indices],
+        dtype=np.float64,
+    )
+
+    der_q = np.array(
+        [float(net.res_sgen.at[s, "q_mvar"]) for s in dso_cfg.der_indices],
+        dtype=np.float64,
+    )
+    der_p = np.array(
+        [float(net.res_sgen.at[s, "p_mw"]) for s in dso_cfg.der_indices],
+        dtype=np.float64,
+    )
+
+    oltc_taps = np.array(
+        [int(net.trafo3w.at[t, "tap_pos"]) for t in dso_cfg.oltc_trafo_indices],
+        dtype=np.int64,
+    ) if dso_cfg.oltc_trafo_indices else np.array([], dtype=np.int64)
+
+    shunt_states = np.zeros(len(dso_cfg.shunt_bus_indices), dtype=np.int64)
+
+    gf_indices = list(getattr(dso_cfg, "gridforming_gen_indices", []) or [])
+    if gf_indices:
+        gf_vm = np.array(
+            [float(net.gen.at[g, "vm_pu"]) for g in gf_indices], dtype=np.float64
+        )
+        gf_p = np.array(
+            [float(net.res_gen.at[g, "p_mw"]) for g in gf_indices], dtype=np.float64
+        )
+        gf_q = np.array(
+            [float(net.res_gen.at[g, "q_mvar"]) for g in gf_indices], dtype=np.float64
+        )
+    else:
+        gf_vm = np.array([], dtype=np.float64)
+        gf_p = np.array([], dtype=np.float64)
+        gf_q = np.array([], dtype=np.float64)
+    # Stage-2: pull V_ref for every DSO sgen (cold-start 1.03 if Stage 2
+    # plumbing is not yet active in the build).
+    if dso_cfg.der_indices and "vm_pu_ref" in net.sgen.columns:
+        der_vm_ref = np.array(
+            [float(net.sgen.at[s, "vm_pu_ref"]) for s in dso_cfg.der_indices],
+            dtype=np.float64,
+        )
+    else:
+        der_vm_ref = np.full(len(dso_cfg.der_indices), 1.03, dtype=np.float64)
+    # Stage-2: V_ref per DSO sgen (zone-version)
+    if dso_cfg.der_indices and "vm_pu_ref" in net.sgen.columns:
+        der_vm_ref_z = np.array(
+            [float(net.sgen.at[s, "vm_pu_ref"]) for s in dso_cfg.der_indices],
+            dtype=np.float64,
+        )
+    else:
+        der_vm_ref_z = np.full(len(dso_cfg.der_indices), 1.03, dtype=np.float64)
+
+    return Measurement(
+        iteration=it,
+        bus_indices=all_bus,
+        voltage_magnitudes_pu=vm_all,
+        branch_indices=np.array(dso_cfg.current_line_indices, dtype=np.int64),
+        current_magnitudes_ka=i_ka,
+        interface_transformer_indices=np.array(dso_cfg.interface_trafo_indices, dtype=np.int64),
+        interface_q_hv_side_mvar=q_iface,
+        der_indices=np.array(dso_cfg.der_indices, dtype=np.int64),
+        der_q_mvar=der_q,
+        der_p_mw=der_p,
+        oltc_indices=np.array(dso_cfg.oltc_trafo_indices, dtype=np.int64),
+        oltc_tap_positions=oltc_taps,
+        shunt_indices=np.array(dso_cfg.shunt_bus_indices, dtype=np.int64),
+        shunt_states=shunt_states,
+        gen_indices=np.array([], dtype=np.int64),
+        gen_vm_pu=np.array([], dtype=np.float64),
+        gridforming_gen_indices=np.array(gf_indices, dtype=np.int64),
+        gridforming_gen_vm_pu=gf_vm,
+        gridforming_gen_p_mw=gf_p,
+        gridforming_gen_q_mvar=gf_q,
+        der_vm_pu_ref=der_vm_ref_z,
     )

@@ -157,7 +157,17 @@ class MIQPProblem:
                 f"G_z shape {self.G_z.shape} does not match "
                 f"expected ({self.n_outputs}, {self.n_outputs})"
             )
-        
+
+        if self.n_outputs > 0 and not np.allclose(
+            self.G_z, np.diag(np.diag(self.G_z))
+        ):
+            raise ValueError(
+                "G_z must be diagonal: the slack-detection logic in "
+                "MIQPSolver inspects only the diagonal (np.diag(G_z) > 0). "
+                "Off-diagonal entries would be ignored and silently disable "
+                "the soft-constraint branch."
+            )
+
         if len(self.grad_f) != n_total:
             raise ValueError(
                 f"grad_f length {len(self.grad_f)} does not match "

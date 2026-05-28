@@ -92,10 +92,12 @@ from numpy.typing import NDArray
 # 1-indexed label → 0-indexed: Bus N → bus (N-1).
 #
 # Zone 1 (blue/north):  Buses 01,02,25,26,27,28,29,30,37,38,39
-#   Generators: G10 (bus 29), G8 (bus 36), G9 (bus 37), slack (bus 38)
+#   Generators: G10 (bus 29), G8 (bus 36), G9 (bus 37)
+#   Slack (ext_grid) at bus 38 (IEEE standard location)
 #
 # Zone 2 (pink/south-west): Buses 03,04,05,06,07,08,09,10,11,12,13,14,31,32
-#   Generators: G2 (bus 30), G3 (bus 31)
+#   Generators: ex-slack PV gen (bus 30, grid_bus=5), G3 (bus 31, grid_bus=9)
+#   In scenario "reduced_gen_z2", the bus-30 gen is removed.
 #
 # Zone 3 (green/south-east): Buses 15,16,17,18,19,20,21,22,23,24,33,34,35,36
 #   Generators: G4 (bus 32), G5 (bus 33), G6 (bus 34), G7 (bus 35)
@@ -554,3 +556,51 @@ def get_tie_lines(
         if a_to_b or b_to_a:
             ties.append(int(li))
     return sorted(ties)
+
+
+def get_zone_tie_lines(
+    net: pp.pandapowerNet,
+    zone_buses: set,
+    other_zones_bus_lists: List[set],
+) -> List[Tuple[int, int]]:
+    """
+    Return all tie lines touching ``zone_buses`` together with their
+    endpoint bus that lies INSIDE the zone.
+
+    A "tie line" is any in-service ``net.line`` whose two endpoints belong
+    to two different zones.  This helper collects every such line where
+    *one* of the endpoints sits in ``zone_buses`` and the other sits in
+    one of the bus sets listed in ``other_zones_bus_lists``.
+
+    The returned endpoint bus (the one inside ``zone_buses``) anchors the
+    sign convention for any downstream Q_tie measurement and sensitivity:
+    Q_tie is to be measured "into the line" at that bus.
+
+    Parameters
+    ----------
+    net : pandapowerNet
+    zone_buses : set of int
+        Pandapower bus indices owned by this zone.
+    other_zones_bus_lists : List[set of int]
+        Bus sets of all other zones (one set per neighbour zone).  Each
+        set is intersected with ``net.line`` endpoints to detect ties.
+
+    Returns
+    -------
+    List of (line_idx, endpoint_bus_in_zone) pairs, sorted by line_idx.
+    Duplicate line_idx entries are de-duplicated (a line can only belong
+    to one (zone, neighbour) pair).
+    """
+    seen: Dict[int, int] = {}
+    for other in other_zones_bus_lists:
+        ties = get_tie_lines(net, zone_buses, set(other))
+        for li in ties:
+            if li in seen:
+                continue
+            fb = int(net.line.at[li, "from_bus"])
+            tb = int(net.line.at[li, "to_bus"])
+            if fb in zone_buses:
+                seen[li] = fb
+            elif tb in zone_buses:
+                seen[li] = tb
+    return sorted(seen.items(), key=lambda kv: kv[0])

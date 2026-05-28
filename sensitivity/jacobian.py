@@ -31,7 +31,7 @@ The following Sensitivities are implemented:
 ∂V/∂XXX
 -------------
 1)  ∂V/∂Q_n = J_r^{-1}                                          -> compute_dV_dQ_der()
-2)  ∂V/∂s_i (2W) = Δτ·[D₂₁ D₂₂]·(∂g/∂τ_i)                     -> compute_dV_ds()
+2)  ∂V/∂s_i (2W) = Δτ·[D₂₁ D₂₂]·(∂g/∂τ_i)                       -> compute_dV_ds()
                                                                 -> compute_dV_ds_matrix()
 2b) ∂V/∂s_i (3W) = same formulation for HV winding of 3W trafo  -> compute_dV_ds_trafo3w()
                                                                 -> compute_dV_ds_trafo3w_matrix()
@@ -190,7 +190,12 @@ class JacobianSensitivities:
         
         # Store deep copy of network state -> this is the network state all sensitivites are based on
         self.net = copy.deepcopy(net)
-        
+
+        # Re-converge without distributed_slack so the internal Jacobian has
+        # the standard [P_PV, P_PQ, Q_PQ] structure that the sensitivity code
+        # expects.  The operating point barely changes (only loss redistribution).
+        pp.runpp(self.net, run_control=False, calculate_voltage_angles=True)
+
         # Extract Jacobian from power flow solution
         self.J = np.array(self.net._ppc['internal']['J'].todense()) # ToDo: Dense or Sparse?
         
@@ -231,23 +236,23 @@ class JacobianSensitivities:
     def _compute_reduced_jacobian_inverse(self) -> NDArray[np.float64]:
         """
         Compute the reduced Jacobian inverse using the Schur complement.
-        
+
         This computes J_r^{-1} = (J_QV - J_Qθ J_Pθ^{-1} J_PV)^{-1} = ∂V/∂Q
-        
+
         This is Equation (9) from the PSCC 2026 paper.
-        
+
         Returns
         -------
         dV_dQ : NDArray[np.float64]
             Matrix of shape (n_pq, n_pq) representing ∂V/∂Q.
-        
+
         Raises
         ------
         ValueError
             If the Schur complement is singular.
         """
         n_pq_pv = len(self.pq_buses) + len(self.pv_buses)
-        
+
         # Extract Jacobian submatrices
         # J = [J_Pθ  J_PV]
         #     [J_Qθ  J_QV]
@@ -255,10 +260,10 @@ class JacobianSensitivities:
         J_PV = self.J[:n_pq_pv, n_pq_pv:]
         J_Qtheta = self.J[n_pq_pv:, :n_pq_pv]
         J_QV = self.J[n_pq_pv:, n_pq_pv:]
-        
+
         if J_Ptheta.size == 0 or J_QV.size == 0:
             raise ValueError("Invalid Jacobian structure: empty submatrices.")
-        
+
         try:
             J_Ptheta_inv = np.linalg.inv(J_Ptheta)
             schur_complement = J_QV - J_Qtheta @ J_Ptheta_inv @ J_PV
@@ -266,6 +271,122 @@ class JacobianSensitivities:
             return dV_dQ
         except np.linalg.LinAlgError as e:
             raise ValueError(f"Schur complement is singular: {e}")
+
+    # =========================================================================
+    # Sherman-Morrison rank-1 update for shunt step changes
+    # =========================================================================
+
+    def apply_shunt_step_change_smw(
+        self,
+        shunt_bus_idx: int,
+        new_step: int,
+    ) -> bool:
+        """Apply a rank-1 Sherman-Morrison update for a shunt step change.
+
+        When a shunt's susceptance changes (e.g. the TSO switches a shunt
+        from off to capacitive), the bus admittance matrix changes only
+        at one diagonal entry — specifically ``Y_bb`` at the shunt bus.
+        For a constant-susceptance shunt with no active-power component
+        (P_shunt = 0, Q_shunt = -B V²), only the ``J_QV`` diagonal entry
+        at the shunt bus changes; ``J_Pθ``, ``J_PV``, ``J_Qθ`` are
+        invariant.  Hence both the full Jacobian inverse ``J_inv`` and
+        the reduced inverse ``dV_dQ_reduced`` admit rank-1 updates via
+        Sherman-Morrison.
+
+        This method performs both updates in place and is mathematically
+        exact for the rank-1 perturbation.  No ``pp.runpp`` is called;
+        the cached operating point (V, θ) is preserved.
+
+        Parameters
+        ----------
+        shunt_bus_idx : int
+            Pandapower bus index of the shunt that changed step.
+        new_step : int
+            Post-switch step value (e.g. -1, 0, +1 for bipolar shunts).
+
+        Returns
+        -------
+        applied : bool
+            True if the update was applied; False if the step was
+            unchanged or the update was numerically degenerate (in
+            which case ``self`` is left untouched and the caller should
+            either fall back to a full rebuild or accept the staleness).
+
+        Notes
+        -----
+        Sign convention follows pandapower: ``q_mvar > 0`` with
+        ``step = +1`` is an inductor (consumes Q at the shunt bus),
+        ``step = -1`` is a capacitor (provides Q).  Equivalently, the
+        per-unit susceptance assigned to ``Y_bb`` is
+        ``B_pu = -q_mvar * step / S_base`` (negative for inductor in
+        the standard ``Y = G + jB`` convention).  The diagonal entry of
+        ``J_QV`` (= ∂(Q-mismatch)/∂V at the shunt bus) shifts by
+        ``ΔJ = +2 * V_pu * q_mvar * Δstep / S_base``.
+        """
+        # Locate the shunt row and current step
+        mask = self.net.shunt["bus"] == shunt_bus_idx
+        if not mask.any():
+            return False
+        sh_idx = int(self.net.shunt.index[mask][0])
+        old_step = int(self.net.shunt.at[sh_idx, "step"])
+        if int(new_step) == old_step:
+            return False
+        delta_step = int(new_step) - old_step
+
+        # Rated Q per step (pandapower's q_mvar at V = V_nom)
+        q_step_mvar = float(self.net.shunt.at[sh_idx, "q_mvar"])
+        s_base = float(self.net.sn_mva)
+
+        # Cached voltage magnitude at the shunt bus
+        try:
+            v_pu = float(self.net.res_bus.at[shunt_bus_idx, "vm_pu"])
+        except (KeyError, ValueError):
+            return False
+
+        # ΔJ_QV,bb at the shunt bus (pu); see method docstring
+        delta_J = 2.0 * v_pu * q_step_mvar * float(delta_step) / s_base
+        if delta_J == 0.0:
+            return False
+
+        # Map shunt bus to its position in the PQ bus ordering
+        from sensitivity.index_helper import get_jacobian_indices
+        _, v_idx = get_jacobian_indices(self.net, int(shunt_bus_idx))
+        if v_idx is None or v_idx >= self.dV_dQ_reduced.shape[0]:
+            # Shunt bus is not a PQ bus (PV or slack); cannot SMW-update.
+            return False
+        k = int(v_idx)  # row/col in dV_dQ_reduced
+
+        # SMW update of dV_dQ_reduced (shape (n_pq, n_pq))
+        # S_new = S_old + ΔJ * e_k e_k^T (where S = J_QV - J_Qθ J_Pθ^{-1} J_PV)
+        # =>  S_new^{-1} = S_old^{-1} - (u v^T) / (1/ΔJ + S_old^{-1}[k,k])
+        # where u = S_old^{-1}[:,k], v = S_old^{-1}[k,:].
+        Jr = self.dV_dQ_reduced
+        u_red = Jr[:, k].copy()
+        v_red = Jr[k, :].copy()
+        denom_red = 1.0 / delta_J + Jr[k, k]
+        if abs(denom_red) < 1e-14:
+            return False  # numerically degenerate; caller falls back
+
+        # SMW update of full J_inv (shape (n_theta + n_v, n_theta + n_v))
+        # J_new = J_old + ΔJ * e_n e_n^T at row/col n_b in the Q_PQ/V_PQ block
+        n_pv_pq = len(self.pq_buses) + len(self.pv_buses)
+        n_b = n_pv_pq + k                  # row & col in full J / J_inv
+        Jinv = self.J_inv
+        u_full = Jinv[:, n_b].copy()
+        v_full = Jinv[n_b, :].copy()
+        denom_full = 1.0 / delta_J + Jinv[n_b, n_b]
+        if abs(denom_full) < 1e-14:
+            return False
+
+        # Apply both updates atomically (no pp.runpp, no V/θ change).
+        self.dV_dQ_reduced = Jr - np.outer(u_red, v_red) / denom_red
+        self.J_inv = Jinv - np.outer(u_full, v_full) / denom_full
+        # Keep self.J consistent (one diagonal entry shift; cheap insurance).
+        self.J[n_b, n_b] = self.J[n_b, n_b] + delta_J
+
+        # Persist the new shunt step so subsequent compute_* calls see it
+        self.net.shunt.at[sh_idx, "step"] = int(new_step)
+        return True
     
     # =========================================================================
     # A. Bus Voltage to DER Reactive Power Infeed Sensitivity (Eq. 9, 10 PSCC 2026)
@@ -344,6 +465,64 @@ class JacobianSensitivities:
     # A2. Bus Voltage to PV Generator Voltage Setpoint Sensitivity
     # =========================================================================
 
+    def _compute_dg_dVgen(self, gen_bus_ppc: int) -> NDArray[np.float64]:
+        """
+        Build the mismatch-equation sensitivity vector ``∂g/∂V_k`` for a
+        change in the magnitude of a PV-bus voltage at ``gen_bus_ppc``.
+
+        The returned vector has length ``self.x_size`` and is laid out
+        in Jacobian state ordering ``[P_PV, P_PQ, Q_PQ]``.  It can be
+        propagated through ``J_inv`` to obtain the full state response
+        ``Δx = -J_inv · (∂g/∂V_k) · ΔV_k`` for any output that depends
+        on the system state.
+
+        Reused by :meth:`compute_dV_dVgen` and the line-Q endpoint
+        sensitivity helpers; do not duplicate the inline assembly.
+        """
+        bus_data = self.net._ppc['bus']
+        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
+
+        n_bus = min(bus_data.shape[0], Ybus.shape[0])
+        V_complex = bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
+
+        k = gen_bus_ppc
+
+        dP_dVk = np.zeros(n_bus)
+        dQ_dVk = np.zeros(n_bus)
+        theta = np.angle(V_complex)
+        Vm = np.abs(V_complex)
+        G = np.real(Ybus)
+        B = np.imag(Ybus)
+
+        for i in range(n_bus):
+            cos_ik = np.cos(theta[i] - theta[k])
+            sin_ik = np.sin(theta[i] - theta[k])
+            if i == k:
+                dP_dVk[i] = 2 * Vm[k] * G[k, k]
+                dQ_dVk[i] = -2 * Vm[k] * B[k, k]
+                for j in range(n_bus):
+                    if j != k:
+                        cos_kj = np.cos(theta[k] - theta[j])
+                        sin_kj = np.sin(theta[k] - theta[j])
+                        dP_dVk[i] += Vm[j] * (G[k, j] * cos_kj + B[k, j] * sin_kj)
+                        dQ_dVk[i] += Vm[j] * (G[k, j] * sin_kj - B[k, j] * cos_kj)
+            else:
+                dP_dVk[i] = Vm[i] * (G[i, k] * cos_ik + B[i, k] * sin_ik)
+                dQ_dVk[i] = Vm[i] * (G[i, k] * sin_ik - B[i, k] * cos_ik)
+
+        pv_list = list(self.pv_buses)
+        pq_list = list(self.pq_buses)
+        n_pv = len(pv_list)
+
+        dg_dVk = np.zeros(self.x_size)
+        for idx_pv, bus_pv in enumerate(pv_list):
+            dg_dVk[idx_pv] = dP_dVk[bus_pv]
+        for idx_pq, bus_pq in enumerate(pq_list):
+            dg_dVk[n_pv + idx_pq] = dP_dVk[bus_pq]
+            dg_dVk[self.n_theta + idx_pq] = dQ_dVk[bus_pq]
+
+        return dg_dVk
+
     def compute_dV_dVgen(
         self,
         gen_bus_ppc: int,
@@ -372,63 +551,8 @@ class JacobianSensitivities:
         observation_bus_mapping : List[int]
             Ordered list of observation bus indices actually included.
         """
-        bus_data = self.net._ppc['bus']
-        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
-
-        # Use the smaller of bus_data and Ybus dimensions.  Pandapower may
-        # create extra PPC buses (e.g. 3W trafo star points) that are in the
-        # bus array but not yet in Ybus if they were added after the Ybus was
-        # built.  Using Ybus.shape ensures we stay in bounds.
-        n_bus = min(bus_data.shape[0], Ybus.shape[0])
-        V_complex = bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
-
         k = gen_bus_ppc
-        V_k = V_complex[k]
-        Vm_k = np.abs(V_k)
-
-        # Build ∂g/∂V_k  (state-sized vector: [Δθ_PV, Δθ_PQ, ΔV_PQ])
-        # The power injections at every bus i depend on V_k if Y_ik ≠ 0.
-        # S_i = V_i · (Σ_j Y_ij V_j)*
-        # ∂S_i/∂Vm_k = V_i · conj(Y_ik) · exp(jθ_k)     for i ≠ k
-        # ∂S_k/∂Vm_k = (2 Vm_k conj(Y_kk) + Σ_{j≠k} V_j conj(Y_kj)) · exp(jθ_k)
-        #            ... but separating P and Q is cleaner via real-form.
-
-        # ∂P_i/∂Vm_k and ∂Q_i/∂Vm_k for all buses
-        dP_dVk = np.zeros(n_bus)
-        dQ_dVk = np.zeros(n_bus)
-        theta = np.angle(V_complex)
-        Vm = np.abs(V_complex)
-        G = np.real(Ybus)
-        B = np.imag(Ybus)
-
-        for i in range(n_bus):
-            cos_ik = np.cos(theta[i] - theta[k])
-            sin_ik = np.sin(theta[i] - theta[k])
-            if i == k:
-                # ∂P_k/∂Vm_k = 2 Vm_k G_kk + Σ_{j≠k} Vm_j (G_kj cos + B_kj sin)
-                dP_dVk[i] = 2 * Vm[k] * G[k, k]
-                dQ_dVk[i] = -2 * Vm[k] * B[k, k]
-                for j in range(n_bus):
-                    if j != k:
-                        cos_kj = np.cos(theta[k] - theta[j])
-                        sin_kj = np.sin(theta[k] - theta[j])
-                        dP_dVk[i] += Vm[j] * (G[k, j] * cos_kj + B[k, j] * sin_kj)
-                        dQ_dVk[i] += Vm[j] * (G[k, j] * sin_kj - B[k, j] * cos_kj)
-            else:
-                dP_dVk[i] = Vm[i] * (G[i, k] * cos_ik + B[i, k] * sin_ik)
-                dQ_dVk[i] = Vm[i] * (G[i, k] * sin_ik - B[i, k] * cos_ik)
-
-        # Map to Jacobian ordering: [P_PV, P_PQ, Q_PQ]
-        pv_list = list(self.pv_buses)
-        pq_list = list(self.pq_buses)
-
-        dg_dVk = np.zeros(self.x_size)
-        for idx_pv, bus_pv in enumerate(pv_list):
-            dg_dVk[idx_pv] = dP_dVk[bus_pv]
-        n_pv = len(pv_list)
-        for idx_pq, bus_pq in enumerate(pq_list):
-            dg_dVk[n_pv + idx_pq] = dP_dVk[bus_pq]
-            dg_dVk[self.n_theta + idx_pq] = dQ_dVk[bus_pq]
+        dg_dVk = self._compute_dg_dVgen(k)
 
         # Δx = -J⁻¹ · ∂g/∂V_k
         dx_dVk = -self.J_inv @ dg_dVk
@@ -2012,7 +2136,15 @@ class JacobianSensitivities:
         n_t3w = len(trafo3w_indices)
         n_der = len(der_bus_indices)
         if n_t3w == 0 or n_der == 0:
-            return np.zeros((n_t3w, n_der)), [], []
+            # Always return the full trafo3w_indices map even when no DERs
+            # are passed; downstream loops in build_sensitivity_matrix_H
+            # use the same map to size the Q_trafo3w row block for shunt
+            # and OLTC actuators.
+            return (
+                np.zeros((n_t3w, n_der)),
+                list(trafo3w_indices),
+                list(der_bus_indices),
+            )
 
         matrix = np.zeros((n_t3w, n_der))
         t3w_map = list(trafo3w_indices)
@@ -2324,6 +2456,1056 @@ class JacobianSensitivities:
                 )
 
         return matrix, list(trafo3w_indices), list(gen_bus_indices_pp)
+
+    # =========================================================================
+    # G. Gen-bus Reactive Power Sensitivities (Q_gen as dependent output)
+    # =========================================================================
+    #
+    # For a PV generator bus k, the injected reactive power Q_gen,k is a
+    # dependent quantity of the power-flow solution:
+    #
+    #     Q_gen,k = V_k · Σ_j V_j · (G_kj sin(θ_k-θ_j) − B_kj cos(θ_k-θ_j))
+    #
+    # The sensitivity of Q_gen,k to any control input u propagates through
+    # the cached Jacobian:  dQ_gen,k/du = (∂Q_gen,k/∂x) · (∂x/∂u).  See
+    # compute_dQtrafo3w_hv_* for the same pattern applied to transformer Q.
+    # =========================================================================
+
+    def _compute_dQgen_dx(self, gen_bus_ppc: int) -> NDArray[np.float64]:
+        """Sensitivity of Q injected at PV bus k to state x = [θ_PV, θ_PQ, V_PQ].
+
+        V_k at the PV bus itself is NOT in x (held at setpoint), so its
+        direct contribution is handled separately by callers that perturb
+        V_gen_set.  The returned vector only contains entries on state
+        variables that the power flow treats as unknowns.
+        """
+        bus_data = self.net._ppc['bus']
+        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
+        n_bus = min(bus_data.shape[0], Ybus.shape[0])
+        V_complex = (
+            bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
+        )
+        Vm = np.abs(V_complex)
+        theta = np.angle(V_complex)
+        G = np.real(Ybus)
+        B = np.imag(Ybus)
+
+        k = gen_bus_ppc
+        V_k = Vm[k]
+
+        dQ_dtheta = np.zeros(n_bus)
+        dQ_dV = np.zeros(n_bus)
+
+        for i in range(n_bus):
+            if i == k:
+                # dQ_k/dθ_k = V_k Σ_{j≠k} V_j (G_kj cos + B_kj sin)
+                s = 0.0
+                for j in range(n_bus):
+                    if j != k:
+                        cos_kj = np.cos(theta[k] - theta[j])
+                        sin_kj = np.sin(theta[k] - theta[j])
+                        s += Vm[j] * (G[k, j] * cos_kj + B[k, j] * sin_kj)
+                dQ_dtheta[i] = V_k * s
+                # dQ_k/dV_k (used only for the direct term in compute_dQgen_dVgen)
+                dQ_dV[i] = -2.0 * V_k * B[k, k]
+                for j in range(n_bus):
+                    if j != k:
+                        cos_kj = np.cos(theta[k] - theta[j])
+                        sin_kj = np.sin(theta[k] - theta[j])
+                        dQ_dV[i] += Vm[j] * (G[k, j] * sin_kj - B[k, j] * cos_kj)
+            else:
+                cos_ki = np.cos(theta[k] - theta[i])
+                sin_ki = np.sin(theta[k] - theta[i])
+                dQ_dtheta[i] = V_k * Vm[i] * (-G[k, i] * cos_ki - B[k, i] * sin_ki)
+                dQ_dV[i] = V_k * (G[k, i] * sin_ki - B[k, i] * cos_ki)
+
+        pv_list = list(self.pv_buses)
+        pq_list = list(self.pq_buses)
+        n_pv = len(pv_list)
+
+        dQ_dx = np.zeros(self.x_size)
+        for idx_pv, bus_pv in enumerate(pv_list):
+            dQ_dx[idx_pv] = dQ_dtheta[bus_pv]
+        for idx_pq, bus_pq in enumerate(pq_list):
+            dQ_dx[n_pv + idx_pq] = dQ_dtheta[bus_pq]
+            dQ_dx[self.n_theta + idx_pq] = dQ_dV[bus_pq]
+
+        return dQ_dx
+
+    def _compute_dg_dVk(
+        self, gen_bus_ppc: int,
+    ) -> Tuple[NDArray[np.float64], float]:
+        """Mismatch derivative ∂g/∂V_k for a PV bus k, plus the self term ∂Q_k/∂V_k.
+
+        Mirrors the construction inside ``compute_dV_dVgen``.  Separated
+        here so ``compute_dQgen_dVgen_matrix`` can reuse the same ∂g/∂V_k
+        and the direct diagonal term ∂Q_k/∂V_k needed when the measurement
+        generator coincides with the setpoint-change generator.
+        """
+        bus_data = self.net._ppc['bus']
+        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
+        n_bus = min(bus_data.shape[0], Ybus.shape[0])
+        V_complex = (
+            bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
+        )
+        Vm = np.abs(V_complex)
+        theta = np.angle(V_complex)
+        G = np.real(Ybus)
+        B = np.imag(Ybus)
+
+        k = gen_bus_ppc
+        dP_dVk = np.zeros(n_bus)
+        dQ_dVk = np.zeros(n_bus)
+        for i in range(n_bus):
+            cos_ik = np.cos(theta[i] - theta[k])
+            sin_ik = np.sin(theta[i] - theta[k])
+            if i == k:
+                dP_dVk[i] = 2.0 * Vm[k] * G[k, k]
+                dQ_dVk[i] = -2.0 * Vm[k] * B[k, k]
+                for j in range(n_bus):
+                    if j != k:
+                        cos_kj = np.cos(theta[k] - theta[j])
+                        sin_kj = np.sin(theta[k] - theta[j])
+                        dP_dVk[i] += Vm[j] * (G[k, j] * cos_kj + B[k, j] * sin_kj)
+                        dQ_dVk[i] += Vm[j] * (G[k, j] * sin_kj - B[k, j] * cos_kj)
+            else:
+                dP_dVk[i] = Vm[i] * (G[i, k] * cos_ik + B[i, k] * sin_ik)
+                dQ_dVk[i] = Vm[i] * (G[i, k] * sin_ik - B[i, k] * cos_ik)
+
+        pv_list = list(self.pv_buses)
+        pq_list = list(self.pq_buses)
+        n_pv = len(pv_list)
+        dg_dVk = np.zeros(self.x_size)
+        for idx_pv, bus_pv in enumerate(pv_list):
+            dg_dVk[idx_pv] = dP_dVk[bus_pv]
+        for idx_pq, bus_pq in enumerate(pq_list):
+            dg_dVk[n_pv + idx_pq] = dP_dVk[bus_pq]
+            dg_dVk[self.n_theta + idx_pq] = dQ_dVk[bus_pq]
+
+        return dg_dVk, float(dQ_dVk[k])
+
+    def _compute_dg_dtau_2w(
+        self, trafo_idx: int,
+    ) -> Tuple[NDArray[np.float64], float, Dict[int, float]]:
+        """Mismatch derivative ∂g/∂τ for a 2-winding transformer tap ratio.
+
+        Returns ``(dg_dtau, delta_tau, dQ_direct)`` where:
+
+        * ``dg_dtau`` / ``delta_tau`` let callers form the indirect
+          state response ``dx/ds = -J⁻¹ (∂g/∂τ) Δτ``.
+        * ``dQ_direct`` is a ``{pandapower_bus_idx: dQ/dτ}`` dict for the
+          two trafo endpoints.  Callers observing Q at a PV bus must add
+          this direct term because V at a PV bus is not in x, so the
+          indirect chain rule misses the τ-dependence of Q at the PV
+          bus's own power balance equation.
+        """
+        if trafo_idx not in self.net.trafo.index:
+            raise ValueError(f"Transformer {trafo_idx} not found in network.")
+        ppc_br_idx = get_ppc_trafo_index(self.net, trafo_idx)
+        if ppc_br_idx is None:
+            raise ValueError(
+                f"Could not find pypower branch index for transformer {trafo_idx}."
+            )
+
+        hv_bus = self.net.trafo.at[trafo_idx, 'hv_bus']
+        lv_bus = self.net.trafo.at[trafo_idx, 'lv_bus']
+
+        V_i = self.net.res_bus.at[hv_bus, 'vm_pu']
+        V_j = self.net.res_bus.at[lv_bus, 'vm_pu']
+        theta_i = np.deg2rad(self.net.res_bus.at[hv_bus, 'va_degree'])
+        theta_j = np.deg2rad(self.net.res_bus.at[lv_bus, 'va_degree'])
+        theta = theta_i - theta_j
+
+        s0 = self.net.trafo.at[trafo_idx, 'tap_pos']
+        delta_tau = self.net.trafo.at[trafo_idx, 'tap_step_percent'] / 100.0
+        tau = 1.0 + s0 * delta_tau
+
+        r_pu = self.net._ppc['branch'][ppc_br_idx, 2]
+        x_pu = self.net._ppc['branch'][ppc_br_idx, 3]
+        y_pu = 1.0 / complex(r_pu, x_pu)
+        g = y_pu.real
+        b = y_pu.imag
+
+        theta_i_idx, v_i_idx = get_jacobian_indices(self.net, hv_bus)
+        theta_j_idx, v_j_idx = get_jacobian_indices(self.net, lv_bus)
+        if theta_i_idx is None or theta_j_idx is None:
+            raise ValueError("Could not find Jacobian indices for transformer buses.")
+
+        dg_dtau = np.zeros(self.x_size)
+        dPi_dtau = (
+            V_i * V_j * (g * np.cos(theta) + b * np.sin(theta)) / tau**2
+            - 2 * g * V_i**2 / tau**3
+        )
+        dPj_dtau = V_j * V_i * (g * np.cos(theta) - b * np.sin(theta)) / tau**2
+        dQi_dtau = (
+            V_i * V_j * (g * np.sin(theta) - b * np.cos(theta)) / tau**2
+            + 2 * b * V_i**2 / tau**3
+        )
+        dQj_dtau = V_j * V_i * (-g * np.sin(theta) - b * np.cos(theta)) / tau**2
+
+        if theta_i_idx is not None:
+            dg_dtau[theta_i_idx] += dPi_dtau
+        if theta_j_idx is not None:
+            dg_dtau[theta_j_idx] += dPj_dtau
+        if v_i_idx is not None:
+            dg_dtau[self.n_theta + v_i_idx] += dQi_dtau
+        if v_j_idx is not None and (self.n_theta + v_j_idx) < self.x_size:
+            dg_dtau[self.n_theta + v_j_idx] += dQj_dtau
+
+        dQ_direct = {int(hv_bus): float(dQi_dtau), int(lv_bus): float(dQj_dtau)}
+        return dg_dtau, float(delta_tau), dQ_direct
+
+    def compute_dQgen_dQder_matrix(
+        self,
+        gen_bus_indices_pp: List[int],
+        der_bus_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """∂Q_gen / ∂Q_DER for multiple generator buses (PV) and DER buses (PQ).
+
+        Returns
+        -------
+        matrix : NDArray[np.float64]
+            Shape ``(n_gen, n_der)``, units [Mvar/Mvar].
+        gen_bus_mapping : List[int]
+        der_bus_mapping : List[int]
+        """
+        n_gen = len(gen_bus_indices_pp)
+        n_der = len(der_bus_indices)
+        if n_gen == 0 or n_der == 0:
+            return np.zeros((n_gen, n_der)), list(gen_bus_indices_pp), list(der_bus_indices)
+
+        # Cache dQ_gen,k/dx for each generator bus
+        dQgen_dx_cache = np.zeros((n_gen, self.x_size))
+        for i, gen_bus_pp in enumerate(gen_bus_indices_pp):
+            gen_bus_ppc = pp_bus_to_ppc_bus(self.net, gen_bus_pp)
+            dQgen_dx_cache[i, :] = self._compute_dQgen_dx(gen_bus_ppc)
+
+        # For each DER bus (PQ), dx/dQ_der = +J_inv[:, n_theta + v_der_jac]
+        # Sign: consistent with dV_dQ_reduced (the PQ-block of J_inv^T ≡ D).
+        matrix = np.zeros((n_gen, n_der))
+        for j, der_bus in enumerate(der_bus_indices):
+            ppc_der = pp_bus_to_ppc_bus(self.net, der_bus)
+            _, v_der_jac = get_jacobian_indices_ppc(self.net, ppc_der)
+            if v_der_jac is None or v_der_jac >= self.n_v:
+                continue  # slack or PV bus — no Q perturbation makes sense
+            dx_dQder = self.J_inv[:, self.n_theta + v_der_jac]
+            matrix[:, j] = dQgen_dx_cache @ dx_dQder
+
+        return matrix, list(gen_bus_indices_pp), list(der_bus_indices)
+
+    def compute_dQgen_dVgen_matrix(
+        self,
+        gen_bus_indices_pp_meas: List[int],
+        gen_bus_indices_pp_chg: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """∂Q_gen_meas / ∂V_gen_chg for multiple measurement/setpoint gens.
+
+        Includes:
+
+        * Indirect term:  ``(∂Q_meas/∂x) · (-J⁻¹) · (∂g/∂V_chg)``
+        * Direct term (only when measurement gen == setpoint gen):
+          ``∂Q_k/∂V_k`` (diagonal self-contribution, not captured by x
+          because V at a PV bus is not a state variable).
+
+        Returns
+        -------
+        matrix : NDArray[np.float64]
+            Shape ``(n_meas, n_chg)``, units [Mvar/p.u.].
+        meas_mapping, chg_mapping : List[int]
+        """
+        n_meas = len(gen_bus_indices_pp_meas)
+        n_chg = len(gen_bus_indices_pp_chg)
+        if n_meas == 0 or n_chg == 0:
+            return np.zeros((n_meas, n_chg)), list(gen_bus_indices_pp_meas), list(gen_bus_indices_pp_chg)
+
+        # Cache dQ_gen,meas/dx for each measurement generator
+        meas_ppc = [
+            pp_bus_to_ppc_bus(self.net, gb) for gb in gen_bus_indices_pp_meas
+        ]
+        dQgen_dx_cache = np.zeros((n_meas, self.x_size))
+        for i, ppc in enumerate(meas_ppc):
+            dQgen_dx_cache[i, :] = self._compute_dQgen_dx(ppc)
+
+        matrix = np.zeros((n_meas, n_chg))
+        for j, chg_bus_pp in enumerate(gen_bus_indices_pp_chg):
+            chg_ppc = pp_bus_to_ppc_bus(self.net, chg_bus_pp)
+            dg_dVl, dQl_dVl = self._compute_dg_dVk(chg_ppc)
+            dx_dVl = -self.J_inv @ dg_dVl
+            # Indirect contribution for all measurement gens
+            matrix[:, j] = dQgen_dx_cache @ dx_dVl
+            # Direct term: matching meas bus picks up the diagonal self-term
+            for i, meas in enumerate(meas_ppc):
+                if meas == chg_ppc:
+                    matrix[i, j] += dQl_dVl
+
+        return matrix, list(gen_bus_indices_pp_meas), list(gen_bus_indices_pp_chg)
+
+    def compute_dQgen_ds_2w_matrix(
+        self,
+        gen_bus_indices_pp: List[int],
+        oltc_trafo_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """∂Q_gen / ∂s for multiple gens and 2W OLTC transformers.
+
+        Returns a matrix of shape ``(n_gen, n_oltc)`` in [Mvar per tap step].
+        Transformers not found in ``net.trafo`` contribute a zero column
+        (same graceful handling as ``build_sensitivity_matrix_H``).
+        """
+        n_gen = len(gen_bus_indices_pp)
+        n_oltc = len(oltc_trafo_indices)
+        if n_gen == 0 or n_oltc == 0:
+            return (
+                np.zeros((n_gen, n_oltc)),
+                list(gen_bus_indices_pp),
+                list(oltc_trafo_indices),
+            )
+
+        dQgen_dx_cache = np.zeros((n_gen, self.x_size))
+        for i, gb in enumerate(gen_bus_indices_pp):
+            ppc = pp_bus_to_ppc_bus(self.net, gb)
+            dQgen_dx_cache[i, :] = self._compute_dQgen_dx(ppc)
+
+        matrix = np.zeros((n_gen, n_oltc))
+        for j, t_idx in enumerate(oltc_trafo_indices):
+            try:
+                dg_dtau, delta_tau, dQ_direct = self._compute_dg_dtau_2w(t_idx)
+            except ValueError:
+                continue
+            dx_ds = -self.J_inv @ dg_dtau * delta_tau
+            matrix[:, j] = dQgen_dx_cache @ dx_ds
+            # Direct term: Q_calc at a trafo endpoint bus has an explicit
+            # τ-dependence through the branch equation that is not captured
+            # by the indirect chain ``dQgen_dx · dx/dτ``.  Add it when a
+            # generator sits at one of this trafo's endpoints.
+            for i, gb in enumerate(gen_bus_indices_pp):
+                if int(gb) in dQ_direct:
+                    matrix[i, j] += dQ_direct[int(gb)] * delta_tau
+
+        return matrix, list(gen_bus_indices_pp), list(oltc_trafo_indices)
+
+    def compute_dQgen_ds_3w_matrix(
+        self,
+        gen_bus_indices_pp: List[int],
+        oltc_trafo3w_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """∂Q_gen / ∂s for multiple gens and 3W OLTC transformers.
+
+        Reuses ``_compute_dg_dtau_3w`` and the HV-branch data helper.
+        Returns a matrix of shape ``(n_gen, n_oltc3w)`` in [Mvar per tap step].
+        """
+        n_gen = len(gen_bus_indices_pp)
+        n_oltc3w = len(oltc_trafo3w_indices)
+        if n_gen == 0 or n_oltc3w == 0:
+            return (
+                np.zeros((n_gen, n_oltc3w)),
+                list(gen_bus_indices_pp),
+                list(oltc_trafo3w_indices),
+            )
+
+        dQgen_dx_cache = np.zeros((n_gen, self.x_size))
+        for i, gb in enumerate(gen_bus_indices_pp):
+            ppc = pp_bus_to_ppc_bus(self.net, gb)
+            dQgen_dx_cache[i, :] = self._compute_dQgen_dx(ppc)
+
+        matrix = np.zeros((n_gen, n_oltc3w))
+        for j, t3w_idx in enumerate(oltc_trafo3w_indices):
+            try:
+                d = _get_trafo3w_hv_branch_data(self.net, t3w_idx)
+                dg_dtau = self._compute_dg_dtau_3w(d)
+                delta_tau = d['delta_tau']
+            except (ValueError, KeyError):
+                continue
+            dx_ds = -self.J_inv @ dg_dtau * delta_tau
+            matrix[:, j] = dQgen_dx_cache @ dx_ds
+
+        return matrix, list(gen_bus_indices_pp), list(oltc_trafo3w_indices)
+
+    def compute_dQgen_dQ_shunt_matrix(
+        self,
+        gen_bus_indices_pp: List[int],
+        shunt_bus_indices: List[int],
+        shunt_q_steps_mvar: List[float],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """∂Q_gen / ∂s_shunt for multiple gens and shunt buses.
+
+        A switchable shunt is modelled as a constant-susceptance device:
+        the Q injected per state step is ``q_step · V_bus²`` and the sign
+        is load-convention (negated relative to DER-Q convention).  This
+        mirrors ``compute_dQtrafo3w_hv_dQ_shunt``.
+
+        Returns a matrix of shape ``(n_gen, n_shunt)`` in [Mvar per state step].
+        """
+        n_gen = len(gen_bus_indices_pp)
+        n_shunt = len(shunt_bus_indices)
+        if n_gen == 0 or n_shunt == 0:
+            return (
+                np.zeros((n_gen, n_shunt)),
+                list(gen_bus_indices_pp),
+                list(shunt_bus_indices),
+            )
+        if len(shunt_q_steps_mvar) != n_shunt:
+            raise ValueError(
+                "shunt_bus_indices and shunt_q_steps_mvar must have equal length."
+            )
+
+        # Start from ∂Q_gen/∂Q at shunt buses (treating shunts as pseudo-DERs)
+        base_matrix, _, _ = self.compute_dQgen_dQder_matrix(
+            gen_bus_indices_pp, shunt_bus_indices,
+        )
+        matrix = np.zeros_like(base_matrix)
+        for j, shunt_bus in enumerate(shunt_bus_indices):
+            V_pu = self.net.res_bus.at[shunt_bus, 'vm_pu']
+            # Shunt Q is load-convention: negate for injection sign.
+            matrix[:, j] = -base_matrix[:, j] * shunt_q_steps_mvar[j] * V_pu**2
+
+        return matrix, list(gen_bus_indices_pp), list(shunt_bus_indices)
+
+    # =========================================================================
+    # H. PQ-mode (AVR saturation) variants of V_gen sensitivity columns
+    # =========================================================================
+    #
+    # When an AVR saturates (rotor/stator/under-excitation limit), the gen
+    # bus behaves as PQ (Q fixed at the reached limit, V free) rather than
+    # PV.  In the saturated regime, a V_gen setpoint move in the saturating
+    # direction has no effect on network state.  The asymmetric bound clamp
+    # (controller side) prevents motion in the saturating direction; the
+    # de-saturating direction is captured at the next iteration's mode
+    # reclassification.  We therefore zero the V_gen column for saturated
+    # generators — sidestepping a Schur-complement rebuild of the reduced
+    # Jacobian for a mixed PV/PQ state.
+    # =========================================================================
+
+    def compute_dV_dVgen_matrix_pqmode(
+        self,
+        gen_bus_indices_pp: List[int],
+        observation_bus_indices: List[int],
+        mode_vector: Optional[NDArray[np.int8]] = None,
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """Like :meth:`compute_dV_dVgen_matrix` but zeros the column for
+        any generator flagged as saturated in ``mode_vector`` (mode != 0).
+        """
+        matrix, obs_map, gen_map = self.compute_dV_dVgen_matrix(
+            gen_bus_indices_pp, observation_bus_indices,
+        )
+        if mode_vector is not None:
+            for j in range(min(len(mode_vector), matrix.shape[1])):
+                if mode_vector[j] != 0:
+                    matrix[:, j] = 0.0
+        return matrix, obs_map, gen_map
+
+    def compute_dI_dVgen_matrix_pqmode(
+        self,
+        line_indices: List[int],
+        gen_bus_indices_pp: List[int],
+        mode_vector: Optional[NDArray[np.int8]] = None,
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """PQ-mode variant of :meth:`compute_dI_dVgen_matrix`."""
+        matrix, line_map, gen_map = self.compute_dI_dVgen_matrix(
+            line_indices, gen_bus_indices_pp,
+        )
+        if mode_vector is not None:
+            for j in range(min(len(mode_vector), matrix.shape[1])):
+                if mode_vector[j] != 0:
+                    matrix[:, j] = 0.0
+        return matrix, line_map, gen_map
+
+    def compute_dQgen_dVgen_matrix_pqmode(
+        self,
+        gen_bus_indices_pp_meas: List[int],
+        gen_bus_indices_pp_chg: List[int],
+        mode_vector: Optional[NDArray[np.int8]] = None,
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """PQ-mode variant of :meth:`compute_dQgen_dVgen_matrix`.
+
+        The mode vector aligns with the *chg* (setpoint-change) generator
+        ordering: the V_gen column for saturated gens is zeroed.
+        """
+        matrix, meas_map, chg_map = self.compute_dQgen_dVgen_matrix(
+            gen_bus_indices_pp_meas, gen_bus_indices_pp_chg,
+        )
+        if mode_vector is not None:
+            for j in range(min(len(mode_vector), matrix.shape[1])):
+                if mode_vector[j] != 0:
+                    matrix[:, j] = 0.0
+        return matrix, meas_map, chg_map
+
+    # =========================================================================
+    # I. Line Q Endpoint Sensitivities (Phase A: Q_tie monitoring)
+    # =========================================================================
+    #
+    # Pi-model reactive power at one endpoint of a line, measured "into the
+    # line" (load convention from the endpoint bus's perspective):
+    #
+    #     Q_endp = -(b + b_sh/2) * U_endp^2
+    #              + U_endp * U_other * (b * cos(theta_local) - g * sin(theta_local))
+    #
+    # where theta_local = theta_endp - theta_other (radians), g + jb = 1/(R + jX),
+    # and b_sh is the full per-unit shunt susceptance (the Pi-model puts B/2 at
+    # each endpoint).
+    #
+    # The formula is identical for endpoint = from_bus and endpoint = to_bus when
+    # parameterised with the local theta convention above (cos is even, sin is odd
+    # so swapping endpoints flips the sign of theta_local AND the sign of g*sin).
+    #
+    # Sign convention: positive Q_endp = reactive power flowing FROM the endpoint
+    # bus INTO the line.
+
+    def _line_endpoint_partials(
+        self,
+        line_idx: int,
+        endpoint_bus: int,
+    ) -> Tuple[float, float, float, float, int]:
+        """
+        Pi-model partial derivatives of Q at one endpoint of a line.
+
+        Parameters
+        ----------
+        line_idx : int
+            Pandapower line index.
+        endpoint_bus : int
+            Pandapower bus index of the endpoint where Q is measured
+            (must equal either ``from_bus`` or ``to_bus`` of the line).
+
+        Returns
+        -------
+        dQ_dU_endp, dQ_dU_other, dQ_dtheta_endp, dQ_dtheta_other : float
+            Partial derivatives of Q_endpoint with respect to the
+            endpoint and other-bus voltage magnitudes [pu] and
+            angles [rad].  Q is in pu (multiply by sn_mva for Mvar).
+        other_bus : int
+            Pandapower bus index of the OTHER endpoint of the line.
+        """
+        if line_idx not in self.net.line.index:
+            raise ValueError(f"Line {line_idx} not found in network.")
+
+        from_bus = int(self.net.line.at[line_idx, 'from_bus'])
+        to_bus = int(self.net.line.at[line_idx, 'to_bus'])
+        if int(endpoint_bus) == from_bus:
+            other = to_bus
+        elif int(endpoint_bus) == to_bus:
+            other = from_bus
+        else:
+            raise ValueError(
+                f"Endpoint bus {endpoint_bus} matches neither from_bus "
+                f"({from_bus}) nor to_bus ({to_bus}) of line {line_idx}."
+            )
+
+        U_endp = float(self.net.res_bus.at[int(endpoint_bus), 'vm_pu'])
+        U_other = float(self.net.res_bus.at[other, 'vm_pu'])
+        theta_endp = float(np.deg2rad(self.net.res_bus.at[int(endpoint_bus), 'va_degree']))
+        theta_other = float(np.deg2rad(self.net.res_bus.at[other, 'va_degree']))
+        theta_local = theta_endp - theta_other
+
+        line_start = self.net._pd2ppc_lookups['branch']['line'][0]
+        pos = list(self.net.line.index).index(line_idx)
+        ppc_line_idx = line_start + pos
+
+        r_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 2]))
+        x_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 3]))
+        # Pandapower stores the FULL line shunt susceptance in column 4 of the
+        # ppc branch row.  Pi-model places B/2 at each endpoint.
+        b_sh_pu = float(np.real(self.net._ppc['branch'][ppc_line_idx, 4]))
+        y = 1.0 / complex(r_pu, x_pu)
+        g = y.real
+        b = y.imag
+
+        cos_t = np.cos(theta_local)
+        sin_t = np.sin(theta_local)
+
+        dQ_dU_endp = (
+            -2.0 * (b + b_sh_pu / 2.0) * U_endp
+            + U_other * (b * cos_t - g * sin_t)
+        )
+        dQ_dU_other = U_endp * (b * cos_t - g * sin_t)
+        dQ_dtheta_endp = U_endp * U_other * (-b * sin_t - g * cos_t)
+        dQ_dtheta_other = -dQ_dtheta_endp
+
+        return dQ_dU_endp, dQ_dU_other, dQ_dtheta_endp, dQ_dtheta_other, other
+
+    def compute_dQ_line_dQ_der(
+        self,
+        line_idx: int,
+        endpoint_bus: int,
+        der_bus_idx: int,
+    ) -> float:
+        """
+        Compute line endpoint Q sensitivity to DER reactive power injection.
+
+        Chain rule via the cached full Jacobian (V magnitude AND voltage
+        angle paths):
+
+            dQ_endp/dQ_DER = sum_x (∂Q_endp/∂x_endp) · (dx_endp/dQ_DER)
+                           + sum_x (∂Q_endp/∂x_other) · (dx_other/dQ_DER)
+
+        where x ∈ {U, theta} and the state sensitivities come from
+        ``dV_dQ_reduced`` (for U) and ``J_inv`` (for theta) at the
+        cached operating point.
+
+        Parameters
+        ----------
+        line_idx : int
+            Pandapower line index of the tie line.
+        endpoint_bus : int
+            Endpoint bus inside the monitoring zone (sign anchor).
+        der_bus_idx : int
+            Pandapower bus index of the DER (must be a PQ bus).
+
+        Returns
+        -------
+        sensitivity : float
+            ∂Q_endp/∂Q_DER  [Mvar/Mvar, dimensionless].
+
+        Raises
+        ------
+        ValueError
+            If indices are out of range or DER bus is not a PQ bus.
+        """
+        dQ_dU_endp, dQ_dU_other, dQ_dtheta_endp, dQ_dtheta_other, other = (
+            self._line_endpoint_partials(line_idx, endpoint_bus)
+        )
+
+        _, v_der_idx = get_jacobian_indices(self.net, der_bus_idx)
+        if v_der_idx is None:
+            raise ValueError(
+                f"DER bus {der_bus_idx} must be a PQ bus to compute Q "
+                f"injection sensitivity."
+            )
+
+        theta_endp_idx, v_endp_idx = get_jacobian_indices(self.net, int(endpoint_bus))
+        theta_other_idx, v_other_idx = get_jacobian_indices(self.net, other)
+
+        col_q_der = self.n_theta + v_der_idx
+
+        # State sensitivities at the endpoint bus
+        dU_endp = (
+            self.dV_dQ_reduced[v_endp_idx, v_der_idx]
+            if v_endp_idx is not None else 0.0
+        )
+        dU_other = (
+            self.dV_dQ_reduced[v_other_idx, v_der_idx]
+            if v_other_idx is not None else 0.0
+        )
+        dtheta_endp = (
+            self.J_inv[theta_endp_idx, col_q_der]
+            if theta_endp_idx is not None else 0.0
+        )
+        dtheta_other = (
+            self.J_inv[theta_other_idx, col_q_der]
+            if theta_other_idx is not None else 0.0
+        )
+
+        return (
+            dQ_dU_endp * dU_endp
+            + dQ_dU_other * dU_other
+            + dQ_dtheta_endp * dtheta_endp
+            + dQ_dtheta_other * dtheta_other
+        )
+
+    def compute_dQ_line_dQ_der_matrix(
+        self,
+        tie_line_indices: List[int],
+        tie_line_endpoint_buses: List[int],
+        der_bus_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """
+        Vectorised wrapper around :meth:`compute_dQ_line_dQ_der`.
+
+        Parameters
+        ----------
+        tie_line_indices : List[int]
+            Tie-line indices, one per output row.
+        tie_line_endpoint_buses : List[int]
+            In-zone endpoint bus per tie line (same length).
+        der_bus_indices : List[int]
+            DER bus indices, one per input column.
+
+        Returns
+        -------
+        sensitivity_matrix : NDArray[np.float64]
+            Shape (n_tie, n_der) where entry (i, j) is
+            ∂Q_tie_i/∂Q_DER_j.
+        line_mapping : List[int]
+            Line indices in row order.
+        der_bus_mapping : List[int]
+            DER bus indices in column order.
+        """
+        n_tie = len(tie_line_indices)
+        n_der = len(der_bus_indices)
+        if n_tie == 0 or n_der == 0:
+            return np.zeros((n_tie, n_der)), list(tie_line_indices), list(der_bus_indices)
+        if len(tie_line_endpoint_buses) != n_tie:
+            raise ValueError(
+                "tie_line_endpoint_buses length must match tie_line_indices length."
+            )
+
+        sensitivity_matrix = np.zeros((n_tie, n_der), dtype=np.float64)
+        for i, (li, endp) in enumerate(zip(tie_line_indices, tie_line_endpoint_buses)):
+            for j, der_bus in enumerate(der_bus_indices):
+                try:
+                    sensitivity_matrix[i, j] = self.compute_dQ_line_dQ_der(
+                        line_idx=li,
+                        endpoint_bus=endp,
+                        der_bus_idx=der_bus,
+                    )
+                except ValueError:
+                    sensitivity_matrix[i, j] = 0.0
+
+        return sensitivity_matrix, list(tie_line_indices), list(der_bus_indices)
+
+    def compute_dQ_line_2w_ds(
+        self,
+        line_idx: int,
+        endpoint_bus: int,
+        chg_trafo_idx: int,
+    ) -> float:
+        """
+        Compute line endpoint Q sensitivity to a 2W OLTC tap change.
+
+        Uses the indirect-effect chain rule:
+
+            dQ_endp/ds = ∂Q_endp/∂x · (dx/ds)
+
+        where ``dx/ds = -J_inv · (dg/dtau) · delta_tau`` is the
+        full state response to a tap step (same primitive used by
+        :meth:`compute_dI_ds_2w` and :meth:`compute_dQtrafo_2w_ds`).
+
+        There is no direct effect on Q at a *line* endpoint from a *trafo*
+        OLTC (the line's series admittance does not depend on the OLTC tap).
+
+        Parameters
+        ----------
+        line_idx : int
+        endpoint_bus : int
+        chg_trafo_idx : int
+            ``net.trafo`` index of the OLTC.
+
+        Returns
+        -------
+        sensitivity : float
+            ∂Q_endp/∂s  [Mvar per tap step].
+        """
+        if chg_trafo_idx not in self.net.trafo.index:
+            raise ValueError(f"Transformer {chg_trafo_idx} not found.")
+
+        dQ_dU_endp, dQ_dU_other, dQ_dtheta_endp, dQ_dtheta_other, other = (
+            self._line_endpoint_partials(line_idx, endpoint_bus)
+        )
+
+        ppc_br_idx = get_ppc_trafo_index(self.net, chg_trafo_idx)
+        if ppc_br_idx is None:
+            raise ValueError(
+                f"Could not find pypower index for transformer {chg_trafo_idx}."
+            )
+
+        hv_bus_chg = self.net.trafo.at[chg_trafo_idx, 'hv_bus']
+        lv_bus_chg = self.net.trafo.at[chg_trafo_idx, 'lv_bus']
+        V_i_chg = self.net.res_bus.at[hv_bus_chg, 'vm_pu']
+        V_j_chg = self.net.res_bus.at[lv_bus_chg, 'vm_pu']
+        theta_chg = (
+            np.deg2rad(self.net.res_bus.at[hv_bus_chg, 'va_degree'])
+            - np.deg2rad(self.net.res_bus.at[lv_bus_chg, 'va_degree'])
+        )
+        s0_chg = self.net.trafo.at[chg_trafo_idx, 'tap_pos']
+        delta_tau_chg = self.net.trafo.at[chg_trafo_idx, 'tap_step_percent'] / 100.0
+        tau_chg = 1.0 + s0_chg * delta_tau_chg
+
+        r_pu_chg = self.net._ppc['branch'][ppc_br_idx, 2]
+        x_pu_chg = self.net._ppc['branch'][ppc_br_idx, 3]
+        y_pu_chg = 1.0 / complex(r_pu_chg, x_pu_chg)
+        g_chg = y_pu_chg.real
+        b_chg = y_pu_chg.imag
+
+        theta_i_idx_chg, v_i_idx_chg = get_jacobian_indices(self.net, hv_bus_chg)
+        theta_j_idx_chg, v_j_idx_chg = get_jacobian_indices(self.net, lv_bus_chg)
+        if theta_i_idx_chg is None or theta_j_idx_chg is None:
+            raise ValueError("Could not find Jacobian indices for change transformer.")
+
+        dg_dtau = np.zeros(self.x_size)
+        dPi_dtau = (V_i_chg * V_j_chg * (g_chg * np.cos(theta_chg) + b_chg * np.sin(theta_chg)) / tau_chg ** 2
+                    - 2 * g_chg * V_i_chg ** 2 / tau_chg ** 3)
+        dPj_dtau = (V_j_chg * V_i_chg * (g_chg * np.cos(theta_chg) - b_chg * np.sin(theta_chg)) / tau_chg ** 2)
+        dQi_dtau = (V_i_chg * V_j_chg * (g_chg * np.sin(theta_chg) - b_chg * np.cos(theta_chg)) / (tau_chg ** 2)
+                    + 2 * b_chg * V_i_chg ** 2 / (tau_chg ** 3))
+        dQj_dtau = (V_j_chg * V_i_chg * (-g_chg * np.sin(theta_chg) - b_chg * np.cos(theta_chg)) / tau_chg ** 2)
+        if theta_i_idx_chg is not None:
+            dg_dtau[theta_i_idx_chg] += dPi_dtau
+        if theta_j_idx_chg is not None:
+            dg_dtau[theta_j_idx_chg] += dPj_dtau
+        if v_i_idx_chg is not None:
+            dg_dtau[self.n_theta + v_i_idx_chg] += dQi_dtau
+        if v_j_idx_chg is not None and (self.n_theta + v_j_idx_chg) < self.x_size:
+            dg_dtau[self.n_theta + v_j_idx_chg] += dQj_dtau
+
+        dx_ds = -self.J_inv @ dg_dtau * delta_tau_chg
+
+        theta_endp_idx, v_endp_idx = get_jacobian_indices(self.net, int(endpoint_bus))
+        theta_other_idx, v_other_idx = get_jacobian_indices(self.net, other)
+
+        dU_endp = dx_ds[self.n_theta + v_endp_idx] if v_endp_idx is not None else 0.0
+        dU_other = dx_ds[self.n_theta + v_other_idx] if v_other_idx is not None else 0.0
+        dtheta_endp = dx_ds[theta_endp_idx] if theta_endp_idx is not None else 0.0
+        dtheta_other = dx_ds[theta_other_idx] if theta_other_idx is not None else 0.0
+
+        return (
+            dQ_dU_endp * dU_endp
+            + dQ_dU_other * dU_other
+            + dQ_dtheta_endp * dtheta_endp
+            + dQ_dtheta_other * dtheta_other
+        )
+
+    def compute_dQ_line_2w_ds_matrix(
+        self,
+        tie_line_indices: List[int],
+        tie_line_endpoint_buses: List[int],
+        chg_trafo_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """
+        Vectorised wrapper around :meth:`compute_dQ_line_2w_ds`.
+
+        Returns matrix of shape (n_tie, n_oltc) with entries
+        ``∂Q_tie_i/∂s_oltc_j``.
+        """
+        n_tie = len(tie_line_indices)
+        n_oltc = len(chg_trafo_indices)
+        if n_tie == 0 or n_oltc == 0:
+            return np.zeros((n_tie, n_oltc)), list(tie_line_indices), list(chg_trafo_indices)
+        if len(tie_line_endpoint_buses) != n_tie:
+            raise ValueError(
+                "tie_line_endpoint_buses length must match tie_line_indices length."
+            )
+
+        sensitivity_matrix = np.zeros((n_tie, n_oltc), dtype=np.float64)
+        for i, (li, endp) in enumerate(zip(tie_line_indices, tie_line_endpoint_buses)):
+            for j, t_idx in enumerate(chg_trafo_indices):
+                try:
+                    sensitivity_matrix[i, j] = self.compute_dQ_line_2w_ds(
+                        line_idx=li,
+                        endpoint_bus=endp,
+                        chg_trafo_idx=t_idx,
+                    )
+                except ValueError:
+                    sensitivity_matrix[i, j] = 0.0
+        return sensitivity_matrix, list(tie_line_indices), list(chg_trafo_indices)
+
+    def compute_dQ_line_3w_ds(
+        self,
+        line_idx: int,
+        endpoint_bus: int,
+        chg_trafo3w_idx: int,
+    ) -> float:
+        """
+        Compute line endpoint Q sensitivity to a 3W OLTC tap change.
+
+        Same indirect-effect pattern as :meth:`compute_dQ_line_2w_ds`,
+        but uses :func:`_get_trafo3w_hv_branch_data` and
+        :meth:`_compute_dg_dtau_3w` to assemble ``dg/dtau`` for the HV
+        winding.
+        """
+        if chg_trafo3w_idx not in self.net.trafo3w.index:
+            raise ValueError(f"Transformer 3W {chg_trafo3w_idx} not found.")
+
+        dQ_dU_endp, dQ_dU_other, dQ_dtheta_endp, dQ_dtheta_other, other = (
+            self._line_endpoint_partials(line_idx, endpoint_bus)
+        )
+
+        d = _get_trafo3w_hv_branch_data(self.net, chg_trafo3w_idx)
+        dg_dtau = self._compute_dg_dtau_3w(d)
+        dx_ds = -self.J_inv @ dg_dtau * d['delta_tau']
+
+        theta_endp_idx, v_endp_idx = get_jacobian_indices(self.net, int(endpoint_bus))
+        theta_other_idx, v_other_idx = get_jacobian_indices(self.net, other)
+
+        dU_endp = dx_ds[self.n_theta + v_endp_idx] if v_endp_idx is not None else 0.0
+        dU_other = dx_ds[self.n_theta + v_other_idx] if v_other_idx is not None else 0.0
+        dtheta_endp = dx_ds[theta_endp_idx] if theta_endp_idx is not None else 0.0
+        dtheta_other = dx_ds[theta_other_idx] if theta_other_idx is not None else 0.0
+
+        return (
+            dQ_dU_endp * dU_endp
+            + dQ_dU_other * dU_other
+            + dQ_dtheta_endp * dtheta_endp
+            + dQ_dtheta_other * dtheta_other
+        )
+
+    def compute_dQ_line_3w_ds_matrix(
+        self,
+        tie_line_indices: List[int],
+        tie_line_endpoint_buses: List[int],
+        chg_trafo3w_indices: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """Vectorised wrapper around :meth:`compute_dQ_line_3w_ds`."""
+        n_tie = len(tie_line_indices)
+        n_oltc = len(chg_trafo3w_indices)
+        if n_tie == 0 or n_oltc == 0:
+            return np.zeros((n_tie, n_oltc)), list(tie_line_indices), list(chg_trafo3w_indices)
+        if len(tie_line_endpoint_buses) != n_tie:
+            raise ValueError(
+                "tie_line_endpoint_buses length must match tie_line_indices length."
+            )
+
+        sensitivity_matrix = np.zeros((n_tie, n_oltc), dtype=np.float64)
+        for i, (li, endp) in enumerate(zip(tie_line_indices, tie_line_endpoint_buses)):
+            for j, t_idx in enumerate(chg_trafo3w_indices):
+                try:
+                    sensitivity_matrix[i, j] = self.compute_dQ_line_3w_ds(
+                        line_idx=li,
+                        endpoint_bus=endp,
+                        chg_trafo3w_idx=t_idx,
+                    )
+                except ValueError:
+                    sensitivity_matrix[i, j] = 0.0
+        return sensitivity_matrix, list(tie_line_indices), list(chg_trafo3w_indices)
+
+    def compute_dQ_line_dQ_shunt(
+        self,
+        line_idx: int,
+        endpoint_bus: int,
+        shunt_bus_idx: int,
+        q_step_mvar: float = 1.0,
+    ) -> float:
+        """
+        Compute line endpoint Q sensitivity to a bipolar shunt step change.
+
+        Same delegation pattern as :meth:`compute_dQtrafo3w_hv_dQ_shunt`:
+        a shunt is modelled as a constant-susceptance device, so
+        ``Q_shunt = B · V²``.  The chain rule reduces to the DER-Q form
+        evaluated at the shunt bus, scaled by ``-q_step · V_shunt²``
+        (negation accounts for the load convention of pandapower
+        ``shunt.q_mvar``).
+
+        Returns
+        -------
+        sensitivity : float
+            ∂Q_endp / ∂(shunt state)  [Mvar per state step].
+        """
+        V_pu = float(self.net.res_bus.at[shunt_bus_idx, 'vm_pu'])
+        return (
+            -self.compute_dQ_line_dQ_der(
+                line_idx=line_idx,
+                endpoint_bus=endpoint_bus,
+                der_bus_idx=int(shunt_bus_idx),
+            )
+            * float(q_step_mvar)
+            * V_pu ** 2
+        )
+
+    def compute_dQ_line_dQ_shunt_matrix(
+        self,
+        tie_line_indices: List[int],
+        tie_line_endpoint_buses: List[int],
+        shunt_bus_indices: List[int],
+        shunt_q_steps_mvar: List[float],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """Vectorised wrapper around :meth:`compute_dQ_line_dQ_shunt`."""
+        n_tie = len(tie_line_indices)
+        n_sh = len(shunt_bus_indices)
+        if n_tie == 0 or n_sh == 0:
+            return np.zeros((n_tie, n_sh)), list(tie_line_indices), list(shunt_bus_indices)
+        if len(tie_line_endpoint_buses) != n_tie:
+            raise ValueError(
+                "tie_line_endpoint_buses length must match tie_line_indices length."
+            )
+        if len(shunt_q_steps_mvar) != n_sh:
+            raise ValueError(
+                "shunt_q_steps_mvar length must match shunt_bus_indices length."
+            )
+
+        sensitivity_matrix = np.zeros((n_tie, n_sh), dtype=np.float64)
+        for i, (li, endp) in enumerate(zip(tie_line_indices, tie_line_endpoint_buses)):
+            for j, (sh_bus, q_step) in enumerate(zip(shunt_bus_indices, shunt_q_steps_mvar)):
+                try:
+                    sensitivity_matrix[i, j] = self.compute_dQ_line_dQ_shunt(
+                        line_idx=li,
+                        endpoint_bus=endp,
+                        shunt_bus_idx=sh_bus,
+                        q_step_mvar=q_step,
+                    )
+                except ValueError:
+                    sensitivity_matrix[i, j] = 0.0
+        return sensitivity_matrix, list(tie_line_indices), list(shunt_bus_indices)
+
+    def compute_dQ_line_dVgen(
+        self,
+        line_idx: int,
+        endpoint_bus: int,
+        gen_bus_ppc: int,
+    ) -> float:
+        """
+        Compute line endpoint Q sensitivity to a PV-bus voltage setpoint change.
+
+        Uses the chain rule with the PV-bus state response provided by
+        :meth:`compute_dV_dVgen` (V magnitudes only — PV buses fix
+        magnitudes, so theta sensitivities are zero in the reduced
+        model used by V_gen):
+
+            dQ_endp/dV_gen = ∂Q_endp/∂U_endp · ∂U_endp/∂V_gen
+                            + ∂Q_endp/∂U_other · ∂U_other/∂V_gen
+                            + (theta path via J_inv column for the V_gen perturbation)
+
+        For the angle path, we reuse the same dx/dV_gen vector that
+        backs :meth:`compute_dV_dVgen`.
+        """
+        dQ_dU_endp, dQ_dU_other, dQ_dtheta_endp, dQ_dtheta_other, other = (
+            self._line_endpoint_partials(line_idx, endpoint_bus)
+        )
+
+        # Assemble the ∂g/∂V_gen vector (mismatch sensitivity to the
+        # PV-bus voltage magnitude), same as in compute_dV_dVgen.
+        dg_dVgen = self._compute_dg_dVgen(gen_bus_ppc)
+        dx_dVgen = -self.J_inv @ dg_dVgen
+
+        theta_endp_idx, v_endp_idx = get_jacobian_indices(self.net, int(endpoint_bus))
+        theta_other_idx, v_other_idx = get_jacobian_indices(self.net, other)
+
+        dU_endp = dx_dVgen[self.n_theta + v_endp_idx] if v_endp_idx is not None else 0.0
+        dU_other = dx_dVgen[self.n_theta + v_other_idx] if v_other_idx is not None else 0.0
+        dtheta_endp = dx_dVgen[theta_endp_idx] if theta_endp_idx is not None else 0.0
+        dtheta_other = dx_dVgen[theta_other_idx] if theta_other_idx is not None else 0.0
+
+        return (
+            dQ_dU_endp * dU_endp
+            + dQ_dU_other * dU_other
+            + dQ_dtheta_endp * dtheta_endp
+            + dQ_dtheta_other * dtheta_other
+        )
+
+    def compute_dQ_line_dVgen_matrix(
+        self,
+        tie_line_indices: List[int],
+        tie_line_endpoint_buses: List[int],
+        gen_bus_indices_pp: List[int],
+    ) -> Tuple[NDArray[np.float64], List[int], List[int]]:
+        """Vectorised wrapper around :meth:`compute_dQ_line_dVgen`.
+
+        ``gen_bus_indices_pp`` is the PANDAPOWER bus index list (terminal
+        buses); we convert each to its pypower (``ppc``) bus internally
+        because the underlying ``compute_dV_dVgen`` works in ppc space.
+        """
+        n_tie = len(tie_line_indices)
+        n_gen = len(gen_bus_indices_pp)
+        if n_tie == 0 or n_gen == 0:
+            return np.zeros((n_tie, n_gen)), list(tie_line_indices), list(gen_bus_indices_pp)
+        if len(tie_line_endpoint_buses) != n_tie:
+            raise ValueError(
+                "tie_line_endpoint_buses length must match tie_line_indices length."
+            )
+
+        sensitivity_matrix = np.zeros((n_tie, n_gen), dtype=np.float64)
+        for j, gen_bus_pp in enumerate(gen_bus_indices_pp):
+            try:
+                gen_bus_ppc = pp_bus_to_ppc_bus(self.net, int(gen_bus_pp))
+            except ValueError:
+                continue
+            for i, (li, endp) in enumerate(zip(tie_line_indices, tie_line_endpoint_buses)):
+                try:
+                    sensitivity_matrix[i, j] = self.compute_dQ_line_dVgen(
+                        line_idx=li,
+                        endpoint_bus=endp,
+                        gen_bus_ppc=gen_bus_ppc,
+                    )
+                except ValueError:
+                    sensitivity_matrix[i, j] = 0.0
+        return sensitivity_matrix, list(tie_line_indices), list(gen_bus_indices_pp)
 
     # =========================================================================
     # Combined Sensitivity Matrix Construction

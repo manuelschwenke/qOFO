@@ -1,0 +1,133 @@
+adapt_g_w_der: false
+adapt_g_w_dso_der: false
+adapt_g_w_dso_oltc: false
+adapt_g_w_gen: false
+adapt_g_w_pcc: false
+adapt_g_w_tso_oltc: false
+contingencies:
+- action: trip
+  bus: null
+  element_index: 5
+  element_type: gen
+  minute: 90
+  new_setpoint: .nan
+  p_mw: .nan
+  q_mvar: .nan
+  time_s: null
+- action: restore
+  bus: null
+  element_index: 5
+  element_type: gen
+  minute: 180
+  new_setpoint: .nan
+  p_mw: .nan
+  q_mvar: .nan
+  time_s: null
+- action: connect
+  bus: 5
+  element_index: -1
+  element_type: load
+  minute: 120
+  new_setpoint: .nan
+  p_mw: 300
+  q_mvar: 100
+  time_s: null
+- action: trip
+  bus: 5
+  element_index: -1
+  element_type: load
+  minute: 300
+  new_setpoint: .nan
+  p_mw: 300
+  q_mvar: 100
+  time_s: null
+- action: connect
+  bus: 27
+  element_index: -1
+  element_type: load
+  minute: 480
+  new_setpoint: .nan
+  p_mw: 300
+  q_mvar: 150
+  time_s: null
+- action: trip
+  bus: 27
+  element_index: -1
+  element_type: load
+  minute: 560
+  new_setpoint: .nan
+  p_mw: 300
+  q_mvar: 150
+  time_s: null
+distributed_slack: true
+dso_g_qi: 0
+dso_g_v: 20000.0
+dso_gamma_oltc_q: 0.0
+dso_lambda_qi: 0.9
+dso_mode: ofo
+dso_oltc_init_tol_pu: 0.01
+dso_period_s: 10.0
+dso_q_integral_max_mvar: 50.0
+dt_s: 60.0
+enable_avr_saturation_mode: false
+g_q: 200
+g_v: 100000.0
+g_w_adapt_beta1: 0.05
+g_w_adapt_beta1_per_class: {}
+g_w_adapt_beta2: 0.1
+g_w_adapt_beta2_per_class: {}
+g_w_adapt_deadband_rel: 1.0e-06
+g_w_adapt_t_max: 1000000.0
+g_w_adapt_t_max_per_class: {}
+g_w_adapt_t_min: 0.01
+g_w_adapt_t_min_per_class: {}
+g_w_der: 10
+g_w_dso_der: 800
+g_w_dso_oltc: 30
+g_w_gen: 40000000.0
+g_w_pcc: 100
+g_w_tso_oltc: 100
+g_w_tso_shunt: 50000
+g_z_current: 0.0
+g_z_interface: 0.0
+g_z_q_gen: 0.01
+g_z_q_pcc: 100.0
+g_z_q_tie: 0.0
+g_z_voltage: 1.0e-12
+g_z_warmup_s: 900.0
+g_z_warmup_value: 1.0e-12
+install_tso_tertiary_shunts: false
+int_cooldown: 9
+int_max_step: 1
+live_plot_cascade: true
+live_plot_controller: true
+live_plot_layout: dual_screen
+live_plot_show_line_currents: false
+live_plot_system: false
+live_plot_use_tex: false
+load_tuned_params_path: null
+local_der_mode: cos_phi_1
+n_total_s: 21600.0
+oltc_init_v_target_pu: 1.03
+profiles_csv: ''
+result_dir: results
+run_stability_analysis: false
+scenario: wind_replace
+sensitivity_update_interval: 1000000
+stability_analysis_at_s: 0.0
+start_time: '2016-04-15T08:00:00'
+tso_g_q_pcc: 1.0
+tso_g_q_tie: 5
+tso_local_mode: qv
+tso_mode: ofo
+tso_pcc_capability_on_output: false
+tso_period_s: 180.0
+tso_qv_setpoint_pu: 1.03
+tso_qv_slope_pu: 0.07
+tso_tertiary_shunt_q_mvar: 50.0
+use_fixed_zones: true
+use_profiles: true
+use_zonal_gen_dispatch: true
+v_setpoint_pu: 1.03
+verbose: 1
+warmup_s: 0.0

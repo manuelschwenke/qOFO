@@ -46,7 +46,7 @@ from matplotlib.animation import PillowWriter
 if TYPE_CHECKING:
     from controller.dso_controller import DSOControllerConfig
     from controller.tso_controller import TSOControllerConfig
-    from run.records import IterationRecord
+    from experiments.records import IterationRecord
 
 
 # ─── TU Darmstadt PANTONE colour palette ────────────────────────────────────

@@ -29,9 +29,19 @@ compute_branch_current_sensitivity
 # )
 
 from sensitivity.sensitivity_updater import SensitivityUpdater
+from sensitivity.network_reduction import (
+    DSOLocalNetResult,
+    TSOLocalNetResult,
+    build_dso_local_net,
+    build_tso_local_net,
+)
 
 __all__ = [
     "SensitivityUpdater",
+    "build_tso_local_net",
+    "build_dso_local_net",
+    "TSOLocalNetResult",
+    "DSOLocalNetResult",
     # "compute_voltage_sensitivity",
     # "compute_transformer_q_sensitivity",
     # "compute_oltc_voltage_sensitivity",

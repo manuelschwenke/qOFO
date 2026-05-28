@@ -114,6 +114,18 @@ class TSOControllerConfig:
     shunt_q_steps_mvar: List[float]
     voltage_bus_indices: List[int]
     current_line_indices: List[int]
+    shunt_sensitivity_bus_indices: Optional[List[int]] = None
+    """Optional remapping of shunt bus indices for the *sensitivity*
+    Jacobian only.  When ``None`` (default), the same indices in
+    ``shunt_bus_indices`` are used both for the apply path
+    (writing ``net.shunt.step``) and for ``JacobianSensitivities``
+    lookups.  Under the local-network sensitivity option
+    (``MultiTSOConfig.local_sensitivities_tso=True``) the runner sets
+    this field to the synthetic 3W primary bus indices, so the per-zone
+    reduced Jacobian's shunt column is built at the kept boundary bus
+    rather than at the (dropped) tertiary bus.  Same length as
+    ``shunt_bus_indices``."""
+
     v_min_pu: float = 0.90
     v_max_pu: float = 1.10
     i_max_pu: float = 1.0 #1.0
@@ -256,26 +268,21 @@ class TSOControllerConfig:
     optional).  Mirrors ``g_z_q_pcc``.  Default 0.0 = no slack-based
     bound enforcement on Q_tie."""
 
-    # ── refactor_v2 (Soleimani §III-B): Q_cor as actuator ──────────────────
-    use_q_cor_actuator: bool = False
-    """When True, the DER block of the TSO action vector is interpreted
-    as ``Q_cor`` (Mvar): a reactive-power offset that shifts each TSO
-    DER's local Q(V) characteristic.  The H matrix's DER columns are
-    post-multiplied by the closed-loop transform
-
-        T' = (I + diag(K) · S_VQ)^{-1}                  (Soleimani eq. 18)
-
-    where ``K_b = Σ_i S_n,i / slope_pu,i`` per unique TSO DER bus.  The
-    apply step writes to ``net.sgen.q_cor_mvar`` (instead of
-    ``q_mvar``).  Saturated DERs zero their K_diag so the corresponding
-    column of ``T'`` collapses to identity.
-
-    Default ``False`` keeps the legacy direct-Q dispatch (``q_mvar``
-    written to grid-following sgens; or, under
-    ``apply_der_classification`` promotion, the V_gen path on grid-
-    forming gens).  Set to ``True`` after calling
-    :func:`network.ieee39.build.tag_der_q_modes` to populate the
-    ``q_cor_mvar`` / ``qv_slope_pu`` columns."""
+    # ── DER actuator: w-shift (vertical shift + V_ref reanchoring) ──────────
+    # The DER block of the TSO action vector is the OFO-commanded
+    # ``q_set`` (Mvar) at the reanchored V_ref of each DER.  The apply
+    # step (``apply_zone_tso_controls``) writes the value to
+    # ``net.sgen.q_set_mvar`` and reanchors ``qv_vref_anchor_pu`` to
+    # the most recent measured bus voltage.  The H matrix's DER columns
+    # are post-multiplied by the closed-loop transform
+    #
+    #     T' = (I + diag(K) · S_VQ)^{-1}
+    #
+    # where ``K_b = Σ_i S_n,i / slope_pu,i`` per unique TSO DER bus
+    # (Soleimani & Van Cutsem, eq. 18 — same matrix as the earlier
+    # Q_cor formulation, see :func:`controller.der_qv_local_loop.
+    # compute_w_shift_h_transform`).  Saturated DERs zero their K_diag
+    # so the corresponding column of ``T'`` collapses to identity.
 
     qv_slope_pu: float = 0.07
     """Default Q(V) droop slope for TSO DERs (pu_q/pu_v) used when the
@@ -287,7 +294,7 @@ class TSOControllerConfig:
     """Tolerance for the active-set saturation detector.  When realised
     Q is within this tolerance of either capability rail, the
     corresponding diagonal of K is zeroed in the closed-loop transform
-    (DER's slope effectively becomes 0 — Q_cor no longer moves Q)."""
+    (DER's slope effectively becomes 0 — w-shift no longer moves Q)."""
 
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
@@ -1498,12 +1505,21 @@ class TSOController(BaseOFOController):
             t for k, t in enumerate(self.config.oltc_trafo_indices)
             if not self._oos_oltc_mask[k]
         ]
+        # Under the local-net sensitivity mode the runner remaps tertiary
+        # shunt indices to synthetic primary-bus shunts; honour that
+        # remapping when present.  Falls back to ``shunt_bus_indices``
+        # otherwise (legacy / full-net mode).
+        _shunt_buses_for_sens = (
+            self.config.shunt_sensitivity_bus_indices
+            if self.config.shunt_sensitivity_bus_indices is not None
+            else self.config.shunt_bus_indices
+        )
         kw = dict(
             der_bus_indices=der_bus_indices,
             observation_bus_indices=self.config.voltage_bus_indices,
             line_indices=self.config.current_line_indices,
             oltc_trafo_indices=is_oltc_indices,
-            shunt_bus_indices=self.config.shunt_bus_indices,
+            shunt_bus_indices=_shunt_buses_for_sens,
             shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
         )
         if pcc_in_trafo:
@@ -1876,7 +1892,7 @@ class TSOController(BaseOFOController):
                 dQgen_dShunt, _, _ = \
                     self.sensitivities.compute_dQgen_dQ_shunt_matrix(
                         gen_bus_indices_pp=gen_terminal_buses,
-                        shunt_bus_indices=self.config.shunt_bus_indices,
+                        shunt_bus_indices=_shunt_buses_for_sens,
                         shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
                     )
                 col_sh_start = n_der + n_pcc + n_gen + n_gf + n_oltc
@@ -1980,7 +1996,7 @@ class TSOController(BaseOFOController):
                 dQgf_dShunt, _, _ = (
                     self.sensitivities.compute_dQgen_dQ_shunt_matrix(
                         gen_bus_indices_pp=gf_terminal_buses,
-                        shunt_bus_indices=self.config.shunt_bus_indices,
+                        shunt_bus_indices=_shunt_buses_for_sens,
                         shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
                     )
                 )
@@ -2090,7 +2106,7 @@ class TSOController(BaseOFOController):
                     self.sensitivities.compute_dQ_line_dQ_shunt_matrix(
                         tie_line_indices=tie_indices,
                         tie_line_endpoint_buses=tie_endpoints,
-                        shunt_bus_indices=self.config.shunt_bus_indices,
+                        shunt_bus_indices=_shunt_buses_for_sens,
                         shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
                     )
                 )
@@ -2121,15 +2137,15 @@ class TSOController(BaseOFOController):
             if self._oos_oltc_mask[k]:
                 H[:, col_oltc_start + k] = 0.0
 
-        # ── refactor_v2: Q_cor closed-loop transform on TSO DER columns ──
-        # When the DER actuator is interpreted as Q_cor (Soleimani §III-B
-        # eq. 18), post-multiply the DER columns of H by
+        # ── w-shift closed-loop transform on TSO DER columns ──
+        # The DER actuator is the OFO-commanded ``q_set`` (with V_ref
+        # reanchored to V_meas by the apply step).  Post-multiply the
+        # DER columns of H by
         #     T' = (I + diag(K) · S_VQ)^{-1}
-        # which maps the network-level ``∂y/∂Q`` to ``∂y/∂Q_cor`` under
-        # local Q(V) droop.  Operates at the DER-bus level (mirrors the
-        # DSO controller).
-        if self.config.use_q_cor_actuator and n_der > 0:
-            T_prime = self._compute_qcor_transform_T_prime(der_bus_indices)
+        # which maps the network-level ``∂y/∂Q`` to ``∂y/∂q_set`` under
+        # the local Q(V) droop (mirrors the DSO controller).
+        if n_der > 0:
+            T_prime = self._compute_w_shift_transform_T_prime(der_bus_indices)
             if T_prime is not None:
                 H[:, :n_der] = H[:, :n_der] @ T_prime
 
@@ -2158,16 +2174,22 @@ class TSOController(BaseOFOController):
 
         return H
 
-    def _compute_qcor_transform_T_prime(
+    def _compute_w_shift_transform_T_prime(
         self,
         der_bus_indices: List[int],
     ) -> Optional[NDArray[np.float64]]:
-        """Return the Q_cor closed-loop transform
+        """Return the w-shift closed-loop transform
         ``T' = (I + diag(K) · S_VQ)^{-1}`` of shape ``(n_der, n_der)``
-        for the TSO DER block (Soleimani §IV-B eq. 18).
+        for the TSO DER block.
+
+        The matrix is structurally identical to the earlier Q_cor
+        transform (Soleimani & Van Cutsem, eq. 18) — under the
+        vertical-shift + V_ref-reanchored local Q(V) loop, the
+        differential sensitivity ``∂Q_realised / ∂q_set`` is the same
+        ``(I + R·S_VQ)^{-1}`` matrix.
 
         Per-DER slope is read from ``net.sgen.qv_slope_pu`` if the
-        column is present (refactor_v2 path); otherwise the fallback
+        column is present; otherwise the fallback
         ``self.config.qv_slope_pu`` is used.  Saturated DERs zero
         their K_diag entry so their column of ``T'`` collapses to
         identity.
@@ -2177,7 +2199,7 @@ class TSOController(BaseOFOController):
         fall back to identity (no transform) in that case.
         """
         from controller.der_qv_local_loop import (
-            compute_qcor_h_transform,
+            compute_w_shift_h_transform,
             _qv_capability,
         )
         import pandas as pd
@@ -2189,6 +2211,11 @@ class TSOController(BaseOFOController):
         net = self.sensitivities.net
         meas = getattr(self, "_last_measurement", None)
         eps = self.config.qv_saturation_eps_mvar
+
+        # Test / mock nets may lack ``sn_mva``.  Return None so the
+        # caller falls back to identity.
+        if "sn_mva" not in net.sgen.columns:
+            return None
 
         # Build K_diag at DER-bus level.  When der_mapping is active each
         # entry of der_bus_indices is a unique DER bus and we sum the
@@ -2299,7 +2326,7 @@ class TSOController(BaseOFOController):
         if s_base > 0:
             S_VQ = S_VQ / s_base
 
-        return compute_qcor_h_transform(K_diag, S_VQ)
+        return compute_w_shift_h_transform(K_diag, S_VQ)
 
     def apply_avt_reset(self, measurement: Measurement) -> None:
         """Replace PCC-Q entries in _u_current with measured achieved values.
@@ -2346,6 +2373,44 @@ class TSOController(BaseOFOController):
                 for i, t in enumerate(self.config.pcc_trafo_indices):
                     print(f"      trafo {t}: {u_old[i]:.2f} -> "
                           f"{self._u_current[n_der + i]:.2f} Mvar")
+
+    def apply_qw_reset(self, measurement: Measurement) -> None:
+        """Reset the DER block of ``_u_current`` to the measured Q per DER.
+
+        Under the w-shift actuator (vertical shift + V_ref reanchoring),
+        the OFO's effective per-step command is the *increment* sigma;
+        the ``q_set`` value commanded to the plant is
+        ``q_set = Q_meas + sigma``.  Implementing this as
+        ``u_new = u_old + sigma`` (the generic OFO update in
+        :meth:`BaseOFOController.step`) requires resetting ``u_old`` to
+        ``Q_meas`` at the start of each step.  Mirrors
+        :meth:`apply_avt_reset` for the PCC-Q block.
+
+        Call from the runner immediately before :meth:`step`.  A no-op
+        when the DER block is empty.
+        """
+        if self._u_current is None:
+            return
+
+        mapping = self.config.der_mapping
+        if mapping is not None:
+            n_der = mapping.n_der
+            der_iter = list(mapping.sgen_indices)
+        else:
+            n_der = len(self.config.der_indices)
+            der_iter = list(self.config.der_indices)
+        if n_der == 0:
+            return
+
+        q_measured = np.empty(n_der, dtype=np.float64)
+        for i, sgen_idx in enumerate(der_iter):
+            meas_idx = np.where(measurement.der_indices == int(sgen_idx))[0]
+            if len(meas_idx) == 0:
+                # Measurement incomplete — skip reset rather than corrupt state.
+                return
+            q_measured[i] = float(measurement.der_q_mvar[meas_idx[0]])
+
+        self._u_current[:n_der] = q_measured
 
     def _classify_saturation_modes(
         self, measurement: Measurement,

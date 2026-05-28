@@ -27,6 +27,16 @@ Architecture (matches the multi-TSO theory in Schwenke / CIGRE 2026)
     │   slack)       │  └── DSOCtrl_2_1  │                     │
     └──────────────────────────────────────────────────────────┘
 
+Model of Q_PCC_set:
+
+    TN backbone ─── primary bus ─── 3W trafo ─── MV bus ─── (dropped HV sub-network)
+                       ▲                            ▲
+                       │                            │
+        Controllable Q_PCC,set                 Ward load
+        actuator (DSO dispatch              = (-p_mv, -q_mv) cached
+        commanded by TSO)                     (represents the dropped sub-net's
+        ↑ what you asked about                 static draw at the MV side)
+
 Author: Manuel Schwenke / Claude Code
 """
 
@@ -91,7 +101,7 @@ def main_comparison() -> None:
         g_w_dso_der=1000,  # 8 correlated DER; sf~2.5 for smooth tracking
         g_w_dso_oltc=30,   # rho(C_OLTC)~1.1; higher for switching suppression
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
-        run_stability_analysis=True,
+        run_stability_analysis=False,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
         verbose=1,
         live_plot_system=False,
@@ -235,27 +245,27 @@ def main() -> None:
     """
 
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 12,      # 720-min full simulation
+        n_total_s=60.0 * 60 * 7,      # 720-min full simulation
         tso_period_s=60.0 * 6,    # TSO every 3 minutes
-        dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
+        dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
         g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=250,  # DSO Q-tracking
         tso_g_q_tie=1,
         # ── DSO objective tuning ──
-        # use_q_cor_actuator defaults to True (refactor_v2 Soleimani §III-B).
+        # DER actuator: w-shift (q_set + V_ref reanchoring).
         dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.95,  # leaky integrator decay
         dso_q_integral_max_mvar=200.0,  # anti-windup clamp
         dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
-        # ── TSO weights — re-tuned for Q_cor closed-loop curvature ──
+        # ── TSO weights — re-tuned for w-shift closed-loop curvature ──
         # Under Q_cor the H matrix is post-multiplied by T'=(I+R*S_VQ)^-1,
         # which reduces curvature by ~3x on DSO and ~80x on TSO.  Start
         # at ~1/3 (DSO) to ~1/80 (TSO STATCOMs) of the legacy direct-Q
         # values and sweep from there.
-        g_w_der=10,    # was 20 (direct-Q); T-STATCOM curvature ~80x lower under T'
+        g_w_der=20,    # was 20 (direct-Q); T-STATCOM curvature ~80x lower under T'
         g_w_gen=5e7,
-        g_w_pcc=50,
+        g_w_pcc=100,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,
@@ -263,25 +273,35 @@ def main() -> None:
         g_w_dso_der=1000,  # was 1000 (direct-Q); ~3x lower curvature under T'
         g_w_dso_oltc=40,
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
-        run_stability_analysis=True,
+        run_stability_analysis=False,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
         verbose=1,
         live_plot_controller=True,
         live_plot_cascade=True,
         live_plot_system=False,
+        local_sensitivities_tso=True,
+        local_sensitivities_dso=True,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 11, 1, 0, 0),
+        start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies           = [
-            ContingencyEvent(minute=60,  element_type="gen",  element_index=2, action="trip"),
-            ContingencyEvent(minute=100, element_type="gen",  element_index=2, action="restore"),
-            # ContingencyEvent(minute=75, element_type="load", bus=2,  p_mw=200, q_mvar=100, action="connect"),
-            # ContingencyEvent(minute=120, element_type="load", bus=2,  p_mw=200, q_mvar=100, action="trip"),
-            ContingencyEvent(minute=150, element_type="load", bus=14, p_mw=100, q_mvar=50, action="connect"),
-            ContingencyEvent(minute=160, element_type="load", bus=14, p_mw=100, q_mvar=50, action="trip"),
-            ContingencyEvent(minute=180, element_type="gen",  element_index=5, action="trip"),
-            ContingencyEvent(minute=280, element_type="gen",  element_index=5, action="restore"),
+            # Line Tripping -> No Zone 2 -> Zone 3 tie line flow anymore!
+            ContingencyEvent(minute=45, element_type="line", element_index=18, action="trip"),
+            ContingencyEvent(minute=90, element_type="line", element_index=18, action="restore"),
+            ContingencyEvent(minute=60, element_type="line", element_index=5, action="trip"),
+            ContingencyEvent(minute=105, element_type="line", element_index=5, action="restore"),
+            # Generator trip and restore
+            ContingencyEvent(minute=180,  element_type="gen",  element_index=2, action="trip"),
+            ContingencyEvent(minute=300, element_type="gen", element_index=2, action="restore"),
+            # additional load connected and disconnected
+            ContingencyEvent(minute=240, element_type="load", bus=11, p_mw=400, q_mvar=200, action="connect"),
+            ContingencyEvent(minute=330, element_type="load", bus=11, p_mw=400, q_mvar=200, action="trip"),
+            # existing load tripped and restored
+            # ContingencyEvent(minute=400, element_type="load",
+            #                  element_index=20, action="trip"),
+            # ContingencyEvent(minute=450, element_type="load",
+            #                  element_index=20, action="restore"),
             # ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
             # ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
             # ContingencyEvent(minute=720, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="connect"),

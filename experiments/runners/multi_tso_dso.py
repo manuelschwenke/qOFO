@@ -113,6 +113,14 @@ from experiments.helpers import (
     prepare_load_contingencies,
 )
 from sensitivity.jacobian import JacobianSensitivities
+from sensitivity.network_reduction import (
+    build_dso_local_net,
+    build_tso_local_net,
+)
+from sensitivity.numerical_h import (
+    compute_numerical_h_dso,
+    compute_numerical_h_tso,
+)
 from core.message import SetpointMessage, ShuntDisturbanceMessage
 from controller.der_qv_local_loop import (
     CosPhiConstLoop,
@@ -622,7 +630,6 @@ def run_multi_tso_dso(
             q_tie_setpoints_mvar=zd.q_tie_setpoints_mvar,
             g_q_tie=config.tso_g_q_tie,
             g_z_q_tie=config.g_z_q_tie,
-            use_q_cor_actuator=config.use_q_cor_actuator,
             qv_slope_pu=config.tso_qv_slope_pu,
         )
 
@@ -782,7 +789,6 @@ def run_multi_tso_dso(
             g_v=config.dso_g_v,
             gamma_oltc_q=config.dso_gamma_oltc_q,
             qv_slope_pu=config.dso_qv_slope_pu,
-            use_q_cor_actuator=config.use_q_cor_actuator,
         )
 
         dso_s_rated = np.array(
@@ -1125,10 +1131,14 @@ def run_multi_tso_dso(
                  if int(s) in net.sgen.index]
     dso_sgens = [int(s) for s in meta.dso_der_indices
                  if int(s) in net.sgen.index]
-    # Reset q_cor_mvar (controller has not commanded yet) before
-    # the analytical seed.
+    # Reset the w-shift actuator state (the OFO has not commanded yet)
+    # before the analytical seed.  ``q_set_mvar`` starts at 0; the
+    # ``qv_vref_anchor_pu`` is left as the apply-step's responsibility
+    # — until the first apply, the local QVLocalLoop falls back to the
+    # nominal ``qv_vref_pu``.
     for s in tso_sgens + dso_sgens:
-        net.sgen.at[s, "q_cor_mvar"] = 0.0
+        if "q_set_mvar" in net.sgen.columns:
+            net.sgen.at[s, "q_set_mvar"] = 0.0
     # Seed using a fresh Jacobian at the post-Phase-2 operating
     # point so S_VQ matches the network state we'll iterate from.
     _seed_jac = JacobianSensitivities(net)
@@ -1234,12 +1244,148 @@ def run_multi_tso_dso(
     # Invalidate the seed_qv_equilibrium LU cache: a new sensitivities
     # object was constructed, so its id() changes and S_VQ_der may move.
     clear_seed_lu_cache()
-    for ctrl in tso_controllers.values():
-        ctrl.sensitivities = shared_jac
-        ctrl.invalidate_sensitivity_cache()
-    for dso_ctrl in dso_controllers.values():
-        dso_ctrl.sensitivities = shared_jac
-        dso_ctrl.invalidate_sensitivity_cache()
+
+    # ── Optional: per-controller local-net Jacobians (Ward-style boundary) ─
+    # When ``config.local_sensitivities_tso`` is True, each TSO controller
+    # gets a Jacobian built from its own reduced zone net (tie-line far-
+    # end + 3W primary boundaries as PQ loads; synthetic shunts at the
+    # 3W primary).  Same idea for DSOs when ``local_sensitivities_dso``
+    # is True (HV sub-network only, 3W primary as virtual slack).  When
+    # both are False, every controller shares ``shared_jac`` (the
+    # historical behaviour).  See :mod:`sensitivity.network_reduction`.
+    _per_zone_local_jac: Dict[int, JacobianSensitivities] = {}
+    _per_zone_synth_shunt_map: Dict[int, Dict[int, int]] = {}
+    _per_dso_local_jac: Dict[str, JacobianSensitivities] = {}
+    _zone_promoted_oltcs: Dict[int, Tuple[int, ...]] = {}
+
+    # Build a per-zone "all 2W trafos to keep in the reduced TSO net" list
+    # once (used by both the initial build and any later rebuild on shunt
+    # switching).  Includes:
+    #   * every machine 2W trafo whose gen is in the zone (for the gen's
+    #     terminal bus to survive the selective drop, INCLUDING the slack-
+    #     gen's trafo which ``zone_defs[z].oltc_trafo_indices`` excludes);
+    #   * every 2W trafo the TSO MIQP can act on
+    #     (``zone_defs[z].oltc_trafo_indices``) — covers ``gen_idx=-1``
+    #     tap-changing interconnect trafos whose LV bus would otherwise be
+    #     dropped, leaving the controller's OLTC column count out of sync
+    #     with the reduced Jacobian's columns.
+    _zone_all_machine_trafos: Dict[int, List[int]] = {z: [] for z in zone_defs}
+    _zone_gen_set: Dict[int, set] = {
+        z: set(int(g) for g in zd.gen_indices) for z, zd in zone_defs.items()
+    }
+    for t_idx, g_idx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+        if int(g_idx) < 0:
+            continue
+        for z in zone_defs:
+            if int(g_idx) in _zone_gen_set[z]:
+                _zone_all_machine_trafos[z].append(int(t_idx))
+                break
+    for z, zd in zone_defs.items():
+        for t_idx in zd.oltc_trafo_indices:
+            if int(t_idx) not in _zone_all_machine_trafos[z]:
+                _zone_all_machine_trafos[z].append(int(t_idx))
+
+    def _build_tso_local_jac(z: int):
+        """Build per-zone reduced net + JacobianSensitivities.
+
+        Returns
+        -------
+        (JacobianSensitivities, Dict[int,int], Tuple[int,...])
+            Jacobian, {tertiary_bus -> primary_bus} synthetic shunt remap,
+            and the tuple of OLTC trafo indices that need to be flagged
+            OOS on the controller (because a promoted slack-gen sits on
+            their bus, killing the dV/ds sensitivity column).
+        """
+        zd = zone_defs[z]
+        result = build_tso_local_net(
+            net=net,
+            zone_bus_indices=tn_zone_map[z],
+            gen_indices_in_zone=zd.gen_indices,
+            machine_trafo_indices_in_zone=_zone_all_machine_trafos[z],
+            tie_line_indices=zd.tie_line_indices,
+            tie_line_endpoint_buses=zd.tie_line_endpoint_buses,
+            hv_networks_in_zone=zone_hv_networks.get(z, []),
+            tso_shunt_buses_in_zone=zd.shunt_bus_indices,
+            tso_shunt_q_steps_mvar_in_zone=zd.shunt_q_steps_mvar,
+            verbose=verbose,
+        )
+        return (
+            JacobianSensitivities(result.net),
+            dict(result.synthetic_shunt_map),
+            tuple(result.promoted_slack_oltc_indices),
+        )
+
+    def _apply_promoted_oos_oltc(
+        ctrl: TSOController, promoted_oltcs: Tuple[int, ...]
+    ) -> None:
+        """Flag the promoted slack-gen's machine OLTC(s) as out-of-service
+        on the controller so its sensitivity-matrix assembly skips the
+        corresponding column.  Idempotent."""
+        if not promoted_oltcs:
+            return
+        promoted_set = {int(t) for t in promoted_oltcs}
+        for k, t in enumerate(ctrl.config.oltc_trafo_indices):
+            if int(t) in promoted_set:
+                ctrl._oos_oltc_mask[k] = True
+
+    if config.local_sensitivities_tso:
+        if verbose >= 1:
+            print("  [local_sensitivities_tso=True] building per-zone reduced "
+                  "TSO Jacobians ...")
+        for z, ctrl in tso_controllers.items():
+            _jz, _syn_map, _promoted_oltcs = _build_tso_local_jac(z)
+            _per_zone_local_jac[z] = _jz
+            _per_zone_synth_shunt_map[z] = _syn_map
+            _zone_promoted_oltcs[z] = _promoted_oltcs
+            ctrl.sensitivities = _jz
+            ctrl.invalidate_sensitivity_cache()
+            _apply_promoted_oos_oltc(ctrl, _promoted_oltcs)
+            # Plumb the synthetic-shunt remapping into the controller
+            # config so build_sensitivity_matrix_H reads shunt columns at
+            # the synthetic primary bus rather than the (dropped) tertiary.
+            if _syn_map:
+                ctrl.config.shunt_sensitivity_bus_indices = [
+                    _syn_map.get(int(b), int(b))
+                    for b in ctrl.config.shunt_bus_indices
+                ]
+            else:
+                ctrl.config.shunt_sensitivity_bus_indices = None
+            if verbose >= 2:
+                print(f"    Zone {z}: reduced net has "
+                      f"{len(_jz.net.bus)} buses, "
+                      f"{len(_jz.net.gen)} gens, "
+                      f"{len(_jz.net.line)} lines, "
+                      f"{len(_jz.net.shunt)} shunts; "
+                      f"synthetic shunts: {len(_syn_map)}; "
+                      f"promoted-slack OOS OLTCs: {_promoted_oltcs}")
+    else:
+        for ctrl in tso_controllers.values():
+            ctrl.sensitivities = shared_jac
+            ctrl.invalidate_sensitivity_cache()
+            ctrl.config.shunt_sensitivity_bus_indices = None
+
+    if config.local_sensitivities_dso:
+        if verbose >= 1:
+            print("  [local_sensitivities_dso=True] building per-DSO reduced "
+                  "Jacobians ...")
+        for dso_id, dso_ctrl in dso_controllers.items():
+            hv = hv_info_map[dso_id]
+            result = build_dso_local_net(net, hv, verbose=verbose)
+            _jd = JacobianSensitivities(result.net)
+            _per_dso_local_jac[dso_id] = _jd
+            dso_ctrl.sensitivities = _jd
+            dso_ctrl.invalidate_sensitivity_cache()
+            if verbose >= 2:
+                print(f"    {dso_id}: reduced net has "
+                      f"{len(_jd.net.bus)} buses, "
+                      f"{len(_jd.net.gen)} gens, "
+                      f"{len(_jd.net.line)} lines, "
+                      f"{len(_jd.net.shunt)} shunts")
+    else:
+        for dso_ctrl in dso_controllers.values():
+            dso_ctrl.sensitivities = shared_jac
+            dso_ctrl.invalidate_sensitivity_cache()
+
     if verbose >= 1:
         print(f"  [T] post-Phase-2 shared JacobianSensitivities rebuild + reassign: "
               f"{perf_counter() - _t:.2f} s")
@@ -1253,6 +1399,51 @@ def run_multi_tso_dso(
         dso_ctrl.initialise(measure_zone_dso(net, dso_ctrl.config, 0))
     if verbose >= 1:
         print(f"  [T] controller .initialise() loop: {perf_counter() - _t:.2f} s")
+
+    # ── Optional: pin a numerical (finite-difference) H matrix ─────────────
+    # When ``config.numerical_h`` is True and local-sensitivity mode is
+    # off, replace each controller's analytical H by a numerical one
+    # computed by perturbing the plant net and reading the closed-loop
+    # response.  Disable invalidation so the pinned H survives every
+    # subsequent step (frozen baseline).  ``refresh_shared_jac_on_tso``
+    # additionally re-pins the numerical H on every TSO tick.
+    def _pin_numerical_h() -> None:
+        for z, ctrl in tso_controllers.items():
+            H_num = compute_numerical_h_tso(
+                net, ctrl,
+                closed_loop=config.numerical_h_closed_loop,
+                verbose=verbose,
+            )
+            ctrl._H_cache = H_num
+            ctrl._H_mappings = {}
+        for dso_id, dso_ctrl in dso_controllers.items():
+            H_num = compute_numerical_h_dso(
+                net, dso_ctrl,
+                closed_loop=config.numerical_h_closed_loop,
+                verbose=verbose,
+            )
+            dso_ctrl._H_cache = H_num
+            dso_ctrl._H_mappings = {}
+
+    if (
+        config.numerical_h
+        and not config.local_sensitivities_tso
+        and not config.local_sensitivities_dso
+    ):
+        _t = perf_counter()
+        _pin_numerical_h()
+        # Monkey-patch invalidation so subsequent code paths (contingency,
+        # shunt-switch) cannot blow away the pinned cache.  Under
+        # ``refresh_shared_jac_on_tso=True`` the main loop re-pins
+        # explicitly via the same helper.
+        def _noop_invalidate(self):
+            return
+        for ctrl in tso_controllers.values():
+            ctrl.invalidate_sensitivity_cache = _noop_invalidate.__get__(ctrl)
+        for dso_ctrl in dso_controllers.values():
+            dso_ctrl.invalidate_sensitivity_cache = _noop_invalidate.__get__(dso_ctrl)
+        if verbose >= 1:
+            print(f"  [T] numerical H pin (frozen): {perf_counter() - _t:.2f} s")
 
     # ── Send initial DSO capability messages to TSO controllers ──────────
     # Without this, PCC capability bounds stay at the default ±1e-6 Mvar
@@ -1283,9 +1474,15 @@ def run_multi_tso_dso(
 
     # ── Cross-sensitivity computation (needed by stability analysis) ──────
     # Reuse the same shared Jacobian to avoid yet another deep-copy + PF +
-    # dense inversion inside the coordinator.
+    # dense inversion inside the coordinator.  Under local TSO mode the
+    # off-diagonal H_ij blocks are zeroed to stay consistent with each
+    # TSO controller's restricted reduced-net view (no cross-zone
+    # coupling assumed).
     _t = perf_counter()
-    coordinator.compute_cross_sensitivities(jac=shared_jac)
+    coordinator.compute_cross_sensitivities(
+        jac=shared_jac,
+        zero_offdiag=bool(config.local_sensitivities_tso),
+    )
     if verbose >= 1:
         print(f"  [T] coordinator.compute_cross_sensitivities: {perf_counter() - _t:.2f} s")
     _t = perf_counter()
@@ -1795,6 +1992,22 @@ def run_multi_tso_dso(
                 coordinator.update_outage_masks(net)
                 coordinator.invalidate_sensitivity_cache()
 
+                # Under local-net sensitivity mode the controllers'
+                # reduced Jacobians are intentionally frozen at the
+                # pre-contingency cached operating point — that's the
+                # decentralised assumption ("controllers know the plant
+                # only through cached sensitivities").  We do NOT
+                # rebuild the local nets here; we only re-apply the
+                # promoted-slack OOS OLTC marks because
+                # ``update_outage_masks`` above just reset them from
+                # plant ``in_service``.
+                if config.local_sensitivities_tso:
+                    for z, ctrl in tso_controllers.items():
+                        _apply_promoted_oos_oltc(
+                            ctrl,
+                            _zone_promoted_oltcs.get(z, ()),
+                        )
+
         # ── TSO step ──────────────────────────────────────────────────────────
         # Skipped entirely in TSO local mode: the CharacteristicControllers
         # (Q(V)) or the static cos phi=1 setting (Q=0) take over from the OFO
@@ -1806,11 +2019,65 @@ def run_multi_tso_dso(
             refresh_H = (config.sensitivity_update_interval > 0
                          and tso_step_count % config.sensitivity_update_interval == 0)
 
+            # Optional: rebuild the full-network ``shared_jac`` on every
+            # TSO tick and reassign it to every controller so the next
+            # TSO step's sensitivity matrix reflects the current
+            # operating point.  Gated on ``refresh_shared_jac_on_tso``
+            # and only meaningful in full-Jacobian mode (no-op when
+            # ``local_sensitivities_tso`` or ``local_sensitivities_dso``
+            # is True — those controllers hold their own reduced
+            # Jacobians, which the runner intentionally freezes).
+            if (
+                config.refresh_shared_jac_on_tso
+                and not config.local_sensitivities_tso
+                and not config.local_sensitivities_dso
+            ):
+                if config.numerical_h:
+                    # Re-pin the numerical H at the current operating
+                    # point.  Skip the analytical shared_jac rebuild —
+                    # the numerical H bypasses it entirely.
+                    for z, ctrl in tso_controllers.items():
+                        ctrl._H_cache = compute_numerical_h_tso(
+                            net, ctrl,
+                            closed_loop=config.numerical_h_closed_loop,
+                            verbose=verbose,
+                        )
+                    for dso_id, dso_ctrl in dso_controllers.items():
+                        dso_ctrl._H_cache = compute_numerical_h_dso(
+                            net, dso_ctrl,
+                            closed_loop=config.numerical_h_closed_loop,
+                            verbose=verbose,
+                        )
+                else:
+                    shared_jac = JacobianSensitivities(net)
+                    clear_seed_lu_cache()
+                    for ctrl in tso_controllers.values():
+                        ctrl.sensitivities = shared_jac
+                        ctrl.invalidate_sensitivity_cache()
+                    for dso_ctrl in dso_controllers.values():
+                        dso_ctrl.sensitivities = shared_jac
+                        dso_ctrl.invalidate_sensitivity_cache()
+                    coordinator.invalidate_sensitivity_cache()
+
             # Build per-zone measurements from plant network
             measurements: Dict[int, Measurement] = {
                 z: measure_zone_tso(net, zd, step)
                 for z, zd in zone_defs.items()
             }
+
+            # Snapshot u_current[pcc_slice] per zone BEFORE coordinator.step
+            # so the diagnostic below can show u_new - u_old per Q_PCC,set.
+            _prev_pcc_u: Dict[int, NDArray[np.float64]] = {}
+            if verbose >= 1:
+                for z, ctrl in tso_controllers.items():
+                    if ctrl._u_current is None:
+                        continue
+                    n_der_z = len(zone_defs[z].tso_der_indices)
+                    n_pcc_z = len(zone_defs[z].pcc_trafo_indices)
+                    if n_pcc_z > 0:
+                        _prev_pcc_u[z] = ctrl._u_current[
+                            n_der_z:n_der_z + n_pcc_z
+                        ].copy()
 
             # Run decentralised TSO step for all zones
             tso_outputs = coordinator.step(
@@ -1820,11 +2087,73 @@ def run_multi_tso_dso(
                 sim_time_s=time_s,
             )
 
+            # ── Q_PCC,set command diagnostic ───────────────────────────
+            # For each PCC trafo: print previous command, new command,
+            # delta sigma, the input-bound the MIQP was given, and the
+            # distance from the new u to the nearest bound.  If sigma is
+            # essentially zero AND the new u is far from both bounds,
+            # the OFO sees no gradient on this column (most likely
+            # cause: DER absorbed the V-tracking signal).  If sigma is
+            # zero AND the new u is at a bound, the bound is clamping.
+            if verbose >= 1:
+                for z, tso_out in tso_outputs.items():
+                    n_der_z = len(zone_defs[z].tso_der_indices)
+                    n_pcc_z = len(zone_defs[z].pcc_trafo_indices)
+                    if n_pcc_z == 0:
+                        continue
+                    ctrl_z = tso_controllers[z]
+                    u_new_pcc = tso_out.u_new[n_der_z:n_der_z + n_pcc_z]
+                    u_old_pcc = _prev_pcc_u.get(
+                        z, np.zeros(n_pcc_z, dtype=np.float64)
+                    )
+                    # Recompute the input bound the MIQP saw — same code
+                    # as TSOController._compute_input_bounds for PCC.
+                    if not ctrl_z.config.pcc_capability_on_output:
+                        q_iface_now_z = []
+                        for t in zone_defs[z].pcc_trafo_indices:
+                            if t in net.res_trafo3w.index:
+                                q_iface_now_z.append(
+                                    float(net.res_trafo3w.at[t, "q_hv_mvar"])
+                                )
+                            elif t in net.res_trafo.index:
+                                q_iface_now_z.append(
+                                    float(net.res_trafo.at[t, "q_hv_mvar"])
+                                )
+                            else:
+                                q_iface_now_z.append(0.0)
+                        q_iface_now_arr = np.asarray(q_iface_now_z, dtype=np.float64)
+                        lb = q_iface_now_arr + ctrl_z.pcc_capability_min_mvar
+                        ub = q_iface_now_arr + ctrl_z.pcc_capability_max_mvar
+                    else:
+                        lb = np.full(n_pcc_z, -1e4)
+                        ub = np.full(n_pcc_z, +1e4)
+                    for k, t in enumerate(zone_defs[z].pcc_trafo_indices):
+                        u_o = float(u_old_pcc[k]) if k < len(u_old_pcc) else 0.0
+                        u_n = float(u_new_pcc[k])
+                        sigma = u_n - u_o
+                        slack_lo = u_n - lb[k]
+                        slack_hi = ub[k] - u_n
+                        # Tag: 'AT_LB' if at lower bound, 'AT_UB' if at upper,
+                        # 'BOUND_TIGHT' if width < 1 Mvar, else 'FREE'
+                        if (ub[k] - lb[k]) < 1.0:
+                            tag = "BOUND_TIGHT"
+                        elif abs(slack_lo) < 0.5:
+                            tag = "AT_LB"
+                        elif abs(slack_hi) < 0.5:
+                            tag = "AT_UB"
+                        else:
+                            tag = "FREE"
+                        print(
+                            f"  [pcc-set z{z} t={t}] u_old={u_o:+7.2f} -> "
+                            f"u_new={u_n:+7.2f}  Δ={sigma:+6.3f}  "
+                            f"bound=[{lb[k]:+7.2f}, {ub[k]:+7.2f}]  "
+                            f"[{tag}]"
+                        )
+
             # Apply TSO controls to plant network
             for z, tso_out in tso_outputs.items():
                 prev_shunt_steps = apply_zone_tso_controls(
                     net, zone_defs[z], tso_out,
-                    use_q_cor_actuator=config.use_q_cor_actuator,
                 )
 
                 # Record per-zone results.
@@ -1930,14 +2259,38 @@ def run_multi_tso_dso(
                                     f"[{tag}]"
                                 )
 
-                        any_smw = False
-                        for sb, s_new, _ in changed:
-                            applied = tso_ctrl_z.sensitivities.apply_shunt_step_change_smw(
-                                sb, s_new,
+                        if config.local_sensitivities_tso:
+                            # Under local-net mode the TSO's Jacobian has a
+                            # *synthetic* shunt at the 3W primary bus, not
+                            # the (dropped) tertiary; the SMW lookup would
+                            # miss it.  Rebuild the reduced Jacobian from
+                            # scratch instead — the cached step on the
+                            # synthetic shunt then matches the plant.
+                            _jz_new, _syn_map_new, _promoted_oltcs_new = (
+                                _build_tso_local_jac(z)
                             )
-                            any_smw = any_smw or applied
-                        if any_smw:
+                            _per_zone_local_jac[z] = _jz_new
+                            _per_zone_synth_shunt_map[z] = _syn_map_new
+                            _zone_promoted_oltcs[z] = _promoted_oltcs_new
+                            tso_ctrl_z.sensitivities = _jz_new
+                            if _syn_map_new:
+                                tso_ctrl_z.config.shunt_sensitivity_bus_indices = [
+                                    _syn_map_new.get(int(b), int(b))
+                                    for b in tso_ctrl_z.config.shunt_bus_indices
+                                ]
+                            _apply_promoted_oos_oltc(
+                                tso_ctrl_z, _promoted_oltcs_new
+                            )
                             tso_ctrl_z.invalidate_sensitivity_cache()
+                        else:
+                            any_smw = False
+                            for sb, s_new, _ in changed:
+                                applied = tso_ctrl_z.sensitivities.apply_shunt_step_change_smw(
+                                    sb, s_new,
+                                )
+                                any_smw = any_smw or applied
+                            if any_smw:
+                                tso_ctrl_z.invalidate_sensitivity_cache()
 
                         # Dispatch a per-DSO ShuntDisturbanceMessage so each
                         # affected DSO updates its own cached J⁻¹.
@@ -2033,7 +2386,81 @@ def run_multi_tso_dso(
                 )
                 target_tso.receive_capability(cap_msg)
 
+                # ── PCC capability diagnostic ───────────────────────────
+                # Print, on each TSO tick, the per-coupling-trafo bounds
+                # the TSO will use for Q_PCC,set this step:
+                #
+                #   q_now  = current Q at the HV port (load convention)
+                #   Δmin, Δmax = capability deltas reported by the DSO
+                #   bound  = [q_now + Δmin, q_now + Δmax]  (input bound on
+                #            Q_PCC,set under ``tso_pcc_capability_on_output=False``)
+                #   width  = Δmax − Δmin  (PCC freedom this step in Mvar)
+                #
+                # Also reports DER-rail headroom: per-DER (q_max − q_now)
+                # and (q_now − q_min) aggregated across the DSO.  When
+                # both totals are small the DSO is fully saturated and
+                # the TSO has no PCC freedom regardless of g_w_pcc.
+                if verbose >= 2 and run_tso:
+                    try:
+                        ifaces = list(dso_ctrl.config.interface_trafo_indices)
+                        q_now_per = []
+                        for t in ifaces:
+                            if t in net.res_trafo3w.index:
+                                q_now_per.append(
+                                    float(net.res_trafo3w.at[t, "q_hv_mvar"])
+                                )
+                            elif t in net.res_trafo.index:
+                                q_now_per.append(
+                                    float(net.res_trafo.at[t, "q_hv_mvar"])
+                                )
+                            else:
+                                q_now_per.append(float("nan"))
+                        d_min = list(cap_msg.q_min_mvar)
+                        d_max = list(cap_msg.q_max_mvar)
+                        # Per-DER headroom totals
+                        der_p_now = dso_ctrl._extract_der_active_power(meas_dso)
+                        q_der_min, q_der_max = dso_ctrl.actuator_bounds.compute_der_q_bounds(
+                            der_p_now
+                        )
+                        q_der_now = meas_dso.der_q_mvar.copy()
+                        head_up_total = float(np.sum(
+                            np.maximum(q_der_max - q_der_now, 0.0)
+                        ))
+                        head_dn_total = float(np.sum(
+                            np.maximum(q_der_now - q_der_min, 0.0)
+                        ))
+                        n_sat_up = int(np.sum(
+                            (q_der_max - q_der_now) < 0.5
+                        ))
+                        n_sat_dn = int(np.sum(
+                            (q_der_now - q_der_min) < 0.5
+                        ))
+                        for k, t in enumerate(ifaces):
+                            qn = q_now_per[k]
+                            dl = float(d_min[k]) if k < len(d_min) else float("nan")
+                            du = float(d_max[k]) if k < len(d_max) else float("nan")
+                            print(
+                                f"  [cap {dso_id} t={t}] q_now={qn:+7.2f}  "
+                                f"Δ=[{dl:+7.2f}, {du:+7.2f}]  "
+                                f"bound=[{qn + dl:+7.2f}, {qn + du:+7.2f}]  "
+                                f"width={du - dl:6.2f} Mvar"
+                            )
+                        print(
+                            f"  [cap {dso_id}] DER headroom: up={head_up_total:6.1f} Mvar  "
+                            f"down={head_dn_total:6.1f} Mvar  "
+                            f"saturated DERs: up={n_sat_up}/{len(q_der_now)}  "
+                            f"down={n_sat_dn}/{len(q_der_now)}"
+                        )
+                    except Exception as _exc:
+                        print(f"  [cap {dso_id}] diagnostic failed: {_exc}")
+
                 # --- DSO optimisation step -------------------------------------------
+                # w-shift reanchoring: reset the DER block of _u_current
+                # to the measured Q so the OFO's update u_new = u_old +
+                # sigma yields q_set = Q_meas + sigma.  See
+                # :meth:`DSOController.apply_qw_reset`.
+                if hasattr(dso_ctrl, "apply_qw_reset"):
+                    dso_ctrl.apply_qw_reset(meas_dso)
                 dso_out = dso_ctrl.step(meas_dso, sim_time_s=time_s)
                 # Pass the live JacobianSensitivities handle so the
                 # Q+shim apply step can read the **full** per-DSO S_VQ

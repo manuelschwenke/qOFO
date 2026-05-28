@@ -57,7 +57,8 @@ def _build_tiny_cosphi_net(
     net.sgen["qv_deadband_pu"] = 0.0
     net.sgen["cosphi"] = cosphi
     net.sgen["cosphi_sign"] = cosphi_sign
-    net.sgen["q_cor_mvar"] = 0.0
+    net.sgen["q_set_mvar"] = 0.0
+    net.sgen["qv_vref_anchor_pu"] = float("nan")
     return net, b_load, int(sgen_idx)
 
 
@@ -172,7 +173,8 @@ class TestInstallDispatch:
         net.sgen.at[sgen1, "qv_deadband_pu"] = 0.0
         net.sgen.at[sgen1, "cosphi"] = 1.0
         net.sgen.at[sgen1, "cosphi_sign"] = -1
-        net.sgen.at[sgen1, "q_cor_mvar"] = 0.0
+        net.sgen.at[sgen1, "q_set_mvar"] = 0.0
+        net.sgen.at[sgen1, "qv_vref_anchor_pu"] = float("nan")
 
         idx_list = install_der_q_loops(net, [sgen0, sgen1])
         assert len(idx_list) == 2
@@ -192,19 +194,20 @@ class TestInstallDispatch:
 #  Q_cor is ignored for cos-phi DERs
 # ---------------------------------------------------------------------------
 
-class TestQCorIgnored:
+class TestQSetIgnored:
     """cos-phi DERs are excluded from the OFO action vector — the
-    controller's Q_cor write into ``net.sgen.q_cor_mvar`` for these
-    DERs has no effect on Q.  This test confirms the loop ignores
-    q_cor_mvar."""
+    controller's ``q_set`` write into ``net.sgen.q_set_mvar`` (and the
+    accompanying ``qv_vref_anchor_pu`` reanchor) for these DERs has no
+    effect on Q.  This test confirms the loop ignores both columns."""
 
-    def test_q_cor_does_not_affect_target(self):
+    def test_q_set_and_anchor_do_not_affect_target(self):
         net, _, sgen = _build_tiny_cosphi_net(
             cosphi=0.95, cosphi_sign=-1, p_mw=10.0,
         )
         loop = CosPhiConstLoop(net, sgen_idx=sgen)
         pp.runpp(net, run_control=False)
-        net.sgen.at[sgen, "q_cor_mvar"] = 999.0
+        net.sgen.at[sgen, "q_set_mvar"] = 999.0
+        net.sgen.at[sgen, "qv_vref_anchor_pu"] = 0.80
         target = loop._compute_target(net)
         tan_phi = math.sqrt(1.0 / 0.95**2 - 1.0)
         expected = -10.0 * tan_phi

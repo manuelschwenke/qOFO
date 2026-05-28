@@ -17,17 +17,18 @@ Architecture
   is ever stepped).
 * **DSO_2** -- One :class:`DSOController` is constructed for DSO_2 only
   (every other HV sub-network has no OFO).  Its actuator block on the
-  DER side is ``Q_cor`` (refactor_Qcor_method, ``use_q_cor_actuator=True``):
-  the OFO writes a correction term (sgen sign convention) that is
-  communicated to each DER and added to the plant-side QVLocalLoop's
-  droop response, so the DER's reactive output is
-  ``Q_DER = Q_cor + K · (V_ref - V)`` (linear droop, deadband=0.01 in 003).
-  The H matrix is therefore the closed-loop ``∂y/∂Q_cor``, obtained by
-  post-multiplying the open-loop ``∂y/∂Q_DER`` block by
-  ``T' = (I + diag(K) · S_VQ)^{-1}`` (Soleimani §III-B eq. 18).
+  DER side is the w-shift ``q_set`` (sgen sign convention) commanded
+  to each DER alongside a reanchored ``qv_vref_anchor_pu``.  The
+  plant-side QVLocalLoop then computes
+  ``Q_DER = q_set - K · (V - V_anchor)`` (linear droop, deadband=0.01
+  in 003).  The H matrix is the closed-loop ``∂y/∂q_set``, obtained
+  by post-multiplying the open-loop ``∂y/∂Q_DER`` block by
+  ``T' = (I + diag(K) · S_VQ)^{-1}`` (same matrix as the earlier
+  q_set formulation, see :func:`controller.der_qv_local_loop.
+  compute_w_shift_h_transform`).
 * **DSO_2 outputs** -- Q at the HV side of the three coupling 3-winding
   transformers (``q_hv_mvar``) and DN voltage magnitudes.
-* **DSO_2 actuators** -- ``Q_cor`` on every DSO_2 sgen plus the three
+* **DSO_2 actuators** -- ``q_set`` on every DSO_2 sgen plus the three
   coupling 3W trafo OLTC tap positions.
 * **DSO_2 H matrix** -- Built from the full-grid Jacobian via
   :meth:`JacobianSensitivities.build_sensitivity_matrix_H` with DSO_2-only
@@ -59,7 +60,7 @@ the next step.  Four pieces do the wiring (see below):
   ``dso_ctrl.step`` with a version that calls a user-supplied
   predictor after every step and writes its result into ``_H_cache``.
 * :func:`install_pe_noise`      -- step wrapper: adds gaussian noise
-  to the DER (Q_cor) actuator output of the OFO at every step
+  to the DER (q_set) actuator output of the OFO at every step
   (persistent excitation for sensitivity learning).  Toggled by
   ``cfg.dso_pe_noise_enabled`` in :func:`make_base_config`.
 * :func:`_setup_h_predictor`    -- example startup function (passed to
@@ -75,22 +76,22 @@ Vector layouts (DSO_2 in this script, currents and shunts excluded):
 
 ``u`` -- actuator vector (cols of H), in this order::
 
-    u = [ Q_cor_DER[d]                   for d in cfg.der_indices            ]   # Mvar, sgen convention (>0 = injection); correction term added to the local Q(V) droop
+    u = [ q_set_DER[d]                   for d in cfg.der_indices            ]   # Mvar, sgen convention (>0 = injection); commanded at the reanchored V_ref
         [ tap_position[t]                for t in cfg.oltc_trafo_indices     ]   # integer steps relative to neutral
 
-The DER's actual reactive output is ``Q_DER = Q_cor + K · (V_ref - V)``;
-``Q_cor`` is what the OFO writes and what the controller's H is
-linearized against.
+The DER's actual reactive output is
+``Q_DER = q_set - K · (V - V_anchor)``; ``q_set`` is what the OFO
+writes and what the controller's H is linearized against.
 
 ``H = ∂y/∂u`` is the closed-loop linearization of the plant response
 around the post-Phase-2 operating point.  Built from the inverse of
 the full pandapower Jacobian projected onto DSO_2's actuator /
 measurement sets, then post-multiplied on the DER columns by
 ``T' = (I + diag(K) · S_VQ)^{-1}`` to map the network-level
-``∂y/∂Q_DER`` to ``∂y/∂Q_cor`` (see Soleimani §III-B eq. 18).
-Cross-coupling from the rest of the grid is implicit in the inverted
-full Jacobian.  Layout assumes ``use_q_cor_actuator=True`` and no
-grid-forming DER (both hold in 003).
+``∂y/∂Q_DER`` to ``∂y/∂q_set`` (same matrix as the earlier q_set
+formulation).  Cross-coupling from the rest of the grid is implicit
+in the inverted full Jacobian.  Layout assumes the w-shift actuator
+and no grid-forming DER (both hold in 003).
 
 Predictor contract::
 
@@ -161,7 +162,7 @@ def make_base_config() -> MultiTSOConfig:
     Inherits the validated wind_replace + weight tuning + contingency
     timeline from ``002_M_TSO_M_DSO_COMPARE.make_base_config()`` and
     overrides only the flags that switch the run into the
-    "TSO local Q(V), DSO_2 OFO with Q_cor" mode.
+    "TSO local Q(V), DSO_2 OFO with q_set" mode.
     """
     cfg = make_002_base_config()
 
@@ -220,7 +221,7 @@ def make_base_config() -> MultiTSOConfig:
 
     # ---- Persistent excitation (sensitivity learning) -----------------
     # When enabled, gaussian noise N(0, sigma^2) is added to the DSO
-    # OFO's continuous (DER Q_cor) actuator output AT EVERY DSO step,
+    # OFO's continuous (DER q_set) actuator output AT EVERY DSO step,
     # AFTER the MIQP solves and BEFORE the command is sent to the plant.
     # The controller's internal u_current is also incremented by the
     # noise so the next OFO step starts from u(k+1)' = u(k+1) + eps and
@@ -228,7 +229,7 @@ def make_base_config() -> MultiTSOConfig:
     # perturbed (integer actuators).  Useful for downstream H estimation
     # (Kalman filter / NN) where the input must be persistently exciting.
     cfg.dso_pe_noise_enabled = False
-    cfg.dso_pe_noise_std_mvar = 1.0   # std of N(0, sigma^2) on Q_cor [Mvar]
+    cfg.dso_pe_noise_std_mvar = 1.0   # std of N(0, sigma^2) on q_set [Mvar]
     cfg.dso_pe_noise_seed = 42        # RNG seed for reproducibility
 
     # ---- Output directory ---------------------------------------------
@@ -258,7 +259,7 @@ def make_base_config() -> MultiTSOConfig:
 #       # (see _setup_h_predictor below for an example):
 #       install_h_corrector(state["dso_controllers"]["DSO_2"], my_h_predictor)
 #
-#       # Optional: gaussian persistent-excitation noise on Q_cor output.
+#       # Optional: gaussian persistent-excitation noise on q_set output.
 #       # Toggle in make_base_config (cfg.dso_pe_noise_enabled = True/False);
 #       # _setup_h_predictor reads the flag and installs the wrapper.
 
@@ -295,7 +296,7 @@ def get_dso_h_view(
           ``row_units``      : list[str], physical unit for each row.
           ``col_units``      : list[str], physical unit for each column.
           ``row_kinds``      : list[str], one of ``{"Q_trafo","V_bus","I_line"}``.
-          ``col_kinds``      : list[str], one of ``{"Q_cor","OLTC","shunt"}``.
+          ``col_kinds``      : list[str], one of ``{"q_set","OLTC","shunt"}``.
           ``kept_row_mask``  : np.ndarray[bool], length = full-H rows.
           ``kept_col_mask``  : np.ndarray[bool], length = full-H cols.
 
@@ -332,16 +333,16 @@ def get_dso_h_view(
         row_labels.append(f"I[line_{li}]")
         row_units.append("p.u.")
 
-    # ── Column metadata: order is [Q_cor (per-DER) | OLTC_2W | OLTC_3W | shunt] ──
-    # The DER columns of H are the closed-loop ∂y/∂Q_cor (T' applied) under
-    # use_q_cor_actuator=True.  Q_cor is the correction term the OFO writes
-    # to each DER; the DER's actual Q is Q_cor + K·(V_ref - V).
+    # ── Column metadata: order is [q_set (per-DER) | OLTC_2W | OLTC_3W | shunt] ──
+    # The DER columns of H are the closed-loop ∂y/∂q_set (T' applied).
+    # q_set is the OFO command at the reanchored V_ref; the DER's
+    # actual Q is q_set - K·(V - V_anchor).
     col_kinds: List[str] = []
     col_labels: List[str] = []
     col_units: List[str] = []
     for d in cfg.der_indices:
-        col_kinds.append("Q_cor")
-        col_labels.append(f"Q_cor[sgen_{d}]")
+        col_kinds.append("q_set")
+        col_labels.append(f"q_set[sgen_{d}]")
         col_units.append("Mvar (sgen conv, +inj)")
     for ti in m.get("oltc_trafos", []):
         col_kinds.append("OLTC")
@@ -365,7 +366,7 @@ def get_dso_h_view(
         raise RuntimeError(
             f"H-view col count mismatch: counted {len(col_kinds)} (n_der="
             f"{len(cfg.der_indices)}) but H has {H_full.shape[1]} cols.  "
-            f"Layout assumes use_q_cor_actuator=True and no grid-forming DER; "
+            f"Layout assumes the w-shift actuator and no grid-forming DER; "
             f"V_gf or Q_realized splicing would invalidate this view."
         )
 
@@ -456,7 +457,7 @@ def install_pe_noise(
     std_mvar: float,
     rng: np.random.Generator,
 ) -> None:
-    """Wrap ``dso_ctrl.step`` so gaussian noise is added to DER Q_cor commands.
+    """Wrap ``dso_ctrl.step`` so gaussian noise is added to DER q_set commands.
 
     Per step k:
       1. ``dso_ctrl.step(...)`` runs as normal -- OFO computes
@@ -466,7 +467,7 @@ def install_pe_noise(
       3. The DER (continuous) slice of ``u_new`` and ``u_continuous`` on
          the returned ``ControllerOutput`` is incremented by ``eps``,
          so the runner applies ``u(k+1)' = u(k+1) + eps`` to
-         ``net.sgen.q_cor_mvar`` (see ``apply_dso_controls`` in
+         ``net.sgen.q_set_mvar`` (see ``apply_dso_controls`` in
          ``experiments/helpers/plant_io.py``).
       4. ``dso_ctrl._u_current`` is also incremented by ``eps`` so the
          next OFO step starts from ``u(k+1)'`` rather than ``u(k+1)``.
@@ -480,7 +481,7 @@ def install_pe_noise(
     dso_ctrl : DSOController
         The DSO controller to wrap.
     std_mvar : float
-        Standard deviation of the gaussian noise on each DER's Q_cor
+        Standard deviation of the gaussian noise on each DER's q_set
         command, in Mvar.  Set to 0 to effectively disable.
     rng : np.random.Generator
         Random source.  Use a seeded ``np.random.default_rng(seed)`` for
@@ -488,7 +489,7 @@ def install_pe_noise(
 
     Notes
     -----
-    Layout assumption: ``u_new = [Q_cor (n_der) | V_gf (n_gf) |
+    Layout assumption: ``u_new = [q_set (n_der) | V_gf (n_gf) |
     OLTC (n_oltc) | shunt (n_shunts)]`` with the DER block at indices
     ``[0, n_der)``.  Holds for 003 (no V_gf, no shunts).  If the layout
     changes in the future this slicing must be revisited.
@@ -578,12 +579,12 @@ def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> None:
     n_cols_full = len(view["kept_col_mask"])
     n_q = sum(k == "Q_trafo" for k in view["row_kinds"])
     n_v = sum(k == "V_bus"   for k in view["row_kinds"])
-    n_der = sum(k == "Q_cor" for k in view["col_kinds"])
+    n_der = sum(k == "q_set" for k in view["col_kinds"])
     n_oltc = sum(k == "OLTC" for k in view["col_kinds"])
     print(f"[H] DSO_2 view {view['H'].shape}  "
           f"(full was ({n_rows_full}, {n_cols_full}))")
     print(f"[H]   rows: {n_q} Q_trafo + {n_v} V_bus")
-    print(f"[H]   cols: {n_der} Q_cor (DER) + {n_oltc} OLTC")
+    print(f"[H]   cols: {n_der} q_set (DER) + {n_oltc} OLTC")
 
     # Install PE noise FIRST (innermost wrapper) so the H corrector
     # installed below sits on the outside.
@@ -595,7 +596,7 @@ def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> None:
             rng=rng,
         )
         print(f"[PE] installed gaussian noise std={cfg.dso_pe_noise_std_mvar} Mvar "
-              f"on {len(dso_ctrl.config.der_indices)} DER Q_cor channels "
+              f"on {len(dso_ctrl.config.der_indices)} DER q_set channels "
               f"(seed={cfg.dso_pe_noise_seed})")
 
     install_h_corrector(dso_ctrl, _unity_multiply_predictor) # Insert your predictor here

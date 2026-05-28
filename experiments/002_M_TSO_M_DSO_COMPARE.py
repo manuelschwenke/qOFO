@@ -12,10 +12,11 @@ The five-scenario design factors out two axes:
 * **DSO control**: cos phi=1 (suffix ``0``), local Q(V) droop
   (suffix ``1``), or DSO OFO MIQP (cascade ``C``).
 
-Plant-side Q is driven by the refactor_v2 q_mode loops
+Plant-side Q is driven by the q_mode loops
 (``QVLocalLoop`` / ``CosPhiConstLoop``) installed at [3c-deferred]
 in ``experiments/000_M_TSO_M_DSO.py``; the OFO scenarios additionally
-command ``q_cor_mvar`` per DER from the MIQP layer above.
+command ``q_set_mvar`` per DER (and reanchor ``qv_vref_anchor_pu``)
+from the MIQP layer above.
 
 Scenarios
 ---------
@@ -104,15 +105,15 @@ def make_base_config() -> MultiTSOConfig:
       for post-hoc comparison plots instead.
     """
     cfg = MultiTSOConfig(
-        n_total_s=60*110, #60.0 * 60 * 24,      # 720-min full simulation
+        n_total_s=60*60*3, #60.0 * 60 * 24,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
         g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=250,  # DSO Q-tracking
         tso_g_q_tie=1,
         # ── DSO objective tuning ──
-        # use_q_cor_actuator defaults to True (refactor_v2 Soleimani §III-B).
-        dso_g_v=25000.0,  # reduced to avoid competing with Q tracking
+        # DER actuator: w-shift (q_set + V_ref reanchoring).
+        dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.95,  # leaky integrator decay
         dso_q_integral_max_mvar=200.0,  # anti-windup clamp
@@ -124,7 +125,7 @@ def make_base_config() -> MultiTSOConfig:
         # values and sweep from there.
         g_w_der=10,    # was 20 (direct-Q); T-STATCOM curvature ~80x lower under T'
         g_w_gen=5e7,
-        g_w_pcc=50,
+        g_w_pcc=10,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,
@@ -138,19 +139,25 @@ def make_base_config() -> MultiTSOConfig:
         live_plot_controller=True,
         live_plot_cascade=True,
         live_plot_system=False,
+        local_sensitivities_tso=True,
+        local_sensitivities_dso=True,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 9, 7, 10, 0),
+        start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles            = True,
         use_zonal_gen_dispatch  = True,
         contingencies           = [
-            ContingencyEvent(minute=60,  element_type="gen",  element_index=2, action="trip"),
-            ContingencyEvent(minute=100, element_type="gen",  element_index=2, action="restore"),
-            ContingencyEvent(minute=120, element_type="load", bus=2,  p_mw=300, q_mvar=150, action="connect"),
-            ContingencyEvent(minute=240, element_type="load", bus=2,  p_mw=300, q_mvar=150, action="trip"),
-            ContingencyEvent(minute=150, element_type="load", bus=14, p_mw=100, q_mvar=50, action="connect"),
-            ContingencyEvent(minute=160, element_type="load", bus=14, p_mw=100, q_mvar=50, action="trip"),
-            ContingencyEvent(minute=180, element_type="gen",  element_index=5, action="trip"),
-            ContingencyEvent(minute=280, element_type="gen",  element_index=5, action="restore"),
+            ContingencyEvent(minute=30,  element_type="gen",  element_index=2, action="trip"),
+            ContingencyEvent(minute=90, element_type="gen", element_index=2, action="restore"),
+            ContingencyEvent(minute=50, element_type="load", bus=27,  p_mw=200, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=100, element_type="load", bus=27,  p_mw=200, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=120, element_type="load",
+                             element_index=4, action="trip"),
+            ContingencyEvent(minute=160, element_type="load",
+                             element_index=4, action="restore"),
+            ContingencyEvent(minute=130, element_type="line", element_index=18, action="trip"),
+            ContingencyEvent(minute=150, element_type="line", element_index=18, action="restore"),
+            #ContingencyEvent(minute=180, element_type="gen",  element_index=5, action="trip"),
+            #ContingencyEvent(minute=280, element_type="gen",  element_index=5, action="restore"),
             # ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
             # ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
             # ContingencyEvent(minute=720, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="connect"),

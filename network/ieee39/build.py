@@ -771,8 +771,8 @@ def tag_der_q_modes(
     tso_qv_vref_pu: float = 1.00,
     dso_qv_vref_pu: float = 1.00,
     qv_vref_pu_overrides: Optional[Dict[int, float]] = None,
-    tso_qv_deadband_pu: float = 0.0,
-    dso_qv_deadband_pu: float = 0.0,
+    tso_qv_deadband_pu: float = 0.005,
+    dso_qv_deadband_pu: float = 0.005,
     qv_deadband_pu_overrides: Optional[Dict[int, float]] = None,
     tso_cosphi: float = 1.0,
     dso_cosphi: float = 1.0,
@@ -786,17 +786,23 @@ def tag_der_q_modes(
 
     Adds the following columns to ``net.sgen`` (creating them if absent):
 
-    * ``q_mode``        — ``"qv"`` (Q(V) droop) or ``"cosphi"`` (fixed PF).
-    * ``qv_slope_pu``   — droop slope (pu_q/pu_v).  Read only when ``q_mode=="qv"``.
-    * ``qv_vref_pu``    — droop centre voltage.  Read only when ``q_mode=="qv"``.
-    * ``qv_deadband_pu``— half-width of the symmetric deadband around V_ref.
-                          ``0.0`` ⇒ linear droop through V_ref.
-    * ``cosphi``        — power factor magnitude in [0, 1].  Read only when
-                          ``q_mode=="cosphi"``.
-    * ``cosphi_sign``   — ``+1`` over-excited (Q injection) / ``-1`` under-
-                          excited (Q absorption).
-    * ``q_cor_mvar``    — controller-commanded reactive-power offset (Mvar).
-                          Initialised to 0.0; the OFO writes here every step.
+    * ``q_mode``             — ``"qv"`` (Q(V) droop) or ``"cosphi"`` (fixed PF).
+    * ``qv_slope_pu``        — droop slope (pu_q/pu_v).  Read only when ``q_mode=="qv"``.
+    * ``qv_vref_pu``         — nominal droop centre voltage; used as cold-start
+                                fallback when the anchor column below is NaN.
+    * ``qv_deadband_pu``     — half-width of the symmetric deadband around the
+                                reanchored V_ref.  Default 0.005 p.u.
+    * ``cosphi``             — power factor magnitude in [0, 1].  Read only when
+                                ``q_mode=="cosphi"``.
+    * ``cosphi_sign``        — ``+1`` over-excited (Q injection) / ``-1`` under-
+                                excited (Q absorption).
+    * ``q_set_mvar``         — controller-commanded Q setpoint at the reanchored
+                                V_ref (Mvar).  Initialised to 0.0; the OFO writes
+                                here every step in w-shift mode.
+    * ``qv_vref_anchor_pu``  — V_ref reanchored to the most recent measured bus
+                                voltage by the apply step.  Initialised to NaN
+                                so the local loop falls back to ``qv_vref_pu``
+                                until the first apply.
 
     Hierarchy: per-DER override > level (TSO/DSO) default.  Keys in the
     ``*_overrides`` maps are pandapower sgen indices.
@@ -835,11 +841,12 @@ def tag_der_q_modes(
 
     Notes
     -----
-    The OFO controllers will exclude ``q_mode=="cosphi"`` DERs from
-    their action vectors (these DERs are not actuators); the OFO will
-    only write ``q_cor_mvar`` for ``q_mode=="qv"`` DERs.  See the
-    refactor_v2 plan §6a for the piecewise-linear Q(V) characteristic
-    and §6 for the H-matrix transform.
+    The OFO controllers exclude ``q_mode=="cosphi"`` DERs from their
+    action vectors (these DERs are not actuators); the OFO writes
+    ``q_set_mvar`` only for ``q_mode=="qv"`` DERs and reanchors
+    ``qv_vref_anchor_pu`` to the most recent measured bus voltage.
+    The local Q(V) characteristic then reads
+    ``Q = q_set - R · (V - V_anchor)`` with deadband ``qv_deadband_pu``.
     """
     valid_modes = {"qv", "cosphi"}
     for nm, mode in (("tso_q_mode", tso_q_mode), ("dso_q_mode", dso_q_mode)):
@@ -869,11 +876,11 @@ def tag_der_q_modes(
             )
 
     # Ensure all columns exist with a sensible default for sgens not in
-    # tso_/dso_der_indices (e.g. equivalent units).  We use NaN for the
-    # numerics so an unintended read shows up clearly; q_mode defaults
-    # to "qv" and q_cor_mvar to 0.0 since those are also the safest
-    # values if a DER is later promoted into the controller without
-    # being re-tagged.
+    # tso_/dso_der_indices (e.g. equivalent units).  Numerics default to
+    # NaN so an unintended read shows up clearly; q_mode defaults to
+    # "qv" and q_set_mvar to 0.0 (a safe "no shift" starting point).
+    # qv_vref_anchor_pu is NaN until the first apply step populates it
+    # from the bus voltage of the just-completed PF.
     if "q_mode" not in net.sgen.columns:
         net.sgen["q_mode"] = "qv"
     if "qv_slope_pu" not in net.sgen.columns:
@@ -886,8 +893,10 @@ def tag_der_q_modes(
         net.sgen["cosphi"] = float("nan")
     if "cosphi_sign" not in net.sgen.columns:
         net.sgen["cosphi_sign"] = 0
-    if "q_cor_mvar" not in net.sgen.columns:
-        net.sgen["q_cor_mvar"] = 0.0
+    if "q_set_mvar" not in net.sgen.columns:
+        net.sgen["q_set_mvar"] = 0.0
+    if "qv_vref_anchor_pu" not in net.sgen.columns:
+        net.sgen["qv_vref_anchor_pu"] = float("nan")
 
     def _tag(s: int, level_default_mode: str,
              level_slope: float, level_vref: float, level_db: float,
@@ -911,12 +920,15 @@ def tag_der_q_modes(
         net.sgen.at[s, "cosphi_sign"] = int(
             cosphi_sign_overrides.get(s, level_sign)
         )
-        # q_cor_mvar is a runtime state, not a config; the OFO
-        # overwrites it every step.  Initialise to 0.0 only — preserve
-        # any existing value so that re-calling tag_der_q_modes mid-run
-        # does not stomp on the controller's command.
-        if pd.isna(net.sgen.at[s, "q_cor_mvar"]):
-            net.sgen.at[s, "q_cor_mvar"] = 0.0
+        # q_set_mvar and qv_vref_anchor_pu are runtime state, not config;
+        # the OFO / apply step overwrites them every step.  Preserve any
+        # existing values so that re-calling tag_der_q_modes mid-run does
+        # not stomp on the live state.
+        if pd.isna(net.sgen.at[s, "q_set_mvar"]):
+            net.sgen.at[s, "q_set_mvar"] = 0.0
+        # qv_vref_anchor_pu intentionally left NaN at tag time; the local
+        # Q(V) loop falls back to qv_vref_pu (cold start) until the first
+        # apply step writes the measured bus voltage.
 
     for s in meta.tso_der_indices:
         _tag(int(s), tso_q_mode,

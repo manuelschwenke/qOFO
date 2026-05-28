@@ -1,0 +1,24 @@
+
+=== STAGE 1 direct-Q     (use_qv_local_loop=False) ===
+  DSO Q_iface tracking |actual - setpoint|:
+    DSO_1: err mean=  0.41  max=  0.81  final=  0.81  |  Q range=[ +82.3,  +87.0]
+    DSO_2: err mean=  3.63  max=  4.77  final=  4.77  |  Q range=[ +46.7,  +75.9]
+    DSO_3: err mean=  2.45  max=  2.68  final=  2.28  |  Q range=[ +59.3,  +77.8]
+    DSO_4: err mean=  3.64  max=  5.44  final=  5.44  |  Q range=[ +42.1,  +78.8]
+    -> RMS error:   2.91 Mvar  |  Q swing across all DSOs: [ +42.1,  +87.0]
+
+=== STAGE 2 V_ref direct (use_qv_local_loop=True, qv_apply_mode='v_ref') ===
+  DSO Q_iface tracking |actual - setpoint|:
+    DSO_1: err mean= 39.75  max= 52.34  final= 44.16  |  Q range=[ +24.9, +115.5]
+    DSO_2: err mean= 21.78  max= 41.54  final= 31.92  |  Q range=[ +26.5,  +86.4]
+    DSO_3: err mean= 32.38  max= 51.96  final= 38.77  |  Q range=[ +27.4, +108.9]
+    DSO_4: err mean= 34.80  max= 58.09  final= 52.43  |  Q range=[ +16.1, +104.0]
+    -> RMS error:  35.66 Mvar  |  Q swing across all DSOs: [ +16.1, +115.5]
+
+=== STAGE 2 Q + shim     (use_qv_local_loop=True, qv_apply_mode='q_shim') ===
+  DSO Q_iface tracking |actual - setpoint|:
+    DSO_1: err mean=  1.38  max=  4.53  final=  1.21  |  Q range=[ +64.4,  +67.3]
+    DSO_2: err mean=  4.62  max=  5.97  final=  5.83  |  Q range=[ +39.5,  +66.3]
+    DSO_3: err mean=  3.07  max=  5.50  final=  1.96  |  Q range=[ +52.6,  +72.2]
+    DSO_4: err mean=  6.14  max=  7.96  final=  7.96  |  Q range=[ +33.1,  +69.7]
+    -> RMS error:   4.33 Mvar  |  Q swing across all DSOs: [ +33.1,  +72.2]

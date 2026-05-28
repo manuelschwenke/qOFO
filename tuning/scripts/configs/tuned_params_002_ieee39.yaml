@@ -1,0 +1,30 @@
+meta:
+  baseline_path: configs\baseline_002_ieee39.yaml
+  best_trial_number: 85
+  best_value: 24.60941316656625
+  ceilings:
+    g_v: 1964.602948730522
+    g_w_der: 509.00870358877114
+    g_w_dso_der: 40720.69628710169
+    g_w_dso_oltc: .inf
+    g_w_pcc: 5090.087035887711
+    g_w_tso_oltc: 80.86604776936306
+    g_w_tso_shunt: .inf
+  ceilings_notes: 'continuous via isotropic 1/g_w scaling, rho(M_full^c)=50.9 at baseline;
+    g_w_tso_oltc from C3.g_min_required (max over 6 OLTCs); g_w_tso_shunt: no shunt
+    actuators in stability result; g_w_dso_oltc: no analytical bound (DSO OLTCs settle
+    finitely by Prop. 1.3); ceiling=inf, BO uses fallback_high'
+  cvar_pct: 25.0
+  n_trials: 133
+  study_name: v4_002_ieee39_metric_adapt
+  timestamp: '2026-05-02T23:06:34.821810'
+params:
+  dso_g_v: 76441.04962520831
+  g_q: 2.982199477047865
+  g_v: 9225.218460905253
+  g_w_der: 0.13508511943157916
+  g_w_dso_der: 139.3024216715226
+  g_w_dso_oltc: 23580.866317736607
+  g_w_pcc: 0.8437920939489395
+  g_w_tso_oltc: 5107.993700336268
+  tso_g_q_tie: 0.4193549846653459

@@ -1,0 +1,48 @@
+
+=== BASELINE        : slope=0.07  bounds=[0.95, 1.10]  (your main) ===
+    DSO_1: mean=  1.83  max=  4.72  final=  4.72 Mvar
+    DSO_2: mean= 22.80  max= 36.44  final= 36.44 Mvar
+    DSO_3: mean= 14.57  max= 23.18  final= 23.18 Mvar
+    DSO_4: mean= 32.43  max= 52.89  final= 52.89 Mvar
+    -> RMS across all DSOs over time:  23.08 Mvar
+    Final realised DSO DER |Q| sums:
+
+=== STEEPER         : slope=0.04  bounds=[0.95, 1.10] ===
+    DSO_1: mean=  1.97  max=  4.78  final=  4.78 Mvar
+    DSO_2: mean= 19.11  max= 30.61  final= 30.61 Mvar
+    DSO_3: mean= 12.04  max= 19.20  final= 19.20 Mvar
+    DSO_4: mean= 31.17  max= 50.85  final= 50.85 Mvar
+    -> RMS across all DSOs over time:  21.06 Mvar
+    Final realised DSO DER |Q| sums:
+
+=== WIDER           : slope=0.07  bounds=[0.85, 1.20] ===
+    DSO_1: mean=  1.83  max=  4.72  final=  4.72 Mvar
+    DSO_2: mean= 22.80  max= 36.44  final= 36.44 Mvar
+    DSO_3: mean= 14.57  max= 23.18  final= 23.18 Mvar
+    DSO_4: mean= 32.43  max= 52.89  final= 52.89 Mvar
+    -> RMS across all DSOs over time:  23.08 Mvar
+    Final realised DSO DER |Q| sums:
+
+=== RECOMMENDED     : slope=0.04  bounds=[0.85, 1.20] ===
+    DSO_1: mean=  1.97  max=  4.78  final=  4.78 Mvar
+    DSO_2: mean= 19.11  max= 30.61  final= 30.61 Mvar
+    DSO_3: mean= 12.04  max= 19.20  final= 19.20 Mvar
+    DSO_4: mean= 31.17  max= 50.85  final= 50.85 Mvar
+    -> RMS across all DSOs over time:  21.06 Mvar
+    Final realised DSO DER |Q| sums:
+
+=== AGGRESSIVE      : slope=0.02  bounds=[0.80, 1.25] ===
+    DSO_1: mean=  2.02  max=  4.69  final=  4.69 Mvar
+    DSO_2: mean= 16.46  max= 26.41  final= 26.41 Mvar
+    DSO_3: mean= 10.13  max= 16.19  final= 16.19 Mvar
+    DSO_4: mean= 29.73  max= 48.53  final= 48.53 Mvar
+    -> RMS across all DSOs over time:  19.42 Mvar
+    Final realised DSO DER |Q| sums:
+
+=== STEEP+VERY_WIDE : slope=0.04  bounds=[0.70, 1.30] ===
+    DSO_1: mean=  1.97  max=  4.78  final=  4.78 Mvar
+    DSO_2: mean= 19.11  max= 30.61  final= 30.61 Mvar
+    DSO_3: mean= 12.04  max= 19.20  final= 19.20 Mvar
+    DSO_4: mean= 31.17  max= 50.85  final= 50.85 Mvar
+    -> RMS across all DSOs over time:  21.06 Mvar
+    Final realised DSO DER |Q| sums:

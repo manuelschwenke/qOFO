@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Validation report</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 1100px;
+         margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1, h2 { border-bottom: 1px solid #ccc; padding-bottom: .3rem; }
+  table { border-collapse: collapse; margin: 1rem 0; }
+  th, td { padding: .4rem .8rem; border: 1px solid #ddd; text-align: right; }
+  th:first-child, td:first-child { text-align: left; font-family: monospace; }
+  .meta { color: #666; font-size: .9rem; }
+  .bad { color: #c33; }
+  pre { background: #f4f4f4; padding: .5rem; border-radius: 4px;
+        overflow-x: auto; }
+</style>
+</head>
+<body>
+  <h1>Validation report</h1>
+  <p class="meta">
+    Scenarios: {{ n_scenarios }} |
+    PF failures: <b class="{{ 'bad' if n_pf_fail else '' }}">{{ n_pf_fail }}</b> |
+    Runner errors: <b class="{{ 'bad' if n_runner_err else '' }}">{{ n_runner_err }}</b>
+  </p>
+
+  <h2>Cost statistics</h2>
+  <table>
+    <tr><th>statistic</th><th>cost_J</th><th>rho_emp_p95</th></tr>
+    <tr><td>median</td><td>{{ '%.4g' % median_J }}</td>
+        <td>{{ '%.4g' % median_rho }}</td></tr>
+    <tr><td>mean</td><td>{{ '%.4g' % mean_J }}</td><td>—</td></tr>
+    <tr><td>p95</td><td>{{ '%.4g' % p95_J }}</td>
+        <td>{{ '%.4g' % p95_rho }}</td></tr>
+    <tr><td>max</td><td>{{ '%.4g' % max_J }}</td><td>—</td></tr>
+  </table>
+
+  <h2>Tuned parameters</h2>
+  <pre>{{ params|tojson(indent=2) }}</pre>
+
+  <h2>Distributions</h2>
+  {{ fig_J_hist|safe }}
+  {{ fig_rho_hist|safe }}
+  {{ fig_osc_hist|safe }}
+  {{ fig_tap_hist|safe }}
+
+  {% if fail_rows %}
+  <h2>Failed scenarios</h2>
+  <table>
+    <tr><th>scenario</th><th>pf_failures</th><th>cost_J</th><th>reason</th></tr>
+    {% for r in fail_rows %}
+    <tr>
+      <td>{{ r.scenario }}</td>
+      <td class="bad">{{ r.pf_failures }}</td>
+      <td>{{ r.cost_J }}</td>
+      <td>{{ r.reason }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  <h2>Study metadata</h2>
+  <pre>{{ meta|tojson(indent=2) }}</pre>
+</body>
+</html>

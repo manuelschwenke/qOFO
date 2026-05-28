@@ -1,0 +1,60 @@
+
+=== g_q=200    slope=0.02  g_z_qreal=1e2  (default soft rail) ===
+  DSO Q_iface |actual - setpoint| (Mvar):
+    DSO_1: mean=   0.79  max=   1.76  final=   1.76
+    DSO_2: mean=  11.32  max=  16.92  final=  16.92
+    DSO_3: mean=   7.00  max=  10.45  final=  10.45
+    DSO_4: mean=  19.89  max=  30.69  final=  30.69
+  final Q_DER per zone:
+    zone 1: n_DER=1  Q range=[  +98.91,   +98.91] Mvar  mean=  +98.91  std=  0.00
+    zone 2: n_DER=1  Q range=[ +124.99,  +124.99] Mvar  mean= +124.99  std=  0.00
+    zone 3: n_DER=2  Q range=[  +89.63,  +187.06] Mvar  mean= +138.34  std= 48.72
+  max |ΔQ_DER|/step (chatter proxy):
+    zone 1: mean=  2.94  max=  9.79  final=  0.03 Mvar
+    zone 2: mean=  0.68  max=  3.36  final=  0.02 Mvar
+    zone 3: mean=  3.01  max=  9.50  final=  0.01 Mvar
+
+=== g_q=200    slope=0.02  g_z_qreal=1e6  (hard rail) ===
+  DSO Q_iface |actual - setpoint| (Mvar):
+    DSO_1: mean=   0.79  max=   1.76  final=   1.76
+    DSO_2: mean=  11.32  max=  16.92  final=  16.92
+    DSO_3: mean=   7.00  max=  10.45  final=  10.45
+    DSO_4: mean=  19.89  max=  30.69  final=  30.69
+  final Q_DER per zone:
+    zone 1: n_DER=1  Q range=[  +98.91,   +98.91] Mvar  mean=  +98.91  std=  0.00
+    zone 2: n_DER=1  Q range=[ +124.99,  +124.99] Mvar  mean= +124.99  std=  0.00
+    zone 3: n_DER=2  Q range=[  +89.63,  +187.06] Mvar  mean= +138.34  std= 48.72
+  max |ΔQ_DER|/step (chatter proxy):
+    zone 1: mean=  2.94  max=  9.79  final=  0.03 Mvar
+    zone 2: mean=  0.68  max=  3.36  final=  0.02 Mvar
+    zone 3: mean=  3.01  max=  9.50  final=  0.01 Mvar
+
+=== g_q=1000   slope=0.02  g_z_qreal=1e6  (5x Q + hard rail) ===
+  DSO Q_iface |actual - setpoint| (Mvar):
+    DSO_1: mean=   0.79  max=   1.76  final=   1.76
+    DSO_2: mean=  11.32  max=  16.92  final=  16.92
+    DSO_3: mean=   7.00  max=  10.45  final=  10.45
+    DSO_4: mean=  19.89  max=  30.69  final=  30.69
+  final Q_DER per zone:
+    zone 1: n_DER=1  Q range=[  +98.91,   +98.91] Mvar  mean=  +98.91  std=  0.00
+    zone 2: n_DER=1  Q range=[ +124.99,  +124.99] Mvar  mean= +124.99  std=  0.00
+    zone 3: n_DER=2  Q range=[  +89.63,  +187.06] Mvar  mean= +138.34  std= 48.72
+  max |ΔQ_DER|/step (chatter proxy):
+    zone 1: mean=  2.94  max=  9.79  final=  0.03 Mvar
+    zone 2: mean=  0.68  max=  3.36  final=  0.02 Mvar
+    zone 3: mean=  3.01  max=  9.50  final=  0.01 Mvar
+
+=== g_q=10000  slope=0.02  g_z_qreal=1e6  (50x Q + hard rail) ===
+  DSO Q_iface |actual - setpoint| (Mvar):
+    DSO_1: mean=   0.79  max=   1.76  final=   1.76
+    DSO_2: mean=  11.32  max=  16.92  final=  16.92
+    DSO_3: mean=   7.00  max=  10.45  final=  10.45
+    DSO_4: mean=  19.89  max=  30.69  final=  30.69
+  final Q_DER per zone:
+    zone 1: n_DER=1  Q range=[  +98.91,   +98.91] Mvar  mean=  +98.91  std=  0.00
+    zone 2: n_DER=1  Q range=[ +124.99,  +124.99] Mvar  mean= +124.99  std=  0.00
+    zone 3: n_DER=2  Q range=[  +89.63,  +187.06] Mvar  mean= +138.34  std= 48.72
+  max |ΔQ_DER|/step (chatter proxy):
+    zone 1: mean=  2.94  max=  9.79  final=  0.03 Mvar
+    zone 2: mean=  0.68  max=  3.36  final=  0.02 Mvar
+    zone 3: mean=  3.01  max=  9.50  final=  0.01 Mvar

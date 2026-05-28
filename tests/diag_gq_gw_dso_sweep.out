@@ -1,0 +1,75 @@
+Stage 2 q_shim (post matrix-form shim patch) — (g_q, g_w_dso_der) sweep
+  horizon: 40 min  |  contingency: gen5 trip @15m, restore @30m
+  grid: g_q ∈ [200.0, 400.0, 800.0],  g_w_dso_der ∈ [500.0, 1000.0, 2000.0]
+
+
+=== g_q=  200  g_w_dso_der=  500  (ratio=0.400) ===
+  Q-iface RMS over DSOs / time : 5.258 Mvar
+  V-tracking RMS over zones / time: 0.00448 pu
+  Q-iface peak per DSO [Mvar] : DSO_1= 4.52, DSO_2= 9.09, DSO_3=10.46, DSO_4=18.45
+  DER Q chatter mean |ΔQ| [Mvar]: (none)
+  DER Q chatter max  |ΔQ| [Mvar]: (none)
+
+=== g_q=  200  g_w_dso_der= 1000  (ratio=0.200) ===
+  Q-iface RMS over DSOs / time : 5.625 Mvar
+  V-tracking RMS over zones / time: 0.00451 pu
+  Q-iface peak per DSO [Mvar] : DSO_1= 2.53, DSO_2=14.67, DSO_3=13.19, DSO_4=12.65
+  DER Q chatter mean |ΔQ| [Mvar]: (none)
+  DER Q chatter max  |ΔQ| [Mvar]: (none)
+
+=== g_q=  200  g_w_dso_der= 2000  (ratio=0.100) ===
+  Q-iface RMS over DSOs / time : 7.353 Mvar
+  V-tracking RMS over zones / time: 0.00455 pu
+  Q-iface peak per DSO [Mvar] : DSO_1= 2.21, DSO_2=11.53, DSO_3=14.89, DSO_4=14.39
+  DER Q chatter mean |ΔQ| [Mvar]: (none)
+  DER Q chatter max  |ΔQ| [Mvar]: (none)
+
+=== g_q=  400  g_w_dso_der=  500  (ratio=0.800) ===
+  Q-iface RMS over DSOs / time : 58.480 Mvar
+  V-tracking RMS over zones / time: 0.00584 pu
+  Q-iface peak per DSO [Mvar] : DSO_1=117.97, DSO_2=117.82, DSO_3=130.43, DSO_4=117.66
+  DER Q chatter mean |ΔQ| [Mvar]: (none)
+  DER Q chatter max  |ΔQ| [Mvar]: (none)
+
+=== g_q=  400  g_w_dso_der= 1000  (ratio=0.400) ===
+  Q-iface RMS over DSOs / time : 7.021 Mvar
+  V-tracking RMS over zones / time: 0.00448 pu
+  Q-iface peak per DSO [Mvar] : DSO_1= 4.38, DSO_2= 9.35, DSO_3=10.18, DSO_4=40.54
+  DER Q chatter mean |ΔQ| [Mvar]: (none)
+  DER Q chatter max  |ΔQ| [Mvar]: (none)
+
+=== g_q=  400  g_w_dso_der= 2000  (ratio=0.200) ===
+  Q-iface RMS over DSOs / time : 5.445 Mvar
+  V-tracking RMS over zones / time: 0.00451 pu
+  Q-iface peak per DSO [Mvar] : DSO_1= 2.42, DSO_2=14.80, DSO_3=13.36, DSO_4=12.30
+  DER Q chatter mean |ΔQ| [Mvar]: (none)
+  DER Q chatter max  |ΔQ| [Mvar]: (none)
+
+=== g_q=  800  g_w_dso_der=  500  (ratio=1.600) ===
+  FAILED: ControllerNotConverged('Maximum number of iterations per controller is reached. Some controller did not converge after 101 calculations!')
+
+=== g_q=  800  g_w_dso_der= 1000  (ratio=0.800) ===
+  Q-iface RMS over DSOs / time : 56.573 Mvar
+  V-tracking RMS over zones / time: 0.00574 pu
+  Q-iface peak per DSO [Mvar] : DSO_1=92.32, DSO_2=125.40, DSO_3=125.09, DSO_4=107.25
+  DER Q chatter mean |ΔQ| [Mvar]: (none)
+  DER Q chatter max  |ΔQ| [Mvar]: (none)
+
+=== g_q=  800  g_w_dso_der= 2000  (ratio=0.400) ===
+  Q-iface RMS over DSOs / time : 6.955 Mvar
+  V-tracking RMS over zones / time: 0.00448 pu
+  Q-iface peak per DSO [Mvar] : DSO_1= 4.31, DSO_2= 8.95, DSO_3=10.30, DSO_4=40.47
+  DER Q chatter mean |ΔQ| [Mvar]: (none)
+  DER Q chatter max  |ΔQ| [Mvar]: (none)
+
+=== SUMMARY (sorted by Q-iface RMS) ===
+    g_q  g_w_dso   ratio    Q_RMS   Q_peak      V_RMS   chat_max
+                           [Mvar]   [Mvar]       [pu]     [Mvar]
+    200      500   0.400    5.258    18.45    0.00448        nan
+    400     2000   0.200    5.445    14.80    0.00451        nan
+    200     1000   0.200    5.625    14.67    0.00451        nan
+    800     2000   0.400    6.955    40.47    0.00448        nan
+    400     1000   0.400    7.021    40.54    0.00448        nan
+    200     2000   0.100    7.353    14.89    0.00455        nan
+    800     1000   0.800   56.573   125.40    0.00574        nan
+    400      500   0.800   58.480   130.43    0.00584        nan

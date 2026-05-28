@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.idea/
+.claude/
+*.pkl
+Thumbs.db
+results/

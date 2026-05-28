@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Tuning report — {{ study_name }}</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 1100px;
+         margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1, h2 { border-bottom: 1px solid #ccc; padding-bottom: .3rem; }
+  table { border-collapse: collapse; margin: 1rem 0; }
+  th, td { padding: .4rem .8rem; border: 1px solid #ddd; text-align: right; }
+  th:first-child, td:first-child { text-align: left; font-family: monospace; }
+  .meta { color: #666; font-size: .9rem; }
+  .ratio { color: #c33; font-weight: 600; }
+  details { margin: 1rem 0; }
+</style>
+</head>
+<body>
+  <h1>Tuning report</h1>
+  <p class="meta">
+    Study: <b>{{ study_name }}</b> | Trials: {{ n_trials }} |
+    Best CVaR(J) = <b>{{ '%.6f' % best_value }}</b> (trial #{{ best_trial }})
+  </p>
+
+  <h2>Tuned parameters and certificate ratios</h2>
+  <p class="meta">
+    Ratio = LMI ceiling / tuned value.  Larger ratio quantifies the gap
+    between the worst-case sufficient bound and the empirically usable
+    value — this is the central diagnostic for the thesis.
+  </p>
+  <table>
+    <tr><th>parameter</th><th>tuned</th><th>LMI ceiling</th><th>ratio</th></tr>
+    {% for r in cert_rows %}
+    <tr>
+      <td>{{ r.param }}</td>
+      <td>{{ r.tuned }}</td>
+      <td>{{ r.ceiling }}</td>
+      <td class="ratio">{{ r.ratio }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <details><summary>Ceiling notes</summary><pre>{{ ceilings_notes }}</pre></details>
+
+  <h2>Optimisation history</h2>
+  {{ fig_history|safe }}
+
+  <h2>Per-scenario cost trace</h2>
+  {{ fig_per_scenario|safe }}
+
+  <h2>Parameter importance</h2>
+  {{ fig_importance|safe }}
+
+  <h2>Search-space coverage</h2>
+  {{ fig_top2_scatter|safe }}
+</body>
+</html>

@@ -899,14 +899,14 @@ def run_multi_tso_dso(
     profiles = None
     gen_dispatch = None
 
+    _t_init_total = perf_counter()
+
     if use_profiles:
         profiles_csv = config.profiles_csv or DEFAULT_PROFILES_CSV
         if verbose >= 1:
             print()
             print(f"[9] Loading profiles from {profiles_csv}")
             print(f"     start_time = {start_time:%d.%m.%Y %H:%M}")
-
-        _t_init_total = perf_counter()
 
         _t = perf_counter()
         profiles = load_profiles(profiles_csv, timestep_s=config.dt_s)
@@ -1627,9 +1627,10 @@ def run_multi_tso_dso(
         # ── Apply time-series profiles ────────────────────────────────────────
         if use_profiles and profiles is not None:
             t_now = start_time + timedelta(seconds=time_s)
-            apply_profiles(net, profiles, t_now)
+            t_profile = config.frozen_at if config.frozen_at is not None else t_now
+            apply_profiles(net, profiles, t_profile)
             if gen_dispatch is not None:
-                apply_gen_dispatch(net, gen_dispatch, t_now)
+                apply_gen_dispatch(net, gen_dispatch, t_profile)
             # Converge PF so that measurements (q_pcc, voltages) reflect the
             # new profiles/dispatch BEFORE controllers read them.
             # Warm-start the QVLocalLoops with the linear closed-loop

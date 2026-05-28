@@ -280,7 +280,7 @@ class MIQPSolver:
     """
     
     # Solver preference order for MIQP problems
-    MIQP_SOLVERS = ['GUROBI'] #['SCIP', 'MOSEK', 'GUROBI', 'ECOS_BB']
+    MIQP_SOLVERS = ['GUROBI', 'SCIP', 'MOSEK', 'ECOS_BB']
 
     # Solver preference order for QP problems (continuous only)
     QP_SOLVERS = ['OSQP', 'ECOS', 'SCS', 'CVXOPT']

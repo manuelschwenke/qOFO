@@ -149,6 +149,43 @@ from experiments.runners import run_multi_tso_dso  # noqa: E402
 _compare = importlib.import_module("experiments.002_M_TSO_M_DSO_COMPARE")
 make_002_base_config = _compare.make_base_config
 
+# ---------------------------------------------------------------------------
+#  Predictor selection
+#  Set H_PREDICTOR_MODE to one of:
+#    "identity"  -- _unity_multiply_predictor: returns H * 1.0 (wiring smoke-test)
+#    "kalman"    -- _kalman_h_predictor:        Kalman-filter random-walk estimator
+#    "rls"       -- _rls_h_predictor:           Per-row RLS with forgetting factor
+#    "ann"       -- _ANN_h_predictor:           Keras ANN (requires trained model)
+#
+#  Set H_PREDICTOR_ROWS to one of:
+#    "all"       -- replace the full H matrix with the predictor's output (default)
+#    "q_trafo"   -- replace only the Q_trafo rows (∂Q_tr/∂u, the first n_q_trafo
+#                   rows); all other rows (voltage, current) are kept from the
+#                   current _H_cache unchanged
+#
+#  Set FROZEN_OP_POINT = True to lock the plant at a real historical operating
+#  point (FROZEN_OP_TIMESTAMP).  Profiles are enabled so the network is
+#  initialised correctly at that timestamp; then cfg.frozen_at keeps the
+#  profiles constant for the entire run.  Contingency events are suppressed.
+#  PE noise is forced on so estimators remain persistently excited.
+# ---------------------------------------------------------------------------
+H_PREDICTOR_MODE: str = "ann"
+H_PREDICTOR_ROWS: str = "q_trafo"
+FROZEN_OP_POINT:  bool = False
+FROZEN_OP_TIMESTAMP: datetime = datetime(2016, 9, 7, 10, 0)  # real op-point to freeze at
+
+# ---------------------------------------------------------------------------
+#  Init-H bias injection
+#  H_INIT_BIAS_STD > 0 multiplies each entry of the init H by an independent
+#  log-normal(mean=1, std=H_INIT_BIAS_STD) factor — a multiplicative ±N%
+#  perturbation of the analytical starting point.
+#  H_INIT_BIAS_SEED is fixed so identity / kalman / ann runs all start from
+#  exactly the same biased H, making comparisons directly meaningful.
+#  Set H_INIT_BIAS_STD = 0.0 to disable (default).
+# ---------------------------------------------------------------------------
+H_INIT_BIAS_STD:  float = 0.3   # e.g. 0.30 for ±30% multiplicative noise; 0.0 = off
+H_INIT_BIAS_SEED: int   = 0     # fixed seed → identical bias for every run
+
 
 # ---------------------------------------------------------------------------
 #  Configuration
@@ -214,8 +251,8 @@ def make_base_config() -> MultiTSOConfig:
     cfg.qv_local_tol_mvar = 0.1
 
     # ---- Live plots off for diagnostic runs ---------------------------
-    cfg.live_plot_controller = True
-    cfg.live_plot_cascade = True    # This is the live plotter for the DSO
+    cfg.live_plot_controller = False
+    cfg.live_plot_cascade = False
     cfg.live_plot_system = False
 
     # ---- Persistent excitation (sensitivity learning) -----------------
@@ -228,11 +265,24 @@ def make_base_config() -> MultiTSOConfig:
     # perturbed (integer actuators).  Useful for downstream H estimation
     # (Kalman filter / NN) where the input must be persistently exciting.
     cfg.dso_pe_noise_enabled = False
-    cfg.dso_pe_noise_std_mvar = 1.0   # std of N(0, sigma^2) on Q_cor [Mvar]
+    cfg.dso_pe_noise_std_mvar = 5.0   # std of N(0, sigma^2) on Q_cor [Mvar]
     cfg.dso_pe_noise_seed = 42        # RNG seed for reproducibility
 
     # ---- Output directory ---------------------------------------------
     cfg.result_dir = os.path.join("results", "003_cigre_2026")
+
+    # ---- Frozen operating point (estimator convergence mode) ----------
+    # Profiles are kept ON so the network initialises at the real historical
+    # operating point; cfg.frozen_at then holds that profile constant for the
+    # entire run.  This avoids the artificial mean-profile base-case.
+    if FROZEN_OP_POINT:
+        cfg.use_profiles         = True
+        cfg.start_time           = FROZEN_OP_TIMESTAMP
+        cfg.frozen_at            = FROZEN_OP_TIMESTAMP
+        cfg.contingencies        = []
+        cfg.dso_pe_noise_enabled = True
+        print(f"[003] FROZEN_OP_POINT=True: frozen at {FROZEN_OP_TIMESTAMP:%Y-%m-%d %H:%M}, "
+              f"contingencies off, PE noise on")
 
     return cfg
 
@@ -444,6 +494,12 @@ def install_h_corrector(
                 f"_H_cache has shape {dso_ctrl._H_cache.shape}.  Predictor "
                 f"must return the FULL-shape H, not the filtered view."
             )
+        # Write into the sensitivity updater's base so the in-place reset
+        # inside SensitivityUpdater.update() uses the predictor's H, not the
+        # frozen init-time H.  Falls back to a plain reference swap when no
+        # updater is present (e.g. unit tests).
+        if dso_ctrl._sensitivity_updater is not None:
+            dso_ctrl._sensitivity_updater.override_base(H_next)
         dso_ctrl._H_cache = H_next
         return result
 
@@ -521,14 +577,586 @@ def install_pe_noise(
     dso_ctrl.step = step_with_pe  # type: ignore[method-assign]
 
 
-def _johannes_kalman_predictor(dso_ctrl: "DSOController") -> Optional[np.ndarray]:
-    """Skip-write stub: returns ``None`` so ``_H_cache`` is left untouched.
+# ─────────────────────────────────────────────────────────────────────────────
+#  H-predictor implementations and training utilities
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Both predictors are callable class instances that satisfy HPredictor exactly
+# like plain functions but carry mutable state between consecutive DSO steps.
+#
+# Workflow
+# --------
+#   1. collect_training_data()     -- run 003 with PE noise; save (u, y, H)
+#   2. generate_kalman_matrices()  -- estimate Q, R from that data
+#   3. train_ann_model()           -- fit Keras model; save weights + stats
+#   4. In _setup_h_predictor swap the predictor:
+#        install_h_corrector(dso_ctrl, _kalman_h_predictor)
+#        # or:
+#        install_h_corrector(dso_ctrl, _ANN_h_predictor)
 
-    Use this as the gate during a warm-up window or whenever you do NOT
-    want a write at the current step.  The wrapper short-circuits on
-    ``None`` and never assigns to ``_H_cache``.
+_RESULT_DIR_003       = os.path.join("results", "003_cigre_2026")
+_TRAINING_DATA_PATH   = os.path.join(_RESULT_DIR_003, "training_data.npz")
+_KALMAN_MATRICES_PATH = os.path.join(_RESULT_DIR_003, "kalman_matrices.npz")
+_ANN_MODEL_PATH       = os.path.join(_RESULT_DIR_003, "ann_h_model.keras")
+_ANN_STATS_PATH       = os.path.join(_RESULT_DIR_003, "ann_h_stats.npz")
+
+
+def get_dso2_features(dso_ctrl: "DSOController") -> Dict[str, np.ndarray]:
+    """Return all DSO_2-relevant measurements in a named dict.
+
+    Call this inside any predictor — ``dso_ctrl._last_measurement`` is
+    already populated when the predictor runs (it is set at the very start
+    of ``dso_ctrl.step()`` and is not cleared afterwards).
+
+    Keys
+    ----
+    q_trafo_mvar : Q at HV side of the three coupling 3W trafos [Mvar, load conv.]
+                   shape (n_interface,) — these are the rows of H that track Q_set
+    tap_pos      : OLTC tap positions of the coupling trafos, shape (n_oltc,)
+                   integer steps; same ordering as cfg.oltc_trafo_indices
+    der_q_mvar   : actual DER reactive output Q_DER = Q_cor + K·(V_ref - V) [Mvar]
+                   shape (n_der,) — this is what the plant actually produces
+    der_p_mw     : DER active power output [MW], shape (n_der,)
+    q_cor_mvar   : Q_cor correction the OFO last commanded [Mvar], shape (n_der,)
+                   = u[:n_der]; this is what H is linearised against
+    v_buses_pu   : voltages at cfg.voltage_bus_indices [p.u.], shape (n_v_bus,)
+    y            : OFO output vector [q_trafo | v_buses], shape (n_y,)
+                   = rows of H; built by _extract_outputs (same as inside step())
+    u            : OFO actuator vector [q_cor | tap_pos], shape (n_u,)
+                   = cols of H; = dso_ctrl._u_current
     """
-    return None
+    meas = dso_ctrl._last_measurement
+    cfg  = dso_ctrl.config
+    if meas is None or dso_ctrl._u_current is None:
+        raise RuntimeError(
+            "get_dso2_features() called before the controller has stepped once."
+        )
+
+    n_der = len(cfg.der_indices)
+
+    v_buses = np.array(
+        [
+            float(meas.voltage_magnitudes_pu[np.where(meas.bus_indices == bi)[0][0]])
+            for bi in cfg.voltage_bus_indices
+        ],
+        dtype=np.float64,
+    )
+
+    return {
+        "q_trafo_mvar": meas.interface_q_hv_side_mvar.copy(),
+        "tap_pos":      meas.oltc_tap_positions.astype(np.float64),
+        "der_q_mvar":   meas.der_q_mvar.copy(),
+        "der_p_mw":     meas.der_p_mw.copy(),
+        "q_cor_mvar":   dso_ctrl._u_current[:n_der].copy(),
+        "v_buses_pu":   v_buses,
+        "y":            dso_ctrl._extract_outputs(meas),
+        "u":            dso_ctrl._u_current.copy(),
+    }
+
+
+class _KalmanHPredictor:
+    """Tracks H as a linear random-walk state with noisy Δy ≈ H·Δu observations.
+
+    State model :  h(k+1) = h(k) + w(k),       w ~ N(0, Q)
+    Observation :  Δy(k)  = C(Δu) h(k) + v(k), v ~ N(0, R)
+    where h = H.flatten() (row-major) and C(Δu) = I_{n_y} ⊗ Δu^T.
+
+    Q and R are loaded from ``_KALMAN_MATRICES_PATH`` on the first call.
+    Falls back to identity defaults if absent; run
+    :func:`generate_kalman_matrices` first for data-driven matrices.
+    """
+
+    def __init__(self, min_delta_u_norm: float = 0.05, forgetting_factor: float = 0.997) -> None:
+        self.min_delta_u_norm = min_delta_u_norm
+        # Forgetting factor prevents P from collapsing to ~0 after initial convergence.
+        # Without it, K → 0 and the filter can no longer track slow H drift from
+        # actuator movements, causing error to re-increase after the initial dip.
+        self.lam = forgetting_factor
+        self._Q: Optional[np.ndarray] = None
+        self._R: Optional[np.ndarray] = None
+        self._h: Optional[np.ndarray] = None   # vectorised H estimate
+        self._P: Optional[np.ndarray] = None   # estimate covariance
+        self._P_max: Optional[float] = None    # trace ceiling for PSD-safe cap
+        self._y_prev: Optional[np.ndarray] = None
+        self._u_prev: Optional[np.ndarray] = None
+
+    def _load_matrices(self, n_state: int, n_y: int) -> None:
+        if os.path.exists(_KALMAN_MATRICES_PATH):
+            d = np.load(_KALMAN_MATRICES_PATH)
+            self._Q, self._R = d["Q"], d["R"]
+            print(f"[KF] loaded Q {self._Q.shape}, R {self._R.shape}")
+        else:
+            self._Q = np.eye(n_state) * 1e-6
+            self._R = np.eye(n_y) * 1e-4
+            print("[KF] no kalman_matrices.npz found — using I defaults. "
+                  "Run generate_kalman_matrices() for data-driven matrices.")
+
+    def reset(self) -> None:
+        """Reset KF state; re-seeds from the controller's H on next call."""
+        self._h = self._P = self._y_prev = self._u_prev = None
+        self._P_max = None
+
+    def __call__(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
+        if dso_ctrl._H_cache is None or dso_ctrl._u_current is None:
+            return None
+
+        try:
+            feats = get_dso2_features(dso_ctrl)
+        except RuntimeError:
+            return None
+
+        # feats keys available here (replace manual extraction with these):
+        #   feats["y"]           -- OFO output vector [q_trafo | v_buses]   (n_y,)
+        #   feats["u"]           -- OFO actuator vector [q_cor | tap_pos]   (n_u,)
+        #   feats["q_trafo_mvar"]-- Q at coupling 3W trafos                 (n_trafo,)
+        #   feats["tap_pos"]     -- OLTC tap positions                       (n_oltc,)
+        #   feats["der_q_mvar"]  -- actual DER Q output (Q_cor + K*(Vref-V))(n_der,)
+        #   feats["der_p_mw"]    -- DER active power                         (n_der,)
+        #   feats["q_cor_mvar"]  -- Q_cor commanded by OFO (= u[:n_der])    (n_der,)
+        #   feats["v_buses_pu"]  -- voltages at monitored buses               (n_v,)
+
+        n_y, n_u = dso_ctrl._H_cache.shape
+        n_state = n_y * n_u
+
+        if self._Q is None or self._Q.shape[0] != n_state:
+            self._load_matrices(n_state, n_y)
+
+        y = feats["y"]
+        u = feats["u"]
+
+        # Warm-up: seed h and P from the controller's analytical H
+        if self._h is None:
+            self._h = dso_ctrl._H_cache.flatten().copy()
+            # P_init reflects actual initial uncertainty (bias on H), not Q magnitude.
+            # Tying P_init to Q would make K negligibly small when Q is tiny
+            # (e.g. when H barely changes step-to-step even with profiles on).
+            h_rms = float(np.sqrt(np.mean(self._h ** 2))) or 1e-4
+            sigma_init = 0.30 * h_rms   # ~30% per-entry std matches the init bias
+            self._P = (sigma_init ** 2) * np.eye(n_state)
+            self._P_max = float(np.trace(self._P))
+            self._y_prev, self._u_prev = y, u
+            return None  # keep analytical H on the first call
+
+        delta_u = u - self._u_prev
+        delta_y = y - self._y_prev
+
+        # Predict — forgetting factor prevents P collapsing to zero after convergence;
+        # trace cap prevents unbounded growth (PSD-safe: uniform scaling preserves PD).
+        h_p = self._h.copy()
+        P_p = self._P / self.lam + self._Q
+        tr = float(np.trace(P_p))
+        if tr > self._P_max:
+            P_p *= self._P_max / tr
+
+        # Update — skip when ‖Δu‖ is too small (ill-conditioned regression)
+        if np.linalg.norm(delta_u) >= self.min_delta_u_norm:
+            C = np.kron(np.eye(n_y), delta_u.reshape(1, -1))  # (n_y, n_state)
+            S = C @ P_p @ C.T + self._R                        # (n_y, n_y)
+            K = np.linalg.solve(S, C @ P_p).T                  # (n_state, n_y)
+            self._h = h_p + K @ (delta_y - C @ h_p)
+            self._P = (np.eye(n_state) - K @ C) @ P_p
+        else:
+            self._h, self._P = h_p, P_p
+
+        self._y_prev, self._u_prev = y, u
+        return self._h.reshape(n_y, n_u)
+
+
+_kalman_h_predictor = _KalmanHPredictor()
+
+
+class _PerRowRLSPredictor:
+    """Per-row Recursive Least Squares H estimator with forgetting factor.
+
+    Observation model: Δy_i = H[i,:] · Δu  (rows are physically decoupled)
+    Each of the n_y rows maintains its own (n_u × n_u) covariance P_i.
+    Forgetting factor λ < 1 exponentially discounts old observations.
+
+    Advantages over full Kalman:
+    - No Q/R calibration needed; λ is the only tuning knob
+    - P stays bounded (λ prevents unbounded growth)
+    - OLTC columns remain near their initial values when Δu_tap ≈ 0
+    """
+
+    def __init__(
+        self,
+        forgetting_factor: float = 0.995,
+        delta_init: float = 1.0,
+        min_delta_u_norm: float = 0.05,
+    ):
+        self.lam = forgetting_factor
+        self.delta = delta_init
+        self.min_du = min_delta_u_norm
+        self._H: Optional[np.ndarray] = None      # (n_y, n_u)
+        self._P: Optional[list] = None            # list of n_y (n_u, n_u) arrays
+        self._y_prev: Optional[np.ndarray] = None
+        self._u_prev: Optional[np.ndarray] = None
+
+    def reset(self) -> None:
+        self._H = self._P = self._y_prev = self._u_prev = None
+
+    def __call__(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
+        if dso_ctrl._H_cache is None or dso_ctrl._u_current is None:
+            return None
+        try:
+            feats = get_dso2_features(dso_ctrl)
+        except RuntimeError:
+            return None
+
+        n_y, n_u = dso_ctrl._H_cache.shape
+        y: np.ndarray = feats["y"]
+        u: np.ndarray = feats["u"]
+
+        if self._H is None:
+            self._H = dso_ctrl._H_cache.copy()
+            # Scale the initial covariance to the H magnitude so the first
+            # update corrects ~delta*100 % of each entry rather than
+            # instantly overshooting. delta=1 → ~1 % correction per step.
+            h_rms_sq = float(np.mean(self._H ** 2)) or 1e-8
+            delta_scaled = self.delta * h_rms_sq
+            self._P = [delta_scaled * np.eye(n_u) for _ in range(n_y)]
+            self._y_prev = y.copy()
+            self._u_prev = u.copy()
+            return None
+
+        delta_u = u - self._u_prev
+        delta_y = y - self._y_prev
+
+        if np.linalg.norm(delta_u) >= self.min_du:
+            c = delta_u  # shape (n_u,)
+            for i in range(n_y):
+                P_i = self._P[i]
+                Pc = P_i @ c                              # (n_u,)
+                denom = self.lam + float(c @ Pc)
+                k_i = Pc / denom                          # gain (n_u,)
+                e_i = float(delta_y[i]) - float(c @ self._H[i])
+                self._H[i] += k_i * e_i
+                self._P[i] = (P_i - np.outer(k_i, Pc)) / self.lam
+
+        self._y_prev = y.copy()
+        self._u_prev = u.copy()
+        return self._H.copy()
+
+
+_rls_h_predictor = _PerRowRLSPredictor()
+
+
+class _ANNHPredictor:
+    """ANN predictor: estimates H from the current I/O vectors [y, u].
+
+    Feature vector (must match :func:`train_ann_model`): [y(k), u(k)]
+    Output: H_analytical(k).flatten() reshaped to (n_y, n_u).
+
+    Loads a Keras model from ``_ANN_MODEL_PATH`` on the first call.
+    Returns ``None`` (leaves H untouched) if the model file is absent;
+    run :func:`train_ann_model` first.
+    """
+
+    def __init__(self) -> None:
+        self._model = None
+        self._tried_load = False
+        self._x_mean: Optional[np.ndarray] = None
+        self._x_std:  Optional[np.ndarray] = None
+        self._t_mean: Optional[np.ndarray] = None
+        self._t_std:  Optional[np.ndarray] = None
+
+    def _try_load(self) -> None:
+        self._tried_load = True
+        if not os.path.exists(_ANN_MODEL_PATH):
+            print("[ANN] no ann_h_model.keras found — returning None. "
+                  "Run train_ann_model() first.")
+            return
+        try:
+            from tensorflow import keras
+            self._model = keras.models.load_model(_ANN_MODEL_PATH)
+            if os.path.exists(_ANN_STATS_PATH):
+                st = np.load(_ANN_STATS_PATH)
+                self._x_mean, self._x_std = st["x_mean"], st["x_std"]
+                self._t_mean, self._t_std = st["t_mean"], st["t_std"]
+            print(f"[ANN] loaded model from {_ANN_MODEL_PATH}")
+        except Exception as exc:
+            print(f"[ANN] failed to load model: {exc}")
+
+    def __call__(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
+        if not self._tried_load:
+            self._try_load()
+        if self._model is None:
+            return None
+        if dso_ctrl._H_cache is None or dso_ctrl._u_current is None:
+            return None
+
+        try:
+            feats = get_dso2_features(dso_ctrl)
+        except RuntimeError:
+            return None
+
+        # feats keys available for building the input feature vector:
+        #   feats["y"]           -- OFO output vector [q_trafo | v_buses]   (n_y,)
+        #   feats["u"]           -- OFO actuator vector [q_cor | tap_pos]   (n_u,)
+        #   feats["q_trafo_mvar"]-- Q at coupling 3W trafos                 (n_trafo,)
+        #   feats["tap_pos"]     -- OLTC tap positions                       (n_oltc,)
+        #   feats["der_q_mvar"]  -- actual DER Q output (Q_cor + K*(Vref-V))(n_der,)
+        #   feats["der_p_mw"]    -- DER active power                         (n_der,)
+        #   feats["q_cor_mvar"]  -- Q_cor commanded by OFO (= u[:n_der])    (n_der,)
+        #   feats["v_buses_pu"]  -- voltages at monitored buses               (n_v,)
+
+        n_y, n_u = dso_ctrl._H_cache.shape
+        # Feature vector: [y(k), u(k)] — must match train_ann_model.
+        x = np.concatenate([feats["y"], feats["u"]]).reshape(1, -1).astype(np.float32)
+
+        if self._x_mean is not None:
+            x = (x - self._x_mean) / (self._x_std + 1e-8)
+        h_next = self._model.predict(x, verbose=0)[0]
+        if self._t_mean is not None:
+            h_next = h_next * (self._t_std + 1e-8) + self._t_mean
+
+        return h_next.reshape(n_y, n_u)
+
+
+_ANN_h_predictor = _ANNHPredictor()
+
+
+# ── Training data collection ──────────────────────────────────────────────────
+
+def collect_training_data(
+    n_total_s: float = 7200.0,
+    pe_noise_std_mvar: float = 1.0,
+    output_path: str = _TRAINING_DATA_PATH,
+) -> str:
+    """Run the 003 simulation and record measurements at every DSO_2 step.
+
+    PE noise is enabled so that Δu is persistently exciting and off-diagonal
+    H entries are identifiable from the data.
+
+    Saved .npz arrays  (N = number of DSO steps recorded)
+    -----------------
+    u            : (N, n_u)       OFO actuator vector [q_cor | tap_pos]
+    y            : (N, n_y)       OFO output vector   [q_trafo | v_buses]
+    H            : (N, n_y, n_u)  analytical sensitivity matrix
+    q_trafo_mvar : (N, n_trafo)   Q at HV side of coupling 3W trafos [Mvar, load conv.]
+    tap_pos      : (N, n_oltc)    OLTC tap positions
+    der_q_mvar   : (N, n_der)     actual DER Q output  Q_DER = Q_cor + K·(Vref−V)
+    der_p_mw     : (N, n_der)     DER active power [MW]
+    q_cor_mvar   : (N, n_der)     Q_cor commanded by OFO  (= u[:n_der])
+    v_buses_pu   : (N, n_v_bus)   voltages at monitored buses [p.u.]
+
+    Returns the absolute path of the saved file.
+    """
+    cfg = make_base_config()
+    cfg.n_total_s = n_total_s
+    cfg.dso_pe_noise_enabled = True
+    cfg.dso_pe_noise_std_mvar = pe_noise_std_mvar
+    cfg.live_plot_controller = False
+    cfg.live_plot_cascade = False
+
+    records: List[Dict[str, np.ndarray]] = []
+    _net_ref: List[Any] = []
+
+    def _collector(dso_ctrl: "DSOController") -> Optional[np.ndarray]:
+        if dso_ctrl._H_cache is None or dso_ctrl._u_current is None:
+            return None
+        try:
+            feats = get_dso2_features(dso_ctrl)
+        except RuntimeError:
+            return None
+        feats["H"] = dso_ctrl._H_cache.copy()
+        # Record the true Jacobian H at the current operating point as training target.
+        if _net_ref:
+            h_anal = dso_ctrl.compute_h_analytical(_net_ref[0])
+            if h_anal is not None:
+                feats["H_analytical"] = h_anal
+        records.append(feats)
+        return None  # keep the cached H unchanged; only observe
+
+    def _pre_loop(state: dict) -> None:
+        dso_ctrl = state["dso_controllers"].get("DSO_2")
+        if dso_ctrl is None:
+            return
+        net = state.get("net")
+        if net is not None:
+            _net_ref.append(net)
+        rng = np.random.default_rng(cfg.dso_pe_noise_seed)
+        install_pe_noise(dso_ctrl, std_mvar=pe_noise_std_mvar, rng=rng)
+        install_h_corrector(dso_ctrl, _collector)
+        print(f"[collect] DSO_2 ready; PE std={pe_noise_std_mvar} Mvar, "
+              f"duration={n_total_s / 3600:.1f} h")
+
+    try:
+        run_multi_tso_dso(cfg, pre_loop_hook=_pre_loop)
+    except Exception as exc:
+        if not records:
+            raise RuntimeError(
+                f"Simulation failed before any DSO steps were recorded: {exc}"
+            ) from exc
+        print(f"[collect] simulation ended early ({type(exc).__name__}: {exc}); "
+              f"saving {len(records)} steps collected so far.")
+
+    if not records:
+        raise RuntimeError("No DSO steps recorded — did the simulation succeed?")
+
+    # Only keep keys present in every record (H_analytical may be absent on warm-up).
+    common_keys = set(records[0].keys())
+    for r in records[1:]:
+        common_keys &= set(r.keys())
+    arrays = {k: np.stack([r[k] for r in records]) for k in common_keys}
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(out_dir, exist_ok=True)
+    np.savez(output_path, **arrays)
+    abs_out = os.path.abspath(output_path)
+    print(f"[collect] {len(records)} steps -> {abs_out}")
+    for k, v in arrays.items():
+        print(f"[collect]   {k}: {v.shape}")
+    return abs_out
+
+
+# ── Kalman Q/R matrix estimation ─────────────────────────────────────────────
+
+def generate_kalman_matrices(
+    data_path: str = _TRAINING_DATA_PATH,
+    output_path: str = _KALMAN_MATRICES_PATH,
+    min_delta_u_norm: float = 0.05,
+) -> Dict[str, np.ndarray]:
+    """Estimate Kalman process noise Q and measurement noise R from training data.
+
+    Q -- diagonal covariance of ΔH(k) = H(k+1) - H(k) over all steps.
+         Controls how fast the filter allows H to drift between steps.
+    R -- empirical covariance of residuals Δy(k) - H(k-1) @ Δu(k).
+         Captures linearisation error and true measurement noise.
+
+    Steps with ‖Δu‖ < ``min_delta_u_norm`` are excluded from R estimation
+    to avoid inflating residuals from near-zero actuator changes.
+
+    Saves a .npz with keys ``"Q"`` (n_state × n_state) and ``"R"`` (n_y × n_y).
+    Returns ``{"Q": ..., "R": ...}``.
+    """
+    d = np.load(data_path)
+    U: np.ndarray = d["u"]            # (N, n_u)  OFO actuator vector
+    Y: np.ndarray = d["y"]            # (N, n_y)  OFO output vector
+    # Prefer H_analytical (true Jacobian) over the cached H when available.
+    H: np.ndarray = d["H_analytical"] if "H_analytical" in d else d["H"]
+    print(f"[kalman] using {'H_analytical' if 'H_analytical' in d else 'H (cached)'} "
+          f"from training data")
+    N, n_y, n_u = H.shape
+    n_state = n_y * n_u
+
+    # Process noise Q: diagonal variance of flattened H step-differences
+    dH = np.diff(H, axis=0).reshape(N - 1, n_state)  # (N-1, n_state)
+    Q  = np.diag(np.var(dH, axis=0))                  # (n_state, n_state)
+
+    # Measurement noise R: covariance of Δy - H(k-1)@Δu(k) residuals
+    residuals = []
+    for k in range(1, N):
+        du = U[k] - U[k - 1]
+        if np.linalg.norm(du) < min_delta_u_norm:
+            continue
+        residuals.append((Y[k] - Y[k - 1]) - H[k - 1] @ du)
+
+    if len(residuals) < 2:
+        R = np.eye(n_y) * 1e-4
+        print("[kalman] too few excited steps for R estimation — using I*1e-4")
+    else:
+        res = np.stack(residuals)                                   # (M, n_y)
+        R   = np.cov(res.T) if n_y > 1 else np.atleast_2d(np.var(res))
+
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(out_dir, exist_ok=True)
+    np.savez(output_path, Q=Q, R=R)
+    q_d, r_d = np.diag(Q), np.diag(R)
+    print(f"[kalman] Q {Q.shape}, R {R.shape} -> {os.path.abspath(output_path)}")
+    print(f"[kalman]   Q diag: [{q_d.min():.2e}, {q_d.max():.2e}]")
+    print(f"[kalman]   R diag: [{r_d.min():.2e}, {r_d.max():.2e}]")
+    return {"Q": Q, "R": R}
+
+
+# ── ANN training ─────────────────────────────────────────────────────────────
+
+def train_ann_model(
+    data_path: str = _TRAINING_DATA_PATH,
+    model_path: str = _ANN_MODEL_PATH,
+    stats_path: str = _ANN_STATS_PATH,
+    epochs: int = 200,
+    batch_size: int = 32,
+    validation_split: float = 0.15,
+    hidden_units: tuple = (256, 128, 64),
+) -> None:
+    """Fit a dense ANN to predict H(k+1) from DSO_2 measurements at step k.
+
+    Features : x = [y(k), u(k)]
+    Targets  : t = H_analytical(k).flatten()
+
+    Input/output pairs are (y(k), u(k)) → H_analytical(k) — the ANN
+    estimates the true Jacobian at the current operating point directly
+    from the I/O vectors.  ``H_analytical`` is used when present in the
+    training file (generated by :func:`collect_training_data`); falls
+    back to ``H`` (cached sensitivity) for compatibility with older data.
+
+    Both x and t are z-score normalised; statistics are saved alongside
+    the model in ``stats_path`` and applied by :class:`_ANNHPredictor`.
+
+    Architecture : Dense(hidden[0], relu) → … → Dense(n_state, linear)
+    Loss         : MSE on normalised targets, early stopping (patience=20)
+    """
+    try:
+        import tensorflow as tf
+        from tensorflow import keras
+    except ImportError as exc:
+        raise ImportError(
+            "TensorFlow is required: pip install tensorflow"
+        ) from exc
+
+    d = np.load(data_path)
+    U: np.ndarray = d["u"]   # (N, n_u)
+    Y: np.ndarray = d["y"]   # (N, n_y)
+    # Prefer H_analytical (true Jacobian) as target when available.
+    H_target: np.ndarray = (
+        d["H_analytical"] if "H_analytical" in d else d["H"]
+    )
+    print(f"[ANN] training target: "
+          f"{'H_analytical' if 'H_analytical' in d else 'H (cached)'}")
+    N = len(U)
+    if N < 1:
+        raise ValueError(f"Need at least 1 training step, got {N}.")
+
+    n_y, n_u = H_target.shape[1], H_target.shape[2]
+    n_state = n_y * n_u
+
+    # Samples: x[k] = [y(k), u(k)]  →  t[k] = H_analytical(k).flatten()
+    X = np.concatenate([Y, U], axis=1).astype(np.float32)   # (N, n_y+n_u)
+    T = H_target.reshape(N, n_state).astype(np.float32)     # (N, n_state)
+
+    x_mean, x_std = X.mean(0), X.std(0)
+    t_mean, t_std = T.mean(0), T.std(0)
+    X_n = (X - x_mean) / (x_std + 1e-8)
+    T_n = (T - t_mean) / (t_std + 1e-8)
+
+    inputs = keras.Input(shape=(X_n.shape[1],))
+    z = inputs
+    for units in hidden_units:
+        z = keras.layers.Dense(units, activation="relu")(z)
+    outputs = keras.layers.Dense(n_state)(z)
+    model = keras.Model(inputs, outputs)
+    model.compile(optimizer="adam", loss="mse")
+    model.summary()
+
+    model.fit(
+        X_n, T_n,
+        epochs=epochs,
+        batch_size=batch_size,
+        validation_split=validation_split,
+        callbacks=[
+            keras.callbacks.EarlyStopping(
+                patience=20, restore_best_weights=True, verbose=1
+            ),
+        ],
+        verbose=1,
+    )
+
+    out_dir = os.path.dirname(os.path.abspath(model_path))
+    os.makedirs(out_dir, exist_ok=True)
+    model.save(model_path)
+    np.savez(stats_path, x_mean=x_mean, x_std=x_std, t_mean=t_mean, t_std=t_std)
+    print(f"[ANN] model -> {os.path.abspath(model_path)}")
+    print(f"[ANN] stats -> {os.path.abspath(stats_path)}")
 
 
 def _unity_multiply_predictor(
@@ -544,11 +1172,154 @@ def _unity_multiply_predictor(
 
     Replace with the real predictor once the wiring is validated.
     """
-    return dso_ctrl._H_cache * 0.9
+    return dso_ctrl._H_cache * 1
 
 
-def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> None:
+# ---------------------------------------------------------------------------
+#  Per-step observer (sidecar capture)
+# ---------------------------------------------------------------------------
+
+class _DSO2Observer:
+    """Wraps a predictor and records H_used / H_predicted / H_analytical / y / u per step.
+
+    ``h_used``       -- ``_H_cache`` just before the predictor fires; this is
+                        the H matrix that was used in the MIQP at this step.
+    ``h_predicted``  -- what the predictor returns (same as ``h_used`` when
+                        the predictor returns ``None``, e.g. during warm-up).
+    ``h_analytical`` -- H freshly recomputed from the current operating point
+                        of the combined network (true Jacobian linearisation).
+                        Requires *combined_net* to be passed at construction;
+                        ``None`` entries are dropped at save time.
+    ``y``            -- OFO output vector extracted from the measurement.
+    ``u``            -- OFO actuator vector at this step.
+
+    Call :meth:`save` after the simulation to dump all arrays to a ``.npz``
+    sidecar file.
+    """
+
+    def __init__(
+        self,
+        predictor: HPredictor,
+        combined_net: Optional[Any] = None,
+    ) -> None:
+        self._predictor    = predictor
+        self._combined_net = combined_net
+        self._h_used:       List[np.ndarray] = []
+        self._h_predicted:  List[np.ndarray] = []
+        self._h_analytical: List[np.ndarray] = []
+        self._y:            List[np.ndarray] = []
+        self._u:            List[np.ndarray] = []
+        self._n_q_trafo:    int = 0   # set on first call from _H_mappings
+
+    def __call__(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
+        # Capture H_used = the H the MIQP just used (before prediction).
+        h_used = dso_ctrl._H_cache.copy() if dso_ctrl._H_cache is not None else None
+
+        # Latch Q_trafo row count from mappings (constant after init).
+        if self._n_q_trafo == 0 and dso_ctrl._H_mappings is not None:
+            m = dso_ctrl._H_mappings
+            self._n_q_trafo = len(m.get("trafos", [])) + len(m.get("trafo3w", []))
+
+        # Run the actual predictor.
+        h_predicted = self._predictor(dso_ctrl)
+
+        # If the predictor returned None (warm-up / no-op), treat as identity.
+        h_for_next = h_predicted if h_predicted is not None else (
+            h_used.copy() if h_used is not None else None
+        )
+
+        # Compute the true analytical H at the current operating point.
+        h_analytical: Optional[np.ndarray] = None
+        if self._combined_net is not None and h_used is not None:
+            h_analytical = dso_ctrl.compute_h_analytical(self._combined_net)
+
+        # Capture y and u from the controller's last measurement.
+        try:
+            feats = get_dso2_features(dso_ctrl)
+            y, u  = feats["y"], feats["u"]
+        except RuntimeError:
+            y = u = None
+
+        if h_used is not None and y is not None:
+            self._h_used.append(h_used)
+            self._h_predicted.append(h_for_next if h_for_next is not None else h_used.copy())
+            if h_analytical is not None:
+                self._h_analytical.append(h_analytical)
+            self._y.append(y)
+            self._u.append(u)
+
+        return h_predicted  # None keeps _H_cache unchanged (observer is transparent)
+
+    def save(self, path: str) -> None:
+        """Save recorded arrays to a compressed ``.npz`` file."""
+        if not self._h_used:
+            print("[observer] no steps recorded; sidecar not saved.")
+            return
+        out_dir = os.path.dirname(os.path.abspath(path))
+        os.makedirs(out_dir, exist_ok=True)
+        arrays: Dict[str, np.ndarray] = dict(
+            h_used      = np.stack(self._h_used),
+            h_predicted = np.stack(self._h_predicted),
+            y           = np.stack(self._y),
+            u           = np.stack(self._u),
+        )
+        if self._h_analytical:
+            if len(self._h_analytical) == len(self._h_used):
+                arrays["h_analytical"] = np.stack(self._h_analytical)
+            else:
+                print(f"[observer] h_analytical has {len(self._h_analytical)} entries "
+                      f"vs {len(self._h_used)} steps — skipping (shape mismatch).")
+        if self._n_q_trafo > 0:
+            arrays["n_q_trafo"] = np.array(self._n_q_trafo)
+        np.savez_compressed(path, **arrays)
+        keys_str = ", ".join(arrays.keys())
+        print(f"[observer] {len(self._h_used)} steps [{keys_str}] -> {os.path.abspath(path)}")
+
+
+def _make_row_masked_predictor(
+    predictor: HPredictor,
+    rows_mode: str,
+) -> HPredictor:
+    """Wrap *predictor* so only selected rows of H are written back to ``_H_cache``.
+
+    rows_mode
+    ---------
+    ``"all"``     -- full H is written (pass-through, no mask applied).
+    ``"q_trafo"`` -- only the Q_trafo rows (``H[:n_q_trafo, :]``) are taken
+                     from the predictor's output; all remaining rows are kept
+                     from the current ``_H_cache`` unchanged.  The number of
+                     Q_trafo rows is read at call-time from
+                     ``dso_ctrl._H_mappings`` so it adapts automatically to
+                     the network topology.
+
+    The wrapped predictor always returns a full-shape array, so the shape
+    check in :func:`install_h_corrector` continues to pass unchanged.
+    """
+    if rows_mode == "all":
+        return predictor
+
+    def _masked(dso_ctrl: "DSOController") -> Optional[np.ndarray]:
+        H_next = predictor(dso_ctrl)
+        if H_next is None:
+            return None
+        if dso_ctrl._H_cache is None:
+            return H_next
+        m = dso_ctrl._H_mappings or {}
+        n_q_trafo = len(m.get("trafos", [])) + len(m.get("trafo3w", []))
+        if n_q_trafo == 0:
+            return H_next
+        H_out = dso_ctrl._H_cache.copy()
+        H_out[:n_q_trafo] = H_next[:n_q_trafo]
+        return H_out
+
+    return _masked
+
+
+def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> Optional["_DSO2Observer"]:
     """Startup function: prime DSO_2's H, print view, install predictor (and PE noise).
+
+    Returns the :class:`_DSO2Observer` so the caller (:func:`run`) can save
+    the sidecar ``.npz`` after the simulation completes.
 
     Passed to the runner as ``pre_loop_hook`` (wrapped in a lambda that
     binds ``cfg``); runs once after Phase-2 init and before the main
@@ -585,6 +1356,21 @@ def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> None:
     print(f"[H]   rows: {n_q} Q_trafo + {n_v} V_bus")
     print(f"[H]   cols: {n_der} Q_cor (DER) + {n_oltc} OLTC")
 
+    # ── Init-H bias injection ─────────────────────────────────────────────
+    # Apply a multiplicative perturbation to the init H so that all predictor
+    # modes (identity / kalman / ann) start from exactly the same wrong H and
+    # we can observe which one recovers faster.  Fixed seed guarantees that
+    # every run with the same H_INIT_BIAS_SEED gets an identical bias matrix.
+    if H_INIT_BIAS_STD > 0.0:
+        rng_bias = np.random.default_rng(H_INIT_BIAS_SEED)
+        noise = rng_bias.normal(1.0, H_INIT_BIAS_STD, size=dso_ctrl._H_cache.shape)
+        biased = dso_ctrl._H_cache * noise
+        if dso_ctrl._sensitivity_updater is not None:
+            dso_ctrl._sensitivity_updater.override_base(biased)
+        dso_ctrl._H_cache = biased
+        print(f"[H] init bias applied: std={H_INIT_BIAS_STD:.0%}, "
+              f"seed={H_INIT_BIAS_SEED} -> same bias for all predictor modes")
+
     # Install PE noise FIRST (innermost wrapper) so the H corrector
     # installed below sits on the outside.
     if getattr(cfg, "dso_pe_noise_enabled", False):
@@ -598,10 +1384,28 @@ def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> None:
               f"on {len(dso_ctrl.config.der_indices)} DER Q_cor channels "
               f"(seed={cfg.dso_pe_noise_seed})")
 
-    install_h_corrector(dso_ctrl, _unity_multiply_predictor) # Insert your predictor here
-    print("[H] installed _unity_multiply_predictor "
-          "(returns H * 1.0; replace with KF / NN)")
-    return None  # continue main loop
+    _PREDICTORS = {
+        "identity": _unity_multiply_predictor,
+        "kalman":   _kalman_h_predictor,
+        "rls":      _rls_h_predictor,
+        "ann":      _ANN_h_predictor,
+    }
+    if H_PREDICTOR_MODE not in _PREDICTORS:
+        raise ValueError(
+            f"Unknown H_PREDICTOR_MODE {H_PREDICTOR_MODE!r}. "
+            f"Choose one of: {list(_PREDICTORS)}"
+        )
+    predictor = _PREDICTORS[H_PREDICTOR_MODE]
+    if H_PREDICTOR_ROWS != "all":
+        predictor = _make_row_masked_predictor(predictor, H_PREDICTOR_ROWS)
+        print(f"[H] row mask: {H_PREDICTOR_ROWS!r} — predictor updates only "
+              f"Q_trafo rows; remaining rows kept from cache")
+    combined_net = state.get("net")
+    observer  = _DSO2Observer(predictor, combined_net=combined_net)
+    install_h_corrector(dso_ctrl, observer)
+    print(f"[H] installed predictor: {H_PREDICTOR_MODE!r} ({type(predictor).__name__})"
+          f" wrapped in _DSO2Observer")
+    return observer
 
 
 # ---------------------------------------------------------------------------
@@ -623,21 +1427,49 @@ def run() -> List[MultiTSOIterationRecord]:
     print(f"  dso_mode={cfg.dso_mode}, dso_ids_to_run={cfg.dso_ids_to_run}")
     print(f"  q_pcc_setpoints={cfg.q_pcc_setpoints_mvar_per_dso}")
     print(f"  n_total_s={cfg.n_total_s:.0f}, dso_period_s={cfg.dso_period_s:.0f}")
+    print(f"  H_PREDICTOR_MODE={H_PREDICTOR_MODE!r}  H_PREDICTOR_ROWS={H_PREDICTOR_ROWS!r}")
+    if FROZEN_OP_POINT:
+        print(f"  FROZEN_OP_POINT=True  frozen_at={FROZEN_OP_TIMESTAMP:%Y-%m-%d %H:%M}, contingencies=off")
+    else:
+        print(f"  FROZEN_OP_POINT=False  (profiles on, contingencies on)")
+    if H_INIT_BIAS_STD > 0.0:
+        print(f"  H_INIT_BIAS_STD={int(H_INIT_BIAS_STD*100)}%  H_INIT_BIAS_SEED={H_INIT_BIAS_SEED} "
+              f"(same bias for all predictor modes)")
     print(f"  result_dir={out_dir}")
 
+    _observer_ref: List[Optional[_DSO2Observer]] = [None]
+
+    def _pre_loop(state: dict) -> None:
+        obs = _setup_h_predictor(cfg, state)
+        _observer_ref[0] = obs
+
     try:
-        log = run_multi_tso_dso(
-            cfg,
-            pre_loop_hook=lambda state: _setup_h_predictor(cfg, state),
-        )
+        log = run_multi_tso_dso(cfg, pre_loop_hook=_pre_loop)
     except Exception as exc:
         print(f"  [003] FAILED: {type(exc).__name__}: {exc}")
         log = []
 
-    pkl_path = os.path.join(out_dir, "log.pkl")
+    now = datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
+    _suffix = "_" + H_PREDICTOR_MODE
+    if FROZEN_OP_POINT:
+        _suffix += "_frozen"
+    if H_INIT_BIAS_STD > 0.0:
+        _suffix += f"_biased{int(H_INIT_BIAS_STD * 100)}pct"
+    pkl_path = os.path.join(out_dir, now + _suffix + ".pkl")
     with open(pkl_path, "wb") as f:
         pickle.dump(log, f)
     print(f"  [003] wrote {len(log)} records -> {pkl_path}")
+
+    sidecar_path: Optional[str] = None
+    observer = _observer_ref[0]
+    if observer is not None:
+        sidecar_path = os.path.join(out_dir, now + "_dso2_ctrl.npz")
+        observer.save(sidecar_path)
+
+    # ── Auto-analysis: show the analysis plot for this run immediately ──
+    _analysis = importlib.import_module("experiments.003_analysis")
+    _analysis.plot_comparison(pkl_path, sidecar_path)
+
     return log
 
 

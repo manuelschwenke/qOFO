@@ -1476,6 +1476,111 @@ class DSOController(BaseOFOController):
 
         return H
 
+    def compute_h_analytical(
+        self,
+        combined_net: "pp.pandapowerNet",
+    ) -> Optional[NDArray[np.float64]]:
+        """Compute H analytically from *combined_net*'s current operating point.
+
+        Creates a fresh :class:`JacobianSensitivities` (deep-copies and
+        re-converges *combined_net*), recomputes H with the same
+        transformations as :meth:`_build_sensitivity_matrix`, and returns it
+        **without touching any cached state**.
+
+        This is intended for offline analysis: call it after every simulation
+        step to compare the cached/corrected H against the true linearisation.
+        It is expensive (~1 pp run per call) so do not use in the control loop.
+
+        Returns ``None`` on any failure (singular T', invalid net state, etc.).
+        """
+        from sensitivity.jacobian import JacobianSensitivities as _Jac
+
+        # Build a fresh Jacobian at the current operating point.
+        try:
+            fresh_jac = _Jac(combined_net)
+        except Exception:
+            return None
+
+        net = fresh_jac.net
+
+        # Replicate the kw-building logic from _build_sensitivity_matrix.
+        iface_are_3w = (
+            hasattr(net, "trafo3w")
+            and not net.trafo3w.empty
+            and all(t in net.trafo3w.index for t in self.config.interface_trafo_indices)
+        )
+        oltc_are_3w = (
+            hasattr(net, "trafo3w")
+            and not net.trafo3w.empty
+            and all(t in net.trafo3w.index for t in self.config.oltc_trafo_indices)
+        )
+
+        der_bus_indices = [int(net.sgen.at[s, "bus"]) for s in self.config.der_indices]
+        unique_buses: List[int] = []
+        der_to_unique: List[int] = []
+        for b in der_bus_indices:
+            if b not in unique_buses:
+                unique_buses.append(b)
+            der_to_unique.append(unique_buses.index(b))
+
+        kw: Dict[str, object] = dict(
+            der_bus_indices=unique_buses,
+            observation_bus_indices=self.config.voltage_bus_indices,
+            line_indices=self.config.current_line_indices,
+            shunt_bus_indices=self.config.shunt_bus_indices,
+            shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
+        )
+        if iface_are_3w:
+            kw["trafo3w_indices"] = self.config.interface_trafo_indices
+        else:
+            kw["trafo_indices"] = self.config.interface_trafo_indices
+        if oltc_are_3w:
+            kw["oltc_trafo3w_indices"] = self.config.oltc_trafo_indices
+        else:
+            kw["oltc_trafo_indices"] = self.config.oltc_trafo_indices
+
+        try:
+            H, _ = fresh_jac.build_sensitivity_matrix_H(**kw)
+        except Exception:
+            return None
+
+        # Apply T_prime (Q_cor transform) with the fresh Jacobian.
+        if (
+            self.config.use_q_cor_actuator
+            and not getattr(self.config, "ofo_in_v_ref_mode", False)
+            and unique_buses
+        ):
+            # Temporarily swap sensitivities so _compute_qcor_transform_T_prime
+            # uses the fresh Jacobian without caching its result permanently.
+            _old_jac = self.sensitivities
+            _old_t_prime = self._T_prime_cache
+            _old_t_prime_buses = self._T_prime_unique_buses
+            _old_t_prime_k = self._T_prime_K_diag
+            try:
+                self.sensitivities = fresh_jac
+                self._T_prime_cache = None
+                T_prime = self._compute_qcor_transform_T_prime(unique_buses, der_bus_indices)
+            finally:
+                self.sensitivities = _old_jac
+                self._T_prime_cache = _old_t_prime
+                self._T_prime_unique_buses = _old_t_prime_buses
+                self._T_prime_K_diag = _old_t_prime_k
+
+            if T_prime is not None:
+                n_b = len(unique_buses)
+                H = H.copy()
+                H[:, :n_b] = H[:, :n_b] @ T_prime
+
+        # Expand DER bus-columns to per-DER columns (legacy path only).
+        if self.config.der_mapping is None and len(unique_buses) < len(der_bus_indices):
+            n_unique = len(unique_buses)
+            n_other = H.shape[1] - n_unique
+            H_der = H[:, :n_unique][:, der_to_unique]
+            H_rest = H[:, n_unique:]
+            H = np.hstack([H_der, H_rest])
+
+        return H
+
     def step(
         self,
         measurement: Measurement,

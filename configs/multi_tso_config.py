@@ -331,6 +331,8 @@ class MultiTSOConfig:
     use_profiles: bool = False
     start_time:   datetime = field(default_factory=lambda: datetime(2016, 6, 10, 0, 0))
     profiles_csv: str = ""
+    frozen_at:    Optional[datetime] = None
+    """If set, profiles are applied at this fixed timestamp every step (real frozen op-point)."""
 
     use_zonal_gen_dispatch: bool = True
 

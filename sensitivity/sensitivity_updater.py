@@ -96,6 +96,21 @@ class SensitivityUpdater:
         """Return the current (possibly updated) H matrix."""
         return self._H_current
 
+    def override_base(self, H: NDArray[np.float64]) -> None:
+        """Replace the base H with an externally estimated matrix.
+
+        Call this when a Kalman filter, ANN, or other online estimator
+        provides an updated H.  The supplied matrix becomes the new base
+        for all future ``update()`` calls: shunt-column rescaling is applied
+        on top of it rather than on top of the original init-time H.
+
+        Both ``_H_base`` and ``_H_current`` are updated in-place so the
+        change is visible immediately AND survives the next reset inside
+        ``update()``.
+        """
+        self._H_base[:, :] = H
+        self._H_current[:, :] = H
+
     def update(
         self,
         measurement: Measurement,

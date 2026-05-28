@@ -101,6 +101,9 @@ class CascadeConfig:
     use_profiles: bool = True
     """Whether to apply time-varying load/generation profiles."""
 
+    frozen_at: Optional[datetime] = None
+    """If set, profiles are applied at this fixed timestamp every step (real frozen op-point)."""
+
     verbose: int = 1
     """Verbosity level (0=silent, 1=progress, 2=detailed)."""
 
@@ -441,6 +444,8 @@ class CascadeConfig:
         d["start_time"] = self.start_time.isoformat()
         d["profiles_csv"] = self.profiles_csv
         d["use_profiles"] = self.use_profiles
+        if self.frozen_at is not None:
+            d["frozen_at"] = self.frozen_at.isoformat()
         d["verbose"] = self.verbose
         d["live_plot"] = self.live_plot
 
@@ -535,9 +540,11 @@ class CascadeConfig:
 
         kwargs = dict(d)  # shallow copy
 
-        # Parse datetime
+        # Parse datetime fields
         if "start_time" in kwargs and isinstance(kwargs["start_time"], str):
             kwargs["start_time"] = datetime.fromisoformat(kwargs["start_time"])
+        if "frozen_at" in kwargs and isinstance(kwargs["frozen_at"], str):
+            kwargs["frozen_at"] = datetime.fromisoformat(kwargs["frozen_at"])
 
         # Parse contingencies
         if "contingencies" in kwargs:

@@ -66,7 +66,6 @@ def dso_with_cooldown():
         interface_trafo_indices=interface_trafos,
         voltage_bus_indices=voltage_buses,
         current_line_indices=current_lines,
-        use_q_cor_actuator=False,  # mock net lacks sgen.sn_mva column
     )
     params = OFOParameters(
         g_w=0.2, g_z=1000.0, g_u=0.01, int_cooldown_s=30.0,
@@ -120,7 +119,6 @@ def tso_with_cooldown():
         shunt_q_steps_mvar=[50.0],
         voltage_bus_indices=voltage_buses,
         current_line_indices=current_lines,
-        use_q_cor_actuator=False,  # mock net lacks sgen.sn_mva column
     )
     params = OFOParameters(
         g_w=0.2, g_z=1000.0, g_u=0.01, int_cooldown_s=30.0,
@@ -317,8 +315,7 @@ class TestCooldownDisabled:
             interface_trafo_indices=[0],
             voltage_bus_indices=[1, 2, 3],
             current_line_indices=[0, 1],
-            use_q_cor_actuator=False,  # mock net lacks sgen.sn_mva column
-        )
+            )
         params = OFOParameters(
             g_w=0.2, g_z=1000.0, g_u=0.01,  # int_cooldown_s defaults to 0
         )

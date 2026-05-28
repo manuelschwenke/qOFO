@@ -255,12 +255,12 @@ class MultiTSOConfig:
     controller toward ``[0, 0, 0]`` Mvar at its three interface
     transformers."""
 
-    # NOTE: the refactor_v2 master switch for the q_mode plant model is
-    # ``use_q_cor_actuator`` (defined further below alongside the rest of
-    # the q_cor / actuator block).  When that flag is True the runner
-    # tags every DER's q_mode and installs the per-row plant-side loops
-    # in a single pass; the legacy classification / Stage-1 / Stage-2
-    # paths run only when ``use_q_cor_actuator`` is False.
+    # NOTE: the DER plant-side actuator is the w-shift mode (vertical
+    # shift of q_0 + V_ref reanchoring) — implemented unconditionally
+    # by :func:`network.ieee39.build.tag_der_q_modes` and
+    # :func:`controller.der_qv_local_loop.install_der_q_loops`.  The
+    # earlier ``use_q_cor_actuator`` master switch was removed when the
+    # Q_cor horizontal-shift path was retired.
 
     # -- Load pre-computed tuned params from a previous run --------------------
     load_tuned_params_path: Optional[str] = None
@@ -293,6 +293,99 @@ class MultiTSOConfig:
     run_stability_analysis:       bool = False
     stability_analysis_at_s:      float = 0.0
     sensitivity_update_interval:  int  = int(1E6)
+
+    # -- Per-controller local-network sensitivity (Ward-style reduction) ------
+    # When False (default), every TSO and DSO controller shares the
+    # full-network ``JacobianSensitivities`` built from the entire plant
+    # network (the historical behaviour: each controller sees the whole
+    # interconnected Jacobian and its own block is sliced out).
+    #
+    # When True, ``run_multi_tso_dso`` builds a *reduced* pandapower
+    # network per controller via :mod:`sensitivity.network_reduction` and
+    # feeds that reduced net into a per-controller
+    # ``JacobianSensitivities`` instance.  The reduction replaces every
+    # boundary by an equivalent PQ injection from the cached operating
+    # point (Ward equivalent):
+    #
+    # * **TSO zone:** tie-line far-end buses and 3W-coupler primary buses
+    #   become PQ-load stubs; the slack lives on a zone gen; TSO-owned
+    #   tertiary shunts are represented by *synthetic shunts on the 3W
+    #   primary bus* (the tertiary bus itself is dropped along with the
+    #   3W trafo and HV sub-network).
+    # * **DSO sub-network:** the 3W-coupler primary bus becomes a virtual
+    #   slack-gen pinned to ``V_cached`` (no explicit PQ load there — the
+    #   slack auto-dispatches the cached HV flow).  The HV sub-network,
+    #   3W trafo, tertiary bus, and TSO-owned tertiary shunt are all
+    #   kept.
+    #
+    # The coordinator's cross-zone H_ij blocks are zeroed when
+    # ``local_sensitivities_tso=True`` so the contraction diagnostic is
+    # consistent with each TSO controller's restricted model (decoupled
+    # decentralised view).
+    local_sensitivities_tso: bool = False
+    """If True, each TSO controller uses a Jacobian built from its own
+    reduced zone net only (tie-line far-end + 3W primary boundaries as
+    equivalent PQ loads).  See module docstring of
+    :mod:`sensitivity.network_reduction`."""
+
+    local_sensitivities_dso: bool = False
+    """If True, each DSO controller uses a Jacobian built from its own
+    reduced HV sub-network only (3W primary as virtual slack-gen).  See
+    module docstring of :mod:`sensitivity.network_reduction`."""
+
+    numerical_h_closed_loop: bool = True
+    """When ``numerical_h=True``, controls the perturbation mode of
+    :func:`sensitivity.numerical_h.compute_numerical_h_tso` /
+    ``compute_numerical_h_dso``:
+
+    * ``True`` (default): every perturbation uses
+      ``pp.runpp(run_control=True)`` so the plant-side Q(V) loops respond
+      during finite difference.  The numerical DER column then captures
+      ``∂y/∂q_set`` directly; V_gen / OLTC / shunt columns implicitly
+      include the QV-loop reaction to those moves.
+    * ``False``: perturbations use ``run_control=False`` (pure
+      algebraic plant response) and the analytical ``T_prime`` transform
+      is applied post-hoc to the DER columns only — mirroring the
+      analytical builder's structure.  This is the right setting for an
+      apples-to-apples test of the analytical H computation."""
+
+    numerical_h: bool = False
+    """If True, replace every controller's analytical H matrix by a
+    *finite-difference* H computed via :mod:`sensitivity.numerical_h`
+    (perturb each plant-side actuator, run ``pp.runpp(run_control=True)``,
+    measure the response).  The numerical H is pinned to the controller's
+    ``_H_cache`` and invalidation is suppressed, so the cached matrix
+    survives every subsequent step.
+
+    Used only by ``experiments/004b_REFRESH_PROOF.py`` to test whether
+    the FULL-mode Q-tracking gap to LOCAL stems from a *computation
+    bias* in the analytical Jacobian-based formulas (numerical H would
+    perform differently) or purely from the boundary-modeling choice
+    (numerical H matches analytical).
+
+    Mutually exclusive with ``local_sensitivities_tso`` /
+    ``local_sensitivities_dso`` (no-op when either is True — under local
+    mode the controllers' H is built from a reduced net, not from the
+    full plant)."""
+
+    refresh_shared_jac_on_tso: bool = False
+    """If True, the runner rebuilds the full-network ``shared_jac`` (and
+    reassigns it to every TSO and DSO controller) on every TSO tick,
+    immediately before the TSO MIQP runs.  Default ``False`` (the
+    historical behaviour) keeps ``shared_jac`` frozen at the post-Phase-2
+    operating point for the whole simulation.
+
+    No-op when either ``local_sensitivities_tso`` or
+    ``local_sensitivities_dso`` is True — under local-net mode the
+    affected controllers do not use ``shared_jac`` (they hold their own
+    reduced Jacobians, which the runner intentionally keeps frozen as
+    the decentralised cached-sensitivity assumption).
+
+    Used by ``experiments/004_LOCAL_VS_FULL_SENS.py`` to disambiguate
+    whether the FULL-mode steady-state Q-tracking drift comes from
+    cached-Jacobian staleness (set this True → drift should collapse)
+    or from the structural AVR-stiffness mismatch at the 3W primary
+    bus (set this True → drift persists)."""
 
     # -- Output ----------------------------------------------------------------
     verbose:    int = 0
@@ -396,35 +489,6 @@ class MultiTSOConfig:
     """Half-width of the Q(V) linear region (pu).  At V = setpoint+slope
     the windpark dispatches Q = q_min (full inductive); at V = setpoint-slope
     the windpark dispatches Q = q_max (full capacitive)."""
-
-    # ------------------------------------------------------------------
-    #  Q_cor actuator master switch (refactor_v2, Soleimani §III-B)
-    # ------------------------------------------------------------------
-    use_q_cor_actuator: bool = True
-    """Master switch for the refactor_v2 Q_cor path.  When True, the
-    runner:
-
-    * calls :func:`network.ieee39.build.tag_der_q_modes` to populate
-      ``net.sgen.q_mode`` / ``qv_slope_pu`` / ``qv_vref_pu`` /
-      ``qv_deadband_pu`` / ``cosphi`` / ``cosphi_sign`` / ``q_cor_mvar``;
-    * skips :func:`network.ieee39.build.apply_der_classification` so
-      every DER stays as ``pp.sgen`` (no sgen→gen promotion);
-    * installs :func:`controller.der_qv_local_loop.install_der_q_loops`
-      (which dispatches QVLocalLoop or CosPhiConstLoop per ``q_mode``)
-      instead of the legacy ``install_qv_local_loops``;
-    * sets ``use_q_cor_actuator=True`` on every
-      :class:`controller.tso_controller.TSOControllerConfig` and
-      :class:`controller.dso_controller.DSOControllerConfig`,
-      activating the H-matrix ``T' = (I + diag(K)·S_VQ)^{-1}`` transform
-      on the DER columns;
-    * passes ``use_q_cor_actuator=True`` to
-      :func:`experiments.helpers.plant_io.apply_zone_tso_controls`,
-      which writes the OFO output into ``net.sgen.q_cor_mvar``.
-
-    Default ``False`` keeps the legacy grid-forming/grid-following
-    classification path (with sgen→gen promotion and the Stage-2 Q-shim
-    apply step).  Set to ``True`` to exercise the Soleimani-style
-    Q_cor formulation end-to-end."""
 
     # ------------------------------------------------------------------
     #  q_mode hierarchy (refactor_v2, Soleimani §III-B)

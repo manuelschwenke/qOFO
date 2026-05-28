@@ -31,19 +31,27 @@ def prepare_load_contingencies(
     verbose: int = 0,
 ) -> None:
     """
-    Pre-create pandapower loads for ``element_type="load"`` contingency events.
+    Resolve ``element_index`` for every ``element_type="load"`` contingency event.
 
-    Each unique ``(bus, p_mw, q_mvar)`` triple among ``"connect"`` events
-    produces one load row in ``net.load`` with ``in_service=False``.  The
-    assigned load index is written back into ``element_index`` on **all**
-    matching events (both ``"connect"`` and ``"trip"``).
+    Three addressing modes are supported, in priority order:
 
-    The loads are created without ``profile_p`` / ``profile_q`` so that
-    :func:`apply_profiles` never scales them — they behave as constant loads.
-    ``base_p_mw`` and ``base_q_mvar`` are set to **0** so that
-    :func:`compute_zonal_gen_dispatch` (which is pre-computed) does not
-    account for them.  After connection the extra demand is absorbed by
-    the distributed slack, analogous to any other contingency disturbance.
+    1. **Explicit existing index** — ``ev.element_index >= 0``.  Validates
+       that the index exists in ``net.load.index``.  ``action="connect"``
+       is rejected (it would conflict with the row already existing).
+    2. **Name lookup** — ``ev.name is not None``.  Resolves to the unique
+       ``net.load.index[net.load["name"] == ev.name]``; raises if zero or
+       more than one row matches.  ``action="connect"`` is rejected.
+    3. **Legacy dormant-load pattern** — neither of the above set.  Group
+       events by ``(bus, p_mw, q_mvar)``.  Each unique key with at least
+       one ``"connect"`` event produces one dormant ``net.load`` row
+       (``in_service=False``); ``"trip"`` / ``"restore"`` events with
+       the same key reuse the assigned index.
+
+    Modes (1) and (2) target **existing** loads — e.g. the IEEE 39
+    TN-split rows or the per-DSO HV loads created by ``add_hv_networks``.
+    Mode (3) creates new dormant loads with ``base_p_mw=base_q_mvar=0``
+    so that :func:`compute_zonal_gen_dispatch` (pre-computed) is not
+    affected and the slack absorbs the extra demand on connection.
 
     Must be called **after** :func:`snapshot_base_values`.
     """
@@ -53,8 +61,63 @@ def prepare_load_contingencies(
     if not load_events:
         return
 
-    # ── Validate and group connect events by (bus, p_mw, q_mvar) ──────────
-    connect_events = [ev for ev in load_events if ev.action == "connect"]
+    # ── Pass 1: existing-load addressing (index or name) ──────────────────
+    legacy_events: List[ContingencyEvent] = []
+    for ev in load_events:
+        used_existing = False
+
+        if ev.element_index is not None and ev.element_index >= 0:
+            if ev.action == "connect":
+                raise ValueError(
+                    f"Load contingency at minute {ev.minute}: "
+                    f"action='connect' with explicit element_index="
+                    f"{ev.element_index} is a contradiction — the row "
+                    f"already exists."
+                )
+            if ev.element_index not in net.load.index:
+                raise ValueError(
+                    f"Load contingency at minute {ev.minute}: "
+                    f"element_index={ev.element_index} not in "
+                    f"net.load.index."
+                )
+            used_existing = True
+            if verbose > 0:
+                nm = net.load.at[ev.element_index, "name"]
+                bus = int(net.load.at[ev.element_index, "bus"])
+                print(f"  Resolved load contingency by index: "
+                      f"idx={ev.element_index} ({nm!r}, bus {bus})")
+
+        elif ev.name is not None:
+            if ev.action == "connect":
+                raise ValueError(
+                    f"Load contingency at minute {ev.minute}: "
+                    f"action='connect' with name={ev.name!r} is a "
+                    f"contradiction — the row already exists."
+                )
+            matches = net.load.index[net.load["name"] == ev.name].tolist()
+            if len(matches) == 0:
+                raise ValueError(
+                    f"Load contingency at minute {ev.minute}: "
+                    f"no net.load row matches name={ev.name!r}."
+                )
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Load contingency at minute {ev.minute}: "
+                    f"name={ev.name!r} matches multiple net.load rows "
+                    f"({matches}); names must be unique."
+                )
+            ev.element_index = int(matches[0])
+            used_existing = True
+            if verbose > 0:
+                bus = int(net.load.at[ev.element_index, "bus"])
+                print(f"  Resolved load contingency by name {ev.name!r}: "
+                      f"idx={ev.element_index} (bus {bus})")
+
+        if not used_existing:
+            legacy_events.append(ev)
+
+    # ── Pass 2: legacy dormant-load pattern ───────────────────────────────
+    connect_events = [ev for ev in legacy_events if ev.action == "connect"]
     key_to_index: dict[tuple[int, float, float], int] = {}
 
     for ev in connect_events:
@@ -97,8 +160,8 @@ def prepare_load_contingencies(
 
         ev.element_index = key_to_index[key]
 
-    # ── Assign element_index to trip/restore events ───────────────────────
-    for ev in load_events:
+    # ── Assign element_index to legacy trip/restore events ────────────────
+    for ev in legacy_events:
         if ev.action == "connect":
             continue  # already handled
         key = (ev.bus, ev.p_mw, ev.q_mvar)
@@ -107,9 +170,19 @@ def prepare_load_contingencies(
                 f"Load contingency at minute {ev.minute}: "
                 f"action='{ev.action}' for (bus={ev.bus}, "
                 f"p_mw={ev.p_mw}, q_mvar={ev.q_mvar}) but no "
-                f"matching 'connect' event was defined"
+                f"matching 'connect' event was defined and neither "
+                f"element_index nor name were supplied."
             )
         ev.element_index = key_to_index[key]
+
+    # ── Final sanity check: every load event must now resolve ─────────────
+    for ev in load_events:
+        if ev.element_index < 0 or ev.element_index not in net.load.index:
+            raise ValueError(
+                f"Load contingency at minute {ev.minute} (action="
+                f"{ev.action!r}) failed to resolve to a valid net.load "
+                f"index (got element_index={ev.element_index})."
+            )
 
 
 # ---------------------------------------------------------------------------

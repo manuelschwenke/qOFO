@@ -421,6 +421,13 @@ class MultiTSOCoordinator:
         #                     similarity transform with G_w)
         self._H_blocks: Dict[Tuple[int, int], NDArray[np.float64]] = {}
         self._M_blocks: Dict[Tuple[int, int], NDArray[np.float64]] = {}
+        self._zero_offdiag: bool = False
+        """Whether off-diagonal blocks H_ij (i ≠ j) are forced to zero.
+        Set by :meth:`compute_cross_sensitivities` based on its
+        ``zero_offdiag`` argument.  Honoured by any code path that would
+        normally repopulate or refresh cross-zone blocks (currently the
+        coordinator itself; the runner passes the flag through from
+        :data:`configs.multi_tso_config.MultiTSOConfig.local_sensitivities_tso`)."""
 
         # ── Diagnostic storage (populated during step()) ──────────────────────
         self.last_coupling_diagnostics: Dict[int, Dict] = {}
@@ -460,6 +467,7 @@ class MultiTSOCoordinator:
     def compute_cross_sensitivities(
         self,
         jac: Optional[JacobianSensitivities] = None,
+        zero_offdiag: bool = False,
     ) -> None:
         """
         Compute all H_ij cross-sensitivity blocks from the full-network Jacobian.
@@ -490,9 +498,20 @@ class MultiTSOCoordinator:
             copy of the network, a re-convergence ``pp.runpp``, and a dense
             Jacobian inversion.  Pass an existing instance to avoid that
             cost when the operating point has not changed.
+        zero_offdiag : bool, default False
+            If True, every off-diagonal block ``H_ij`` (i ≠ j) is left as
+            an all-zero matrix of the right shape; only diagonal blocks
+            ``H_ii`` are populated from ``jac``.  This is the consistent
+            mode under
+            :data:`configs.multi_tso_config.MultiTSOConfig.local_sensitivities_tso`
+            where each TSO controller already operates on a reduced net
+            with no knowledge of other zones — the contraction diagnostic
+            and the stability M-matrix then reflect that decentralised
+            assumption rather than mixing it with full-network coupling.
         """
         if jac is None:
             jac = JacobianSensitivities(self.net)
+        self._zero_offdiag = bool(zero_offdiag)
         n_zones = len(self.zones)
         zone_ids = sorted(self.zones.keys())
 
@@ -559,6 +578,13 @@ class MultiTSOCoordinator:
                     ),
                     dtype=np.float64,
                 )
+
+                # Skip cross-zone population under decentralised mode.  The
+                # all-zero block matches the assumption that each TSO sees
+                # only its own reduced network (no knowledge of zone j).
+                if zero_offdiag and i != j:
+                    self._H_blocks[(i, j)] = H_ij
+                    continue
 
                 # ── DER Q columns: ∂V_i / ∂Q_DER_j ──────────────────────────
                 # Note: compute_dV_dQ_der only works for PQ buses.
@@ -1193,11 +1219,21 @@ class MultiTSOCoordinator:
             meas = measurements.get(zone_id)
             if meas is None:
                 raise KeyError(f"No measurement provided for zone_id={zone_id}.")
+            # w-shift reanchoring: reset _u_current's DER block to the
+            # measured Q so the OFO's update u_new = u_old + sigma yields
+            # q_set = Q_meas + sigma, matching the per-step "increment"
+            # interpretation of the w-shift actuator.  See
+            # :meth:`TSOController.apply_qw_reset`.
+            if hasattr(controller, "apply_qw_reset"):
+                controller.apply_qw_reset(meas)
             outputs[zone_id] = controller.step(meas, sim_time_s=sim_time_s)
 
-        # Optionally refresh cross-sensitivity and re-run stability diagnostics
+        # Optionally refresh cross-sensitivity and re-run stability diagnostics.
+        # Propagate the latest ``zero_offdiag`` choice (set at the initial
+        # ``compute_cross_sensitivities`` call from the runner) so refreshed
+        # blocks stay consistent with the local-net sensitivity mode.
         if recompute_cross_sensitivities:
-            self.compute_cross_sensitivities()
+            self.compute_cross_sensitivities(zero_offdiag=self._zero_offdiag)
             self.compute_M_blocks()
             self.check_contraction()
 

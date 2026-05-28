@@ -17,24 +17,25 @@ Plots produced (PNG + PDF):
                                           envelope (focus): three stacked
                                           subplots v_min / v_mean / v_max
                                           across all TSO zones.  Setpoint
-                                          line + reference bands annotated.
+                                          line annotated.
 2. ``compare_ds_voltage_envelope``     -- DISTRIBUTION-system equivalent
                                           across all HV sub-networks.
 3. ``compare_voltage_rmsd``            -- TS and DS RMSD-to-setpoint vs t
                                           (two stacked subplots).
-4. ``compare_voltage_violations``      -- bar chart of total step-aggregate
-                                          violations: TS / DS x low / high.
-5. ``compare_losses``                  -- total network active losses vs t.
-6. ``compare_gen_q_headroom``          -- minimum sync-gen Q headroom vs t.
-7. ``compare_q_tie_deviation``         -- summed and worst-pair absolute
+4. ``compare_losses``                  -- total network active losses vs t.
+5. ``compare_gen_q_headroom``          -- minimum sync-gen Q headroom vs t.
+6. ``compare_q_tie_deviation``         -- summed and worst-pair absolute
                                           deviation of inter-zone tie-line
                                           Q flows from the setpoint (Phase B
                                           Q_tie tracking diagnostic).
-8. ``compare_gen_capability_pq``       -- per-generator P-Q operating-point
+7. ``compare_gen_capability_pq``       -- per-generator P-Q operating-point
                                           scatter against the Milano §12.2
                                           capability envelope; one tile per
                                           gen with all four scenarios
                                           overlaid as transparent scatter.
+
+Voltage-band violation counts are still written to ``summary.csv`` even
+though the bar-chart figure was removed.
 
 Non-converged scenarios (empty record list) are annotated in a footer rather
 than dropped, so the consumer can see at a glance which baselines failed.
@@ -57,8 +58,6 @@ from experiments.helpers.comparison_metrics import (
     voltage_envelope_ts,
     voltage_rmsd_ds,
     voltage_rmsd_ts,
-    voltage_violation_counts_ds,
-    voltage_violation_counts_ts,
 )
 from visualisation.style import (
     COLOUR_TITLE_BAR,
@@ -69,14 +68,18 @@ from visualisation.style import (
 )
 
 
-# Default scenario palette: deliberately picks visually-distinct colours
-# from the TU Darmstadt palette.
+# Default scenario palette: TUDA hues spread around the colour wheel so
+# the four conflicting pairs (L0/T0 and L1/T1) sit on opposite sides.
 _DEFAULT_PALETTE: Dict[str, str] = {
-    "L0":    TU_COLOURS[8],   # red
-    "L1":    TU_COLOURS[3],   # gold
-    "L2":    TU_COLOURS[4],   # teal
+    "L0":    TU_COLOURS[8],   # #B90F22 red       (~355 deg)
+    "L1":    TU_COLOURS[9],   # #D28700 amber     (~38 deg)
+    "T0":    TU_COLOURS[1],   # #004E8A dark blue (~213 deg)
+    "T1":    TU_COLOURS[4],   # #008877 teal      (~173 deg)
+    "C":     TU_COLOURS[10],  # #611C73 purple    (~285 deg)
+    # Legacy aliases retained for older log dumps.
+    "L2":    TU_COLOURS[6],   # olive
     "T-OFO": TU_COLOURS[5],   # magenta
-    "C-OFO": TU_COLOURS[1],   # dark blue
+    "C-OFO": TU_COLOURS[7],   # mid-blue
 }
 
 
@@ -117,15 +120,15 @@ def _failure_footer(fig, failed_names: List[str]) -> None:
 def _annotate_voltage_axis(ax, v_set: float, low: float, high: float,
                            soft_low: float = 0.90, soft_high: float = 1.10,
                            ) -> None:
-    """Add setpoint line plus ±0.05 / ±0.10 reference bands."""
+    """Add the setpoint reference line.
+
+    The hard- and soft-limit horizontal lines were removed because they
+    forced the y-axis to span [0.90, 1.10] and squeezed the actual
+    trajectories near 1.0 pu.  The ``low/high/soft_low/soft_high``
+    parameters are kept for caller compatibility.
+    """
     ax.axhline(v_set, color="#222222", linewidth=0.9, linestyle="-",
                alpha=0.7, zorder=1)
-    for v in (low, high):
-        ax.axhline(v, color="#888888", linewidth=0.6, linestyle="--",
-                   alpha=0.6, zorder=1)
-    for v in (soft_low, soft_high):
-        ax.axhline(v, color="#aa4444", linewidth=0.6, linestyle=":",
-                   alpha=0.6, zorder=1)
 
 
 # ---------------------------------------------------------------------------
@@ -199,65 +202,6 @@ def _plot_voltage_rmsd(logs, palette, out_dir, failed, v_set: float) -> None:
     axes[0].legend(loc="upper right", ncol=4, frameon=True, fontsize=8)
     _failure_footer(fig, failed)
     _save(fig, out_dir, "compare_voltage_rmsd")
-    plt.close(fig)
-
-
-def _plot_voltage_violations(logs, palette, out_dir, failed,
-                             low: float = 0.95, high: float = 1.05) -> None:
-    import matplotlib.pyplot as plt
-
-    names = list(logs.keys())
-    counts = {"TS_low": [], "TS_high": [], "DS_low": [], "DS_high": []}
-    for name in names:
-        recs = logs[name]
-        if recs:
-            ts = voltage_violation_counts_ts(recs, low, high)
-            ds = voltage_violation_counts_ds(recs, low, high)
-            counts["TS_low"].append(int(np.nansum(ts["n_low"])))
-            counts["TS_high"].append(int(np.nansum(ts["n_high"])))
-            counts["DS_low"].append(int(np.nansum(ds["n_low"])))
-            counts["DS_high"].append(int(np.nansum(ds["n_high"])))
-        else:
-            for k in counts:
-                counts[k].append(0)
-
-    fig, ax = plt.subplots(figsize=(9.0, 4.4))
-    plt.subplots_adjust(top=0.86, left=0.10, right=0.98, bottom=0.13)
-    draw_figure_header(fig, f"Voltage-band violations (V < {low:.2f} | V > {high:.2f} pu)",
-                       color=COLOUR_TITLE_BAR)
-
-    x = np.arange(len(names))
-    w = 0.20
-    bars_specs = [
-        ("TS_low",  -1.5 * w, "#aa4444", "/"),     # TS low
-        ("TS_high", -0.5 * w, "#cc8800", "/"),     # TS high
-        ("DS_low",  +0.5 * w, "#aa4444", "."),     # DS low
-        ("DS_high", +1.5 * w, "#cc8800", "."),     # DS high
-    ]
-    label_map = {
-        "TS_low":  f"TS V < {low:.2f}",
-        "TS_high": f"TS V > {high:.2f}",
-        "DS_low":  f"DS V < {low:.2f}",
-        "DS_high": f"DS V > {high:.2f}",
-    }
-    for key, dx, colour, hatch in bars_specs:
-        bars = ax.bar(x + dx, counts[key], w, color=colour,
-                      hatch=hatch, edgecolor="white",
-                      label=label_map[key])
-        for rect in bars:
-            h = rect.get_height()
-            if h:
-                ax.annotate(f"{int(h)}",
-                            xy=(rect.get_x() + rect.get_width() / 2, h),
-                            xytext=(0, 2), textcoords="offset points",
-                            ha="center", va="bottom", fontsize=7)
-    ax.set_xticks(x)
-    ax.set_xticklabels(names)
-    ax.set_ylabel("Total step-aggregate violations")
-    ax.legend(loc="upper right", frameon=True, ncol=2, fontsize=8)
-    tile_title(ax, "TS = TSO ZONES, DS = HV SUB-NETWORKS")
-    _failure_footer(fig, failed)
-    _save(fig, out_dir, "compare_voltage_violations")
     plt.close(fig)
 
 
@@ -619,8 +563,6 @@ def plot_scenario_comparison(
         logs=logs, palette=pal, out_dir=out_dir, failed=failed, v_set=v_set,
     )
     _plot_voltage_rmsd(logs, pal, out_dir, failed, v_set=v_set)
-    _plot_voltage_violations(logs, pal, out_dir, failed,
-                             low=v_low, high=v_high)
 
     # --- Losses + headroom ---
     _plot_losses(logs, pal, out_dir, failed)

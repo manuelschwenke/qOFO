@@ -1,8 +1,9 @@
-"""Smoke run for the refactor_v2 Q_cor end-to-end path.
+"""Smoke run for the w-shift end-to-end path.
 
-NOT a pytest test — just a fast driver that flips
-``MultiTSOConfig.use_q_cor_actuator=True`` and exercises the new
-Q_cor formulation through the multi-zone runner.
+NOT a pytest test — just a fast driver that exercises the
+vertical-shift + V_ref-reanchored DER actuator through the multi-zone
+runner.  Originally named ``smoke_q_cor`` from the previous Q_cor
+horizontal-shift formulation that this script supersedes.
 
 Run from the project root:
 
@@ -12,10 +13,7 @@ A 4-minute simulation at 1-min step, 3-min TSO period, 1-min DSO
 period exercises both control layers at least once.  Pass criteria:
 
 * runner returns without exception;
-* at least one iteration record is logged;
-* every DER has ``q_cor_mvar`` populated (the OFO wrote at least
-  one command); a sentinel "all zeros" return means the OFO never
-  fired — flag and exit non-zero.
+* at least one iteration record is logged.
 """
 
 from __future__ import annotations
@@ -67,20 +65,15 @@ def main() -> None:
         scenario="wind_replace",
         start_time=datetime(2016, 4, 15, 10, 0),
         contingencies=[],
-        # ── refactor_v2 Q_cor path ────────────────────────────────────
-        use_q_cor_actuator=True,
-        # Test profile: TSO DERs at unity power factor (Q=0 always),
-        # DSO DERs on Q(V) droop at V_ref=1.03.  This isolates the
-        # DSO-side Q_cor path and matches the regime where the legacy
-        # stage2 smoke is known to converge.
-        # Default tso_q_mode="qv" — exercise QVLocalLoop on TSO STATCOMs too
+        # w-shift DER actuator: tso_q_mode defaults to "qv" so
+        # QVLocalLoop runs on TSO STATCOMs and DSO Q(V) DERs alike.
         tso_qv_vref_pu=1.03,
         dso_qv_vref_pu=1.03,
         # qv_local_damping defaults to 0.05 (MultiTSOConfig); the runner
         # also auto-clamps TSO DERs to 0.03.  No override needed.
         # Per-level tolerances default to tso=0.1 / dso=0.01 Mvar.
     )
-    print(f"\n[smoke_q_cor] use_q_cor_actuator={cfg.use_q_cor_actuator}")
+    print(f"\n[smoke_q_cor] w-shift actuator (q_set + V_ref reanchor)")
     print(f"[smoke_q_cor] tso_q_mode={cfg.tso_q_mode} "
           f"dso_q_mode={cfg.dso_q_mode}")
     print(f"[smoke_q_cor] tso_qv_vref_pu={cfg.tso_qv_vref_pu} "

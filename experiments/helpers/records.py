@@ -48,17 +48,33 @@ class ContingencyEvent:
         or ``"load"`` (for load connection / shedding).
     element_index : int
         Row index in the corresponding ``net.<element_type>`` table.
-        For ``"load"`` events this is filled automatically by
-        :func:`run.contingency.prepare_load_contingencies`; pass ``-1``.
+
+        For ``"load"`` events three addressing modes are supported by
+        :func:`run.contingency.prepare_load_contingencies`:
+
+        1. Pass ``element_index >= 0`` directly → trip / restore the
+           existing ``net.load`` row at that index (no dormant load is
+           created).  ``"connect"`` is rejected.
+        2. Pass ``name=<str>`` → look up the unique row whose
+           ``net.load["name"]`` matches.  ``"connect"`` is rejected.
+        3. Legacy "create dormant + trip" pattern (default ``element_index = -1``
+           and ``name = None``): supply ``bus`` + ``p_mw`` + ``q_mvar``; a
+           dormant load is pre-created at the first ``"connect"`` event,
+           subsequent ``"trip"`` / ``"restore"`` events at the same
+           ``(bus, p_mw, q_mvar)`` triple reuse that load.
     action : str
         ``"trip"`` sets ``in_service = False``;
         ``"restore"`` / ``"connect"`` sets ``in_service = True``.
+    name : str | None
+        Optional load name for ``"load"`` events.  When set,
+        :func:`prepare_load_contingencies` resolves ``element_index`` by
+        exact match on ``net.load["name"]``.  Required to be unique.
     bus : int | None
-        Bus index for ``"load"`` events (ignored for other types).
+        Bus index for ``"load"`` events (dormant-load mode only).
     p_mw : float
-        Active power [MW] of the contingency load (``"load"`` only).
+        Active power [MW] of the contingency load (dormant-load mode only).
     q_mvar : float
-        Reactive power [Mvar] of the contingency load (``"load"`` only).
+        Reactive power [Mvar] of the contingency load (dormant-load mode only).
     """
 
     minute: int
@@ -68,12 +84,15 @@ class ContingencyEvent:
     new_setpoint: float = np.nan
     time_s: Optional[float] = None
     """Event time in seconds.  Overrides ``minute`` when set."""
+    name: Optional[str] = None
+    """Element name for ``"load"`` events; resolved to ``element_index``
+    by :func:`prepare_load_contingencies`."""
     bus: Optional[int] = None
-    """Bus index for load contingency events."""
+    """Bus index for load contingency events (dormant-load mode)."""
     p_mw: float = np.nan
-    """Active power [MW] of contingency load."""
+    """Active power [MW] of contingency load (dormant-load mode)."""
     q_mvar: float = np.nan
-    """Reactive power [Mvar] of contingency load."""
+    """Reactive power [Mvar] of contingency load (dormant-load mode)."""
 
     @property
     def effective_time_s(self) -> float:

@@ -176,8 +176,6 @@ def apply_zone_tso_controls(
     net: pp.pandapowerNet,
     zone_def: "ZoneDefinition",
     tso_out,
-    *,
-    use_q_cor_actuator: bool = False,
 ) -> List[int]:
     """
     Write TSO control output for one zone back to the pandapower plant network.
@@ -188,16 +186,12 @@ def apply_zone_tso_controls(
     PCC Q setpoints are *not* applied here; they are communicated to the DSO
     via ``TSOController.generate_setpoint_messages()``.
 
-    Parameters
-    ----------
-    use_q_cor_actuator
-        When True (refactor_v2), the DER block of ``u`` is written into
-        ``net.sgen.q_cor_mvar`` (the controller-commanded Q offset that
-        shifts each DER's local Q(V) curve).  The plant-side
-        :class:`controller.der_qv_local_loop.QVLocalLoop` then converges
-        Q via the droop equation.  When False (default, legacy), the
-        DER block is written into ``net.sgen.q_mvar`` directly (Stage-1
-        direct-Q dispatch).
+    DER actuator (w-shift mode): the DER block of ``u`` is the OFO-commanded
+    ``q_set`` (Mvar) at the reanchored V_ref of each DER.  The apply step
+    reanchors ``net.sgen.qv_vref_anchor_pu`` from the latest measured bus
+    voltage (``net.res_bus.vm_pu``) before writing ``q_set_mvar``.  Order
+    matters: the plant-side :class:`controller.der_qv_local_loop.QVLocalLoop`
+    reads both columns together on the next PF iteration.
 
     Returns
     -------
@@ -216,17 +210,28 @@ def apply_zone_tso_controls(
     n_gf = len(zone_def.gridforming_gen_indices)
     off = 0
 
-    if use_q_cor_actuator:
-        # Q_cor path (Soleimani §III-B): write the OFO output directly
-        # into the q_cor_mvar column.  The plant-side QVLocalLoop reads
-        # this each PF iteration to shift the V_Q curve.
-        if "q_cor_mvar" not in net.sgen.columns:
-            net.sgen["q_cor_mvar"] = 0.0
+    # w-shift mode: reanchor V_ref to the most recent measured bus
+    # voltage, then write q_set.  Defensive column creation so the
+    # function is safe to call before tag_der_q_modes has run.
+    if n_der > 0:
+        if "q_set_mvar" not in net.sgen.columns:
+            net.sgen["q_set_mvar"] = 0.0
+        if "qv_vref_anchor_pu" not in net.sgen.columns:
+            net.sgen["qv_vref_anchor_pu"] = float("nan")
+        has_res_bus = (
+            hasattr(net, "res_bus")
+            and net.res_bus is not None
+            and not net.res_bus.empty
+            and "vm_pu" in net.res_bus.columns
+        )
         for k, s_idx in enumerate(zone_def.tso_der_indices):
-            net.sgen.at[s_idx, "q_cor_mvar"] = float(u[off + k])
-    else:
-        for k, s_idx in enumerate(zone_def.tso_der_indices):
-            net.sgen.at[s_idx, "q_mvar"] = float(u[off + k])
+            if has_res_bus:
+                bus = int(net.sgen.at[s_idx, "bus"])
+                if bus in net.res_bus.index:
+                    net.sgen.at[s_idx, "qv_vref_anchor_pu"] = float(
+                        net.res_bus.at[bus, "vm_pu"]
+                    )
+            net.sgen.at[s_idx, "q_set_mvar"] = float(u[off + k])
     off += n_der
 
     # PCC Q setpoints are forwarded to DSO controllers, not written to net.
@@ -277,31 +282,15 @@ def apply_dso_controls(
     taps live in ``net.trafo3w``; shunt switching is intentionally skipped
     (shunts are initialised separately in the multi-zone runner).
 
-    The DER-block apply path depends on
-    ``(use_qv_local_loop, qv_apply_mode)``:
+    DER actuator (w-shift mode): the DER block of ``u`` is the OFO-commanded
+    ``q_set`` (Mvar) at the reanchored V_ref of each DER.  The apply step
+    reanchors ``net.sgen.qv_vref_anchor_pu`` from the latest measured bus
+    voltage (``net.res_bus.vm_pu``) before writing ``q_set_mvar``.  The
+    plant-side :class:`controller.der_qv_local_loop.QVLocalLoop` reads both
+    columns on the next ``pp.runpp(run_control=True)`` call.
 
-    * ``(False, *)`` — Stage 1: write ``u[k]`` to ``net.sgen.q_mvar`` directly.
-    * ``(True, "v_ref")`` — Stage 2 V_ref-direct: write ``u[k]`` to
-      ``net.sgen.vm_pu_ref``.  The Q(V) loop then converges Q on the
-      next ``pp.runpp(run_control=True)`` call, but Q is bounded by
-      the closed-loop equilibrium ``Q* = K(V_ref-V_open)/(1+KS_VQ)``.
-    * ``(True, "q_shim")`` — Q+shim: OFO output is Q (Mvar).  Invert the
-      multi-DER closed-loop equilibrium
-
-      .. math::
-        \\mathbf{V}_{\\rm ref} = \\mathbf{V}_{\\rm meas}
-        + \\mathrm{diag}(1/k)\\,\\mathbf{Q}_{\\rm cmd}
-        + \\mathbf{S}_{VQ}\\,(\\mathbf{Q}_{\\rm cmd} - \\mathbf{Q}_{\\rm meas})
-
-      where ``S_VQ`` is the **full** per-DSO bus-voltage / Q-injection
-      sensitivity block read live from
-      ``sensitivities.compute_dV_dQ_der`` (a submatrix of the cached
-      ``dV_dQ_reduced`` — no extra PF needed).  Including the off-diagonal
-      terms accounts for cross-DER coupling within a DSO sub-network: when
-      DER j shifts its Q, V at DER i's bus moves by ``S_VQ_ij·ΔQ_j``,
-      which the per-DER (diagonal-only) shim used to ignore.  V_ref is
-      intentionally NOT clipped — the QVLocalLoop's per-DER Q-cap clipping
-      handles physical limits.
+    The ``sensitivities`` argument is retained for backward compatibility
+    with the legacy V_ref/Q-shim apply path (no longer used).
     """
     u = dso_out.u_new
     n_der = len(dso_cfg.der_indices)
@@ -309,116 +298,28 @@ def apply_dso_controls(
     n_oltc = len(dso_cfg.oltc_trafo_indices)
     off = 0
 
-    if dso_cfg.use_q_cor_actuator:
-        # Q_cor path (refactor_v2 / Soleimani §III-B): the OFO output
-        # for the DER block is Q_cor (Mvar) — written directly to
-        # ``net.sgen.q_cor_mvar``.  The plant-side QVLocalLoop reads it
-        # each PF iteration to shift the V_Q characteristic.  No
-        # vm_pu_ref / Q-shim inversion needed.
-        if "q_cor_mvar" not in net.sgen.columns:
-            net.sgen["q_cor_mvar"] = 0.0
+    # w-shift mode: reanchor V_ref to the most recent measured bus
+    # voltage, then write q_set.  Defensive column creation so the
+    # function is safe to call before tag_der_q_modes has run.
+    if n_der > 0:
+        if "q_set_mvar" not in net.sgen.columns:
+            net.sgen["q_set_mvar"] = 0.0
+        if "qv_vref_anchor_pu" not in net.sgen.columns:
+            net.sgen["qv_vref_anchor_pu"] = float("nan")
+        has_res_bus = (
+            hasattr(net, "res_bus")
+            and net.res_bus is not None
+            and not net.res_bus.empty
+            and "vm_pu" in net.res_bus.columns
+        )
         for k, s_idx in enumerate(dso_cfg.der_indices):
-            net.sgen.at[s_idx, "q_cor_mvar"] = float(u[off + k])
-    elif dso_cfg.use_qv_local_loop:
-        # Ensure the column exists even if the build didn't create it
-        # (defensive: enables Stage 2 to be flipped on at runtime).
-        if "vm_pu_ref" not in net.sgen.columns:
-            net.sgen["vm_pu_ref"] = 1.03
-
-        if dso_cfg.qv_apply_mode == "v_ref":
-            # OFO output is V_ref — write directly.
-            for k, s_idx in enumerate(dso_cfg.der_indices):
-                net.sgen.at[s_idx, "vm_pu_ref"] = float(u[off + k])
-        elif dso_cfg.qv_apply_mode == "q_shim":
-            slope = dso_cfg.qv_slope_pu
-
-            # Per-DER static parameters.
-            der_buses = [int(net.sgen.at[s, "bus"]) for s in dso_cfg.der_indices]
-            der_sn = np.array(
-                [float(net.sgen.at[s, "sn_mva"]) for s in dso_cfg.der_indices],
-                dtype=np.float64,
-            )
-
-            # Per-DER Q_cmd and Q_meas vectors.
-            q_cmd = u[off:off + n_der].astype(np.float64, copy=True)
-            q_meas = np.zeros(n_der, dtype=np.float64)
-            for k, s_idx in enumerate(dso_cfg.der_indices):
-                if (hasattr(net, "res_sgen")
-                        and s_idx in net.res_sgen.index):
-                    q_meas[k] = float(net.res_sgen.at[s_idx, "q_mvar"])
-
-            # Aggregate Δq per unique bus (multiple sgens can share a bus).
-            unique_buses: List[int] = []
-            for b in der_buses:
-                if b not in unique_buses:
-                    unique_buses.append(b)
-            n_b = len(unique_buses)
-            bus_to_idx = {b: i for i, b in enumerate(unique_buses)}
-            delta_q = q_cmd - q_meas
-            delta_q_per_bus = np.zeros(n_b, dtype=np.float64)
-            for k, b in enumerate(der_buses):
-                delta_q_per_bus[bus_to_idx[b]] += delta_q[k]
-
-            # Compute the per-bus voltage offset from cross-coupling:
-            # ΔV_bus = S_VQ @ Δq_bus.  S_VQ is read live from the shared
-            # JacobianSensitivities cache (a submatrix of dV_dQ_reduced
-            # — no extra PF), in pu_v / Mvar.  Falls back to zeros if the
-            # sensitivities handle is unavailable or the helper rejects
-            # one of the buses (e.g. a PV bus where the reduced Jacobian
-            # has no row).
-            delta_v_bus = np.zeros(n_b, dtype=np.float64)
-            if sensitivities is not None and n_b > 0:
-                try:
-                    S_VQ_full, obs_map, der_map = (
-                        sensitivities.compute_dV_dQ_der(
-                            der_bus_indices=unique_buses,
-                            observation_bus_indices=unique_buses,
-                        )
+            if has_res_bus:
+                bus = int(net.sgen.at[s_idx, "bus"])
+                if bus in net.res_bus.index:
+                    net.sgen.at[s_idx, "qv_vref_anchor_pu"] = float(
+                        net.res_bus.at[bus, "vm_pu"]
                     )
-                    obs_perm = [
-                        obs_map.index(b) if b in obs_map else None
-                        for b in unique_buses
-                    ]
-                    der_perm = [
-                        der_map.index(b) if b in der_map else None
-                        for b in unique_buses
-                    ]
-                    if all(p is not None for p in obs_perm) and all(
-                        p is not None for p in der_perm
-                    ):
-                        S_VQ = S_VQ_full[np.ix_(obs_perm, der_perm)]
-                        s_base = float(getattr(net, "sn_mva", 1.0))
-                        if s_base > 0.0:
-                            S_VQ = S_VQ / s_base
-                        delta_v_bus = S_VQ @ delta_q_per_bus
-                except (ValueError, KeyError, AttributeError):
-                    pass
-
-            # Per-DER V_ref:
-            #   V_ref_i = V_bus_meas_i + Q_cmd_i / k_i + ΔV_bus_i
-            # where ΔV_bus_i bundles BOTH the self-bus correction
-            # S_VQ_ii·Δq_i and the cross-DER coupling Σ_{j≠i} S_VQ_ij·Δq_j.
-            for k, s_idx in enumerate(dso_cfg.der_indices):
-                sn = der_sn[k]
-                if sn <= 0.0 or slope <= 0.0:
-                    net.sgen.at[s_idx, "vm_pu_ref"] = 1.03
-                    continue
-                k_droop = sn / slope
-                bus = der_buses[k]
-                v_bus = (
-                    float(net.res_bus.at[bus, "vm_pu"])
-                    if bus in net.res_bus.index else 1.03
-                )
-                offset = q_cmd[k] / k_droop + delta_v_bus[bus_to_idx[bus]]
-                net.sgen.at[s_idx, "vm_pu_ref"] = float(v_bus + offset)
-        else:
-            raise ValueError(
-                f"Unknown qv_apply_mode={dso_cfg.qv_apply_mode!r}; "
-                f"expected 'v_ref' or 'q_shim'."
-            )
-    else:
-        for k, s_idx in enumerate(dso_cfg.der_indices):
-            net.sgen.at[s_idx, "q_mvar"] = float(u[off + k])
+            net.sgen.at[s_idx, "q_set_mvar"] = float(u[off + k])
     off += n_der
 
     # Grid-forming converter gens (DSO-owned): write vm_pu to net.gen.

@@ -879,6 +879,12 @@ def run_multi_tso_dso(
     last_dso_q_set_mvar: Dict[str, Optional[NDArray]] = {
         dso_id: None for dso_id in dso_ids
     }
+    # Latest TSO-dispatched interface Q setpoint per coupling-trafo index,
+    # persisted across steps.  Lets the local-DSO recording path (one-sided-OFO
+    # variants: TSO OFO + local DSO, e.g. comparison scenario "T1") expose the
+    # same per-trafo interface setpoint field as the cascaded OFO path so the
+    # CIGRE interface-tracking-error figure can overlay both uniformly.
+    last_pcc_set_per_trafo: Dict[int, float] = {}
 
     # =========================================================================
     # STEP 8: Initialise MultiTSOCoordinator
@@ -1755,13 +1761,25 @@ def run_multi_tso_dso(
     # movement.  Only active when at least one local-mode tap controller
     # is present; the OFO MIQP path enforces the same cooldown via
     # OFOParameters.int_cooldown_s on its own integer block.
+    _oltc_local_active = _local_dso or _local_tso
     _oltc_limiter = _OLTCRateLimiter(
         max_step=config.local_oltc_max_step_per_dt,
-        cooldown_s=(
-            config.oltc_cooldown_s if (_local_dso or _local_tso) else 0.0
+        cooldown_s=(config.oltc_cooldown_s if _oltc_local_active else 0.0),
+        cooldown_by_table=(
+            {
+                # MT = machine 2W gen-transformer OLTCs (net.trafo);
+                # NC = coupler 3W OLTCs (net.trafo3w) at the TS--STS interface.
+                "trafo": (config.oltc_cooldown_s_mt
+                          if config.oltc_cooldown_s_mt is not None
+                          else config.oltc_cooldown_s),
+                "trafo3w": (config.oltc_cooldown_s_nc
+                            if config.oltc_cooldown_s_nc is not None
+                            else config.oltc_cooldown_s),
+            }
+            if _oltc_local_active else {}
         ),
     )
-    _oltc_limiter_active = (_local_dso or _local_tso) and _oltc_limiter.active
+    _oltc_limiter_active = _oltc_local_active and _oltc_limiter.active
 
     if pre_loop_hook is not None:
         _hook_state = {
@@ -1982,7 +2000,7 @@ def run_multi_tso_dso(
                         pp.runpp(
                             net, run_control=False,
                             calculate_voltage_angles=True,
-                            max_iteration=100,
+                            max_iteration=200,
                             distributed_slack=config.distributed_slack,
                             enforce_q_lims=False,
                         )
@@ -2095,7 +2113,7 @@ def run_multi_tso_dso(
             # the OFO sees no gradient on this column (most likely
             # cause: DER absorbed the V-tracking signal).  If sigma is
             # zero AND the new u is at a bound, the bound is clamping.
-            if verbose >= 1:
+            if verbose >= 3:
                 for z, tso_out in tso_outputs.items():
                     n_der_z = len(zone_defs[z].tso_der_indices)
                     n_pcc_z = len(zone_defs[z].pcc_trafo_indices)
@@ -2168,6 +2186,10 @@ def run_multi_tso_dso(
                 off = 0
                 rec.zone_q_der[z]         = u[off:off+n_der].copy(); off += n_der
                 rec.zone_q_pcc_set[z]     = u[off:off+n_pcc].copy(); off += n_pcc
+                # Persist per-trafo interface setpoint (parallel to
+                # pcc_trafo_indices) for the local-DSO recording path below.
+                for _k, _t in enumerate(zone_defs[z].pcc_trafo_indices):
+                    last_pcc_set_per_trafo[int(_t)] = float(rec.zone_q_pcc_set[z][_k])
                 rec.zone_v_gen[z]         = u[off:off+n_gen].copy(); off += n_gen
                 rec.zone_v_gf[z]          = np.zeros(0)  # no V_gf actuator
                 rec.zone_oltc_taps[z]     = u[off:off+n_oltc].copy(); off += n_oltc
@@ -2400,7 +2422,7 @@ def run_multi_tso_dso(
                 # and (q_now − q_min) aggregated across the DSO.  When
                 # both totals are small the DSO is fully saturated and
                 # the TSO has no PCC freedom regardless of g_w_pcc.
-                if verbose >= 2 and run_tso:
+                if verbose >= 3 and run_tso:
                     try:
                         ifaces = list(dso_ctrl.config.interface_trafo_indices)
                         q_now_per = []
@@ -2525,7 +2547,7 @@ def run_multi_tso_dso(
             if _oltc_limiter_active and _needs_end_pf:
                 _moved = _oltc_limiter.clamp(net, time_s)
                 if _moved:
-                    if verbose >= 1:
+                    if verbose >= 3:
                         _pretty = ", ".join(
                             f"{tab}#{tid} {prev:+d}->{new:+d}"
                             for tab, tid, prev, new in _moved
@@ -2617,6 +2639,19 @@ def run_multi_tso_dso(
             _record_local_dso_trafo_data(rec, net, hv_info_map)
             _record_hv_group_observables(rec, net, hv_info_map)
 
+            # Expose the TSO-dispatched interface Q setpoint per coupling trafo
+            # so one-sided-OFO variants (TSO OFO + local DSO) report the same
+            # interface tracking-error field as the cascaded path.  Keyed
+            # identically to _record_local_dso_trafo_data ("{net_id}|trafo_{t}").
+            # Empty when the TSO is also local (no setpoint dispatched).
+            for hv in meta.hv_networks:
+                for _t in hv.coupling_trafo_indices:
+                    _t = int(_t)
+                    if _t in last_pcc_set_per_trafo:
+                        rec.dso_trafo_q_set_mvar[f"{hv.net_id}|trafo_{_t}"] = (
+                            last_pcc_set_per_trafo[_t]
+                        )
+
         # ── Record plant voltages per zone ────────────────────────────────────
         for z, zd in zone_defs.items():
             vm_zone = np.array(
@@ -2628,6 +2663,11 @@ def run_multi_tso_dso(
                 rec.zone_v_min[z]  = float(vm_zone.min())
                 rec.zone_v_max[z]  = float(vm_zone.max())
                 rec.zone_v_mean[z] = float(vm_zone.mean())
+                # Spatial RMS of the voltage error to the setpoint across the
+                # zone's observed EHV buses (CIGRE per-zone tracking figure).
+                rec.zone_v_rms_err_pu[z] = float(
+                    np.sqrt(np.mean((vm_zone - v_set) ** 2))
+                )
 
             # Generator P, Q from converged power flow (every step).
             # Live plots consume these each update, so they cannot be gated

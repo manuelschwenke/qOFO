@@ -63,6 +63,30 @@ def _collect_contingency_watch_buses(
     return sorted(watch)
 
 
+def _controlled_oltc_keys(obj) -> List[Tuple[str, int]]:
+    """Return ``[(table, trafo_index), ...]`` controlled by a
+    ``DiscreteTapControl``.
+
+    pandapower stores the controlled index as ``element_index`` (a scalar in
+    single-index mode, or an ``ndarray`` in 'loc' mode), **not** ``tid``.
+    Reading ``tid`` returned -1 and silently made the whole rate-limiter a
+    no-op (machine 2W and coupler 3W OLTCs were never clamped).  Falls back to
+    ``tid`` for any legacy pandapower that still exposes it."""
+    table = str(getattr(obj, "element", "trafo"))
+    ei = getattr(obj, "element_index", None)
+    if ei is None:
+        ei = getattr(obj, "tid", None)
+    if ei is None:
+        return []
+    keys: List[Tuple[str, int]] = []
+    for x in np.atleast_1d(ei):
+        try:
+            keys.append((table, int(x)))
+        except (TypeError, ValueError):
+            continue
+    return keys
+
+
 def _snapshot_oltc_taps(
     net: pp.pandapowerNet,
 ) -> Dict[Tuple[str, int], int]:
@@ -82,11 +106,10 @@ def _snapshot_oltc_taps(
         obj = net.controller.at[cid, "object"]
         if not isinstance(obj, DiscreteTapControl):
             continue
-        table = str(getattr(obj, "element", "trafo"))
-        tid = int(getattr(obj, "tid", -1))
-        if tid < 0 or table not in net or tid not in net[table].index:
-            continue
-        snap[(table, tid)] = int(net[table].at[tid, "tap_pos"])
+        for table, tid in _controlled_oltc_keys(obj):
+            if table not in net or tid not in net[table].index:
+                continue
+            snap[(table, tid)] = int(net[table].at[tid, "tap_pos"])
     return snap
 
 
@@ -112,19 +135,18 @@ def _clamp_oltc_taps(
         obj = net.controller.at[cid, "object"]
         if not isinstance(obj, DiscreteTapControl):
             continue
-        table = str(getattr(obj, "element", "trafo"))
-        tid = int(getattr(obj, "tid", -1))
-        key = (table, tid)
-        if key not in snapshot:
-            continue
-        prev = snapshot[key]
-        curr = int(net[table].at[tid, "tap_pos"])
-        delta = curr - prev
-        if abs(delta) <= max_step:
-            continue
-        clamped = prev + (max_step if delta > 0 else -max_step)
-        net[table].at[tid, "tap_pos"] = int(clamped)
-        moved.append((table, tid, prev, int(clamped)))
+        for table, tid in _controlled_oltc_keys(obj):
+            key = (table, tid)
+            if key not in snapshot:
+                continue
+            prev = snapshot[key]
+            curr = int(net[table].at[tid, "tap_pos"])
+            delta = curr - prev
+            if abs(delta) <= max_step:
+                continue
+            clamped = prev + (max_step if delta > 0 else -max_step)
+            net[table].at[tid, "tap_pos"] = int(clamped)
+            moved.append((table, tid, prev, int(clamped)))
     return moved
 
 
@@ -148,19 +170,34 @@ class _OLTCRateLimiter:
     ...     pp.runpp(net, run_control=False, ...)
     """
 
-    def __init__(self, max_step: int, cooldown_s: float) -> None:
+    def __init__(self, max_step: int, cooldown_s: float,
+                 cooldown_by_table: Optional[Dict[str, float]] = None) -> None:
         self.max_step: int = int(max_step)
         self.cooldown_s: float = float(cooldown_s)
+        #: Per-element-table cooldown override (e.g. ``{"trafo": 180.0,
+        #: "trafo3w": 60.0}`` to rate-limit machine 2W (MT) OLTCs and coupler
+        #: 3W (NC) OLTCs at different wall-clock rates).  Tables absent from
+        #: this map fall back to the scalar ``cooldown_s``.
+        self._cooldown_by_table: Dict[str, float] = {
+            str(k): float(v) for k, v in (cooldown_by_table or {}).items()
+        }
         self._snapshot: Dict[Tuple[str, int], int] = {}
         self._last_change_time_s: Dict[Tuple[str, int], float] = {}
+
+    def _cooldown_for(self, table: str) -> float:
+        """Resolve the cooldown (s) for an OLTC on ``table`` (per-table
+        override if present, else the scalar ``cooldown_s``)."""
+        return self._cooldown_by_table.get(table, self.cooldown_s)
 
     @property
     def active(self) -> bool:
         """``True`` when the limiter will do anything (either rate-cap
-        or cooldown).  ``max_step < 0`` AND ``cooldown_s <= 0`` means
+        or cooldown).  ``max_step < 0`` AND every cooldown ``<= 0`` means
         the limiter is a no-op and callers can skip the snapshot/clamp
         round-trip entirely."""
-        return self.max_step >= 0 or self.cooldown_s > 0.0
+        return (self.max_step >= 0
+                or self.cooldown_s > 0.0
+                or any(v > 0.0 for v in self._cooldown_by_table.values()))
 
     def snapshot(self, net: pp.pandapowerNet) -> None:
         """Record every ``DiscreteTapControl`` tap_pos at the start of a
@@ -200,33 +237,33 @@ class _OLTCRateLimiter:
             obj = net.controller.at[cid, "object"]
             if not isinstance(obj, DiscreteTapControl):
                 continue
-            table = str(getattr(obj, "element", "trafo"))
-            tid = int(getattr(obj, "tid", -1))
-            key = (table, tid)
-            if key not in self._snapshot:
-                continue
-            prev = self._snapshot[key]
-            curr = int(net[table].at[tid, "tap_pos"])
-            delta = curr - prev
-            if delta == 0:
-                continue
-            last_t = self._last_change_time_s.get(key, float("-inf"))
-            if self.cooldown_s > 0.0 and (time_s - last_t) < self.cooldown_s:
-                # Cooldown not elapsed: revert any tap movement.
-                net[table].at[tid, "tap_pos"] = int(prev)
-                moved.append((table, tid, curr, prev))
-                continue
-            # Apply existing per-step ±max_step clamp on top of the
-            # cooldown gate (max_step < 0 disables this stage).
-            if self.max_step >= 0 and abs(delta) > self.max_step:
-                clamped = prev + (self.max_step if delta > 0 else -self.max_step)
-                net[table].at[tid, "tap_pos"] = int(clamped)
-                if clamped != prev:
+            for table, tid in _controlled_oltc_keys(obj):
+                key = (table, tid)
+                if key not in self._snapshot:
+                    continue
+                prev = self._snapshot[key]
+                curr = int(net[table].at[tid, "tap_pos"])
+                delta = curr - prev
+                if delta == 0:
+                    continue
+                last_t = self._last_change_time_s.get(key, float("-inf"))
+                cd = self._cooldown_for(table)
+                if cd > 0.0 and (time_s - last_t) < cd:
+                    # Cooldown not elapsed: revert any tap movement.
+                    net[table].at[tid, "tap_pos"] = int(prev)
+                    moved.append((table, tid, curr, prev))
+                    continue
+                # Apply per-step ±max_step clamp on top of the cooldown gate
+                # (max_step < 0 disables this stage).
+                if self.max_step >= 0 and abs(delta) > self.max_step:
+                    clamped = prev + (self.max_step if delta > 0 else -self.max_step)
+                    net[table].at[tid, "tap_pos"] = int(clamped)
+                    if clamped != prev:
+                        self._last_change_time_s[key] = time_s
+                    moved.append((table, tid, prev, int(clamped)))
+                else:
+                    # The natural move (within ±max_step) is allowed.
                     self._last_change_time_s[key] = time_s
-                moved.append((table, tid, prev, int(clamped)))
-            else:
-                # The natural move (within ±max_step) is allowed.
-                self._last_change_time_s[key] = time_s
         return moved
 
 

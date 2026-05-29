@@ -208,6 +208,18 @@ class MultiTSOConfig:
     entirely (the iteration-based ``int_cooldown`` and per-step
     ``local_oltc_max_step_per_dt`` clamp remain active)."""
 
+    oltc_cooldown_s_mt: Optional[float] = None
+    """Per-type override of ``oltc_cooldown_s`` for local-mode **machine
+    2-winding (MT) gen-transformer OLTCs** (``net.trafo``).  ``None`` falls
+    back to ``oltc_cooldown_s``.  Wall-clock seconds, so it is independent of
+    ``dt_s`` (e.g. 180 -> at most one MT tap per 3 min)."""
+
+    oltc_cooldown_s_nc: Optional[float] = None
+    """Per-type override of ``oltc_cooldown_s`` for local-mode **coupler
+    3-winding (NC) OLTCs** (``net.trafo3w``) at the TS--STS interface.
+    ``None`` falls back to ``oltc_cooldown_s`` (e.g. 60 -> at most one NC tap
+    per minute)."""
+
     # -- AVR saturation handling (Feature B) -----------------------------------
     enable_avr_saturation_mode: bool = False
     """When True, enable the hysteretic AVR saturation classifier, the
@@ -567,13 +579,13 @@ class MultiTSOConfig:
     very tight tolerances cost iterations without operational benefit;
     0.1 Mvar is a reasonable T-side accuracy."""
 
-    dso_qv_tol_mvar: float = 0.02
+    dso_qv_tol_mvar: float = 0.05
     """Convergence tolerance for the plant-side QVLocalLoop on DSO
     DERs (Mvar).  DSO sgens are smaller (S_n ≈ 30–50 Mvar) and the
     OFO benefits from sub-Mvar accuracy at the interface; keep tight
     (0.01 Mvar)."""
 
-    qv_local_damping: float = 0.1
+    qv_local_damping: float = 0.3
     """Damping factor for the Q(V) local loop iteration.
 
     Per-DER contraction: ``|1 − damping·(1 + K·S_VQ)|`` where K = S_n/slope.

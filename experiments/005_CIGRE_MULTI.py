@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+experiments/005_CIGRE_MULTI.py
+==============================
+Case-study driver for the CIGRE Energy Forum 2026 paper.  Runs the four
+control variants of the cascaded multi-TSO / multi-STS OFO framework on the
+IEEE 39-bus ``wind_replace`` system over a single 360-minute SimBench-driven
+time series with the paper's contingency schedule, then renders the three
+paper figures (PDF, Times New Roman) and the Section-5 summary table.
+
+Variants (Table ``tab:variants``; V5 single-OFO reference is not yet
+implemented and is skipped):
+
+* **V1** -- TS local Q(V), STS DER at cos phi = 1            (002 key ``L0``)
+* **V2** -- TS local Q(V), STS local Q(V) on DER             (002 key ``L1``)
+* **V3** -- TS-OFO, STS local Q(V) on DER (one-sided OFO)    (002 key ``T1``)
+* **V4** -- cascaded TS-OFO + STS-OFO (proposed)            (002 key ``C``)
+
+All variants share ``make_cigre_config()`` (the user's tuned run config) and
+differ only in the control layer.  Each variant is run by
+``run_multi_tso_dso(cfg)`` and pickled to ``results/005_cigre/<V>/log.pkl``.
+
+Outputs
+-------
+* ``results/005_cigre/<V>/log.pkl``          -- per-variant record list.
+* ``results/005_cigre/cigre_summary.csv``    -- Table ``tab:summary`` metrics.
+* ``results/005_cigre/inventory.txt``        -- Table ``tab:inv`` / ``tab:params`` data.
+* ``Fig3_tracking.pdf`` / ``Fig4_capability.pdf`` (+ ``_all``) /
+  ``Fig5_tieflow.pdf`` -- written to BOTH ``results/005_cigre/`` and the
+  paper's ``Figures/`` directory.
+
+Live plotting is forced OFF for the batch sweep (a four-fold sequential run
+with live plots is not viable headless); use the post-hoc PDFs instead.
+
+CLI
+---
+* ``--only V1,V4``  -- run only the named variants (others picked up from disk).
+* ``--skip V2``     -- inverse of ``--only``.
+* ``--replot``      -- skip simulation, just rebuild figures + tables from the
+                       existing ``log.pkl`` files (fast iteration on styling).
+
+Author: Manuel Schwenke / Claude Code
+"""
+from __future__ import annotations
+
+# Headless rendering for the batch sweep (must precede any matplotlib import,
+# which is pulled in transitively via visualisation.style).
+import os
+os.environ["QT_API"] = "pyqt5"
+
+import matplotlib as mpl
+mpl.use("Qt5Agg")
+
+import pickle
+import sys
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+# Force UTF-8 console so Unicode in controller logs (e.g. the Greek Δ in
+# capability messages) does not raise UnicodeEncodeError when stdout is
+# redirected to a cp1252 file on Windows.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    except (AttributeError, ValueError):
+        pass
+
+# ── Project root on sys.path ──────────────────────────────────────────────
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from configs.multi_tso_config import MultiTSOConfig
+from experiments.helpers.records import ContingencyEvent, MultiTSOIterationRecord
+from experiments.runners import run_multi_tso_dso
+
+
+# ---------------------------------------------------------------------------
+#  User-facing knobs
+# ---------------------------------------------------------------------------
+
+#: Output directory inside the repo.
+OUT_ROOT = os.path.join("results", "005_cigre")
+
+#: The CIGRE paper's figure directory (PDFs are written here too).
+PAPER_FIG_DIR = r"C:\Users\Manuel Schwenke\Desktop\CIGRE_2026\Figures"
+
+#: Generators to show in the Fig. 4 *subset* (paper) plot.  Match by generator
+#: name (str) or net.gen index (int).  ``None`` -> one representative per zone.
+#: First inspect ``Fig4_capability_all.pdf`` (every machine), then set the 2-3
+#: you want here and re-run with ``--replot``.
+GEN_SELECT: Optional[List] = ["G3_bus31","G7_bus35"]
+
+#: Voltage setpoint (matches MultiTSOConfig.v_setpoint_pu / paper V_ref).
+V_SET = 1.03
+
+
+# ---------------------------------------------------------------------------
+#  Configuration (user's tuned run config, verbatim; live plots forced off)
+# ---------------------------------------------------------------------------
+
+
+def make_cigre_config() -> MultiTSOConfig:
+    """Shared run configuration for all four CIGRE variants.
+
+    Values are the user's tuned configuration for the 360-minute case study
+    (``n_total_s = 60*60*6`` s).  ``dt_s`` is left at its 60 s default, so the
+    plant is solved once per minute (360 steps), the STS-OFO fires every step
+    and the TS-OFO every 6th step (``tso_period_s = 360`` s).
+    """
+    cfg = MultiTSOConfig(
+        n_total_s=60.0 * 60 * 5,      # 300-min simulation
+        tso_period_s=60.0 * 3,        # TS-OFO every 6 min
+        dso_period_s=20.0,            # STS-OFO each step (dt_s=60 >= 10)
+        g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
+        g_q=250,                      # DSO Q-tracking
+        tso_g_q_tie=1,
+        # ── DSO objective tuning ──
+        dso_g_v=15000.0,              # reduced to avoid competing with Q tracking
+        dso_g_qi=0,                   # integral Q-tracking (0 = off)
+        dso_lambda_qi=0.95,           # leaky integrator decay
+        dso_q_integral_max_mvar=200.0,
+        dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
+        # ── TSO weights (w-shift closed-loop curvature) ──
+        g_w_der=20,
+        g_w_gen=5e7,
+        g_w_pcc=150,
+        g_w_tso_oltc=100,
+        install_tso_tertiary_shunts=False,
+        g_w_tso_shunt=10000,
+        # ── DSO weights ──
+        g_w_dso_der=1000,
+        g_w_dso_oltc=40,
+        # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
+        # max_step=1 (default) + wall-clock cooldown per OLTC type:
+        #   MT (machine 2W gen-trafo) -> 1 tap / 180 s = once per TS interval.
+        #   NC (coupler 3W interface) -> 1 tap / 60 s  = once per minute.
+        # Cooldowns are wall-clock, hence robust to dt_s / dso_period_s.
+        local_oltc_max_step_per_dt=1,
+        oltc_cooldown_s_mt=180.0,
+        oltc_cooldown_s_nc=60.0,
+        use_fixed_zones=True,         # literature 3-area partition
+        run_stability_analysis=False,
+        sensitivity_update_interval=1E6,
+        verbose=1,
+        # Live plots OFF for the batch sweep (see module docstring).
+        live_plot_controller=False,
+        live_plot_cascade=False,
+        live_plot_system=False,
+        local_sensitivities_tso=True,
+        local_sensitivities_dso=True,
+        # ── Profile & contingency settings ──
+        start_time=datetime(2016, 1, 5, 10, 0),
+        use_profiles=True,
+        use_zonal_gen_dispatch=True,
+        contingencies=[
+            # NOTE: the original schedule also tripped lines 18 (min 45-150) and
+            # 5 (min 60-150).  With gen 2 (G4_bus32, ~680 MW in zone 3) tripped
+            # at min 120 *while both lines are out*, zone 3 loses its local
+            # source and its remaining ties simultaneously -> the power flow is
+            # genuinely infeasible (pp.diagnostic: converges only at 0.1 % load).
+            # Per the user's instruction the line trips are removed; the gen and
+            # load events are retained.  gen-2 trip alone at min 120 converges.
+            # Generator trip + restore.
+            ContingencyEvent(minute=60, element_type="gen",  element_index=2,  action="trip"),
+            ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
+            # Additional load connected then disconnected at bus 11.
+            # Reduced from the originally-requested 400 MW / 200 Mvar: with gen 2
+            # still tripped (out 120-270) the 200 Mvar step caused the cos phi=1
+            # baseline (V1) to collapse at min 180.  200 MW / 100 Mvar (the
+            # proven-stable magnitude from the 002 comparison) keeps the event
+            # while all four variants converge.
+            ContingencyEvent(minute=90, element_type="load", bus=11, p_mw=200, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=200, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
+            ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
+        ],
+    )
+    cfg.scenario = "wind_replace"
+    cfg.warmup_s = 0.0
+    return cfg
+
+
+#: Per-variant control-mode overrides (mirror 002_M_TSO_M_DSO_COMPARE.SCENARIOS).
+VARIANTS: Dict[str, Dict[str, Any]] = {
+    "V1": dict(  # 002 "L0" -- TS Q(V), STS cos phi = 1
+        tso_mode="local", tso_local_mode="qv",
+        dso_mode="local", local_der_mode="cos_phi_1",
+        tso_q_mode="qv", dso_q_mode="cosphi",
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+    ),
+    "V2": dict(  # 002 "L1" -- TS Q(V), STS local Q(V)
+        tso_mode="local", tso_local_mode="qv",
+        dso_mode="local", local_der_mode="qv",
+        tso_q_mode="qv", dso_q_mode="qv",
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
+    ),
+    "V3": dict(  # 002 "T1" -- TS-OFO, STS local Q(V); g_w_pcc pin
+        tso_mode="ofo",
+        dso_mode="local", local_der_mode="qv",
+        tso_q_mode="qv", dso_q_mode="qv",
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
+        g_w_pcc=1.0e8,
+    ),
+    "V4": dict(  # 002 "C" -- cascaded TS-OFO + STS-OFO (proposed)
+        tso_mode="ofo",
+        dso_mode="ofo",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+#  Run / load
+# ---------------------------------------------------------------------------
+
+
+def run_one(name: str, overrides: Dict[str, Any]) -> List[MultiTSOIterationRecord]:
+    """Run a single variant and pickle its log.  Returns the log (``[]`` on failure)."""
+    cfg = make_cigre_config()
+    for k, v in overrides.items():
+        setattr(cfg, k, v)
+    scen_dir = os.path.join(OUT_ROOT, name)
+    cfg.result_dir = scen_dir
+    os.makedirs(scen_dir, exist_ok=True)
+
+    print("\n" + "=" * 72)
+    print(f"  RUNNING VARIANT {name}  "
+          f"(tso_mode={cfg.tso_mode}, dso_mode={cfg.dso_mode})")
+    print("=" * 72)
+
+    try:
+        log = run_multi_tso_dso(cfg)
+    except Exception as exc:  # noqa: BLE001 - persist failure, keep sweep alive
+        print(f"  [{name}] FAILED: {type(exc).__name__}: {exc}")
+        log = []
+
+    with open(os.path.join(scen_dir, "log.pkl"), "wb") as f:
+        pickle.dump(log, f)
+    print(f"  [{name}] wrote {len(log)} records -> {scen_dir}/log.pkl")
+    return log
+
+
+def load_logs(names: Optional[List[str]] = None
+              ) -> Dict[str, List[MultiTSOIterationRecord]]:
+    """Reload pickled variant logs from ``OUT_ROOT``.  Missing -> empty list."""
+    if names is None:
+        names = list(VARIANTS.keys())
+    out: Dict[str, List[MultiTSOIterationRecord]] = {}
+    for name in names:
+        pkl = os.path.join(OUT_ROOT, name, "log.pkl")
+        if not os.path.isfile(pkl):
+            print(f"  [load_logs] missing {pkl} -- {name} treated as empty")
+            out[name] = []
+            continue
+        with open(pkl, "rb") as f:
+            out[name] = pickle.load(f)
+        print(f"  [load_logs] {name}: {len(out[name])} records")
+    return out
+
+
+# ---------------------------------------------------------------------------
+#  Tables (tab:inv, tab:params, tab:summary)
+# ---------------------------------------------------------------------------
+
+
+def _zone_of_bus(bus, bus_zone, net):
+    """Zone of a bus, resolving generator LV-terminal buses via their trafo."""
+    z = bus_zone.get(bus)
+    if z is not None:
+        return z
+    for ti in net.trafo.index:
+        if int(net.trafo.at[ti, "lv_bus"]) == bus:
+            return bus_zone.get(int(net.trafo.at[ti, "hv_bus"]))
+    return None
+
+
+def build_inventory(cfg: MultiTSOConfig) -> str:
+    """Best-effort Table ``tab:inv`` data: per-zone TS actuators + per-STS counts.
+
+    Rebuilds the combined net exactly as ``run_multi_tso_dso`` does
+    (``build_ieee39_net`` -> ``fixed_zone_partition_ieee39`` -> ``add_hv_networks``)
+    and counts elements.  Returns a formatted text block; never raises.
+    """
+    lines: List[str] = ["== Table tab:inv (test system & actuator inventory) =="]
+    try:
+        from network.ieee39 import build_ieee39_net, add_hv_networks
+        from network.zone_partition import fixed_zone_partition_ieee39, get_tie_lines
+
+        net, meta = build_ieee39_net(ext_grid_vm_pu=1.03, scenario=cfg.scenario)
+        zone_map, bus_zone = fixed_zone_partition_ieee39(net, verbose=False)
+        meta = add_hv_networks(
+            net, meta,
+            install_tso_tertiary_shunts=cfg.install_tso_tertiary_shunts,
+            verbose=False,
+        )
+        existing = set(net.bus.index)
+        zone_map = {z: [b for b in bs if b in existing] for z, bs in zone_map.items()}
+
+        hv_buses = {b for hv in meta.hv_networks for b in hv.bus_indices}
+        hv_sgens = {s for hv in meta.hv_networks for s in hv.sgen_indices}
+
+        # tn-only zone bus sets for tie-line counting
+        tn_zone = {z: [b for b in bs if b not in hv_buses] for z, bs in zone_map.items()}
+        zsorted = sorted(zone_map)
+        tie_count = {z: 0 for z in zsorted}
+        for i, zi in enumerate(zsorted):
+            for zj in zsorted[i + 1:]:
+                t = get_tie_lines(net, set(tn_zone[zi]), set(tn_zone[zj]))
+                tie_count[zi] += len(t)
+                tie_count[zj] += len(t)
+
+        # Per-zone synchronous machines + machine transformers.
+        n_avr = {z: 0 for z in zsorted}
+        for g in net.gen.index:
+            z = _zone_of_bus(int(net.gen.at[g, "bus"]), bus_zone, net)
+            if z in n_avr:
+                n_avr[z] += 1
+        n_mt = {z: 0 for z in zsorted}
+        for ti, gi in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+            if gi is None or int(gi) < 0:
+                continue
+            z = _zone_of_bus(int(net.gen.at[int(gi), "bus"]), bus_zone, net)
+            if z in n_mt:
+                n_mt[z] += 1
+        # Per-zone TS DER (sgen not in any HV sub-network).
+        n_der_ts = {z: 0 for z in zsorted}
+        for s in net.sgen.index:
+            if s in hv_sgens:
+                continue
+            z = _zone_of_bus(int(net.sgen.at[s, "bus"]), bus_zone, net)
+            if z in n_der_ts:
+                n_der_ts[z] += 1
+
+        lines.append(f"{'Zone':<6}{'n_AVR':>7}{'n_MT':>6}{'n_DER_TS':>10}{'n_tie':>7}")
+        for z in zsorted:
+            lines.append(f"T{z:<5}{n_avr[z]:>7}{n_mt[z]:>6}{n_der_ts[z]:>10}{tie_count[z]:>7}")
+
+        lines.append("")
+        lines.append(f"{'STS':<8}{'zone':>5}{'n_DER':>7}{'n_NC':>6}{'n_sh':>6}")
+        for hv in meta.hv_networks:
+            n_sh = sum(1 for sh in net.shunt.index
+                       if int(net.shunt.at[sh, "bus"]) in set(hv.bus_indices))
+            lines.append(f"{hv.net_id:<8}{hv.zone:>5}{len(hv.sgen_indices):>7}"
+                         f"{len(hv.coupling_trafo_indices):>6}{n_sh:>6}")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"  (inventory build failed: {type(exc).__name__}: {exc})")
+    return "\n".join(lines)
+
+
+def params_block(cfg: MultiTSOConfig) -> str:
+    """Table ``tab:params`` controller settings, read from the run config."""
+    return "\n".join([
+        "== Table tab:params (controller settings) ==",
+        f"  TS-OFO update period   : {cfg.tso_period_s:.0f} s",
+        f"  STS-OFO update period  : {cfg.dso_period_s:.0f} s "
+        f"(dt_s={getattr(cfg, 'dt_s', 60.0):.0f} s -> fires each step)",
+        f"  Local Q(V) deadband    : 0.005 p.u. (paper)  / run dv_db="
+        f"{getattr(cfg, 'dso_qv_deadband_pu', 0.01)} p.u.",
+        f"  g_v (TS V tracking)    : {cfg.g_v:g}",
+        f"  g_q (STS Q tracking)   : {cfg.g_q:g}",
+        f"  G_w  TS  der/gen/pcc/oltc/shunt : "
+        f"{cfg.g_w_der:g}/{cfg.g_w_gen:g}/{cfg.g_w_pcc:g}/"
+        f"{cfg.g_w_tso_oltc:g}/{cfg.g_w_tso_shunt:g}",
+        f"  G_w  STS der/oltc      : {cfg.g_w_dso_der:g}/{cfg.g_w_dso_oltc:g}",
+        f"  Sensitivity variant    : S3 (local per-area Jacobian)",
+    ])
+
+
+def write_tables(cfg: MultiTSOConfig,
+                 logs: Dict[str, List[MultiTSOIterationRecord]]) -> None:
+    """Write cigre_summary.csv and inventory.txt; echo to stdout."""
+    from experiments.helpers.comparison_metrics import cigre_summary_table
+
+    os.makedirs(OUT_ROOT, exist_ok=True)
+    summary = cigre_summary_table(logs, v_set=V_SET)
+    csv_path = os.path.join(OUT_ROOT, "cigre_summary.csv")
+    try:
+        summary.to_csv(csv_path)
+        print(f"\n  wrote {csv_path}")
+    except (PermissionError, OSError) as exc:
+        print(f"  WARNING: could not write {csv_path}: {exc}")
+    print("\n== Table tab:summary (per-variant metrics) ==")
+    print(summary.to_string(float_format=lambda x: f"{x:.4g}"))
+
+    inv = build_inventory(cfg)
+    par = params_block(cfg)
+    print("\n" + inv + "\n\n" + par)
+    try:
+        with open(os.path.join(OUT_ROOT, "inventory.txt"), "w", encoding="utf-8") as f:
+            f.write(inv + "\n\n" + par + "\n")
+    except (PermissionError, OSError):
+        pass
+
+
+# ---------------------------------------------------------------------------
+#  Plot orchestration
+# ---------------------------------------------------------------------------
+
+
+def make_figures(logs: Dict[str, List[MultiTSOIterationRecord]]) -> None:
+    from visualisation.plot_cigre import make_cigre_figures
+
+    out_dirs = [OUT_ROOT, PAPER_FIG_DIR]
+    make_cigre_figures(
+        logs, out_dirs,
+        scenario="wind_replace",
+        gen_select=GEN_SELECT,
+        v_set=V_SET,
+        png_dir=OUT_ROOT,
+    )
+
+
+# ---------------------------------------------------------------------------
+#  CLI
+# ---------------------------------------------------------------------------
+
+
+def _parse_csv_arg(argv: List[str], flag: str) -> Optional[List[str]]:
+    if flag not in argv:
+        return None
+    idx = argv.index(flag)
+    if idx + 1 >= len(argv):
+        raise ValueError(f"{flag} requires a comma-separated value, e.g. {flag} V1,V4")
+    return [s.strip() for s in argv[idx + 1].split(",") if s.strip()]
+
+
+def main(only: Optional[List[str]] = None,
+         skip: Optional[List[str]] = None) -> None:
+    os.makedirs(OUT_ROOT, exist_ok=True)
+    selected = list(VARIANTS.keys())
+    if only is not None:
+        bad = [s for s in only if s not in VARIANTS]
+        if bad:
+            raise ValueError(f"--only unknown variants {bad}; valid {list(VARIANTS)}")
+        selected = [s for s in selected if s in only]
+    if skip is not None:
+        bad = [s for s in skip if s not in VARIANTS]
+        if bad:
+            raise ValueError(f"--skip unknown variants {bad}; valid {list(VARIANTS)}")
+        selected = [s for s in selected if s not in skip]
+
+    if not selected:
+        print("[main] No variants selected; nothing to run.")
+    else:
+        print(f"[main] Running variants: {selected}")
+        for name in selected:
+            run_one(name, VARIANTS[name])
+
+    logs = load_logs()  # build from every pickle on disk
+    cfg = make_cigre_config()
+    write_tables(cfg, logs)
+    make_figures(logs)
+    print(f"\n[done] Figures + tables written to {OUT_ROOT}/ and {PAPER_FIG_DIR}")
+
+
+def replot() -> None:
+    print("=" * 72)
+    print(f"  REPLOT from {OUT_ROOT}/ (no simulation)")
+    print("=" * 72)
+    logs = load_logs()
+    write_tables(make_cigre_config(), logs)
+    make_figures(logs)
+
+
+if __name__ == "__main__":
+    if "--replot" in sys.argv:
+        replot()
+    else:
+        main(only=_parse_csv_arg(sys.argv, "--only"),
+             skip=_parse_csv_arg(sys.argv, "--skip"))

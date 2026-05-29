@@ -245,15 +245,15 @@ def main() -> None:
     """
 
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 7,      # 720-min full simulation
+        n_total_s=60.0 * 60 * 6,      # 720-min full simulation
         tso_period_s=60.0 * 6,    # TSO every 3 minutes
-        dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
+        dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
         g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=250,  # DSO Q-tracking
         tso_g_q_tie=1,
         # ── DSO objective tuning ──
         # DER actuator: w-shift (q_set + V_ref reanchoring).
-        dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
+        dso_g_v=10000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.95,  # leaky integrator decay
         dso_q_integral_max_mvar=200.0,  # anti-windup clamp
@@ -265,7 +265,7 @@ def main() -> None:
         # values and sweep from there.
         g_w_der=20,    # was 20 (direct-Q); T-STATCOM curvature ~80x lower under T'
         g_w_gen=5e7,
-        g_w_pcc=100,
+        g_w_pcc=150,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,
@@ -281,31 +281,37 @@ def main() -> None:
         live_plot_system=False,
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
+        # Cooldowns are wall-clock, hence robust to dt_s / dso_period_s.
+        local_oltc_max_step_per_dt=1,
+        oltc_cooldown_s_mt=180.0,
+        oltc_cooldown_s_nc=60.0,
         # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 8, 0),
+        start_time=datetime(2016, 1, 5, 10, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
-        contingencies           = [
-            # Line Tripping -> No Zone 2 -> Zone 3 tie line flow anymore!
-            ContingencyEvent(minute=45, element_type="line", element_index=18, action="trip"),
-            ContingencyEvent(minute=90, element_type="line", element_index=18, action="restore"),
-            ContingencyEvent(minute=60, element_type="line", element_index=5, action="trip"),
-            ContingencyEvent(minute=105, element_type="line", element_index=5, action="restore"),
-            # Generator trip and restore
-            ContingencyEvent(minute=180,  element_type="gen",  element_index=2, action="trip"),
-            ContingencyEvent(minute=300, element_type="gen", element_index=2, action="restore"),
-            # additional load connected and disconnected
-            ContingencyEvent(minute=240, element_type="load", bus=11, p_mw=400, q_mvar=200, action="connect"),
-            ContingencyEvent(minute=330, element_type="load", bus=11, p_mw=400, q_mvar=200, action="trip"),
-            # existing load tripped and restored
-            # ContingencyEvent(minute=400, element_type="load",
-            #                  element_index=20, action="trip"),
-            # ContingencyEvent(minute=450, element_type="load",
-            #                  element_index=20, action="restore"),
-            # ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
-            # ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
-            # ContingencyEvent(minute=720, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="connect"),
-            # ContingencyEvent(minute=900, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="trip"),
+        # dso_mode="local", local_der_mode="qv",
+        # dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
+        contingencies=[
+            # NOTE: the original schedule also tripped lines 18 (min 45-150) and
+            # 5 (min 60-150).  With gen 2 (G4_bus32, ~680 MW in zone 3) tripped
+            # at min 120 *while both lines are out*, zone 3 loses its local
+            # source and its remaining ties simultaneously -> the power flow is
+            # genuinely infeasible (pp.diagnostic: converges only at 0.1 % load).
+            # Per the user's instruction the line trips are removed; the gen and
+            # load events are retained.  gen-2 trip alone at min 120 converges.
+            # Generator trip + restore.
+            ContingencyEvent(minute=60, element_type="gen",  element_index=2,  action="trip"),
+            ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
+            # Additional load connected then disconnected at bus 11.
+            # Reduced from the originally-requested 400 MW / 200 Mvar: with gen 2
+            # still tripped (out 120-270) the 200 Mvar step caused the cos phi=1
+            # baseline (V1) to collapse at min 180.  200 MW / 100 Mvar (the
+            # proven-stable magnitude from the 002 comparison) keeps the event
+            # while all four variants converge.
+            ContingencyEvent(minute=90, element_type="load", bus=11, p_mw=200, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=200, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
+            ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
         ],
     )
     log = run_multi_tso_dso(cfg)

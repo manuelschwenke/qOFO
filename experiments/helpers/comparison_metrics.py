@@ -385,3 +385,253 @@ def summary_table(logs: Dict[str, List[MultiTSOIterationRecord]],
         })
 
     return pd.DataFrame(rows).set_index("scenario")
+
+
+# ===========================================================================
+#  CIGRE per-zone / per-group time-series helpers (005_CIGRE_MULTI.py)
+# ===========================================================================
+
+
+def voltage_rms_err_per_zone(records: List[MultiTSOIterationRecord],
+                             v_set: float = V_SET_DEFAULT,
+                             ) -> Dict[str, object]:
+    """Per-TS-zone voltage tracking error time series.
+
+    For each TSO zone, returns the spatial RMS of ``(V_i - v_set)`` over the
+    zone's observed EHV buses at every step, read from the record field
+    ``zone_v_rms_err_pu`` (populated by ``run_multi_tso_dso``).  Falls back to
+    ``|zone_v_mean - v_set|`` for older pickles that lack the field.
+
+    Returns
+    -------
+    dict with keys
+        ``t_min``      -- time axis [min].
+        ``zones``      -- sorted list of zone ids.
+        ``rms_err_pu`` -- ``{zone: ndarray[n_steps]}`` of the RMS error [p.u.].
+    """
+    t = _times_min(records)
+    zones = sorted({z for r in records for z in r.zone_v_mean})
+    out = {z: np.full(len(records), np.nan, dtype=np.float64) for z in zones}
+    for i, r in enumerate(records):
+        for z in zones:
+            if getattr(r, "zone_v_rms_err_pu", None) and z in r.zone_v_rms_err_pu:
+                out[z][i] = float(r.zone_v_rms_err_pu[z])
+            elif z in r.zone_v_mean and np.isfinite(r.zone_v_mean[z]):
+                out[z][i] = abs(float(r.zone_v_mean[z]) - v_set)
+    return {"t_min": t, "zones": zones, "rms_err_pu": out}
+
+
+def q_iface_err_per_group(records: List[MultiTSOIterationRecord]
+                          ) -> Dict[str, object]:
+    """Per-DSO-group interface reactive-power tracking error time series.
+
+    Groups the per-interface-trafo quantities by ``dso_trafo_group`` and, at
+    each step, sums them to the group's net interface reactive power.  The
+    tracking error is ``q_actual - q_set`` [Mvar]; it is finite only for
+    variants that recorded an interface setpoint (cascaded OFO, and one-sided
+    OFO via the local-DSO setpoint recording added in ``run_multi_tso_dso``).
+    Variants with no dispatched setpoint (pure-local TSO) yield all-NaN error
+    and are thus omitted by the plotter.
+
+    Returns
+    -------
+    dict with keys
+        ``t_min``        -- time axis [min].
+        ``groups``       -- sorted list of DSO group ids.
+        ``err_mvar``     -- ``{group: ndarray}`` of ``q_actual - q_set``.
+        ``set_mvar``     -- ``{group: ndarray}`` of the summed setpoint.
+        ``actual_mvar``  -- ``{group: ndarray}`` of the summed measured Q.
+        ``has_setpoint`` -- ``{group: bool}`` -- any finite setpoint over the run.
+    """
+    t = _times_min(records)
+    groups = sorted({g for r in records for g in r.dso_trafo_group.values()})
+    err = {g: np.full(len(records), np.nan, dtype=np.float64) for g in groups}
+    setv = {g: np.full(len(records), np.nan, dtype=np.float64) for g in groups}
+    actv = {g: np.full(len(records), np.nan, dtype=np.float64) for g in groups}
+    for i, r in enumerate(records):
+        g_set: Dict[str, float] = {}
+        g_act: Dict[str, float] = {}
+        g_has_set: Dict[str, bool] = {}
+        for key, grp in r.dso_trafo_group.items():
+            a = r.dso_trafo_q_actual_mvar.get(key)
+            s = r.dso_trafo_q_set_mvar.get(key)
+            if a is not None and np.isfinite(a):
+                g_act[grp] = g_act.get(grp, 0.0) + float(a)
+            if s is not None and np.isfinite(s):
+                g_set[grp] = g_set.get(grp, 0.0) + float(s)
+                g_has_set[grp] = True
+        for g in groups:
+            if g in g_act:
+                actv[g][i] = g_act[g]
+            if g in g_set:
+                setv[g][i] = g_set[g]
+            if g_has_set.get(g) and g in g_act:
+                err[g][i] = g_act[g] - g_set[g]
+    has_setpoint = {g: bool(np.any(np.isfinite(setv[g]))) for g in groups}
+    return {"t_min": t, "groups": groups, "err_mvar": err,
+            "set_mvar": setv, "actual_mvar": actv, "has_setpoint": has_setpoint}
+
+
+def tie_q_per_pair(records: List[MultiTSOIterationRecord]
+                   ) -> Dict[str, object]:
+    """Inter-zone tie-line reactive-power flow time series, per zone pair.
+
+    Reads ``zone_tie_q_mvar`` (keyed by ordered pair ``(zi, zj)``, ``zi < zj``;
+    positive = Q leaves the lower-index zone, summed over all physical boundary
+    lines).  A pair carrying no flow at a step (e.g. tie tripped by a
+    contingency) is left NaN so the gap is visible in the plot.
+
+    Returns
+    -------
+    dict with keys
+        ``t_min``     -- time axis [min].
+        ``pairs``     -- sorted list of ``(zi, zj)`` tuples seen in the log.
+        ``q_mvar``    -- ``{(zi, zj): ndarray}`` of signed tie-line Q [Mvar].
+    """
+    t = _times_min(records)
+    pairs = sorted({p for r in records for p in r.zone_tie_q_mvar})
+    q = {p: np.full(len(records), np.nan, dtype=np.float64) for p in pairs}
+    for i, r in enumerate(records):
+        for p, val in r.zone_tie_q_mvar.items():
+            if np.isfinite(val):
+                q[p][i] = float(val)
+    return {"t_min": t, "pairs": pairs, "q_mvar": q}
+
+
+def _switching_count(records: List[MultiTSOIterationRecord]) -> int:
+    """Total discrete switching operations over the run.
+
+    Counts step-to-step changes (per actuator) of TSO OLTC taps
+    (``zone_oltc_taps``), TSO shunt steps (``zone_tso_shunt_states``), and DSO
+    interface-trafo tap positions (``dso_trafo_tap_pos``).  A simultaneous
+    multi-tap move on one actuator counts as the number of tap steps moved.
+    """
+    total = 0
+
+    def _diff_dict_arrays(getter):
+        nonlocal total
+        prev: Dict[object, np.ndarray] = {}
+        for r in records:
+            d = getter(r)
+            if not d:
+                continue
+            for k, arr in d.items():
+                a = np.asarray(arr, dtype=np.float64).ravel()
+                if a.size == 0:
+                    continue
+                if k in prev and prev[k].shape == a.shape:
+                    total += int(np.nansum(np.abs(a - prev[k])))
+                prev[k] = a
+
+    _diff_dict_arrays(lambda r: r.zone_oltc_taps)
+    _diff_dict_arrays(lambda r: r.zone_tso_shunt_states)
+
+    prev_scalar: Dict[str, float] = {}
+    for r in records:
+        for k, v in r.dso_trafo_tap_pos.items():
+            if v is None:
+                continue
+            fv = float(v)
+            if k in prev_scalar:
+                total += int(abs(fv - prev_scalar[k]))
+            prev_scalar[k] = fv
+    return total
+
+
+def cigre_summary_table(logs: Dict[str, List[MultiTSOIterationRecord]],
+                        v_set: float = V_SET_DEFAULT,
+                        ) -> pd.DataFrame:
+    """One row per variant for the CIGRE paper Table ``tab:summary``.
+
+    Columns (all time-averaged over the full simulation unless noted)
+
+    ``J_TS``        -- voltage objective proxy: time-mean of
+                       ``sum_zones (per-zone RMS voltage error)^2`` [p.u.^2].
+                       Monotone in the paper's weighted objective; lower=better.
+    ``m_bar_mvar``  -- fleet-mean synchronous-generator Q headroom
+                       ``mean_g(Q_max-|Q|)`` [Mvar], time-averaged; higher=more
+                       reserve preserved.
+    ``res_util``    -- fleet-mean generator Q utilisation
+                       ``mean_g |Q|/(|Q|+headroom)`` in [0,1], time-averaged.
+    ``rms_e_sts_mvar`` -- interface tracking error RMS over groups and time
+                       [Mvar]; ``NaN`` for variants with no dispatched setpoint.
+    ``rms_q_tie_mvar`` -- tie-line Q RMS over zone pairs and time [Mvar].
+    ``n_sw``        -- total discrete switching operations (OLTC + shunt).
+    """
+    rows = []
+    for name, recs in logs.items():
+        if not recs:
+            rows.append({"variant": name, "converged": False,
+                         "J_TS": np.nan, "m_bar_mvar": np.nan,
+                         "res_util": np.nan, "rms_e_sts_mvar": np.nan,
+                         "rms_q_tie_mvar": np.nan, "n_sw": 0})
+            continue
+
+        # J_TS : time-mean of sum over zones of per-zone MSE.
+        vz = voltage_rms_err_per_zone(recs, v_set)
+        if vz["zones"]:
+            per_step = np.nansum(
+                np.vstack([vz["rms_err_pu"][z] ** 2 for z in vz["zones"]]),
+                axis=0,
+            )
+            j_ts = float(np.nanmean(per_step))
+        else:
+            j_ts = np.nan
+
+        # m_bar and utilisation from gen Q headroom + |Q|.
+        qh = gen_q_headroom_series(recs)
+        _hr = qh["q_headroom_mean_mvar"]
+        m_bar = float(np.nanmean(_hr)) if np.any(np.isfinite(_hr)) else np.nan
+        util_per_step = np.full(len(recs), np.nan, dtype=np.float64)
+        for i, r in enumerate(recs):
+            qs, hs = [], []
+            for z, q_arr in r.zone_q_gen.items():
+                if q_arr is None:
+                    continue
+                h_arr = r.gen_q_headroom_mvar.get(z)
+                if h_arr is None:
+                    continue
+                qa = np.abs(np.asarray(q_arr, dtype=np.float64))
+                ha = np.asarray(h_arr, dtype=np.float64)
+                n = min(qa.size, ha.size)
+                qs.append(qa[:n]); hs.append(ha[:n])
+            if qs:
+                qa = np.concatenate(qs); ha = np.concatenate(hs)
+                denom = qa + ha
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    u = np.where(denom > 1e-9, qa / denom, np.nan)
+                util_per_step[i] = float(np.nanmean(u))
+        res_util = (float(np.nanmean(util_per_step))
+                    if np.any(np.isfinite(util_per_step)) else np.nan)
+
+        # Interface tracking-error RMS (groups x time).
+        qe = q_iface_err_per_group(recs)
+        err_stack = [qe["err_mvar"][g] for g in qe["groups"]
+                     if qe["has_setpoint"].get(g)]
+        if err_stack:
+            allerr = np.concatenate([e[np.isfinite(e)] for e in err_stack])
+            rms_e = float(np.sqrt(np.mean(allerr ** 2))) if allerr.size else np.nan
+        else:
+            rms_e = np.nan
+
+        # Tie-line Q RMS (pairs x time).
+        tq = tie_q_per_pair(recs)
+        tie_stack = [tq["q_mvar"][p] for p in tq["pairs"]]
+        if tie_stack:
+            alltie = np.concatenate([v[np.isfinite(v)] for v in tie_stack])
+            rms_tie = float(np.sqrt(np.mean(alltie ** 2))) if alltie.size else np.nan
+        else:
+            rms_tie = np.nan
+
+        rows.append({
+            "variant":         name,
+            "converged":       True,
+            "J_TS":            j_ts,
+            "m_bar_mvar":      m_bar,
+            "res_util":        res_util,
+            "rms_e_sts_mvar":  rms_e,
+            "rms_q_tie_mvar":  rms_tie,
+            "n_sw":            _switching_count(recs),
+        })
+
+    return pd.DataFrame(rows).set_index("variant")

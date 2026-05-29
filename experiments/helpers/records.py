@@ -189,6 +189,12 @@ class MultiTSOIterationRecord:
     zone_v_min:  Dict[int, float] = field(default_factory=dict)
     zone_v_max:  Dict[int, float] = field(default_factory=dict)
     zone_v_mean: Dict[int, float] = field(default_factory=dict)
+    zone_v_rms_err_pu: Dict[int, float] = field(default_factory=dict)
+    """Per-zone spatial RMS of ``(V_i - v_setpoint_pu)`` over the zone's
+    voltage-observed EHV buses (``zd.v_bus_indices``).  Added for the CIGRE
+    per-zone voltage-tracking-error figure (005_CIGRE_MULTI).  Defaulted so
+    older pickles load; the plotter falls back to ``|zone_v_mean - v_set|``
+    when this dict is empty."""
 
     # Per-zone stability diagnostic from coordinator
     zone_contraction_lhs: Dict[int, float] = field(default_factory=dict)

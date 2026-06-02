@@ -99,7 +99,7 @@ def compute_generator_q_limits(
        p² + (q + v²/xd)² ≤ (v · i_f_max / xd)²
 
     3. **Under-excitation limit** (Milano eq. 12.11):
-       q ≥ −q₀(v) + β · p_max
+       q ≥ −q₀(v) + β · p      (line of slope β in P; incline ≈ arctan β)
 
     Parameters
     ----------
@@ -123,7 +123,6 @@ def compute_generator_q_limits(
 
     # Convert to per-unit on machine base
     p_pu = p_mw / s_base
-    p_max_pu = params.p_max_mw / s_base
     s_max_pu = 1.0  # by definition of s_rated
 
     xd = params.xd_pu
@@ -160,10 +159,12 @@ def compute_generator_q_limits(
     q_min_stator = -q_max_stator  # symmetric for stator
 
     # (3) Under-excitation limit (Milano eq. 12.11):
-    #     q ≥ -q₀(v) + β · p_max
+    #     q ≥ -q₀(v) + β · p   (straight line of slope β in the P-Q plane;
+    #     under-excitation incline ≈ arctan β — uses the RUNNING p, not p_max,
+    #     so the limit tilts with active power instead of staying flat)
     #     q₀(v) ≈ q0_pu · v²  (voltage-dependent offset)
     q0_v = params.q0_pu * v_pu ** 2
-    q_min_ue = -q0_v + params.beta * p_max_pu
+    q_min_ue = -q0_v + params.beta * p_pu
 
     q_min_pu = max(q_min_stator, q_min_ue)
 

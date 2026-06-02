@@ -245,15 +245,23 @@ def main() -> None:
     """
 
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 6,      # 720-min full simulation
-        tso_period_s=60.0 * 6,    # TSO every 3 minutes
+        n_total_s=60.0 * 60 * 5,      # 720-min full simulation
+        tso_period_s=20.0 * 1,    # TSO every 3 minutes
         dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
         g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=250,  # DSO Q-tracking
         tso_g_q_tie=1,
+        # TEMP #################
+        control_scope="central",
+        tso_mode="ofo",
+        dso_mode="local",
+        tso_q_mode="qv", dso_q_mode="qv",
+        # Voltage-tracking weights: g_v (TN) inherited from make_cigre_config
+        # (3e5); central_dso_g_v (HV) mirrors the cascaded dso_g_v (2e4).
+        central_dso_g_v=20000.0,
         # ── DSO objective tuning ──
         # DER actuator: w-shift (q_set + V_ref reanchoring).
-        dso_g_v=10000.0,  # reduced to avoid competing with Q tracking
+        dso_g_v=15000.0,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.95,  # leaky integrator decay
         dso_q_integral_max_mvar=200.0,  # anti-windup clamp
@@ -308,7 +316,9 @@ def main() -> None:
             # baseline (V1) to collapse at min 180.  200 MW / 100 Mvar (the
             # proven-stable magnitude from the 002 comparison) keeps the event
             # while all four variants converge.
-            ContingencyEvent(minute=90, element_type="load", bus=11, p_mw=200, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=250, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=250, action="trip"),
+            ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=200, q_mvar=100, action="connect"),
             ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=200, q_mvar=100, action="trip"),
             ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
             ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),

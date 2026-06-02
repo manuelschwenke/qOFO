@@ -34,6 +34,7 @@ from controller.tso_controller import TSOControllerConfig
 
 if TYPE_CHECKING:
     from controller.multi_tso_coordinator import ZoneDefinition
+    from controller.central_controller import CentralControllerConfig
     from network.ieee39.hv_networks import HVNetworkInfo
 
 
@@ -331,6 +332,110 @@ def apply_dso_controls(
         net.trafo3w.at[t_idx, "tap_pos"] = int(round(u[off + k]))
     off += n_oltc
     # Shunt switching skipped for multi-zone setup.
+
+
+def apply_central_controls(
+    net: pp.pandapowerNet,
+    central_cfg: "CentralControllerConfig",
+    central_out,
+) -> List[int]:
+    """Write the single centralized controller's output to the plant network
+    (CIGRE V5, ``control_scope='central'``).
+
+    Control-vector order (must match
+    :meth:`controller.central_controller.CentralOFOController._get_control_structure`):
+        ``u = [ Q_DER | Q_PCC(0) | V_gen | V_gf(0) | s_OLTC2w | s_shunt | s_OLTC3w ]``
+
+    * **DER** (w-shift): reanchor ``net.sgen.qv_vref_anchor_pu`` to the latest
+      measured bus voltage, then write ``net.sgen.q_set_mvar`` for **every**
+      controlled DER (all TSO + DSO sgens).
+    * **V_gen**: write ``net.gen.vm_pu`` for every synchronous machine.
+    * **s_OLTC2w**: write ``net.trafo.tap_pos`` (machine OLTCs).
+    * **s_shunt**: write ``net.shunt.step`` for TSO-owned shunts.
+    * **s_OLTC3w**: write ``net.trafo3w.tap_pos`` (TS–STS coupler OLTCs).
+
+    Q_PCC and V_gf blocks are empty in the centralized formulation (no interface
+    setpoints, no promoted grid-forming gens) but the offsets are kept explicit
+    for parity with :func:`apply_zone_tso_controls`.
+
+    Returns
+    -------
+    prev_shunt_steps : List[int]
+        Pre-write shunt steps (for parity with ``apply_zone_tso_controls``;
+        the central runner has no DSO controllers to notify, so it is unused).
+    """
+    u = central_out.u_new
+    der_indices = list(central_cfg.der_indices)
+    gen_indices = list(central_cfg.gen_indices)
+    gf_indices = list(getattr(central_cfg, "gridforming_gen_indices", []) or [])
+    oltc2w = list(central_cfg.oltc_trafo_indices)
+    shunt_buses = list(central_cfg.shunt_bus_indices)
+    oltc3w = list(getattr(central_cfg, "oltc_trafo3w_indices", []) or [])
+
+    n_der = len(der_indices)
+    n_pcc = len(central_cfg.pcc_trafo_indices)  # 0 (no interface tracking)
+    n_gen = len(gen_indices)
+    n_gf = len(gf_indices)                       # 0
+    n_oltc = len(oltc2w)
+    n_shunt = len(shunt_buses)
+    off = 0
+
+    # --- DER w-shift q_set + V_ref reanchor (all TSO+DSO DERs) ---
+    if n_der > 0:
+        if "q_set_mvar" not in net.sgen.columns:
+            net.sgen["q_set_mvar"] = 0.0
+        if "qv_vref_anchor_pu" not in net.sgen.columns:
+            net.sgen["qv_vref_anchor_pu"] = float("nan")
+        has_res_bus = (
+            hasattr(net, "res_bus")
+            and net.res_bus is not None
+            and not net.res_bus.empty
+            and "vm_pu" in net.res_bus.columns
+        )
+        for k, s_idx in enumerate(der_indices):
+            if has_res_bus:
+                bus = int(net.sgen.at[s_idx, "bus"])
+                if bus in net.res_bus.index:
+                    net.sgen.at[s_idx, "qv_vref_anchor_pu"] = float(
+                        net.res_bus.at[bus, "vm_pu"]
+                    )
+            net.sgen.at[s_idx, "q_set_mvar"] = float(u[off + k])
+    off += n_der
+
+    # PCC setpoints: none in the central formulation.
+    off += n_pcc
+
+    # --- Generator AVR setpoints ---
+    for k, g_idx in enumerate(gen_indices):
+        net.gen.at[g_idx, "vm_pu"] = float(u[off + k])
+    off += n_gen
+
+    # Grid-forming converter gens: none in the central formulation.
+    off += n_gf
+
+    # --- 2W machine-transformer OLTC taps ---
+    for k, t_idx in enumerate(oltc2w):
+        net.trafo.at[t_idx, "tap_pos"] = int(round(u[off + k]))
+    off += n_oltc
+
+    # --- TSO-owned shunts ---
+    prev_shunt_steps: List[int] = []
+    for k, sb in enumerate(shunt_buses):
+        mask = net.shunt["bus"] == sb
+        if not mask.any():
+            prev_shunt_steps.append(0)
+            continue
+        sh_idx = net.shunt.index[mask][0]
+        prev_shunt_steps.append(int(net.shunt.at[sh_idx, "step"]))
+        net.shunt.at[sh_idx, "step"] = int(round(u[off + k]))
+    off += n_shunt
+
+    # --- 3W coupler OLTC taps ---
+    for k, t_idx in enumerate(oltc3w):
+        net.trafo3w.at[t_idx, "tap_pos"] = int(round(u[off + k]))
+    off += len(oltc3w)
+
+    return prev_shunt_steps
 
 
 def _sgen_q_capability(net: pp.pandapowerNet, s_idx: int) -> tuple[float, float]:

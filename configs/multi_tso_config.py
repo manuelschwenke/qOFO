@@ -94,6 +94,15 @@ class MultiTSOConfig:
     g_q:            float = 1.0
     dso_g_v:        float = 50000.0
 
+    central_dso_g_v: float = 20000.0
+    """Voltage-tracking weight applied to the HV (110 kV / STS) buses by the
+    single centralized controller (``control_scope='central'``, CIGRE V5).
+    EHV/TN buses use the existing :attr:`g_v`.  The central controller builds
+    a per-bus voltage weight vector that assigns ``g_v`` to every TN PQ bus and
+    ``central_dso_g_v`` to every HV sub-network bus, so the two voltage levels
+    can be balanced independently in the monolithic objective.  Ignored unless
+    ``control_scope == 'central'``."""
+
     # -- G_w regularisation weights (TSO) --------------------------------------
     g_w_der:        float = 2.0
     g_w_gen:        float = 1e7
@@ -463,6 +472,40 @@ class MultiTSOConfig:
     where neither the TSO nor the DSO MIQP is stepped and the
     ``g_z_q_gen`` slack penalty has no effect.  Set to ``False`` to
     reproduce the pre-fix behaviour (e.g. for ablation)."""
+
+    # -- Control scope (cascaded distributed vs single centralized) -----------
+    control_scope: str = "cascaded"
+    """Selects the controller topology of a run.
+
+    ``"cascaded"`` (default) -- the distributed multi-TSO / multi-DSO OFO
+        framework: one :class:`controller.tso_controller.TSOController` per
+        zone + one :class:`controller.dso_controller.DSOController` per HV
+        sub-network, coordinated by capability / setpoint messages.  This is
+        the V1--V4 path; ``tso_mode`` / ``dso_mode`` further select OFO vs
+        local control per layer.
+
+    ``"central"`` -- a single :class:`controller.central_controller.CentralOFOController`
+        that owns **all** actuators (every gen AVR, every TSO+DSO DER, all 2W
+        machine OLTCs, all 3W coupler OLTCs, all TSO shunts) and observes
+        **all** measurements (every TN+HV bus voltage, all lines, gen-Q
+        capability) across the whole interconnection.  Used as the CIGRE V5
+        best-case upper-bound reference against the distributed proposed
+        controller (V4).  The 3-zone partition and per-HV-network metadata are
+        retained purely as a recording lens for the paper figures; the
+        per-zone TSO controllers, DSO controllers, coordinator cross-
+        sensitivities, and capability/setpoint messaging are all bypassed.
+        The central controller fires every ``central_period_s`` (default:
+        every step); the voltage objective uses ``g_v`` for TN buses and
+        ``central_dso_g_v`` for HV buses (no interface-Q / tie-Q tracking)."""
+
+    central_period_s: Optional[float] = None
+    """Control period [s] of the single centralized controller
+    (``control_scope='central'``, CIGRE V5).  ``None`` (default) fires the
+    controller every simulation step (``dt_s``) — the correct best-case
+    cadence, since V5 replaces the fast STS-OFO layer (which runs every step in
+    the cascaded variants) as well as the slow TS-OFO layer.  Set to a larger
+    value (e.g. ``tso_period_s``) only to deliberately slow the reference.
+    Ignored unless ``control_scope == 'central'``."""
 
     # -- DSO control mode ------------------------------------------------------
     dso_mode: str = "ofo"

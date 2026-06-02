@@ -103,6 +103,8 @@ class Measurement:
         gridforming_gen_p_mw: NDArray[np.float64] = None,
         gridforming_gen_q_mvar: NDArray[np.float64] = None,
         der_vm_pu_ref: NDArray[np.float64] = None,
+        oltc3w_indices: NDArray[np.int64] = None,
+        oltc3w_tap_positions: NDArray[np.int64] = None,
     ) -> None:
         """
         Initialise a Measurement instance.
@@ -205,6 +207,21 @@ class Measurement:
         self.der_vm_pu_ref = (
             der_vm_pu_ref if der_vm_pu_ref is not None
             else np.array([], dtype=np.float64)
+        )
+        # ── 3-winding coupler OLTC taps (central-controller V5 only) ───────
+        # net.trafo and net.trafo3w are independent pandapower index spaces,
+        # so the same int can name a 2W and a 3W transformer.  The single
+        # centralized controller actuates both; to avoid index collisions in
+        # ``oltc_indices`` (which holds the 2W machine OLTCs) the 3W coupler
+        # taps live in a dedicated field.  Empty for every cascaded (V1--V4)
+        # measurement.
+        self.oltc3w_indices = (
+            oltc3w_indices if oltc3w_indices is not None
+            else np.array([], dtype=np.int64)
+        )
+        self.oltc3w_tap_positions = (
+            oltc3w_tap_positions if oltc3w_tap_positions is not None
+            else np.array([], dtype=np.int64)
         )
 
     @property
@@ -625,4 +642,107 @@ def measure_zone_dso(net, dso_cfg, it: int) -> "Measurement":
         gridforming_gen_p_mw=gf_p,
         gridforming_gen_q_mvar=gf_q,
         der_vm_pu_ref=der_vm_ref_z,
+    )
+
+
+def measure_central(net, central_cfg, it: int) -> "Measurement":
+    """Build a whole-network ``Measurement`` for the single centralized
+    controller (CIGRE V5, ``control_scope='central'``).
+
+    Mirrors :func:`measure_zone_tso` but spans the entire interconnection in a
+    single measurement: it reads 2-winding machine OLTC taps from
+    ``net.trafo`` (into ``oltc_indices`` / ``oltc_tap_positions``) and the
+    3-winding coupler OLTC taps from ``net.trafo3w`` (into the dedicated
+    ``oltc3w_indices`` / ``oltc3w_tap_positions`` fields, so the two
+    independent pandapower index spaces never collide).  ``bus_indices``
+    already spans the whole net, so the central controller's wide
+    ``voltage_bus_indices`` selection is satisfied directly.
+
+    ``central_cfg`` is a
+    :class:`controller.central_controller.CentralControllerConfig` (a
+    ``TSOControllerConfig`` with the extra ``oltc_trafo3w_indices`` field).
+    The interface (``pcc_trafo_indices``) and tie-line blocks are empty for
+    the centralized problem.
+    """
+    all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
+    vm_all = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
+
+    i_ka = np.array(
+        [float(net.res_line.at[li, "i_from_ka"]) for li in central_cfg.current_line_indices],
+        dtype=np.float64,
+    ) if central_cfg.current_line_indices else np.array([], dtype=np.float64)
+
+    der_q = np.array(
+        [float(net.res_sgen.at[s, "q_mvar"]) for s in central_cfg.der_indices],
+        dtype=np.float64,
+    ) if central_cfg.der_indices else np.array([], dtype=np.float64)
+    der_p = np.array(
+        [float(net.res_sgen.at[s, "p_mw"]) for s in central_cfg.der_indices],
+        dtype=np.float64,
+    ) if central_cfg.der_indices else np.array([], dtype=np.float64)
+
+    shunt_states = np.zeros(len(central_cfg.shunt_bus_indices), dtype=np.int64)
+    for k, sb in enumerate(central_cfg.shunt_bus_indices):
+        mask = net.shunt["bus"] == sb
+        if mask.any():
+            shunt_states[k] = int(net.shunt.at[net.shunt.index[mask][0], "step"])
+
+    if central_cfg.gen_indices:
+        gen_vm = np.empty(len(central_cfg.gen_indices), dtype=np.float64)
+        gen_p = np.empty(len(central_cfg.gen_indices), dtype=np.float64)
+        gen_q = np.empty(len(central_cfg.gen_indices), dtype=np.float64)
+        for k, g in enumerate(central_cfg.gen_indices):
+            gen_vm[k] = float(net.gen.at[g, "vm_pu"])
+            if net.gen.at[g, "in_service"]:
+                gen_p[k] = float(net.res_gen.at[g, "p_mw"])
+                gen_q[k] = float(net.res_gen.at[g, "q_mvar"])
+            else:
+                gen_p[k] = 0.0
+                gen_q[k] = 0.0
+    else:
+        gen_vm = np.array([], dtype=np.float64)
+        gen_p = np.array([], dtype=np.float64)
+        gen_q = np.array([], dtype=np.float64)
+
+    oltc_taps = np.array(
+        [int(net.trafo.at[t, "tap_pos"]) for t in central_cfg.oltc_trafo_indices],
+        dtype=np.int64,
+    ) if central_cfg.oltc_trafo_indices else np.array([], dtype=np.int64)
+
+    oltc3w_indices = list(getattr(central_cfg, "oltc_trafo3w_indices", []) or [])
+    oltc3w_taps = np.array(
+        [int(net.trafo3w.at[t, "tap_pos"]) for t in oltc3w_indices],
+        dtype=np.int64,
+    ) if oltc3w_indices else np.array([], dtype=np.int64)
+
+    if central_cfg.der_indices and "vm_pu_ref" in net.sgen.columns:
+        der_vm_ref = np.array(
+            [float(net.sgen.at[s, "vm_pu_ref"]) for s in central_cfg.der_indices],
+            dtype=np.float64,
+        )
+    else:
+        der_vm_ref = np.full(len(central_cfg.der_indices), 1.03, dtype=np.float64)
+
+    return Measurement(
+        iteration=it,
+        bus_indices=all_bus,
+        voltage_magnitudes_pu=vm_all,
+        branch_indices=np.array(central_cfg.current_line_indices, dtype=np.int64),
+        current_magnitudes_ka=i_ka,
+        interface_transformer_indices=np.array([], dtype=np.int64),
+        interface_q_hv_side_mvar=np.array([], dtype=np.float64),
+        der_indices=np.array(central_cfg.der_indices, dtype=np.int64),
+        der_q_mvar=der_q,
+        der_p_mw=der_p,
+        oltc_indices=np.array(central_cfg.oltc_trafo_indices, dtype=np.int64),
+        oltc_tap_positions=oltc_taps,
+        shunt_indices=np.array(central_cfg.shunt_bus_indices, dtype=np.int64),
+        shunt_states=shunt_states,
+        gen_indices=np.array(central_cfg.gen_indices, dtype=np.int64),
+        gen_vm_pu=gen_vm,
+        gen_p_mw=gen_p,
+        gen_q_mvar=gen_q,
+        der_vm_pu_ref=der_vm_ref,
+        oltc3w_indices=np.array(oltc3w_indices, dtype=np.int64),
+        oltc3w_tap_positions=oltc3w_taps,
     )

@@ -25,6 +25,7 @@ from .contingency import _apply_contingency, prepare_load_contingencies
 from .plant_io import (
     _apply_dso,
     _apply_tso,
+    apply_central_controls,
     apply_cos_phi_one_local_control,
     apply_dso_controls,
     apply_qv_local_control,
@@ -58,6 +59,7 @@ __all__ = [
     # plant I/O (multi-zone)
     "apply_zone_tso_controls",
     "apply_dso_controls",
+    "apply_central_controls",
     "apply_qv_local_control",
     "apply_cos_phi_one_local_control",
     "install_qv_characteristic_controllers",

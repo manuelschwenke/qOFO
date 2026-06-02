@@ -9,26 +9,33 @@ IEEE 39-bus ``wind_replace`` system over a single 360-minute SimBench-driven
 time series with the paper's contingency schedule, then renders the three
 paper figures (PDF, Times New Roman) and the Section-5 summary table.
 
-Variants (Table ``tab:variants``; V5 single-OFO reference is not yet
-implemented and is skipped):
+Variants (Table ``tab:variants``):
 
 * **V1** -- TS local Q(V), STS DER at cos phi = 1            (002 key ``L0``)
 * **V2** -- TS local Q(V), STS local Q(V) on DER             (002 key ``L1``)
 * **V3** -- TS-OFO, STS local Q(V) on DER (one-sided OFO)    (002 key ``T1``)
 * **V4** -- cascaded TS-OFO + STS-OFO (proposed)            (002 key ``C``)
+* **V5** -- single centralized OFO over all zones + DSOs (best-case upper
+  bound; ``control_scope='central'``)
 
 All variants share ``make_cigre_config()`` (the user's tuned run config) and
 differ only in the control layer.  Each variant is run by
 ``run_multi_tso_dso(cfg)`` and pickled to ``results/005_cigre/<V>/log.pkl``.
+
+V5 is the **upper-bound reference**: one OFO controller owns every actuator
+(all gen AVR, all TSO+DSO DER, all 2W machine OLTCs, all 3W coupler OLTCs, all
+shunts) and observes every TN+HV bus, removing the information barriers and the
+cascade-decomposition optimality gap of V1--V4.  Its sole objective is voltage
+tracking, with ``g_v`` on TN buses and ``central_dso_g_v`` on HV buses.
 
 Outputs
 -------
 * ``results/005_cigre/<V>/log.pkl``          -- per-variant record list.
 * ``results/005_cigre/cigre_summary.csv``    -- Table ``tab:summary`` metrics.
 * ``results/005_cigre/inventory.txt``        -- Table ``tab:inv`` / ``tab:params`` data.
-* ``Fig3_tracking.pdf`` / ``Fig4_capability.pdf`` (+ ``_all``) /
-  ``Fig5_tieflow.pdf`` -- written to BOTH ``results/005_cigre/`` and the
-  paper's ``Figures/`` directory.
+* ``Fig3a_voltage_tracking.pdf`` / ``Fig3b_iface_tracking.pdf`` /
+  ``Fig4_capability.pdf`` (+ ``_all``) / ``Fig5_tieflow.pdf`` -- written to
+  BOTH ``results/005_cigre/`` and the paper's ``Figures/`` directory.
 
 Live plotting is forced OFF for the batch sweep (a four-fold sequential run
 with live plots is not viable headless); use the post-hoc PDFs instead.
@@ -88,10 +95,14 @@ PAPER_FIG_DIR = r"C:\Users\Manuel Schwenke\Desktop\CIGRE_2026\Figures"
 #: name (str) or net.gen index (int).  ``None`` -> one representative per zone.
 #: First inspect ``Fig4_capability_all.pdf`` (every machine), then set the 2-3
 #: you want here and re-run with ``--replot``.
-GEN_SELECT: Optional[List] = ["G3_bus31","G7_bus35"]
+GEN_SELECT: Optional[List] = ["G3_bus31","G4_bus32", "G7_bus35"]
 
 #: Voltage setpoint (matches MultiTSOConfig.v_setpoint_pu / paper V_ref).
 V_SET = 1.03
+
+#: Show the V5 centralized-reference trace in the Fig. 3b interface-flow plot
+#: (measured flow drawn dotted).  Set False to show the proposed V4 alone.
+IFACE_SHOW_V5 = False
 
 
 # ---------------------------------------------------------------------------
@@ -112,8 +123,8 @@ def make_cigre_config() -> MultiTSOConfig:
         tso_period_s=60.0 * 3,        # TS-OFO every 6 min
         dso_period_s=20.0,            # STS-OFO each step (dt_s=60 >= 10)
         g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
-        g_q=250,                      # DSO Q-tracking
-        tso_g_q_tie=1,
+        g_q=300,                      # DSO Q-tracking
+        tso_g_q_tie=2,
         # ── DSO objective tuning ──
         dso_g_v=15000.0,              # reduced to avoid competing with Q tracking
         dso_g_qi=0,                   # integral Q-tracking (0 = off)
@@ -123,13 +134,13 @@ def make_cigre_config() -> MultiTSOConfig:
         # ── TSO weights (w-shift closed-loop curvature) ──
         g_w_der=20,
         g_w_gen=5e7,
-        g_w_pcc=150,
+        g_w_pcc=200,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,
         # ── DSO weights ──
         g_w_dso_der=1000,
-        g_w_dso_oltc=40,
+        g_w_dso_oltc=30,
         # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
         # max_step=1 (default) + wall-clock cooldown per OLTC type:
         #   MT (machine 2W gen-trafo) -> 1 tap / 180 s = once per TS interval.
@@ -169,7 +180,9 @@ def make_cigre_config() -> MultiTSOConfig:
             # baseline (V1) to collapse at min 180.  200 MW / 100 Mvar (the
             # proven-stable magnitude from the 002 comparison) keeps the event
             # while all four variants converge.
-            ContingencyEvent(minute=90, element_type="load", bus=11, p_mw=200, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=250, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=250, action="trip"),
+            ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=200, q_mvar=100, action="connect"),
             ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=200, q_mvar=100, action="trip"),
             ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
             ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
@@ -206,6 +219,26 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
     "V4": dict(  # 002 "C" -- cascaded TS-OFO + STS-OFO (proposed)
         tso_mode="ofo",
         dso_mode="ofo",
+    ),
+    "V5": dict(  # single centralized OFO -- best-case upper-bound reference
+        control_scope="central",
+        # tso_mode='ofo' keeps the machine 2W OLTCs free for the central MIQP
+        # (no main-loop DiscreteTapControl); dso_mode='local' suppresses the
+        # per-DSO OFO controllers and routes DSO-group recording through the
+        # net-state path.  The single CentralOFOController owns all actuators.
+        tso_mode="ofo",
+        dso_mode="local",
+        tso_q_mode="qv", dso_q_mode="qv",
+        # Voltage-tracking weights: g_v (TN) inherited from make_cigre_config
+        # (3e5); central_dso_g_v (HV) mirrors the cascaded dso_g_v (2e4).
+        central_dso_g_v=10000.0,
+        # Fire the single controller every step (best-case cadence: V5 also
+        # replaces the fast STS-OFO layer).  None -> dt_s.  (tso_period_s is
+        # inert in central mode; the per-zone TSO step is skipped.)
+        central_period_s=20,
+        g_w_tso_oltc=150,
+        g_w_dso_der=200,
+        g_w_dso_oltc=30,
     ),
 }
 
@@ -398,6 +431,48 @@ def write_tables(cfg: MultiTSOConfig,
 # ---------------------------------------------------------------------------
 
 
+def build_event_markers(cfg: MultiTSOConfig):
+    """Resolve the contingency schedule to ``(t_min, label)`` markers.
+
+    Labels follow the paper convention: generators ``G<k>-T`` (trip) / ``-C``
+    (reconnect), loads ``LO@B<bus>-C`` / ``-T`` (bus = IEEE number from
+    ``net.bus['name']``), lines ``LI(<from>-<to>) T`` / ``C``.  Only events
+    inside the simulated window (``effective_time_s <= n_total_s``) are kept.
+    Best-effort: returns ``[]`` and never raises if the net cannot be built.
+    """
+    markers = []
+    try:
+        from network.ieee39 import build_ieee39_net
+        net, _meta = build_ieee39_net(ext_grid_vm_pu=1.03, scenario=cfg.scenario)
+
+        def _busno(idx):
+            try:
+                return net.bus.at[int(idx), "name"]
+            except Exception:  # noqa: BLE001
+                return int(idx) + 1
+
+        for ev in cfg.contingencies:
+            if ev.effective_time_s > cfg.n_total_s:
+                continue
+            t_min = ev.effective_time_s / 60.0
+            sfx = "T" if ev.action == "trip" else "C"  # restore/connect -> C
+            et = ev.element_type
+            if et == "gen":
+                gname = str(net.gen.at[int(ev.element_index), "name"]).split("_")[0]
+                markers.append((t_min, f"{gname}-{sfx}"))
+            elif et == "load":
+                bus = ev.bus if ev.bus is not None else net.load.at[int(ev.element_index), "bus"]
+                markers.append((t_min, f"LO@B{_busno(bus)}-{sfx}"))
+            elif et == "line":
+                li = int(ev.element_index)
+                frm, to = _busno(net.line.at[li, "from_bus"]), _busno(net.line.at[li, "to_bus"])
+                markers.append((t_min, f"LI({frm}-{to}) {sfx}"))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [build_event_markers] skipped ({type(exc).__name__}: {exc})")
+        return []
+    return markers
+
+
 def make_figures(logs: Dict[str, List[MultiTSOIterationRecord]]) -> None:
     from visualisation.plot_cigre import make_cigre_figures
 
@@ -407,6 +482,8 @@ def make_figures(logs: Dict[str, List[MultiTSOIterationRecord]]) -> None:
         scenario="wind_replace",
         gen_select=GEN_SELECT,
         v_set=V_SET,
+        iface_show_v5=IFACE_SHOW_V5,
+        events=build_event_markers(make_cigre_config()),
         png_dir=OUT_ROOT,
     )
 

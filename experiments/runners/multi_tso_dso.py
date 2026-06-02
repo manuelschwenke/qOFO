@@ -68,11 +68,17 @@ from analysis.stability_analysis import (
     MultiZoneStabilityResult,
 )
 from controller.base_controller import OFOParameters
+from controller.central_controller import CentralControllerConfig, CentralOFOController
 from controller.dso_controller import DSOController, DSOControllerConfig
 from controller.multi_tso_coordinator import MultiTSOCoordinator, ZoneDefinition
 from controller.tso_controller import TSOController, TSOControllerConfig
 from core.actuator_bounds import ActuatorBounds, GeneratorParameters
-from core.measurement import Measurement, measure_zone_tso, measure_zone_dso
+from core.measurement import (
+    Measurement,
+    measure_zone_tso,
+    measure_zone_dso,
+    measure_central,
+)
 from core.network_state import NetworkState
 from core.reporting import (
     load_and_apply_tuned_params,
@@ -108,6 +114,7 @@ from experiments.helpers import (
     MultiTSOIterationRecord,
     _apply_contingency,
     _network_state,
+    apply_central_controls,
     apply_dso_controls,
     apply_zone_tso_controls,
     prepare_load_contingencies,
@@ -178,6 +185,20 @@ def run_multi_tso_dso(
     """
     v_set = config.v_setpoint_pu
     verbose = config.verbose
+
+    # Single centralized controller path (CIGRE V5 best-case reference).
+    # When True, one CentralOFOController owns every actuator and observes
+    # every measurement; the 3-zone partition + per-HV metadata are retained
+    # only as a recording lens, and the distributed per-zone TSO / per-DSO
+    # controllers are constructed for that recording but never stepped.
+    _central = (config.control_scope == "central")
+    # Firing period of the single central controller.  Default (None) ->
+    # every step (dt_s): V5 replaces the fast STS-OFO layer, so it must fire
+    # as often to be a true best-case upper bound.
+    _central_period_s = (
+        config.central_period_s if config.central_period_s is not None
+        else config.dt_s
+    )
 
     if verbose >= 1:
         print("=" * 72)
@@ -902,6 +923,196 @@ def run_multi_tso_dso(
         coordinator.register_tso_controller(z, ctrl)
 
     # =========================================================================
+    # STEP 8b: Build the single centralized controller (control_scope='central')
+    # =========================================================================
+    # The CentralOFOController owns the UNION of every zone's + every HV
+    # sub-network's actuators and observations: all TSO+DSO DER (w-shift Q),
+    # all synchronous-machine AVR setpoints, all 2W machine OLTCs, all TSO
+    # shunts, and all 3W coupler OLTCs.  It observes every TN+HV PQ bus
+    # voltage and line current, with a generator-Q capability soft band.  No
+    # interface-Q / tie-Q tracking — the sole objective is voltage tracking,
+    # with g_v on TN buses and central_dso_g_v on HV buses.  It always uses the
+    # FULL-network ``shared_jac`` (re-assigned after the Phase-2 rebuild),
+    # independent of the local-sensitivity flags that the per-zone controllers
+    # honour.  The per-zone TSO / DSO controllers above are kept solely as the
+    # recording lens (their ``actuator_bounds`` feed the per-zone figures).
+    central_controller: Optional[CentralOFOController] = None
+    central_cfg: Optional[CentralControllerConfig] = None
+    if _central:
+        if verbose >= 1:
+            print()
+            print("[8b] Building single centralized controller (V5 reference) ...")
+
+        # ── Actuator union (deterministic order: zone 0,1,2 then DSO_1..) ──
+        tso_der_set = set(int(s) for s in meta.tso_der_indices)
+        c_der_indices = (
+            [int(s) for s in meta.tso_der_indices if int(s) in net.sgen.index]
+            + [int(s) for s in meta.dso_der_indices if int(s) in net.sgen.index]
+        )
+        c_gen_indices: List[int] = []
+        c_gen_buses: List[int] = []
+        c_oltc2w: List[int] = []
+        c_shunt_buses: List[int] = []
+        c_shunt_qsteps: List[float] = []
+        for z in sorted(zone_defs.keys()):
+            zd = zone_defs[z]
+            c_gen_indices += [int(g) for g in zd.gen_indices]
+            c_gen_buses += [int(b) for b in zd.gen_bus_indices]
+            c_oltc2w += [int(t) for t in zd.oltc_trafo_indices]
+            c_shunt_buses += [int(b) for b in zd.shunt_bus_indices]
+            c_shunt_qsteps += [float(q) for q in zd.shunt_q_steps_mvar]
+        c_oltc3w = [int(t) for hv in meta.hv_networks for t in hv.coupling_trafo_indices]
+
+        # ── Observation union: TN PQ buses + HV buses (dedup, order-stable) ──
+        hv_bus_set: Set[int] = {int(b) for hv in meta.hv_networks for b in hv.bus_indices}
+        c_v_buses: List[int] = []
+        _seen_v: Set[int] = set()
+        for z in sorted(zone_defs.keys()):
+            for b in zone_defs[z].v_bus_indices:        # TN PQ buses
+                b = int(b)
+                if b not in _seen_v:
+                    _seen_v.add(b); c_v_buses.append(b)
+        for b in sorted(hv_bus_set):                    # HV (STS) buses
+            if b in pv_and_slack_buses_run or b not in net.bus.index:
+                continue
+            if b not in _seen_v:
+                _seen_v.add(b); c_v_buses.append(b)
+
+        # Per-bus voltage weight: g_v on TN buses, central_dso_g_v on HV buses.
+        c_g_v_per_bus = np.array(
+            [config.central_dso_g_v if b in hv_bus_set else config.g_v
+             for b in c_v_buses],
+            dtype=np.float64,
+        )
+
+        # ── Line union: TN zone lines + HV lines (PQ-endpoint only) ──
+        c_lines: List[int] = []
+        c_lines_max: List[float] = []
+        _seen_l: Set[int] = set()
+        for z in sorted(zone_defs.keys()):
+            zd = zone_defs[z]
+            for li, imax in zip(zd.line_indices, zd.line_max_i_ka):
+                li = int(li)
+                if li not in _seen_l:
+                    _seen_l.add(li); c_lines.append(li); c_lines_max.append(float(imax))
+        for hv in meta.hv_networks:
+            for li in hv.line_indices:
+                li = int(li)
+                if li in _seen_l:
+                    continue
+                if (int(net.line.at[li, "from_bus"]) in pv_and_slack_buses_run
+                        or int(net.line.at[li, "to_bus"]) in pv_and_slack_buses_run):
+                    continue
+                _seen_l.add(li)
+                c_lines.append(li)
+                c_lines_max.append(float(net.line.at[li, "max_i_ka"]))
+
+        n_v_c = len(c_v_buses)
+
+        central_cfg = CentralControllerConfig(
+            der_indices=c_der_indices,
+            pcc_trafo_indices=[],
+            pcc_dso_controller_ids=[],
+            oltc_trafo_indices=c_oltc2w,
+            shunt_bus_indices=c_shunt_buses,
+            shunt_q_steps_mvar=c_shunt_qsteps,
+            voltage_bus_indices=c_v_buses,
+            current_line_indices=c_lines,
+            current_line_max_i_ka=c_lines_max if c_lines else None,
+            v_setpoints_pu=np.full(n_v_c, v_set),
+            g_v=config.g_v,
+            gen_indices=c_gen_indices,
+            gen_bus_indices=c_gen_buses,
+            g_q_tso=0.0,
+            qv_slope_pu=config.tso_qv_slope_pu,
+            oltc_trafo3w_indices=c_oltc3w,
+            g_v_per_bus=c_g_v_per_bus,
+        )
+
+        # ── ActuatorBounds spanning every actuator ──
+        c_der_s_rated = np.array(
+            [float(net.sgen.at[s, "sn_mva"]) for s in c_der_indices], dtype=np.float64,
+        )
+        c_der_p_max = np.array(
+            [float(net.sgen.at[s, "p_mw"]) for s in c_der_indices], dtype=np.float64,
+        )
+        c_der_op_diagrams = []
+        for s in c_der_indices:
+            od = net.sgen.at[s, "op_diagram"] if "op_diagram" in net.sgen.columns else None
+            c_der_op_diagrams.append(str(od) if od and str(od) != "nan" else "VDE-AR-N-4120-v2")
+        c_gen_params = []
+        for g in c_gen_indices:
+            c_gen_params.append(
+                GeneratorParameters(
+                    s_rated_mva=float(net.gen.at[g, "sn_mva"]),
+                    p_max_mw=float(net.gen.at[g, "max_p_mw"]),
+                    p_min_mw=0.0,
+                    xd_pu=1.8, i_f_max_pu=2.7, beta=0.15, q0_pu=0.4,
+                )
+            )
+        central_bounds = ActuatorBounds(
+            der_indices=np.array(c_der_indices, dtype=np.int64),
+            der_s_rated_mva=c_der_s_rated,
+            der_p_max_mw=c_der_p_max,
+            oltc_indices=np.array(c_oltc2w, dtype=np.int64),
+            oltc_tap_min=np.array(
+                [int(net.trafo.at[t, "tap_min"]) for t in c_oltc2w], dtype=np.int64,
+            ),
+            oltc_tap_max=np.array(
+                [int(net.trafo.at[t, "tap_max"]) for t in c_oltc2w], dtype=np.int64,
+            ),
+            shunt_indices=np.array(c_shunt_buses, dtype=np.int64),
+            shunt_q_mvar=np.array(c_shunt_qsteps, dtype=np.float64),
+            gen_params=c_gen_params,
+            der_op_diagrams=c_der_op_diagrams,
+        )
+
+        # ── OFO weights.  g_w order = control-vector order
+        #    [ Q_DER | V_gen | s_OLTC2w | s_shunt | s_OLTC3w ] (PCC/V_gf empty).
+        c_gw_der = np.array(
+            [config.g_w_der if s in tso_der_set else config.g_w_dso_der
+             for s in c_der_indices],
+            dtype=np.float64,
+        )
+        c_gw = np.concatenate([
+            c_gw_der,
+            np.full(len(c_gen_indices), config.g_w_gen),
+            np.full(len(c_oltc2w), config.g_w_tso_oltc),
+            np.full(len(c_shunt_buses), config.g_w_tso_shunt),
+            np.full(len(c_oltc3w), config.g_w_dso_oltc),
+        ])
+        # g_z order = output-vector order [ V | I | Q_gen ] (Q_PCC/Q_gf/Q_tie empty).
+        c_gz = np.concatenate([
+            np.full(n_v_c, config.g_z_voltage),
+            np.full(len(c_lines), config.g_z_current),
+            np.full(len(c_gen_indices), config.g_z_q_gen),
+        ])
+        central_params = OFOParameters(
+            g_w=c_gw,
+            g_z=c_gz,
+            g_u=np.zeros_like(c_gw),
+            alpha=1.0,
+            int_max_step=config.int_max_step,
+            int_cooldown=config.int_cooldown,
+            int_cooldown_s=config.oltc_cooldown_s,
+        )
+
+        central_controller = CentralOFOController(
+            controller_id="central",
+            params=central_params,
+            config=central_cfg,
+            network_state=ns0,
+            actuator_bounds=central_bounds,
+            sensitivities=shared_jac,
+        )
+        if verbose >= 1:
+            print(f"  central controller: {len(c_der_indices)} DER, "
+                  f"{len(c_gen_indices)} gen AVR, {len(c_oltc2w)} 2W OLTC, "
+                  f"{len(c_oltc3w)} 3W OLTC, {len(c_shunt_buses)} shunt; "
+                  f"{n_v_c} V-buses ({len(hv_bus_set & set(c_v_buses))} HV), "
+                  f"{len(c_lines)} lines")
+
+    # =========================================================================
     # STEP 9: Load profiles and compute zonal generator dispatch
     # =========================================================================
     use_profiles = config.use_profiles
@@ -1107,7 +1318,10 @@ def run_multi_tso_dso(
     # In "local" DSO mode, keep them active as local AVR.  Either way
     # preserve the plant-side QVLocalLoops if any are present (defensive;
     # under the current flow they install at [10.3] AFTER this drop).
-    if not _local_dso:
+    # Central mode (V5) always drops them: the single OFO controller owns
+    # the coupler 3W OLTC taps, so a co-active DiscreteTapControl would
+    # fight it for the same taps every run_control PF.
+    if not _local_dso or _central:
         if hasattr(net, "controller") and len(net.controller) > 0:
             drop_idx = [
                 idx for idx, row in net.controller.iterrows()
@@ -1403,6 +1617,14 @@ def run_multi_tso_dso(
         ctrl.initialise(measure_zone_tso(net, zone_defs[z], 0))
     for dso_id, dso_ctrl in dso_controllers.items():
         dso_ctrl.initialise(measure_zone_dso(net, dso_ctrl.config, 0))
+    if _central and central_controller is not None:
+        # The centralized controller always uses the FULL-network Jacobian
+        # rebuilt at the post-Phase-2 operating point (overriding any
+        # per-controller local-sensitivity reduction the loop above applied
+        # to the recording-only TSO/DSO controllers).
+        central_controller.sensitivities = shared_jac
+        central_controller.invalidate_sensitivity_cache()
+        central_controller.initialise(measure_central(net, central_cfg, 0))
     if verbose >= 1:
         print(f"  [T] controller .initialise() loop: {perf_counter() - _t:.2f} s")
 
@@ -1761,7 +1983,10 @@ def run_multi_tso_dso(
     # movement.  Only active when at least one local-mode tap controller
     # is present; the OFO MIQP path enforces the same cooldown via
     # OFOParameters.int_cooldown_s on its own integer block.
-    _oltc_local_active = _local_dso or _local_tso
+    # Central mode owns every OLTC through the single MIQP (wall-clock
+    # cooldown via OFOParameters.int_cooldown_s), so the local-mode
+    # DiscreteTapControl rate-limiter is disabled there.
+    _oltc_local_active = (_local_dso or _local_tso) and not _central
     _oltc_limiter = _OLTCRateLimiter(
         max_step=config.local_oltc_max_step_per_dt,
         cooldown_s=(config.oltc_cooldown_s if _oltc_local_active else 0.0),
@@ -1804,6 +2029,9 @@ def run_multi_tso_dso(
         time_s  = step * config.dt_s
         run_tso = (step == 1) or _is_period_hit(time_s, config.tso_period_s)
         run_dso = _is_period_hit(time_s, config.dso_period_s)
+        run_central = _central and (
+            (step == 1) or _is_period_hit(time_s, _central_period_s)
+        )
         _in_warmup = time_s <= config.warmup_s
         # Track whether anything wrote new actuator commands this step.
         # Used to decide whether the end-of-step PF is needed: if no
@@ -2010,6 +2238,24 @@ def run_multi_tso_dso(
                 coordinator.update_outage_masks(net)
                 coordinator.invalidate_sensitivity_cache()
 
+                # The centralized controller is not registered with the
+                # coordinator, so mask its OOS generators / 2W machine OLTCs
+                # directly (mirrors coordinator.update_outage_masks).  Its
+                # cached H over the frozen shared_jac is otherwise unchanged
+                # — the same "controllers know the plant only through cached
+                # sensitivities" assumption as the distributed variants.
+                if _central and central_controller is not None:
+                    _oos_gen = {
+                        int(g) for g in central_cfg.gen_indices
+                        if not bool(net.gen.at[g, "in_service"])
+                    }
+                    _oos_oltc = {
+                        int(t) for t in central_cfg.oltc_trafo_indices
+                        if not bool(net.trafo.at[t, "in_service"])
+                    }
+                    central_controller.update_outage_mask(_oos_gen, _oos_oltc)
+                    central_controller.invalidate_sensitivity_cache()
+
                 # Under local-net sensitivity mode the controllers'
                 # reduced Jacobians are intentionally frozen at the
                 # pre-contingency cached operating point — that's the
@@ -2026,12 +2272,41 @@ def run_multi_tso_dso(
                             _zone_promoted_oltcs.get(z, ()),
                         )
 
+        # ── Central single-controller step (control_scope='central', V5) ──────
+        # One MIQP over every actuator / measurement, fired every
+        # _central_period_s (default: every step).  Replaces the per-zone TSO
+        # step and the per-DSO step; the 3-zone scaffolding below it is used
+        # only for recording.
+        if run_central and central_controller is not None:
+            meas_central = measure_central(net, central_cfg, step)
+            # w-shift reanchoring: reset the DER block of _u_current to the
+            # measured Q so the OFO update u_new = u_old + sigma yields
+            # q_set = Q_meas + sigma (the per-step "increment" interpretation
+            # of the w-shift actuator).  The cascaded path does this for every
+            # TSO controller (MultiTSOCoordinator.step) and every DSO controller
+            # (DSO step below); the central controller bypasses both, so without
+            # this reset its commanded q_set teleports from the stale last
+            # command rather than incrementing from the realised Q — producing
+            # the discrete DER jumps and poor tracking otherwise observed.
+            central_controller.apply_qw_reset(meas_central)
+            central_out = central_controller.step(meas_central, sim_time_s=time_s)
+            apply_central_controls(net, central_cfg, central_out)
+            if verbose >= 1:
+                _n_int = len(central_out.u_integer)
+                print(f"  [central t={int(time_s/60):3d} min] "
+                      f"obj={central_out.objective_value:.4e}  "
+                      f"status={central_out.solver_status}  "
+                      f"solve={central_out.solve_time_s:.2f}s  "
+                      f"({_n_int} integer actuators)")
+
         # ── TSO step ──────────────────────────────────────────────────────────
         # Skipped entirely in TSO local mode: the CharacteristicControllers
         # (Q(V)) or the static cos phi=1 setting (Q=0) take over from the OFO
         # coordinator.  The DSO loop below is also disabled for L0/L1/L2 because
-        # those scenarios use dso_mode='local'.
-        if run_tso and not _local_tso:
+        # those scenarios use dso_mode='local'.  Also skipped in central mode
+        # (control_scope='central'): the single controller above owns the TSO
+        # actuators.
+        if run_tso and not _local_tso and not _central:
             tso_step_count += 1
             # Decide whether to refresh cross-sensitivities this step
             refresh_H = (config.sensitivity_update_interval > 0
@@ -2501,8 +2776,9 @@ def run_multi_tso_dso(
         # T0/T1 where DSO is local.  An MIQP fired ⇒ end-of-step PF is
         # required to propagate the new q_cor / V_set / OLTC commands.
         _miqp_acted = (
-            (run_tso and not _local_tso)
+            (run_tso and not _local_tso and not _central)
             or (run_dso and not _local_dso)
+            or run_central
         )
         _needs_end_pf = _miqp_acted or _contingency_fired_this_step
         if _needs_end_pf:

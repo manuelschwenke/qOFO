@@ -421,6 +421,83 @@ def voltage_rms_err_per_zone(records: List[MultiTSOIterationRecord],
     return {"t_min": t, "zones": zones, "rms_err_pu": out}
 
 
+def voltage_rms_err_all(records: List[MultiTSOIterationRecord],
+                        v_set: float = V_SET_DEFAULT,
+                        ) -> Dict[str, object]:
+    """System-wide TS voltage tracking error per step (single aggregate series).
+
+    Combines the per-zone spatial RMS errors from
+    :func:`voltage_rms_err_per_zone` into one quadratic mean across zones,
+    ``sqrt(mean_z (rms_err_z)^2)``.  Because the pickled records store only the
+    per-zone RMS (``zone_v_rms_err_pu``) and not per-bus counts, zones are
+    weighted equally; this is the across-zone quadratic mean used as a proxy
+    for the RMS over all EHV bus voltages (exact only when zones hold equal bus
+    counts).
+
+    Returns
+    -------
+    dict with keys
+        ``t_min``      -- time axis [min].
+        ``rms_err_pu`` -- ``ndarray[n_steps]`` of the aggregate RMS error [p.u.].
+    """
+    import warnings
+
+    per_zone = voltage_rms_err_per_zone(records, v_set)
+    t = per_zone["t_min"]
+    zones = per_zone["zones"]
+    if not zones:
+        return {"t_min": t, "rms_err_pu": np.full(len(records), np.nan)}
+    stack = np.vstack([per_zone["rms_err_pu"][z] for z in zones])  # (n_zone, n)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        rms = np.sqrt(np.nanmean(stack ** 2, axis=0))
+    return {"t_min": t, "rms_err_pu": rms}
+
+
+def q_iface_per_trafo(records: List[MultiTSOIterationRecord]
+                      ) -> Dict[str, object]:
+    """Per-interface-trafo reactive-power setpoint & actual flows, grouped.
+
+    Unlike :func:`q_iface_err_per_group` (which sums interfaces to a per-group
+    net and reports the tracking *error*), this keeps every coupling
+    transformer separate and returns both the dispatched setpoint and the
+    measured interface Q -- the data the cascade live plot draws as
+    solid (actual) / dashed (setpoint) traces per interface.
+
+    Returns
+    -------
+    dict with keys
+        ``t_min``        -- time axis [min].
+        ``groups``       -- sorted list of DSO group ids.
+        ``trafos``       -- ``{group: [trafo_key, ...]}`` (sorted, stable order).
+        ``set_mvar``     -- ``{trafo_key: ndarray}`` of the dispatched setpoint.
+        ``actual_mvar``  -- ``{trafo_key: ndarray}`` of the measured interface Q.
+        ``has_setpoint`` -- ``{trafo_key: bool}`` -- any finite setpoint logged.
+    """
+    t = _times_min(records)
+    n = len(records)
+    group_of: Dict[str, str] = {}
+    for r in records:
+        for key, grp in r.dso_trafo_group.items():
+            group_of.setdefault(key, grp)
+    keys = sorted(group_of)
+    setv = {k: np.full(n, np.nan, dtype=np.float64) for k in keys}
+    actv = {k: np.full(n, np.nan, dtype=np.float64) for k in keys}
+    for i, r in enumerate(records):
+        for k in keys:
+            a = r.dso_trafo_q_actual_mvar.get(k)
+            s = r.dso_trafo_q_set_mvar.get(k)
+            if a is not None and np.isfinite(a):
+                actv[k][i] = float(a)
+            if s is not None and np.isfinite(s):
+                setv[k][i] = float(s)
+    groups = sorted(set(group_of.values()))
+    trafos = {g: sorted(k for k in keys if group_of[k] == g) for g in groups}
+    has_setpoint = {k: bool(np.any(np.isfinite(setv[k]))) for k in keys}
+    return {"t_min": t, "groups": groups, "trafos": trafos,
+            "set_mvar": setv, "actual_mvar": actv, "has_setpoint": has_setpoint}
+
+
 def q_iface_err_per_group(records: List[MultiTSOIterationRecord]
                           ) -> Dict[str, object]:
     """Per-DSO-group interface reactive-power tracking error time series.

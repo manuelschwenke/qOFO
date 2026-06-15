@@ -473,6 +473,27 @@ class MultiTSOConfig:
     ``g_z_q_gen`` slack penalty has no effect.  Set to ``False`` to
     reproduce the pre-fix behaviour (e.g. for ablation)."""
 
+    # -- Voltage-stability / nose-curve reachability guard ---------------------
+    enable_reachability_guard: bool = True
+    """Run the modal voltage-stability reachability check
+    (:mod:`analysis.reachability`) at every main-loop step.  The quasi-static
+    power flow can converge to points on the lower (unstable) voltage branch
+    that the dynamic system could never reach; the guard records the stability
+    margin every step and aborts the run (``ReachabilityViolation``) at the
+    first equilibrium that is not on the stable upper branch.  Set ``False`` to
+    disable the guard entirely (e.g. for ablation or to reproduce pre-guard
+    behaviour)."""
+
+    reach_tau_sigma: float = 1e-6
+    """Proximity threshold on the smallest singular value of the full
+    power-flow Jacobian; the step is rejected when ``sigma_min(J) <
+    reach_tau_sigma``.  See :func:`analysis.reachability.check_reachability`."""
+
+    reach_tau_eig: float = 1e-6
+    """Proximity threshold on the minimum real eigenvalue of the reduced Q-V
+    Jacobian ``J_R``; the step is rejected when ``min(real(eig(J_R))) <=
+    reach_tau_eig``.  See :func:`analysis.reachability.check_reachability`."""
+
     # -- Control scope (cascaded distributed vs single centralized) -----------
     control_scope: str = "cascaded"
     """Selects the controller topology of a run.
@@ -616,19 +637,19 @@ class MultiTSOConfig:
     """Per-DER override of the cosphi sign."""
 
     # -- Plant-side Q(V) loop convergence tolerance (per level) --------
-    tso_qv_tol_mvar: float = 0.2
+    tso_qv_tol_mvar: float = 0.1
     """Convergence tolerance for the plant-side QVLocalLoop on TSO
     DERs (Mvar).  Transmission STATCOMs are large (S_n ≈ 600 Mvar) so
     very tight tolerances cost iterations without operational benefit;
     0.1 Mvar is a reasonable T-side accuracy."""
 
-    dso_qv_tol_mvar: float = 0.05
+    dso_qv_tol_mvar: float = 0.01
     """Convergence tolerance for the plant-side QVLocalLoop on DSO
     DERs (Mvar).  DSO sgens are smaller (S_n ≈ 30–50 Mvar) and the
     OFO benefits from sub-Mvar accuracy at the interface; keep tight
     (0.01 Mvar)."""
 
-    qv_local_damping: float = 0.3
+    qv_local_damping: float = 0.1
     """Damping factor for the Q(V) local loop iteration.
 
     Per-DER contraction: ``|1 − damping·(1 + K·S_VQ)|`` where K = S_n/slope.
@@ -727,6 +748,27 @@ class MultiTSOConfig:
     """Soft-constraint slack penalty for Q_tie output bound (Phase B
     optional).  Mirrors ``g_z_q_pcc``.  Default 0.0 = no slack-based
     bound enforcement on Q_tie."""
+
+    tso_g_res_sg: float = 0.0
+    """Explicit reactive-RESERVE weight for TS synchronous generators.
+    Routed to ``TSOControllerConfig.g_res_sg`` at zone construction time.
+    Adds ``tso_g_res_sg · Σ_i r_SG,i²`` to each zone's TSO objective, where
+    ``r_SG,i = (Q_gen,i − Q_mid,i)/Q_half,i`` is the normalised distance of
+    generator ``i``'s reactive output from the midpoint of its
+    state-dependent PQ-capability band.  Penalising it keeps synchronous
+    machines centred in their band → symmetric reserve in both directions.
+    Default ``0.0`` = term off (reserve minimised only implicitly via the
+    DSO cascade).  Toggle pattern mirrors ``tso_g_q_tie``."""
+
+    tso_g_res_der: float = 0.0
+    """Explicit reactive-RESERVE weight for TS-connected DER (continuous,
+    Q-controlled sgens).  Routed to ``TSOControllerConfig.g_res_der``.
+    Adds ``tso_g_res_der · Σ_i r_DER,i²`` with
+    ``r_DER,i = (Q_DER,i − Q_mid,i)/Q_half,i`` over each DER's VDE-AR-N-4120
+    capability band.  Kept separate from ``tso_g_res_sg`` so the operator
+    can prefer one resource class over the other.  Default ``0.0`` (off).
+    DSO-connected DER reserve is NOT covered here (it belongs to the DSO
+    layer)."""
 
     # ---- Adaptive g_w helpers ------------------------------------------------
     def tso_adapt_g_w_classes(self) -> tuple:

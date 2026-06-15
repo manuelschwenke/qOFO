@@ -67,6 +67,7 @@ from analysis.stability_analysis import (
     analyse_multi_zone_stability,
     MultiZoneStabilityResult,
 )
+from analysis.reachability import ReachabilityMonitor, ReachabilityViolation
 from controller.base_controller import OFOParameters
 from controller.central_controller import CentralControllerConfig, CentralOFOController
 from controller.dso_controller import DSOController, DSOControllerConfig
@@ -651,6 +652,8 @@ def run_multi_tso_dso(
             q_tie_setpoints_mvar=zd.q_tie_setpoints_mvar,
             g_q_tie=config.tso_g_q_tie,
             g_z_q_tie=config.g_z_q_tie,
+            g_res_sg=config.tso_g_res_sg,
+            g_res_der=config.tso_g_res_der,
             qv_slope_pu=config.tso_qv_slope_pu,
         )
 
@@ -1840,6 +1843,26 @@ def run_multi_tso_dso(
 
     log: List[MultiTSOIterationRecord] = []
 
+    # ── Voltage-stability / nose-curve reachability guard ────────────────────
+    # At every step the converged plant equilibrium is checked against the
+    # modal Q-V criterion (analysis.reachability).  The margin is recorded into
+    # each MultiTSOIterationRecord so the full trajectory is available, and the
+    # run aborts (ReachabilityViolation) at the first equilibrium that is not on
+    # the stable upper voltage branch.  The monitor canonicalises the
+    # distributed-slack Jacobian internally (single-slack re-converge on a deep
+    # copy), so net is left untouched.
+    _reach_monitor: Optional[ReachabilityMonitor] = (
+        ReachabilityMonitor(
+            tau_sigma=config.reach_tau_sigma,
+            tau_eig=config.reach_tau_eig,
+        )
+        if config.enable_reachability_guard else None
+    )
+    if verbose >= 1 and _reach_monitor is not None:
+        print(f"  [13] Reachability guard ON "
+              f"(tau_sigma={config.reach_tau_sigma:.1e}, "
+              f"tau_eig={config.reach_tau_eig:.1e})")
+
     # ── Optionally create live plot windows (three figures, 1/3 screen each) ─
     _plotter_tso = None
     _plotter_dso = None
@@ -2843,6 +2866,28 @@ def run_multi_tso_dso(
             print(f"  [Step {step}] Power flow failed: {e}")
             log.append(rec)
             continue
+
+        # ── Voltage-stability / nose-curve reachability guard ────────────────
+        # The network is converged here (PF failures above did ``continue``).
+        # Verify the equilibrium lies on the stable upper voltage branch via
+        # the modal Q-V criterion, record the margin into this step's record,
+        # and abort at the first lower-branch point.  Placed BEFORE any metric
+        # logging and OUTSIDE the PF try/except so the ReachabilityViolation
+        # propagates out of the runner (Fail-Fast) instead of being swallowed.
+        if _reach_monitor is not None:
+            try:
+                _reach = _reach_monitor.check_step(
+                    net, step_index=step, time_s=time_s
+                )
+            except ReachabilityViolation as _rv:
+                # Hand the records accumulated before the violation to the
+                # caller (experiment drivers persist them); then re-raise so the
+                # run still aborts (Fail-Fast).
+                _rv.partial_log = log
+                raise
+            rec.reach_sigma_min_J = _reach.sigma_min_J
+            rec.reach_lambda_min_JR = _reach.lambda_min_JR
+            rec.reach_critical_bus = _reach.critical_bus
 
         # ── Record post-PF observables (require converged res_* tables) ──────
         if run_dso and not _local_dso:

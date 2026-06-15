@@ -245,60 +245,51 @@ def main() -> None:
     """
 
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 5,      # 720-min full simulation
-        tso_period_s=20.0 * 1,    # TSO every 3 minutes
-        dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
-        g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
-        g_q=250,  # DSO Q-tracking
-        tso_g_q_tie=1,
-        # TEMP #################
-        control_scope="central",
-        tso_mode="ofo",
-        dso_mode="local",
-        tso_q_mode="qv", dso_q_mode="qv",
-        # Voltage-tracking weights: g_v (TN) inherited from make_cigre_config
-        # (3e5); central_dso_g_v (HV) mirrors the cascaded dso_g_v (2e4).
-        central_dso_g_v=20000.0,
+        n_total_s=60.0 * 60 * 36,      # 300-min simulation
+        tso_period_s=60.0 * 3,        # TS-OFO every 6 min
+        dso_period_s=10.0,            # STS-OFO each step (dt_s=60 >= 10)
+        g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
+        g_q=300,                      # DSO Q-tracking
+        tso_g_q_tie=0,
+        tso_g_res_sg=0,
         # ── DSO objective tuning ──
-        # DER actuator: w-shift (q_set + V_ref reanchoring).
-        dso_g_v=15000.0,  # reduced to avoid competing with Q tracking
-        dso_g_qi=0,  # integral Q-tracking (0 = off)
-        dso_lambda_qi=0.95,  # leaky integrator decay
-        dso_q_integral_max_mvar=200.0,  # anti-windup clamp
-        dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
-        # ── TSO weights — re-tuned for w-shift closed-loop curvature ──
-        # Under Q_cor the H matrix is post-multiplied by T'=(I+R*S_VQ)^-1,
-        # which reduces curvature by ~3x on DSO and ~80x on TSO.  Start
-        # at ~1/3 (DSO) to ~1/80 (TSO STATCOMs) of the legacy direct-Q
-        # values and sweep from there.
-        g_w_der=20,    # was 20 (direct-Q); T-STATCOM curvature ~80x lower under T'
+        dso_g_v=15000.0,              # reduced to avoid competing with Q tracking
+        dso_g_qi=0,                   # integral Q-tracking (0 = off)
+        dso_lambda_qi=0.95,           # leaky integrator decay
+        dso_q_integral_max_mvar=200.0,
+        dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
+        # ── TSO weights (w-shift closed-loop curvature) ──
+        g_w_der=20,
         g_w_gen=5e7,
         g_w_pcc=150,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,
         # ── DSO weights ──
-        g_w_dso_der=1000,  # was 1000 (direct-Q); ~3x lower curvature under T'
-        g_w_dso_oltc=40,
-        use_fixed_zones=True,      # literature 3-area partition (not spectral)
+        g_w_dso_der=1000,
+        g_w_dso_oltc=30,
+        # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
+        # max_step=1 (default) + wall-clock cooldown per OLTC type:
+        #   MT (machine 2W gen-trafo) -> 1 tap / 180 s = once per TS interval.
+        #   NC (coupler 3W interface) -> 1 tap / 60 s  = once per minute.
+        # Cooldowns are wall-clock, hence robust to dt_s / dso_period_s.
+        local_oltc_max_step_per_dt=1,
+        oltc_cooldown_s_mt=180.0,
+        oltc_cooldown_s_nc=60.0,
+        use_fixed_zones=True,         # literature 3-area partition
         run_stability_analysis=False,
-        sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
+        sensitivity_update_interval=1E6,
         verbose=1,
+        # Live plots OFF for the batch sweep (see module docstring).
         live_plot_controller=True,
         live_plot_cascade=True,
         live_plot_system=False,
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
-        # Cooldowns are wall-clock, hence robust to dt_s / dso_period_s.
-        local_oltc_max_step_per_dt=1,
-        oltc_cooldown_s_mt=180.0,
-        oltc_cooldown_s_nc=60.0,
-        # ── Profile & contingency settings ───────────────────────────────
-        start_time=datetime(2016, 1, 5, 10, 0),
+        # ── Profile & contingency settings ──
+        start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
-        # dso_mode="local", local_der_mode="qv",
-        # dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
         contingencies=[
             # NOTE: the original schedule also tripped lines 18 (min 45-150) and
             # 5 (min 60-150).  With gen 2 (G4_bus32, ~680 MW in zone 3) tripped
@@ -316,10 +307,10 @@ def main() -> None:
             # baseline (V1) to collapse at min 180.  200 MW / 100 Mvar (the
             # proven-stable magnitude from the 002 comparison) keeps the event
             # while all four variants converge.
-            ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=250, action="connect"),
-            ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=250, action="trip"),
-            ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=200, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=200, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=300, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=300, action="trip"),
+            ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
             ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
             ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
         ],

@@ -79,6 +79,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from configs.multi_tso_config import MultiTSOConfig
 from experiments.helpers.records import ContingencyEvent, MultiTSOIterationRecord
 from experiments.runners import run_multi_tso_dso
+from analysis.reachability import ReachabilityViolation
 
 
 # ---------------------------------------------------------------------------
@@ -121,10 +122,11 @@ def make_cigre_config() -> MultiTSOConfig:
     cfg = MultiTSOConfig(
         n_total_s=60.0 * 60 * 5,      # 300-min simulation
         tso_period_s=60.0 * 3,        # TS-OFO every 6 min
-        dso_period_s=20.0,            # STS-OFO each step (dt_s=60 >= 10)
+        dso_period_s=10.0,            # STS-OFO each step (dt_s=60 >= 10)
         g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
         g_q=300,                      # DSO Q-tracking
-        tso_g_q_tie=2,
+        tso_g_q_tie=0,
+        tso_g_res_sg=0,
         # ── DSO objective tuning ──
         dso_g_v=15000.0,              # reduced to avoid competing with Q tracking
         dso_g_qi=0,                   # integral Q-tracking (0 = off)
@@ -134,7 +136,7 @@ def make_cigre_config() -> MultiTSOConfig:
         # ── TSO weights (w-shift closed-loop curvature) ──
         g_w_der=20,
         g_w_gen=5e7,
-        g_w_pcc=200,
+        g_w_pcc=150,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,
@@ -160,7 +162,7 @@ def make_cigre_config() -> MultiTSOConfig:
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
         # ── Profile & contingency settings ──
-        start_time=datetime(2016, 1, 5, 10, 0),
+        start_time=datetime(2016, 1, 5, 12, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
@@ -180,10 +182,10 @@ def make_cigre_config() -> MultiTSOConfig:
             # baseline (V1) to collapse at min 180.  200 MW / 100 Mvar (the
             # proven-stable magnitude from the 002 comparison) keeps the event
             # while all four variants converge.
-            ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=250, action="connect"),
-            ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=250, action="trip"),
-            ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=200, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=200, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=300, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=300, action="trip"),
+            ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
             ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
             ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
         ],
@@ -231,14 +233,19 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
         tso_q_mode="qv", dso_q_mode="qv",
         # Voltage-tracking weights: g_v (TN) inherited from make_cigre_config
         # (3e5); central_dso_g_v (HV) mirrors the cascaded dso_g_v (2e4).
+        g_v=4E5,  # TSO voltage tracking; drives PCC Q dispatch
         central_dso_g_v=10000.0,
         # Fire the single controller every step (best-case cadence: V5 also
         # replaces the fast STS-OFO layer).  None -> dt_s.  (tso_period_s is
         # inert in central mode; the per-zone TSO step is skipped.)
-        central_period_s=20,
-        g_w_tso_oltc=150,
-        g_w_dso_der=200,
+        central_period_s=10,
+        g_w_tso_oltc=250,
+        g_w_dso_der=50,
         g_w_dso_oltc=30,
+        local_sensitivities_tso=False,
+        local_sensitivities_dso=False,
+        #tso_g_res_sg=2E6,
+        #g_v=3.5E5,
     ),
 }
 
@@ -264,6 +271,13 @@ def run_one(name: str, overrides: Dict[str, Any]) -> List[MultiTSOIterationRecor
 
     try:
         log = run_multi_tso_dso(cfg)
+    except ReachabilityViolation as rv:
+        # Voltage-stability (nose-curve) rejection -- distinct from a power-flow
+        # divergence.  Keep the records computed before the violation and dump
+        # the margin trajectory so the approach to the nose is inspectable.
+        log = list(rv.partial_log) if rv.partial_log else []
+        print(f"  [{name}] VOLTAGE-UNSTABLE (nose): {rv}")
+        _dump_reach_margins(scen_dir, rv)
     except Exception as exc:  # noqa: BLE001 - persist failure, keep sweep alive
         print(f"  [{name}] FAILED: {type(exc).__name__}: {exc}")
         log = []
@@ -272,6 +286,22 @@ def run_one(name: str, overrides: Dict[str, Any]) -> List[MultiTSOIterationRecor
         pickle.dump(log, f)
     print(f"  [{name}] wrote {len(log)} records -> {scen_dir}/log.pkl")
     return log
+
+
+def _dump_reach_margins(scen_dir: str, rv: ReachabilityViolation) -> None:
+    """Persist the per-step voltage-stability margin trajectory carried by a
+    :class:`ReachabilityViolation` to ``<scen_dir>/reach_margins.csv``."""
+    if not rv.margins:
+        return
+    import pandas as pd
+    try:
+        pd.DataFrame(rv.margins).to_csv(
+            os.path.join(scen_dir, "reach_margins.csv"), index=False
+        )
+        print(f"  [reach] wrote {len(rv.margins)} margin rows -> "
+              f"{scen_dir}/reach_margins.csv")
+    except (PermissionError, OSError) as exc:  # never block the sweep on I/O
+        print(f"  [reach] could not write reach_margins.csv: {exc}")
 
 
 def load_logs(names: Optional[List[str]] = None
@@ -403,10 +433,20 @@ def params_block(cfg: MultiTSOConfig) -> str:
 def write_tables(cfg: MultiTSOConfig,
                  logs: Dict[str, List[MultiTSOIterationRecord]]) -> None:
     """Write cigre_summary.csv and inventory.txt; echo to stdout."""
-    from experiments.helpers.comparison_metrics import cigre_summary_table
+    from experiments.helpers.comparison_metrics import (
+        cigre_summary_table, gen_s_rated_by_zone,
+    )
 
     os.makedirs(OUT_ROOT, exist_ok=True)
-    summary = cigre_summary_table(logs, v_set=V_SET)
+    # Pass per-zone machine ratings so the table also reports m_bar_pu (headroom
+    # in p.u. of S_n -- size-comparable, not dominated by the largest machine).
+    try:
+        gen_srated = gen_s_rated_by_zone(cfg.scenario)
+    except Exception as exc:  # noqa: BLE001 - m_bar_pu is optional, never block
+        print(f"  [write_tables] m_bar_pu ratings unavailable: "
+              f"{type(exc).__name__}: {exc}")
+        gen_srated = None
+    summary = cigre_summary_table(logs, v_set=V_SET, gen_s_rated_mva=gen_srated)
     csv_path = os.path.join(OUT_ROOT, "cigre_summary.csv")
     try:
         summary.to_csv(csv_path)

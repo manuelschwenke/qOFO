@@ -298,3 +298,17 @@ class MultiTSOIterationRecord:
     slack_p_mw: float = 0.0
     slack_q_mvar: float = 0.0
     slack_q_at_limit: bool = False
+
+    # ── Voltage-stability reachability margin (added 2026-06-08) ────────────────
+    # Populated post-PF in run_multi_tso_dso() when config.enable_reachability_guard
+    # is set, by analysis.reachability.ReachabilityMonitor.check_step().  Records
+    # the per-step nose-curve margin so the full trajectory is available even when
+    # no violation occurs.  Defaults keep older logs loadable.
+    reach_sigma_min_J: Optional[float] = None
+    """Smallest singular value of the full power-flow Jacobian (nose proximity)."""
+    reach_lambda_min_JR: Optional[float] = None
+    """Minimum real eigenvalue of the reduced Q-V Jacobian; positive on the
+    stable upper branch, non-positive at/beyond the saddle-node."""
+    reach_critical_bus: Optional[int] = None
+    """Pandapower bus index with the largest participation in the critical
+    (minimum-eigenvalue) voltage-stability mode."""

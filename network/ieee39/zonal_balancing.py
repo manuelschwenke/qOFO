@@ -302,11 +302,22 @@ def compute_zonal_gen_dispatch(
                     dispatch.at[idx, gi] = min(
                         gen_p_max[gi], dispatch.at[idx, gi] + add
                     )
-                total_deficit = sum(
-                    max(0.0, zone_residual_t[z][t_i]
-                        - sum(dispatch.at[idx, gi] for gi in zone_gens[z]))
-                    for z in zone_map if zone_gens[z]
+                # Remaining deficit must be measured SYSTEM-WIDE, not as a sum of
+                # per-zone (residual_z - dispatch_z) terms.  The spill above places
+                # generation in OTHER zones (chiefly the high-capacity slack gen) to
+                # cover a deficit zone; a per-zone measure never registers that
+                # coverage, so it re-adds the same deficit on every iteration and the
+                # slack/zone-1 gen ends up dispatched several times the real residual
+                # (the root cause of high-load over-dispatch -> 200%+ line overloads
+                # and PF collapse under distributed_slack).
+                total_dispatched_all = sum(
+                    dispatch.at[idx, gi]
+                    for zz in zone_map for gi in zone_gens[zz]
                 )
+                total_residual_all = sum(
+                    zone_residual_t[zz][t_i] for zz in zone_map
+                )
+                total_deficit = max(0.0, total_residual_all - total_dispatched_all)
                 if total_deficit < 0.01:
                     break
 

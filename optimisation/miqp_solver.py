@@ -612,6 +612,7 @@ class MIQPSolver:
             elif solver_name == 'GUROBI':
                 solver_kwargs['TimeLimit'] = self.time_limit_s
                 solver_kwargs['MIPGap'] = self.mip_gap
+                solver_kwargs['Threads'] = 1
             elif solver_name == 'MOSEK':
                 solver_kwargs['mosek_params'] = {
                     'MSK_DPAR_OPTIMIZER_MAX_TIME': self.time_limit_s,

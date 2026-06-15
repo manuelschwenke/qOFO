@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -615,53 +615,95 @@ def _switching_count(records: List[MultiTSOIterationRecord]) -> int:
     return total
 
 
+def gen_s_rated_by_zone(scenario: str) -> Dict[int, NDArray[np.float64]]:
+    """Per-zone synchronous-machine MVA ratings aligned to ``zone_q_gen``.
+
+    Returns ``{zone: array of S_n [MVA]}`` where the array index matches the
+    per-zone generator index used in ``record.zone_q_gen`` and
+    ``record.gen_q_headroom_mvar`` (i.e. the ``k_in_zone`` ordering that the
+    Fig. 4 capability plot already relies on).  Feeds the size-comparable
+    :data:`m_bar_pu` metric in :func:`cigre_summary_table`.
+
+    The gen-info builder is imported lazily to avoid a circular import:
+    ``visualisation.plot_cigre`` imports this module.
+    """
+    from visualisation.plot_cigre import _gen_info_with_k
+
+    by_zone: Dict[int, Dict[int, float]] = {}
+    for gi in _gen_info_with_k(scenario):
+        by_zone.setdefault(int(gi["zone"]), {})[int(gi["k_in_zone"])] = float(
+            gi["s_rated_mva"]
+        )
+    return {
+        z: np.array([kv[k] for k in sorted(kv)], dtype=np.float64)
+        for z, kv in by_zone.items()
+    }
+
+
 def cigre_summary_table(logs: Dict[str, List[MultiTSOIterationRecord]],
                         v_set: float = V_SET_DEFAULT,
+                        gen_s_rated_mva: Optional[Dict[int, NDArray[np.float64]]] = None,
                         ) -> pd.DataFrame:
     """One row per variant for the CIGRE paper Table ``tab:summary``.
 
     Columns (all time-averaged over the full simulation unless noted)
 
-    ``J_TS``        -- voltage objective proxy: time-mean of
-                       ``sum_zones (per-zone RMS voltage error)^2`` [p.u.^2].
-                       Monotone in the paper's weighted objective; lower=better.
+    ``rms_v_ts_pu`` -- system-wide TS voltage RMS deviation [p.u.]: time-mean of
+                       the across-zone RMS of ``(V_i - v_set)`` -- i.e. the SAME
+                       unweighted scalar plotted in Fig. 3a, so plot and table
+                       are unified.  Deliberately UNWEIGHTED (no ``G_v``) so the
+                       metric is controller-agnostic and does not coincide with
+                       the OFO objective.  lower = better.
     ``m_bar_mvar``  -- fleet-mean synchronous-generator Q headroom
-                       ``mean_g(Q_max-|Q|)`` [Mvar], time-averaged; higher=more
-                       reserve preserved.
-    ``res_util``    -- fleet-mean generator Q utilisation
+                       ``mean_g min(Q_max-Q, Q-Q_min)`` [Mvar], time-averaged;
+                       higher = more reserve preserved.  Size-weighted: a mean of
+                       absolute Mvar is dominated by the largest machine.
+    ``m_bar_pu``    -- size-comparable counterpart of ``m_bar_mvar``: the same
+                       headroom normalised by each machine's MVA rating,
+                       ``mean_g (headroom_g / S_n,g)`` [p.u.], time-averaged;
+                       higher = more reserve preserved.  Equal-weighted across
+                       machines, so it is NOT dominated by the largest unit (the
+                       reason it differs from ``m_bar_mvar``).  ``NaN`` unless
+                       ``gen_s_rated_mva`` is supplied (e.g. from
+                       :func:`gen_s_rated_by_zone`).
+    ``res_util``    -- fleet-mean generator reactive-capability utilisation
                        ``mean_g |Q|/(|Q|+headroom)`` in [0,1], time-averaged.
     ``rms_e_sts_mvar`` -- interface tracking error RMS over groups and time
                        [Mvar]; ``NaN`` for variants with no dispatched setpoint.
+                       Reported in the paper for V4 only (the only variant whose
+                       STS actively tracks the dispatched setpoint).
     ``rms_q_tie_mvar`` -- tie-line Q RMS over zone pairs and time [Mvar].
-    ``n_sw``        -- total discrete switching operations (OLTC + shunt).
+    ``n_sw``        -- total discrete switching operations (OLTC + shunt; the
+                       case study installs no shunts, so this counts OLTC moves).
     """
     rows = []
     for name, recs in logs.items():
         if not recs:
             rows.append({"variant": name, "converged": False,
-                         "J_TS": np.nan, "m_bar_mvar": np.nan,
+                         "rms_v_ts_pu": np.nan, "m_bar_mvar": np.nan,
+                         "m_bar_pu": np.nan,
                          "res_util": np.nan, "rms_e_sts_mvar": np.nan,
                          "rms_q_tie_mvar": np.nan, "n_sw": 0})
             continue
 
-        # J_TS : time-mean of sum over zones of per-zone MSE.
-        vz = voltage_rms_err_per_zone(recs, v_set)
-        if vz["zones"]:
-            per_step = np.nansum(
-                np.vstack([vz["rms_err_pu"][z] ** 2 for z in vz["zones"]]),
-                axis=0,
-            )
-            j_ts = float(np.nanmean(per_step))
-        else:
-            j_ts = np.nan
+        # Unweighted system-wide TS voltage RMS deviation, UNIFIED with Fig. 3a:
+        # time-mean of sqrt(mean_zone (per-zone RMS error)^2).  No G_v weighting,
+        # so the metric does not coincide with the controllers' own objective.
+        va = voltage_rms_err_all(recs, v_set)
+        rms_v_ts = (float(np.nanmean(va["rms_err_pu"]))
+                    if np.any(np.isfinite(va["rms_err_pu"])) else np.nan)
 
         # m_bar and utilisation from gen Q headroom + |Q|.
         qh = gen_q_headroom_series(recs)
         _hr = qh["q_headroom_mean_mvar"]
         m_bar = float(np.nanmean(_hr)) if np.any(np.isfinite(_hr)) else np.nan
         util_per_step = np.full(len(recs), np.nan, dtype=np.float64)
+        # Size-comparable headroom: per-machine reserve normalised by its MVA
+        # rating and equal-weighted across machines, so the fleet mean is not
+        # dominated by the single largest unit (NaN when no ratings supplied).
+        mbar_pu_per_step = np.full(len(recs), np.nan, dtype=np.float64)
         for i, r in enumerate(recs):
-            qs, hs = [], []
+            qs, hs, hpu = [], [], []
             for z, q_arr in r.zone_q_gen.items():
                 if q_arr is None:
                     continue
@@ -672,14 +714,26 @@ def cigre_summary_table(logs: Dict[str, List[MultiTSOIterationRecord]],
                 ha = np.asarray(h_arr, dtype=np.float64)
                 n = min(qa.size, ha.size)
                 qs.append(qa[:n]); hs.append(ha[:n])
+                if gen_s_rated_mva is not None:
+                    s_arr = gen_s_rated_mva.get(z)
+                    if s_arr is not None:
+                        sa = np.asarray(s_arr, dtype=np.float64)
+                        m = min(ha.size, sa.size)
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            hpu.append(np.where(sa[:m] > 1e-9,
+                                                ha[:m] / sa[:m], np.nan))
             if qs:
                 qa = np.concatenate(qs); ha = np.concatenate(hs)
                 denom = qa + ha
                 with np.errstate(divide="ignore", invalid="ignore"):
                     u = np.where(denom > 1e-9, qa / denom, np.nan)
                 util_per_step[i] = float(np.nanmean(u))
+            if hpu:
+                mbar_pu_per_step[i] = float(np.nanmean(np.concatenate(hpu)))
         res_util = (float(np.nanmean(util_per_step))
                     if np.any(np.isfinite(util_per_step)) else np.nan)
+        m_bar_pu = (float(np.nanmean(mbar_pu_per_step))
+                    if np.any(np.isfinite(mbar_pu_per_step)) else np.nan)
 
         # Interface tracking-error RMS (groups x time).
         qe = q_iface_err_per_group(recs)
@@ -703,8 +757,9 @@ def cigre_summary_table(logs: Dict[str, List[MultiTSOIterationRecord]],
         rows.append({
             "variant":         name,
             "converged":       True,
-            "J_TS":            j_ts,
+            "rms_v_ts_pu":     rms_v_ts,
             "m_bar_mvar":      m_bar,
+            "m_bar_pu":        m_bar_pu,
             "res_util":        res_util,
             "rms_e_sts_mvar":  rms_e,
             "rms_q_tie_mvar":  rms_tie,

@@ -268,6 +268,36 @@ class TSOControllerConfig:
     optional).  Mirrors ``g_z_q_pcc``.  Default 0.0 = no slack-based
     bound enforcement on Q_tie."""
 
+    # ── Explicit reactive-reserve penalisation (optional, togglable) ────────
+    g_res_sg: float = 0.0
+    """Explicit reserve-penalisation weight for transmission-connected
+    SYNCHRONOUS GENERATORS.  Adds the term ``g_res_sg · Σ_i (r_SG,i)²`` to
+    the TSO objective, where
+    ``r_SG,i = (Q_gen,i − Q_mid,i) / Q_half,i`` is the *normalised* distance
+    of generator ``i``'s reactive output from the midpoint of its
+    state-dependent PQ-capability band ``[Q_min,i, Q_max,i]``
+    (``Q_mid = ½(Q_min+Q_max)``, ``Q_half = ½(Q_max−Q_min)``).  Minimising
+    the term keeps synchronous machines centred in their capability band,
+    preserving symmetric reactive reserve in both directions.  Q_gen is an
+    *output*, so the gradient is mapped to control space via the
+    sensitivities: ``2 · g_res_sg · (r_SG / Q_half)^T · ∂Q_gen/∂u``.
+    Default ``0.0`` keeps the term out of the objective entirely (reserve is
+    then minimised only *implicitly*, via the DSO cascade).  Toggle pattern
+    mirrors ``g_q_tie``.  See
+    :class:`configs.multi_tso_config.MultiTSOConfig.tso_g_res_sg`."""
+
+    g_res_der: float = 0.0
+    """Explicit reserve-penalisation weight for transmission-connected DER
+    (continuous, Q-controlled sgens).  Adds ``g_res_der · Σ_i (r_DER,i)²``
+    with ``r_DER,i = (Q_DER,i − Q_mid,i) / Q_half,i`` over each DER's
+    VDE-AR-N-4120 capability band.  Because ``Q_DER`` is a *direct* control
+    variable, the gradient lands straight on the DER control columns:
+    ``2 · g_res_der · (Q_DER − Q_mid) / Q_half²``.  Default ``0.0`` (off).
+    A weight separate from ``g_res_sg`` lets the operator prefer one resource
+    class over the other.  NOTE: DSO-connected DER reserve is intentionally
+    NOT penalised here — that belongs to the DSO (Layer-2) controllers.  See
+    :class:`configs.multi_tso_config.MultiTSOConfig.tso_g_res_der`."""
+
     # ── DER actuator: w-shift (vertical shift + V_ref reanchoring) ──────────
     # The DER block of the TSO action vector is the OFO-commanded
     # ``q_set`` (Mvar) at the reanchored V_ref of each DER.  The apply
@@ -1402,7 +1432,143 @@ class TSOController(BaseOFOController):
             dQtie_du = H[q_tie_row_start:q_tie_row_start + n_tie, :]
             grad_f += 2.0 * self.config.g_q_tie * (q_tie_err @ dQtie_du)
 
+        # --- Component 5: Explicit reactive-reserve penalisation (optional) ---
+        # Keep TS actuators centred in their (state-dependent) Q-capability
+        # band so symmetric reactive reserve is retained.  Each actuator's
+        # normalised reserve coordinate is
+        #     r_i = (Q_i - Q_mid,i) / Q_half,i,
+        # with Q_mid = ½(Q_min+Q_max), Q_half = ½(Q_max-Q_min); the penalty
+        # g_res · Σ_i r_i² has gradient 2·g_res·(Q_i - Q_mid)/Q_half² w.r.t Q_i.
+        # Two independent weights (SG vs DER) let the operator prefer one
+        # resource class over the other.  When a weight is 0 its block is
+        # skipped — the term is then not part of the objective (mirrors the
+        # g_q_tie toggle).  DSO-connected DER reserve is intentionally NOT
+        # penalised here — it belongs to the DSO (Layer-2) controllers.
+        _RES_HALF_EPS = 1e-6  # Mvar; bands narrower than this are treated as
+        #                       collapsed (no reserve preference, avoids /0).
+
+        # SG reserve: Q_gen is an OUTPUT (rows q_gen_row_start..+n_gen of H),
+        # so the per-gen coefficient is mapped to control space via ∂Q_gen/∂u.
+        if (
+            n_gen > 0
+            and self.config.g_res_sg != 0.0
+            and self.actuator_bounds.gen_params is not None
+            and len(measurement.gen_p_mw) == n_gen
+            and len(measurement.gen_vm_pu) == n_gen
+            and len(measurement.gen_q_mvar) == n_gen
+        ):
+            if not H_built:
+                H_bus = self._build_sensitivity_matrix()
+                H = self._expand_H_to_der_level(H_bus)
+                H_built = True
+
+            q_min_g, q_max_g = self.actuator_bounds.compute_gen_q_bounds(
+                measurement.gen_p_mw, measurement.gen_vm_pu,
+            )
+            q_mid_g = 0.5 * (q_max_g + q_min_g)
+            q_half_g = 0.5 * (q_max_g - q_min_g)
+            q_gen = np.asarray(measurement.gen_q_mvar, dtype=np.float64)
+
+            coeff_sg = np.zeros(n_gen, dtype=np.float64)
+            ok_g = q_half_g > _RES_HALF_EPS
+            coeff_sg[ok_g] = (
+                2.0 * self.config.g_res_sg
+                * (q_gen[ok_g] - q_mid_g[ok_g]) / (q_half_g[ok_g] ** 2)
+            )
+            # OOS generators contribute nothing (their Q_gen row is already
+            # zeroed in H, but guard the coefficient too for clarity/safety).
+            for k in range(n_gen):
+                if self._oos_gen_mask[k]:
+                    coeff_sg[k] = 0.0
+
+            q_gen_row_start = n_v + n_pcc + n_i
+            dQgen_du = H[q_gen_row_start:q_gen_row_start + n_gen, :]
+            reserve_contrib_sg = coeff_sg @ dQgen_du
+            grad_f += reserve_contrib_sg
+            self._debug_reserve_term("SG", reserve_contrib_sg, grad_f, extra={
+                "r_norm": float(np.linalg.norm(
+                    np.where(ok_g, (q_gen - q_mid_g) / np.where(ok_g, q_half_g, 1.0), 0.0)
+                )),
+                "max_abs_r": float(np.max(np.abs(
+                    np.where(ok_g, (q_gen - q_mid_g) / np.where(ok_g, q_half_g, 1.0), 0.0)
+                )) if n_gen else 0.0),
+            })
+
+        # DER reserve: Q_DER is a DIRECT control variable (first n_der_ctrl
+        # columns of u), so the coefficient lands straight on grad_f — no
+        # sensitivity mapping is needed.
+        if self.config.g_res_der != 0.0:
+            mapping = self.config.der_mapping
+            n_der_ctrl = (
+                mapping.n_der if mapping is not None
+                else len(self.config.der_indices)
+            )
+            der_p = self._extract_der_active_power(measurement)
+            if n_der_ctrl > 0 and len(der_p) == n_der_ctrl:
+                q_min_d, q_max_d = self.actuator_bounds.compute_der_q_bounds(der_p)
+                q_mid_d = 0.5 * (q_max_d + q_min_d)
+                q_half_d = 0.5 * (q_max_d - q_min_d)
+                if self._u_current is not None:
+                    q_der = self._u_current[:n_der_ctrl]
+                else:
+                    # First call: anchor at the midpoint → zero reserve term.
+                    q_der = q_mid_d
+                coeff_der = np.zeros(n_der_ctrl, dtype=np.float64)
+                ok_d = q_half_d > _RES_HALF_EPS
+                coeff_der[ok_d] = (
+                    2.0 * self.config.g_res_der
+                    * (q_der[ok_d] - q_mid_d[ok_d]) / (q_half_d[ok_d] ** 2)
+                )
+                grad_f[:n_der_ctrl] += coeff_der
+                _contrib_der = np.zeros_like(grad_f)
+                _contrib_der[:n_der_ctrl] = coeff_der
+                self._debug_reserve_term("DER", _contrib_der, grad_f)
+
         return grad_f
+
+    def _debug_reserve_term(
+        self,
+        tag: str,
+        contrib: NDArray[np.float64],
+        grad_f: NDArray[np.float64],
+        extra: Optional[dict] = None,
+    ) -> None:
+        """Opt-in diagnostic for the explicit reserve term (Component 5).
+
+        Enabled only when the environment variable ``QOFO_DEBUG_RESERVE`` is
+        set (to any non-empty value).  Prints, for the first few TS steps of
+        this controller, the magnitude of the reserve gradient contribution
+        and — crucially — the implied OFO step ``|contrib| / g_w`` per actuator
+        class, so a *large* reserve gradient that is *frozen* by a large
+        ``g_w`` (e.g. ``g_w_gen``) is visible.  No effect on the dispatch.
+        """
+        import os
+        if not os.environ.get("QOFO_DEBUG_RESERVE"):
+            return
+        cnt = getattr(self, "_reserve_dbg_count", 0)
+        if cnt >= 6:  # a handful of steps is enough to diagnose
+            return
+        self._reserve_dbg_count = cnt + 1
+        contrib = np.asarray(contrib, dtype=np.float64)
+        g_w = np.asarray(getattr(self.params, "g_w", np.ones_like(contrib)),
+                         dtype=np.float64)
+        if g_w.shape != contrib.shape:
+            g_w = np.broadcast_to(g_w, contrib.shape)
+        # Implied (un-clamped, un-alpha'd) OFO step magnitude per control.
+        step = np.where(g_w > 0, contrib / g_w, 0.0)
+        nz = np.flatnonzero(np.abs(contrib) > 0)
+        msg = (
+            f"[reserve:{tag}] {self.controller_id} call#{self._reserve_dbg_count} "
+            f"||contrib||={np.linalg.norm(contrib):.4g} "
+            f"||grad_f||={np.linalg.norm(grad_f):.4g} "
+            f"max|contrib|={np.max(np.abs(contrib)) if contrib.size else 0.0:.4g} "
+            f"max|step=contrib/g_w|={np.max(np.abs(step)) if step.size else 0.0:.4g} "
+            f"nonzero_cols={nz.tolist()} "
+            f"g_w@nz={[float(g_w[i]) for i in nz][:8]}"
+        )
+        if extra:
+            msg += " " + " ".join(f"{k}={v:.4g}" for k, v in extra.items())
+        print(msg)
 
     def _build_sensitivity_matrix(self) -> NDArray[np.float64]:
         """

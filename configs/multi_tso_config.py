@@ -422,6 +422,15 @@ class MultiTSOConfig:
     live_plot_system:     bool = False
     """Enable Figure 3 — SYSTEM POWER FLOW live plot."""
 
+    live_plot_tracking:   bool = False
+    """Enable Figure 4 — TRACKING ERRORS & RESERVES live plot.
+
+    Six tiles: per-zone and system-wide TS voltage tracking RMS error,
+    per-DSO TSO-DSO interface-Q tracking RMS error, system-wide tie-line-Q
+    tracking RMS error, plus synchronous-generator and TSO-DER reactive-power
+    reserve r_Q(P) (one line per machine / DER).  See
+    :class:`visualisation.plot_tracking.TrackingLivePlotter`."""
+
     live_plot_use_tex:    bool = False
     """When True, live plots enable ``text.usetex`` with a classicthesis-
     style mathpazo + eulervm preamble.  Requires a working LaTeX install

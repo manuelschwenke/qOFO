@@ -156,13 +156,13 @@ def make_cigre_config() -> MultiTSOConfig:
         sensitivity_update_interval=1E6,
         verbose=1,
         # Live plots OFF for the batch sweep (see module docstring).
-        live_plot_controller=False,
-        live_plot_cascade=False,
+        live_plot_controller=True,
+        live_plot_cascade=True,
         live_plot_system=False,
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
         # ── Profile & contingency settings ──
-        start_time=datetime(2016, 1, 5, 12, 0),
+        start_time=datetime(2016, 6, 1, 12, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[

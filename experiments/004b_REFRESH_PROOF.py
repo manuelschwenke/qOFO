@@ -37,11 +37,11 @@ Date: 2026-05-27
 """
 from __future__ import annotations
 
+import importlib
 import os
 import pickle
 import sys
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -51,45 +51,17 @@ from configs.multi_tso_config import MultiTSOConfig
 from experiments.helpers.records import MultiTSOIterationRecord
 from experiments.runners import run_multi_tso_dso
 
+# ``004_LOCAL_VS_FULL_SENS`` starts with a digit, so import via importlib.
+_sens = importlib.import_module("experiments.004_LOCAL_VS_FULL_SENS")
+make_004_base_config = _sens.make_base_config
+
 
 def make_base_config() -> MultiTSOConfig:
-    """Same OFO weights as 004, 240-min profile, NO contingencies."""
-    cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60.0 * 4.0,
-        tso_period_s=60.0 * 3.0,
-        dso_period_s=20.0,
-        g_v=3e5,
-        g_q=250,
-        tso_g_q_tie=1.0,
-        dso_g_v=20000.0,
-        dso_g_qi=0.0,
-        dso_lambda_qi=0.95,
-        dso_q_integral_max_mvar=200.0,
-        dso_gamma_oltc_q=0.0,
-        g_w_der=10,
-        g_w_gen=5e7,
-        g_w_pcc=50,
-        g_w_tso_oltc=100,
-        install_tso_tertiary_shunts=False,
-        g_w_tso_shunt=10000,
-        g_w_dso_der=1000,
-        g_w_dso_oltc=40,
-        use_fixed_zones=True,
-        run_stability_analysis=False,
-        sensitivity_update_interval=int(1e6),
-        verbose=1,
-        live_plot_controller=False,
-        live_plot_cascade=False,
-        live_plot_system=False,
-        start_time=datetime(2016, 1, 5, 8, 0),
-        use_profiles=True,
-        use_zonal_gen_dispatch=True,
-        contingencies=[],  # <- key difference vs 004
-        tso_mode="ofo",
-        dso_mode="ofo",
-    )
-    cfg.scenario = "wind_replace"
-    cfg.warmup_s = 0.0
+    """Same config as 004's FULL-vs-LOCAL base, but a 240-min profile and
+    NO contingencies (refresh-vs-frozen proof needs a clean steady ramp)."""
+    cfg = make_004_base_config()
+    cfg.n_total_s = 60.0 * 60.0 * 4.0   # 240 min
+    cfg.contingencies = []
     return cfg
 
 

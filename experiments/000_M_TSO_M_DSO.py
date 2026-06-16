@@ -236,18 +236,17 @@ def main_comparison() -> None:
 #  Entry point
 # =============================================================================
 
-def main() -> None:
-    """
-    Run the multi-TSO-DSO simulation with default settings and print results.
+def make_config() -> MultiTSOConfig:
+    """Run configuration for the default multi-TSO / multi-DSO run (edit here).
 
-    Invoke from the project root:
-        python experiments/000_M_TSO_M_DSO.py
+    Single place to change the horizon, objective weights, OFO timing,
+    profile and contingency schedule for ``main()``.  ``main_comparison()``
+    keeps its own paired config.
     """
-
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 36,      # 300-min simulation
-        tso_period_s=60.0 * 3,        # TS-OFO every 6 min
-        dso_period_s=10.0,            # STS-OFO each step (dt_s=60 >= 10)
+        n_total_s=60.0 * 60 * 36,      # 36-hour (2160-min) simulation
+        tso_period_s=60.0 * 3,        # TS-OFO every 3 min
+        dso_period_s=10.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
         g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
         g_q=300,                      # DSO Q-tracking
         tso_g_q_tie=0,
@@ -280,10 +279,11 @@ def main() -> None:
         run_stability_analysis=False,
         sensitivity_update_interval=1E6,
         verbose=1,
-        # Live plots OFF for the batch sweep (see module docstring).
-        live_plot_controller=True,
-        live_plot_cascade=True,
+        # Live plotting on (controller + cascade); system overview off.
+        live_plot_controller=False,
+        live_plot_cascade=False,
         live_plot_system=False,
+        live_plot_tracking=True,
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
         # ── Profile & contingency settings ──
@@ -315,6 +315,18 @@ def main() -> None:
             ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
         ],
     )
+    return cfg
+
+
+def main() -> None:
+    """
+    Run the multi-TSO-DSO simulation with default settings and print results.
+
+    Invoke from the project root:
+        python experiments/000_M_TSO_M_DSO.py
+    """
+
+    cfg = make_config()
     log = run_multi_tso_dso(cfg)
     print(f"\nSimulation complete. {len(log)} steps recorded.")
 

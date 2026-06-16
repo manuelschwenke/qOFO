@@ -40,22 +40,13 @@ from experiments.runners import run_cascade
 # =============================================================================
 
 
-def main():
-    import time as _time
+def make_config():
+    """Run configuration for the single TSO-DSO cascade (edit here).
 
+    This is the one place to change all simulation, objective-weight,
+    OFO and generator-capability parameters for a 001 run.
+    """
     from configs.cascade_config import CascadeConfig
-    from core.results_storage import save_results
-
-    start_min = 600
-    duration = 120
-    step = 1
-    start_sp = 1.05
-    end_sp = 1.07
-
-    num_steps = duration // step
-    delta = (end_sp - start_sp) / num_steps
-
-# ── Configuration (single place for ALL parameters) ───────────────────
     config = CascadeConfig(
         # Simulation
         v_setpoint_pu=1.05,
@@ -134,6 +125,15 @@ def main():
         # ],
         contingencies=[],
     )
+    return config
+
+
+def main():
+    import time as _time
+
+    from core.results_storage import save_results
+
+    config = make_config()
 
     # ── Run ────────────────────────────────────────────────────────────────
     t0 = _time.perf_counter()

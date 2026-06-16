@@ -91,7 +91,7 @@ measurement sets, then post-multiplied on the DER columns by
 ``∂y/∂Q_DER`` to ``∂y/∂q_set`` (same matrix as the earlier q_set
 formulation).  Cross-coupling from the rest of the grid is implicit
 in the inverted full Jacobian.  Layout assumes the w-shift actuator
-and no grid-forming DER (both hold in 003).
+(holds in 003).
 
 Predictor contract::
 
@@ -201,8 +201,8 @@ def make_base_config() -> MultiTSOConfig:
     cfg.tso_period_s = 180.0          # cosmetic: TSO never steps anyway
     cfg.dso_period_s = 20.0
     cfg.warmup_s = 0.0
-    start_time = datetime(2016, 9, 7, 8, 0)
-    use_profiles = True
+    cfg.start_time = datetime(2016, 9, 7, 8, 0)
+    cfg.use_profiles = True
 
     # ---- Plant-side Q(V) loop damping ----------------------------------
     # 44 QVLocalLoops (4 TSO STATCOMs + 40 DSO sgens) iterate in parallel
@@ -366,8 +366,8 @@ def get_dso_h_view(
         raise RuntimeError(
             f"H-view col count mismatch: counted {len(col_kinds)} (n_der="
             f"{len(cfg.der_indices)}) but H has {H_full.shape[1]} cols.  "
-            f"Layout assumes the w-shift actuator and no grid-forming DER; "
-            f"V_gf or Q_realized splicing would invalidate this view."
+            f"Layout assumes the w-shift actuator; Q_realized splicing "
+            f"would invalidate this view."
         )
 
     # ── Filter masks ─────────────────────────────────────────────────────
@@ -489,9 +489,9 @@ def install_pe_noise(
 
     Notes
     -----
-    Layout assumption: ``u_new = [q_set (n_der) | V_gf (n_gf) |
-    OLTC (n_oltc) | shunt (n_shunts)]`` with the DER block at indices
-    ``[0, n_der)``.  Holds for 003 (no V_gf, no shunts).  If the layout
+    Layout assumption: ``u_new = [q_set (n_der) | OLTC (n_oltc) |
+    shunt (n_shunts)]`` with the DER block at indices
+    ``[0, n_der)``.  Holds for 003 (no shunts).  If the layout
     changes in the future this slicing must be revisited.
 
     Δu  =  dso_ctrl._u_current   -  u_prev_stored        # = w(k) + ε(k)

@@ -69,6 +69,7 @@ Date: 2026-05-27
 """
 from __future__ import annotations
 
+import importlib
 import os
 import pickle
 import sys
@@ -84,6 +85,10 @@ from configs.multi_tso_config import MultiTSOConfig
 from experiments.helpers.records import ContingencyEvent, MultiTSOIterationRecord
 from experiments.runners import run_multi_tso_dso
 
+# ``002_M_TSO_M_DSO_COMPARE`` starts with a digit, so import via importlib.
+_compare = importlib.import_module("experiments.002_M_TSO_M_DSO_COMPARE")
+make_002_base_config = _compare.make_base_config
+
 
 # ---------------------------------------------------------------------------
 #  Configuration
@@ -93,64 +98,26 @@ from experiments.runners import run_multi_tso_dso
 def make_base_config() -> MultiTSOConfig:
     """Shared simulation conditions for the FULL-vs-LOCAL comparison.
 
-    Mirrors the C (cascade OFO) configuration from
-    ``experiments/002_M_TSO_M_DSO_COMPARE.py`` so the only changing
-    factor between the two runs is the sensitivity-model knob.  Live
-    plotting is OFF (the script is meant for batch comparison) and the
-    horizon is shortened to 60 minutes by default to keep the
-    side-by-side run tractable; bump ``n_total_s`` if a longer profile
-    is wanted.
+    Derives from the cascade-OFO 'C' configuration in
+    ``002_M_TSO_M_DSO_COMPARE.make_base_config()`` (same weights, ~180-min
+    wind_replace profile, contingency-free base timing) and changes only the
+    knobs this comparison needs.  The FULL/LOCAL sensitivity-model axis is set
+    per scenario in ``SCENARIOS`` below; the base leaves both local-sensitivity
+    flags OFF.
     """
-    cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60.0 * 3.0,    # 4-hour profile
-        tso_period_s=60.0 * 3.0,        # TSO every 3 min
-        dso_period_s=20.0,              # DSO every 20 s
-        # ── Objective weights (same as 002 C-scenario) ──────────────────
-        g_v=3e5,
-        g_q=250,
-        tso_g_q_tie=1.0,
-        dso_g_v=20000.0,
-        dso_g_qi=0.0,
-        dso_lambda_qi=0.95,
-        dso_q_integral_max_mvar=200.0,
-        dso_gamma_oltc_q=0.0,
-        g_w_der=10,
-        g_w_gen=5e7,
-        g_w_pcc=50,
-        g_w_tso_oltc=100,
-        install_tso_tertiary_shunts=False,
-        g_w_tso_shunt=10000,
-        g_w_dso_der=1000,
-        g_w_dso_oltc=40,
-        use_fixed_zones=True,
-        run_stability_analysis=False,
-        sensitivity_update_interval=int(1e6),  # no in-loop refresh
-        verbose=1,
-        # Live plotting OFF for batch comparison
-        live_plot_controller=False,
-        live_plot_cascade=False,
-        live_plot_system=False,
-        # ── Profile & contingency timeline ──────────────────────────────
-        start_time=datetime(2016, 1, 5, 8, 0),
-        use_profiles=True,
-        use_zonal_gen_dispatch=True,
-        contingencies=[
-            ContingencyEvent(minute=30, element_type="gen", element_index=2,
-                             action="trip"),
-            ContingencyEvent(minute=120, element_type="gen", element_index=2,
-                             action="restore"),
-            ContingencyEvent(minute=90, element_type="load", bus=27,
-                             p_mw=200, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=150, element_type="load", bus=27,
-                             p_mw=200, q_mvar=100, action="trip"),
-        ],
-        # Cascade OFO at both layers — both modes share this so only the
-        # sensitivity-model axis varies.
-        tso_mode="ofo",
-        dso_mode="ofo",
-    )
-    cfg.scenario = "wind_replace"
-    cfg.warmup_s = 0.0
+    cfg = make_002_base_config()
+    cfg.local_sensitivities_tso = False
+    cfg.local_sensitivities_dso = False
+    cfg.g_w_pcc = 50                  # NOTE: 002's C uses 10; kept at 50 for parity with prior 004 runs.
+    cfg.live_plot_controller = False  # headless batch comparison
+    cfg.live_plot_cascade = False
+    # 004's own contingency timeline (gen-2 trip/restore + one load step).
+    cfg.contingencies = [
+        ContingencyEvent(minute=30, element_type="gen", element_index=2, action="trip"),
+        ContingencyEvent(minute=120, element_type="gen", element_index=2, action="restore"),
+        ContingencyEvent(minute=90, element_type="load", bus=27, p_mw=200, q_mvar=100, action="connect"),
+        ContingencyEvent(minute=150, element_type="load", bus=27, p_mw=200, q_mvar=100, action="trip"),
+    ]
     return cfg
 
 

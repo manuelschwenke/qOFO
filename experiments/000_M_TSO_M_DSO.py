@@ -244,7 +244,7 @@ def make_config() -> MultiTSOConfig:
     keeps its own paired config.
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 36,      # 36-hour (2160-min) simulation
+        n_total_s=60.0 * 60 * 5,      # 36-hour (2160-min) simulation
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
         dso_period_s=10.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
         g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
@@ -258,9 +258,9 @@ def make_config() -> MultiTSOConfig:
         dso_q_integral_max_mvar=200.0,
         dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
         # ── TSO weights (w-shift closed-loop curvature) ──
-        g_w_der=20,
-        g_w_gen=5e7,
-        g_w_pcc=150,
+        g_w_der=100,
+        g_w_gen=1e8,
+        g_w_pcc=300,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
         g_w_tso_shunt=10000,
@@ -280,14 +280,14 @@ def make_config() -> MultiTSOConfig:
         sensitivity_update_interval=1E6,
         verbose=1,
         # Live plotting on (controller + cascade); system overview off.
-        live_plot_controller=False,
-        live_plot_cascade=False,
+        live_plot_controller=True,
+        live_plot_cascade=True,
         live_plot_system=False,
         live_plot_tracking=True,
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
         # ── Profile & contingency settings ──
-        start_time=datetime(2016, 1, 5, 8, 0),
+        start_time=datetime(2016, 1, 5, 12, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[

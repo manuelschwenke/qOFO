@@ -156,32 +156,19 @@ def make_cigre_config() -> MultiTSOConfig:
         sensitivity_update_interval=1E6,
         verbose=1,
         # Live plots OFF for the batch sweep (see module docstring).
-        live_plot_controller=True,
-        live_plot_cascade=True,
+        live_plot_controller=False,
+        live_plot_cascade=False,
         live_plot_system=False,
+        live_plot_tracking=True,
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
         # ── Profile & contingency settings ──
-        start_time=datetime(2016, 6, 1, 12, 0),
+        start_time=datetime(2016, 1, 5, 12, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
-            # NOTE: the original schedule also tripped lines 18 (min 45-150) and
-            # 5 (min 60-150).  With gen 2 (G4_bus32, ~680 MW in zone 3) tripped
-            # at min 120 *while both lines are out*, zone 3 loses its local
-            # source and its remaining ties simultaneously -> the power flow is
-            # genuinely infeasible (pp.diagnostic: converges only at 0.1 % load).
-            # Per the user's instruction the line trips are removed; the gen and
-            # load events are retained.  gen-2 trip alone at min 120 converges.
-            # Generator trip + restore.
             ContingencyEvent(minute=60, element_type="gen",  element_index=2,  action="trip"),
             ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
-            # Additional load connected then disconnected at bus 11.
-            # Reduced from the originally-requested 400 MW / 200 Mvar: with gen 2
-            # still tripped (out 120-270) the 200 Mvar step caused the cos phi=1
-            # baseline (V1) to collapse at min 180.  200 MW / 100 Mvar (the
-            # proven-stable magnitude from the 002 comparison) keeps the event
-            # while all four variants converge.
             ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=300, action="connect"),
             ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=300, action="trip"),
             ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),

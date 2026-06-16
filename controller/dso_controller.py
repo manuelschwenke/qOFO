@@ -141,6 +141,20 @@ class DSOControllerConfig:
 
     use_qv_local_loop: bool = False
     qv_apply_mode: str = "q_shim"
+    apply_qv_h_transform: bool = False
+    """Apply the closed-loop sensitivity transform
+    ``T' = (I + diag(K) . S_VQ)^{-1}`` to the DER columns of H (and the
+    matching q_set input-bound scaling via ``T'_bb``).
+
+    Default ``False`` => bare ``H = dy/dQ_DER`` and physical Q_DER input
+    bounds, matching the reference-anchored DER model documented in the
+    dissertation (Ch.4 sec.4.6.3): the reanchoring centres the deadband at
+    every dispatch, so the commanded q_set is realised one-to-one
+    (dQ_DER/dq_set = 1 at the dispatch point) and no closed-loop transform
+    is needed.
+
+    Set ``True`` to restore the legacy sloping-segment T' correction
+    (e.g. to reproduce results generated before 2026-06-16)."""
     qv_v_ref_min_pu: float = 0.95
     qv_v_ref_max_pu: float = 1.10
 
@@ -1288,8 +1302,15 @@ class DSOController(BaseOFOController):
         # enforced by :meth:`_compute_input_bounds`, which maps the
         # physical Q_DER envelope to q_set bounds via T'_bb.
         if not self.config.ofo_in_v_ref_mode and unique_buses:
-            T_prime = self._compute_w_shift_transform_T_prime(
-                unique_buses, der_bus_indices,
+            # Gated by ``apply_qv_h_transform`` (default False => bare H).
+            # When disabled, T_prime is None so the cache-clearing branch
+            # below runs and _compute_input_bounds reverts to physical
+            # Q_DER bounds -- matching the dissertation's bare-H model.
+            T_prime = (
+                self._compute_w_shift_transform_T_prime(
+                    unique_buses, der_bus_indices,
+                )
+                if self.config.apply_qv_h_transform else None
             )
             if T_prime is not None:
                 n_b = len(unique_buses)

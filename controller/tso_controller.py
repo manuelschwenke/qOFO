@@ -283,6 +283,17 @@ class TSOControllerConfig:
     the column is present the per-DER value is read from there and this
     field is ignored."""
 
+    apply_qv_h_transform: bool = False
+    """Apply the closed-loop sensitivity transform
+    ``T' = (I + diag(K) . S_VQ)^{-1}`` to the DER columns of H.
+
+    Default ``False`` => bare ``H = dy/dQ_DER``, matching the
+    reference-anchored DER model documented in the dissertation
+    (Ch.4 sec.4.6.3): the reanchoring centres the deadband at every
+    dispatch, so the commanded q_set is realised one-to-one and no
+    closed-loop transform is needed.  Set ``True`` to restore the legacy
+    sloping-segment T' correction (mirrors the DSO controller)."""
+
     qv_saturation_eps_mvar: float = 1.0
     """Tolerance for the active-set saturation detector.  When realised
     Q is within this tolerance of either capability rail, the
@@ -1964,7 +1975,9 @@ class TSOController(BaseOFOController):
         #     T' = (I + diag(K) · S_VQ)^{-1}
         # which maps the network-level ``∂y/∂Q`` to ``∂y/∂q_set`` under
         # the local Q(V) droop (mirrors the DSO controller).
-        if n_der > 0:
+        # Gated by ``apply_qv_h_transform`` (default False => bare H,
+        # matching the dissertation's reference-anchored model).
+        if n_der > 0 and self.config.apply_qv_h_transform:
             T_prime = self._compute_w_shift_transform_T_prime(der_bus_indices)
             if T_prime is not None:
                 H[:, :n_der] = H[:, :n_der] @ T_prime

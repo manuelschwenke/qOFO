@@ -71,14 +71,7 @@ BO_DIMS: tuple[BOParam, ...] = (
     #BOParam("g_w_tso_shunt", log=True, low=1e-1, high="ceil", fallback_high=1e4),
     BOParam("g_w_dso_der",   log=True, low=1e-1, high=1e3), # high="ceil", fallback_high=1e4),
     BOParam("g_w_dso_oltc",  log=True, low=1, high=1e5), # high="ceil", fallback_high=1e4),
-    # ── Stage-2 (grid-forming + Q(V) local loop) knobs ─────────────────
-    # g_w_gridforming is the only stage-2 g_w that actually affects the
-    # MIQP step in the current controller setup — it must dominate the
-    # V_gf curvature ``g_v · (∂V/∂vm_pu)² ≈ 5·10⁵``.  Below ``1e6`` the
-    # TSO V_gf chases DSO transients; above ``1e8`` the converter
-    # response slows toward synch-machine timescales.  Search box
-    # spans the validated band [1e6, 1e8].
-    BOParam("g_w_gridforming", log=True, low=1e6, high=1e8),
+    # ── Stage-2 (Q(V) local loop) knobs ─────────────────
     # g_w_dso_der_vref is empirically inert in the current setup
     # (curvature dominates).  Pinned in FIXED_OVERRIDES rather than
     # tuned to avoid wasting BO trials on a vacuous coordinate.

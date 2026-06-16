@@ -63,10 +63,6 @@ from numpy.typing import NDArray
 # ── Ensure project root is on sys.path when imported as a package module ─────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from analysis.stability_analysis import (
-    analyse_multi_zone_stability,
-    MultiZoneStabilityResult,
-)
 from analysis.reachability import ReachabilityMonitor, ReachabilityViolation
 from controller.base_controller import OFOParameters
 from controller.central_controller import CentralControllerConfig, CentralOFOController
@@ -80,12 +76,7 @@ from core.measurement import (
     measure_zone_dso,
     measure_central,
 )
-from core.network_state import NetworkState
-from core.reporting import (
-    load_and_apply_tuned_params,
-    write_stability_analysis_markdown,
-    write_tuned_params_json,
-)
+from core.reporting import load_and_apply_tuned_params
 from core.profiles import (
     DEFAULT_PROFILES_CSV,
     apply_profiles,
@@ -97,8 +88,6 @@ from network.ieee39 import (
     add_hv_networks,
     build_ieee39_net,
     HVNetworkInfo,
-    IEEE39NetworkMeta,
-    remove_generators,
     tag_der_q_modes,
 )
 from network.zone_partition import (
@@ -111,7 +100,6 @@ from network.zone_partition import (
 )
 from configs.multi_tso_config import MultiTSOConfig
 from experiments.helpers import (
-    ContingencyEvent,
     MultiTSOIterationRecord,
     _apply_contingency,
     _network_state,
@@ -135,7 +123,6 @@ from controller.der_qv_local_loop import (
     QVLocalLoop,
     clear_seed_lu_cache,
     install_der_q_loops,
-    install_qv_local_loops,
     seed_qv_equilibrium,
 )
 
@@ -592,7 +579,7 @@ def run_multi_tso_dso(
 
         # ── G_w diagonal for this zone's u vector ────────────────────────────
         gw_diag = zd.gw_diagonal()
-        # Q_cor mode: no V_gf actuator → no Q_gf slacks.
+        # Output-slack weights in g_z (output-vector) order.
         gz_diag_target = np.concatenate([
             np.full(len(zd.v_bus_indices),     config.g_z_voltage),  # V slacks
             np.full(len(zd.pcc_trafo_indices), config.g_z_q_pcc),    # Q_PCC slacks
@@ -850,7 +837,7 @@ def run_multi_tso_dso(
         n_iface = len(interface_trafos)
         n_v = len(v_buses)
         n_i = len(hv_lines)
-        # Q_cor mode: no V_gf, no Q_realized soft rows.
+        # Q_cor mode: no Q_realized soft rows.
         dso_gz_target = np.concatenate([
             np.full(n_iface, config.g_z_interface),  # interface-Q slacks
             np.full(n_v,     config.g_z_voltage),    # voltage slacks
@@ -1071,7 +1058,7 @@ def run_multi_tso_dso(
         )
 
         # ── OFO weights.  g_w order = control-vector order
-        #    [ Q_DER | V_gen | s_OLTC2w | s_shunt | s_OLTC3w ] (PCC/V_gf empty).
+        #    [ Q_DER | V_gen | s_OLTC2w | s_shunt | s_OLTC3w ] (PCC empty).
         c_gw_der = np.array(
             [config.g_w_der if s in tso_der_set else config.g_w_dso_der
              for s in c_der_indices],
@@ -1084,7 +1071,7 @@ def run_multi_tso_dso(
             np.full(len(c_shunt_buses), config.g_w_tso_shunt),
             np.full(len(c_oltc3w), config.g_w_dso_oltc),
         ])
-        # g_z order = output-vector order [ V | I | Q_gen ] (Q_PCC/Q_gf/Q_tie empty).
+        # g_z order = output-vector order [ V | I | Q_gen ] (Q_PCC/Q_tie empty).
         c_gz = np.concatenate([
             np.full(n_v_c, config.g_z_voltage),
             np.full(len(c_lines), config.g_z_current),
@@ -1722,7 +1709,7 @@ def run_multi_tso_dso(
         print(f"  [T] coordinator.compute_M_blocks: {perf_counter() - _t:.2f} s")
 
     _t = perf_counter()
-    contraction_info = coordinator.check_contraction()
+    coordinator.check_contraction()
     if verbose >= 1:
         print(f"  [T] coordinator.check_contraction: {perf_counter() - _t:.2f} s")
         print(f"  [T] TOTAL init after [9]: {perf_counter() - _t_init_total:.2f} s")
@@ -1730,7 +1717,6 @@ def run_multi_tso_dso(
     # Stability analysis is deferred until ``config.stability_analysis_at_s``
     # simulated seconds.  Running it at t=0 with an uncontrolled initial
     # operating point produces misleading curvature matrices.
-    stab_result = None
     _stability_analysis_done = False
 
     # ── Optionally load tuned params from a previous run ────────────────
@@ -1767,13 +1753,10 @@ def run_multi_tso_dso(
     # STEP 12: Q-tracking capacity diagnostic
     # =========================================================================
     if verbose >= 2:
-        import math as _math
         print()
         print("[12] Q-tracking capacity diagnostic")
         # DER Q capacity (VDE-AR-N 4120 v2)
         for did, hv in hv_info_map.items():
-            sgens = net.sgen.loc[list(hv.sgen_indices)]
-            res_sg = net.res_sgen.loc[list(hv.sgen_indices)]
             tot_qmin, tot_qmax, tot_qact = 0.0, 0.0, 0.0
             for idx in hv.sgen_indices:
                 sn = net.sgen.at[idx, "sn_mva"]
@@ -1867,6 +1850,7 @@ def run_multi_tso_dso(
     _plotter_tso = None
     _plotter_dso = None
     _plotter_sys = None
+    _plotter_track = None
 
     if config.live_plot_controller:
         from visualisation.plot_tso_controller import TSOControllerLivePlotter
@@ -1878,7 +1862,6 @@ def run_multi_tso_dso(
                 z: len(getattr(zd, "shunt_bus_indices", []) or [])
                 for z, zd in zone_defs.items()
             },
-            n_gridforming_per_zone={z: 0 for z in zone_defs},
             v_setpoint_pu=config.v_setpoint_pu,
             v_min_pu=0.9, v_max_pu=1.1,
             sub_minute=False, update_every=1, slot_idx=0,
@@ -1923,6 +1906,37 @@ def run_multi_tso_dso(
             interface_trafo_ids=_interface_trafo_ids,
             zone_gen_indices={z: list(zd.gen_indices) for z, zd in zone_defs.items()},
             gen_limits_static=gen_limits_static,
+            sub_minute=False, update_every=1, slot_idx=2,
+            layout=config.live_plot_layout,
+            use_tex=config.live_plot_use_tex,
+        )
+
+    if config.live_plot_tracking:
+        from visualisation.plot_tracking import TrackingLivePlotter
+        # Per-DSO interface-trafo key map, matching the record's trafo_key
+        # convention "{dso_id}|trafo_{idx}" (OFO controllers when present,
+        # else the local-DSO HV-network fallback — see SystemPowerFlow above).
+        if dso_controllers:
+            _track_trafo_keys = {
+                did: [f"{did}|trafo_{t}" for t in ctrl.config.interface_trafo_indices]
+                for did, ctrl in dso_controllers.items()
+            }
+        else:
+            _track_trafo_keys = {
+                hv.net_id: [f"{hv.net_id}|trafo_{t}" for t in hv.coupling_trafo_indices]
+                for hv in meta.hv_networks
+            }
+        # Tie-Q tracking reference per zone-pair: the configured inter-zone
+        # tie-flow setpoint.  ZoneDefinition.q_tie_setpoints_mvar currently
+        # defaults to zeros (no commanded tie exchange), so the plotter's
+        # default reference of 0.0 Mvar is used; wire a non-zero per-pair map
+        # here if/when commanded tie setpoints are introduced.
+        _plotter_track = TrackingLivePlotter(
+            zone_ids=zone_ids_sorted,
+            n_v_bus_per_zone={z: len(zd.v_bus_indices) for z, zd in zone_defs.items()},
+            dso_ids=dso_ids,
+            dso_trafo_keys=_track_trafo_keys,
+            tie_line_pairs=sorted(tie_line_map.keys()),
             sub_minute=False, update_every=1, slot_idx=2,
             layout=config.live_plot_layout,
             use_tex=config.live_plot_use_tex,
@@ -2489,7 +2503,6 @@ def run_multi_tso_dso(
                 for _k, _t in enumerate(zone_defs[z].pcc_trafo_indices):
                     last_pcc_set_per_trafo[int(_t)] = float(rec.zone_q_pcc_set[z][_k])
                 rec.zone_v_gen[z]         = u[off:off+n_gen].copy(); off += n_gen
-                rec.zone_v_gf[z]          = np.zeros(0)  # no V_gf actuator
                 rec.zone_oltc_taps[z]     = u[off:off+n_oltc].copy(); off += n_oltc
                 rec.zone_tso_objective[z] = tso_out.objective_value
                 rec.zone_tso_status[z]    = tso_out.solver_status
@@ -3021,6 +3034,15 @@ def run_multi_tso_dso(
                 rec.gen_q_headroom_mvar[z] = np.minimum(
                     q_max_cap - q_act, q_act - q_min_cap,
                 )
+                # Normalised reserve r_Q = min(q_max-q, q-q_min)/(q_max-q_min)
+                # for the TRACKING ERRORS & RESERVES live plot.  NaN where the
+                # capability band collapses (q_max == q_min).
+                _gen_rng = q_max_cap - q_min_cap
+                rec.gen_q_reserve[z] = np.where(
+                    _gen_rng > 1e-9,
+                    np.minimum(q_max_cap - q_act, q_act - q_min_cap) / _gen_rng,
+                    np.nan,
+                )
 
             # ── Live-plot ACTUATORS tiles (TSO controller live plot) ──────
             # Populated from net state every step in BOTH OFO and local
@@ -3034,13 +3056,8 @@ def run_multi_tso_dso(
             # time series across both modes.  Values reflect the converged
             # PF (PF does not modify sgen.q_mvar / gen.vm_pu / trafo.tap_pos
             # so for OFO they equal the commanded values).
-            # zone_q_der: concatenate grid-following sgen Q (legacy path)
-            # with the realised Q of any TSO grid-forming converter gen
-            # in the zone (Stage-1 promoted units now live in net.gen).
-            # This keeps the live plot showing the FULL TSO DER reactive
-            # infeed, not just the un-promoted slice.  Sgen indices that
-            # were promoted are no longer in zd.tso_der_indices, so the
-            # two reads cover disjoint sets of physical units.
+            # zone_q_der: realised Q of each TSO-connected DER sgen in the
+            # zone (the live plot's TSO DER reactive infeed).
             der_q_following = (
                 np.array(
                     [float(net.res_sgen.at[idx, "q_mvar"])
@@ -3052,6 +3069,24 @@ def run_multi_tso_dso(
             )
             if der_q_following.size:
                 rec.zone_q_der[z] = der_q_following
+                # Normalised TSO-DER reserve r_Q from the VDE/STATCOM
+                # capability band (TRACKING ERRORS & RESERVES live plot).
+                # Order matches zd.tso_der_indices == actuator_bounds.der_indices.
+                der_p = np.array(
+                    [float(net.res_sgen.at[idx, "p_mw"])
+                     for idx in zd.tso_der_indices],
+                    dtype=np.float64,
+                )
+                q_min_der, q_max_der = (
+                    tso_controllers[z].actuator_bounds.compute_der_q_bounds(der_p)
+                )
+                _der_rng = q_max_der - q_min_der
+                rec.tso_der_q_reserve[z] = np.where(
+                    _der_rng > 1e-9,
+                    np.minimum(q_max_der - der_q_following,
+                               der_q_following - q_min_der) / _der_rng,
+                    np.nan,
+                )
             if zd.gen_indices:
                 rec.zone_v_gen[z] = np.array(
                     [float(net.gen.at[idx, "vm_pu"]) for idx in zd.gen_indices],
@@ -3160,6 +3195,8 @@ def run_multi_tso_dso(
             _plotter_dso.update(rec)
         if _plotter_sys is not None:
             _plotter_sys.update(rec)
+        if _plotter_track is not None:
+            _plotter_track.update(rec)
 
         if not _in_warmup:
             log.append(rec)
@@ -3202,7 +3239,7 @@ def run_multi_tso_dso(
             # the local-mode runner never populates).
             if config.run_stability_analysis and not _local_tso:
                 try:
-                    stab_result = _run_delayed_stability_analysis(
+                    _run_delayed_stability_analysis(
                         config=config,
                         time_s=time_s,
                         net=net,

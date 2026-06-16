@@ -172,12 +172,6 @@ class MultiTSOIterationRecord:
     zone_q_der:         Dict[int, NDArray] = field(default_factory=dict)
     zone_q_pcc_set:     Dict[int, NDArray] = field(default_factory=dict)
     zone_v_gen:         Dict[int, NDArray] = field(default_factory=dict)
-    zone_v_gf:          Dict[int, NDArray] = field(default_factory=dict)
-    """Per-zone V_gf actuator commands (vm_pu setpoints for grid-forming
-    converter gens).  Same indexing as ``zone_v_gen`` but for the
-    Stage-1-promoted ``net.gen`` rows in
-    ``meta.tso_grid_forming_gen_indices``.  Empty dict on the legacy
-    sgen-only path."""
     zone_q_gen:         Dict[int, Any] = field(default_factory=dict)
     zone_p_gen:         Dict[int, NDArray] = field(default_factory=dict)
     zone_oltc_taps:     Dict[int, NDArray] = field(default_factory=dict)
@@ -291,6 +285,20 @@ class MultiTSOIterationRecord:
     """Per-zone array, parallel to ``zone_q_gen``: ``q_max(g) - |q_actual(g)|``
     for each synchronous machine in that zone (positive = remaining
     capability, zero = saturated, negative = capability violated)."""
+
+    gen_q_reserve: Dict[int, NDArray] = field(default_factory=dict)
+    """Per-zone array, parallel to ``zone_q_gen``: normalised reactive-power
+    reserve of each synchronous machine,
+    ``min(q_max - q, q - q_min) / (q_max - q_min)`` from the Milano §12.2.1
+    capability band at the current P / terminal V.  Ranges 0 (at a limit)
+    to 0.5 (mid-band); NaN where the band has zero width.  Feeds the
+    TRACKING ERRORS & RESERVES live plot (``live_plot_tracking``)."""
+
+    tso_der_q_reserve: Dict[int, NDArray] = field(default_factory=dict)
+    """Per-zone array, parallel to ``zone_q_der``: normalised reactive-power
+    reserve of each TSO-connected DER, same definition as
+    ``gen_q_reserve`` but using the VDE-AR-N-4120 / STATCOM capability band
+    from ``ActuatorBounds.compute_der_q_bounds`` at the current P."""
 
     # ── Slack-Q saturation diagnostic (added 2026-05-02) ────────────────────────
     # Populated post-PF in run_multi_tso_dso() to expose slack saturation in

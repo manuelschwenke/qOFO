@@ -32,7 +32,7 @@ For each input column ``k`` of the controller's H matrix the function:
 The output vector ``y`` matches the row layout used by the analytical
 builders:
 
-* TSO: ``[V_bus | Q_PCC | I_line | Q_gen | Q_gf | Q_tie]``
+* TSO: ``[V_bus | Q_PCC | I_line | Q_gen | Q_tie]``
 * DSO: ``[Q_iface | V_bus | I_line]``
 
 Perturbation magnitudes (configurable via constructor args):
@@ -68,7 +68,7 @@ import pandapower as pp
 # ---------------------------------------------------------------------------
 
 def _read_tso_outputs(net, cfg) -> NDArray[np.float64]:
-    """Read the TSO output vector ``[V | Q_PCC | I | Q_gen | Q_gf | Q_tie]``.
+    """Read the TSO output vector ``[V | Q_PCC | I | Q_gen | Q_tie]``.
 
     Q_PCC follows the analytical builder's load convention (positive =
     Q INTO the trafo from the HV bus), which is the same sign as
@@ -99,11 +99,6 @@ def _read_tso_outputs(net, cfg) -> NDArray[np.float64]:
 
     # Q_gen
     for g in cfg.gen_indices:
-        y.append(float(net.res_gen.at[g, "q_mvar"]) if g in net.res_gen.index else 0.0)
-
-    # Q_gf (grid-forming gens)
-    gf_indices = getattr(cfg, "gridforming_gen_indices", []) or []
-    for g in gf_indices:
         y.append(float(net.res_gen.at[g, "q_mvar"]) if g in net.res_gen.index else 0.0)
 
     # Q_tie
@@ -193,7 +188,7 @@ def compute_numerical_h_tso(
     delta_q_mvar : float
         ±Mvar perturbation magnitude for DER and PCC_set columns.
     delta_v_pu : float
-        ±p.u. perturbation magnitude for V_gen and V_gf columns.
+        ±p.u. perturbation magnitude for V_gen columns.
     closed_loop : bool, default True
         If True, perturbations run ``pp.runpp(run_control=True)`` so the
         plant-side Q(V) loops respond during the finite-difference (the
@@ -214,23 +209,22 @@ def compute_numerical_h_tso(
     H : NDArray[np.float64]
         Sensitivity matrix in the controller's layout:
 
-        * rows: ``[V_bus | Q_PCC | I_line | Q_gen | Q_gf | Q_tie]``
-        * cols: ``[Q_DER | Q_PCC_set | V_gen | V_gf | OLTC | shunt]``
+        * rows: ``[V_bus | Q_PCC | I_line | Q_gen | Q_tie]``
+        * cols: ``[Q_DER | Q_PCC_set | V_gen | OLTC | shunt]``
     """
     cfg = ctrl.config
 
     n_der = len(cfg.der_indices)
     n_pcc = len(cfg.pcc_trafo_indices)
     n_gen = len(cfg.gen_indices)
-    n_gf = len(getattr(cfg, "gridforming_gen_indices", []) or [])
     n_oltc = len(cfg.oltc_trafo_indices)
     n_shunt = len(cfg.shunt_bus_indices)
     n_v = len(cfg.voltage_bus_indices)
     n_i = len(cfg.current_line_indices)
     n_tie = len(getattr(cfg, "tie_line_indices", []) or [])
 
-    n_inputs = n_der + n_pcc + n_gen + n_gf + n_oltc + n_shunt
-    n_outputs = n_v + n_pcc + n_i + n_gen + n_gf + n_tie
+    n_inputs = n_der + n_pcc + n_gen + n_oltc + n_shunt
+    n_outputs = n_v + n_pcc + n_i + n_gen + n_tie
     H = np.zeros((n_outputs, n_inputs), dtype=np.float64)
 
     if n_inputs == 0 or n_outputs == 0:
@@ -306,24 +300,6 @@ def compute_numerical_h_tso(
         if k < len(oos_gen) and bool(oos_gen[k]):
             col += 1  # OOS gen → zero column
             continue
-        if g_idx not in work.gen.index:
-            col += 1
-            continue
-        v0 = float(work.gen.at[g_idx, "vm_pu"])
-        work.gen.at[g_idx, "vm_pu"] = v0 + delta_v_pu
-        _runpp(work, run_control=closed_loop)
-        y_plus = _read_tso_outputs(work, cfg)
-        work.gen.at[g_idx, "vm_pu"] = v0 - delta_v_pu
-        _runpp(work, run_control=closed_loop)
-        y_minus = _read_tso_outputs(work, cfg)
-        H[:, col] = (y_plus - y_minus) / (2.0 * delta_v_pu)
-        work.gen.at[g_idx, "vm_pu"] = v0
-        col += 1
-    _runpp(work, run_control=True)
-
-    # ── V_gf columns (grid-forming gens) ──
-    gf_indices = list(getattr(cfg, "gridforming_gen_indices", []) or [])
-    for k, g_idx in enumerate(gf_indices):
         if g_idx not in work.gen.index:
             col += 1
             continue

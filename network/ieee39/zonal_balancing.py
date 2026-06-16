@@ -129,9 +129,8 @@ def compute_zonal_gen_dispatch(
             prof = None
         zone_sgens[z].append((base_p, prof))
 
-    # Promoted DER gens (wind/PV originally on net.sgen, promoted to
-    # pp.gen by apply_der_classification) carry a ``profile`` column.
-    # Treat them as exogenous P injectors (sgen-equivalent) for zone
+    # Gens carrying a ``profile`` column (exogenous wind/PV P) are
+    # treated as exogenous P injectors (sgen-equivalent) for zone
     # residual computation — they MUST NOT take part in zonal dispatch
     # because their P is the wind/PV resource, not a dispatchable
     # quantity.  Synchronous-machine gens have no ``profile`` and fall

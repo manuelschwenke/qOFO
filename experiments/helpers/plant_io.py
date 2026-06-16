@@ -24,7 +24,7 @@ from typing import List, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
 import pandapower as pp
-from pandapower.auxiliary import _detect_read_write_flag, read_from_net, write_to_net
+from pandapower.auxiliary import read_from_net, write_to_net
 from pandapower.control import CharacteristicControl
 from pandapower.control.util.characteristic import Characteristic
 
@@ -182,7 +182,7 @@ def apply_zone_tso_controls(
     Write TSO control output for one zone back to the pandapower plant network.
 
     Control variable ordering in ``u`` (must match ``TSOControllerConfig``):
-        ``u = [Q_DER | Q_PCC_set | V_gen | V_gf | s_OLTC | s_shunt]``
+        ``u = [Q_DER | Q_PCC_set | V_gen | s_OLTC | s_shunt]``
 
     PCC Q setpoints are *not* applied here; they are communicated to the DSO
     via ``TSOController.generate_setpoint_messages()``.
@@ -208,7 +208,6 @@ def apply_zone_tso_controls(
     n_der = len(zone_def.tso_der_indices)
     n_pcc = len(zone_def.pcc_trafo_indices)
     n_gen = len(zone_def.gen_indices)
-    n_gf = len(zone_def.gridforming_gen_indices)
     off = 0
 
     # w-shift mode: reanchor V_ref to the most recent measured bus
@@ -242,11 +241,6 @@ def apply_zone_tso_controls(
         net.gen.at[g_idx, "vm_pu"] = float(u[off + k])
     off += n_gen
 
-    # Grid-forming converter gens: write vm_pu into net.gen
-    for k, g_idx in enumerate(zone_def.gridforming_gen_indices):
-        net.gen.at[g_idx, "vm_pu"] = float(u[off + k])
-    off += n_gf
-
     n_oltc = len(zone_def.oltc_trafo_indices)
     for k, t_idx in enumerate(zone_def.oltc_trafo_indices):
         net.trafo.at[t_idx, "tap_pos"] = int(round(u[off + k]))
@@ -279,7 +273,7 @@ def apply_dso_controls(
     """
     Write multi-zone DSO control output to the pandapower plant network.
 
-    DSO ``u = [Q_DER | V_gf | s_OLTC | s_shunt]``.  3-winding coupling trafo
+    DSO ``u = [Q_DER | s_OLTC | s_shunt]``.  3-winding coupling trafo
     taps live in ``net.trafo3w``; shunt switching is intentionally skipped
     (shunts are initialised separately in the multi-zone runner).
 
@@ -295,7 +289,6 @@ def apply_dso_controls(
     """
     u = dso_out.u_new
     n_der = len(dso_cfg.der_indices)
-    n_gf = len(dso_cfg.gridforming_gen_indices)
     n_oltc = len(dso_cfg.oltc_trafo_indices)
     off = 0
 
@@ -323,11 +316,6 @@ def apply_dso_controls(
             net.sgen.at[s_idx, "q_set_mvar"] = float(u[off + k])
     off += n_der
 
-    # Grid-forming converter gens (DSO-owned): write vm_pu to net.gen.
-    for k, g_idx in enumerate(dso_cfg.gridforming_gen_indices):
-        net.gen.at[g_idx, "vm_pu"] = float(u[off + k])
-    off += n_gf
-
     for k, t_idx in enumerate(dso_cfg.oltc_trafo_indices):
         net.trafo3w.at[t_idx, "tap_pos"] = int(round(u[off + k]))
     off += n_oltc
@@ -344,7 +332,7 @@ def apply_central_controls(
 
     Control-vector order (must match
     :meth:`controller.central_controller.CentralOFOController._get_control_structure`):
-        ``u = [ Q_DER | Q_PCC(0) | V_gen | V_gf(0) | s_OLTC2w | s_shunt | s_OLTC3w ]``
+        ``u = [ Q_DER | Q_PCC(0) | V_gen | s_OLTC2w | s_shunt | s_OLTC3w ]``
 
     * **DER** (w-shift): reanchor ``net.sgen.qv_vref_anchor_pu`` to the latest
       measured bus voltage, then write ``net.sgen.q_set_mvar`` for **every**
@@ -354,9 +342,9 @@ def apply_central_controls(
     * **s_shunt**: write ``net.shunt.step`` for TSO-owned shunts.
     * **s_OLTC3w**: write ``net.trafo3w.tap_pos`` (TS–STS coupler OLTCs).
 
-    Q_PCC and V_gf blocks are empty in the centralized formulation (no interface
-    setpoints, no promoted grid-forming gens) but the offsets are kept explicit
-    for parity with :func:`apply_zone_tso_controls`.
+    The Q_PCC block is empty in the centralized formulation (no interface
+    setpoints) but the offset is kept explicit for parity with
+    :func:`apply_zone_tso_controls`.
 
     Returns
     -------
@@ -367,7 +355,6 @@ def apply_central_controls(
     u = central_out.u_new
     der_indices = list(central_cfg.der_indices)
     gen_indices = list(central_cfg.gen_indices)
-    gf_indices = list(getattr(central_cfg, "gridforming_gen_indices", []) or [])
     oltc2w = list(central_cfg.oltc_trafo_indices)
     shunt_buses = list(central_cfg.shunt_bus_indices)
     oltc3w = list(getattr(central_cfg, "oltc_trafo3w_indices", []) or [])
@@ -375,7 +362,6 @@ def apply_central_controls(
     n_der = len(der_indices)
     n_pcc = len(central_cfg.pcc_trafo_indices)  # 0 (no interface tracking)
     n_gen = len(gen_indices)
-    n_gf = len(gf_indices)                       # 0
     n_oltc = len(oltc2w)
     n_shunt = len(shunt_buses)
     off = 0
@@ -409,9 +395,6 @@ def apply_central_controls(
     for k, g_idx in enumerate(gen_indices):
         net.gen.at[g_idx, "vm_pu"] = float(u[off + k])
     off += n_gen
-
-    # Grid-forming converter gens: none in the central formulation.
-    off += n_gf
 
     # --- 2W machine-transformer OLTC taps ---
     for k, t_idx in enumerate(oltc2w):

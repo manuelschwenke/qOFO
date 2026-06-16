@@ -164,39 +164,3 @@ class TestValidation:
             tag_der_q_modes(
                 net, meta, cosphi_sign_overrides={first_tso: 0},
             )
-
-
-# ---------------------------------------------------------------------------
-#  Coexistence with apply_der_classification (transition guarantee)
-# ---------------------------------------------------------------------------
-
-class TestCoexistenceWithApply:
-    """tag_der_q_modes is additive; it must not interfere with the legacy
-    apply_der_classification path.  The two will coexist through commits
-    2-6 and tag_der_q_modes will become canonical in commit 7."""
-
-    def test_tag_then_apply(self, base_net_meta):
-        net, meta = base_net_meta
-        from network.ieee39.build import apply_der_classification
-        tag_der_q_modes(net, meta)
-        # The legacy promotion still runs cleanly (drops sgens, makes gens)
-        meta2 = apply_der_classification(net, meta, overrides=None)
-        # After promotion, surviving sgens still carry the q_mode columns
-        if len(meta2.dso_der_indices) > 0:
-            s = int(meta2.dso_der_indices[0])
-            assert s in net.sgen.index
-            assert net.sgen.at[s, "q_mode"] == "qv"
-            assert net.sgen.at[s, "qv_slope_pu"] == pytest.approx(0.07)
-
-    def test_apply_then_tag(self, base_net_meta):
-        net, meta = base_net_meta
-        from network.ieee39.build import apply_der_classification
-        meta2 = apply_der_classification(net, meta, overrides=None)
-        # tag_der_q_modes after promotion only sees surviving sgens
-        tag_der_q_modes(net, meta2)
-        # Surviving DSO DERs are tagged
-        if len(meta2.dso_der_indices) > 0:
-            s = int(meta2.dso_der_indices[0])
-            assert net.sgen.at[s, "q_mode"] == "qv"
-        # Promoted gens are NOT in net.sgen anymore — tag silently skips them
-        # (that's the per-DER guard in _tag).  Test passes implicitly.

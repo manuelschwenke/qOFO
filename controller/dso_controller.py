@@ -139,17 +139,6 @@ class DSOControllerConfig:
     """Q(V) droop slope [pu_q / pu_v].  Fallback when
     ``net.sgen.qv_slope_pu`` column is missing (legacy networks)."""
 
-    # ── Vestigial fields (kept empty under Q_cor mode; consumed by ─────────
-    # legacy gridforming + V_ref-direct branches in DSOController that
-    # become no-ops when these defaults are used).  Slated for full removal
-    # together with their reader code in a follow-up cleanup.
-    gridforming_gen_indices: List[int] = field(default_factory=list)
-    gridforming_gen_buses: List[int] = field(default_factory=list)
-    gridforming_gen_sn_mva: List[float] = field(default_factory=list)
-    gridforming_gen_op_diagrams: List[str] = field(default_factory=list)
-    gridforming_vm_min_pu: float = 0.95
-    gridforming_vm_max_pu: float = 1.10
-    rho_q_gridforming: float = 1e2
     use_qv_local_loop: bool = False
     qv_apply_mode: str = "q_shim"
     qv_v_ref_min_pu: float = 0.95
@@ -647,21 +636,20 @@ class DSOController(BaseOFOController):
     def _get_control_structure(self) -> Tuple[int, int, List[int]]:
         """Define the control variable structure.
 
-        Ordering: [ Q_DER | V_gf | s_OLTC | s_shunt ]
+        Ordering: [ Q_DER | s_OLTC | s_shunt ]
         """
         mapping = self.config.der_mapping
         if mapping is not None:
             n_der = mapping.n_der
         else:
             n_der = len(self.config.der_indices)
-        n_gf = len(self.config.gridforming_gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
 
-        n_continuous = n_der + n_gf
+        n_continuous = n_der
         n_integer = n_oltc + n_shunt
 
-        # Integer indices are after the continuous DER + V_gf block
+        # Integer indices are after the continuous DER block
         integer_indices = list(range(n_continuous, n_continuous + n_integer))
 
         return n_continuous, n_integer, integer_indices
@@ -669,7 +657,7 @@ class DSOController(BaseOFOController):
     def _get_oltc_integer_indices(self) -> List[int]:
         """OLTC slice within the integer block.
 
-        DSO ordering ``[Q_DER | V_gf | s_OLTC | s_shunt]`` puts the OLTC
+        DSO ordering ``[Q_DER | s_OLTC | s_shunt]`` puts the OLTC
         integers immediately after the continuous block.  Used by
         :class:`BaseOFOController` to scope the wall-clock cooldown to
         OLTC indices only.
@@ -679,29 +667,25 @@ class DSOController(BaseOFOController):
             n_der = mapping.n_der
         else:
             n_der = len(self.config.der_indices)
-        n_gf = len(self.config.gridforming_gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
-        return list(range(n_der + n_gf, n_der + n_gf + n_oltc))
+        return list(range(n_der, n_der + n_oltc))
 
     def _actuator_class_indices(self) -> Dict[str, NDArray[np.int64]]:
         """Per-class index map for adaptive ``g_w`` (paper Eq. 16).
 
         Class names match the BO dimension naming in
-        ``tuning/parameters.py``: ``"dso_der"``, ``"dso_grid_forming"``,
-        ``"dso_oltc"``, ``"dso_shunt"``.  Empty classes are dropped
-        from the map.
+        ``tuning/parameters.py``: ``"dso_der"``, ``"dso_oltc"``,
+        ``"dso_shunt"``.  Empty classes are dropped from the map.
         """
         mapping = self.config.der_mapping
         if mapping is not None:
             n_der = mapping.n_der
         else:
             n_der = len(self.config.der_indices)
-        n_gf = len(self.config.gridforming_gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
 
-        gf_start = n_der
-        oltc_start = n_der + n_gf
+        oltc_start = n_der
         oltc_end = oltc_start + n_oltc
         shunt_end = oltc_end + n_shunt
 
@@ -715,8 +699,6 @@ class DSOController(BaseOFOController):
                 "dso_der_vref" if self.config.ofo_in_v_ref_mode else "dso_der"
             )
             out[der_class_name] = np.arange(0, n_der, dtype=np.int64)
-        if n_gf > 0:
-            out["dso_grid_forming"] = np.arange(gf_start, oltc_start, dtype=np.int64)
         if n_oltc > 0:
             out["dso_oltc"] = np.arange(oltc_start, oltc_end, dtype=np.int64)
         if n_shunt > 0:
@@ -740,10 +722,9 @@ class DSOController(BaseOFOController):
             n_der = mapping.n_der
         else:
             n_der = len(self.config.der_indices)
-        n_gf = len(self.config.gridforming_gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
-        n_total = n_der + n_gf + n_oltc + n_shunt
+        n_total = n_der + n_oltc + n_shunt
 
         u = np.zeros(n_total)
         v_ref_mode = self.config.ofo_in_v_ref_mode
@@ -782,26 +763,12 @@ class DSOController(BaseOFOController):
                     raise ValueError(f"DER {der_idx} not found in measurement")
                 u[i] = measurement.der_q_mvar[meas_idx[0]]
 
-        # Grid-forming converter gen voltage setpoints (V_gf)
-        for i, gf_idx in enumerate(self.config.gridforming_gen_indices):
-            meas_idx = np.where(
-                measurement.gridforming_gen_indices == gf_idx
-            )[0]
-            if len(meas_idx) == 0:
-                raise ValueError(
-                    f"Grid-forming gen {gf_idx} not found in "
-                    f"measurement.gridforming_gen_indices"
-                )
-            u[n_der + i] = float(
-                measurement.gridforming_gen_vm_pu[meas_idx[0]]
-            )
-
         # OLTC tap positions
         for i, oltc_idx in enumerate(self.config.oltc_trafo_indices):
             meas_idx = np.where(measurement.oltc_indices == oltc_idx)[0]
             if len(meas_idx) == 0:
                 raise ValueError(f"OLTC {oltc_idx} not found in measurement")
-            u[n_der + n_gf + i] = float(
+            u[n_der + i] = float(
                 measurement.oltc_tap_positions[meas_idx[0]]
             )
 
@@ -810,7 +777,7 @@ class DSOController(BaseOFOController):
             meas_idx = np.where(measurement.shunt_indices == shunt_idx)[0]
             if len(meas_idx) == 0:
                 raise ValueError(f"Shunt at bus {shunt_idx} not found in measurement")
-            u[n_der + n_gf + n_oltc + i] = float(
+            u[n_der + n_oltc + i] = float(
                 measurement.shunt_states[meas_idx[0]]
             )
 
@@ -822,7 +789,7 @@ class DSOController(BaseOFOController):
     ) -> NDArray[np.float64]:
         """Extract current output values from measurements.
 
-        Ordering: [ Q_interface | V_bus | I_line | Q_gf | Q_realized_DER ]
+        Ordering: [ Q_interface | V_bus | I_line | Q_realized_DER ]
 
         ``Q_realized_DER`` is appended only when
         ``use_qv_local_loop=True`` (Stage 2).
@@ -830,7 +797,6 @@ class DSOController(BaseOFOController):
         n_interfaces = len(self.config.interface_trafo_indices)
         n_voltage = len(self.config.voltage_bus_indices)
         n_current = len(self.config.current_line_indices)
-        n_gf = len(self.config.gridforming_gen_indices)
         mapping = self.config.der_mapping
         n_der = (
             mapping.n_der if mapping is not None
@@ -838,7 +804,7 @@ class DSOController(BaseOFOController):
         )
         n_q_real = n_der if self.config.ofo_in_v_ref_mode else 0
         n_outputs = (
-            n_interfaces + n_voltage + n_current + n_gf + n_q_real
+            n_interfaces + n_voltage + n_current + n_q_real
         )
 
         y = np.zeros(n_outputs)
@@ -872,20 +838,7 @@ class DSOController(BaseOFOController):
             y[idx] = measurement.current_magnitudes_ka[meas_idx[0]]
             idx += 1
 
-        # Grid-forming converter Q (Q_gf, STATCOM capability output)
-        for gf_idx in self.config.gridforming_gen_indices:
-            meas_idx = np.where(
-                measurement.gridforming_gen_indices == gf_idx
-            )[0]
-            if len(meas_idx) == 0:
-                raise ValueError(
-                    f"Grid-forming gen {gf_idx} not found in "
-                    f"measurement.gridforming_gen_indices"
-                )
-            y[idx] = float(measurement.gridforming_gen_q_mvar[meas_idx[0]])
-            idx += 1
-
-        # Stage-2: realised Q at each grid-following DER (V_ref-mode only).
+        # Stage-2: realised Q at each DER (V_ref-mode only).
         # The plant's Q(V) loop produces this Q in response to OFO V_ref
         # commands; the soft output bound on this row enforces the
         # converter PQ envelope so the OFO eases off V_ref before
@@ -936,10 +889,9 @@ class DSOController(BaseOFOController):
             n_der = mapping.n_der
         else:
             n_der = len(self.config.der_indices)
-        n_gf = len(self.config.gridforming_gen_indices)
         n_oltc = len(self.config.oltc_trafo_indices)
         n_shunt = len(self.config.shunt_bus_indices)
-        n_total = n_der + n_gf + n_oltc + n_shunt
+        n_total = n_der + n_oltc + n_shunt
 
         u_lower = np.zeros(n_total)
         u_upper = np.zeros(n_total)
@@ -1020,20 +972,14 @@ class DSOController(BaseOFOController):
                 u_lower[:n_der] = q_min
                 u_upper[:n_der] = q_max
 
-        # Grid-forming converter V_gf bounds (fixed physical band)
-        gf_start = n_der
-        gf_end = gf_start + n_gf
-        u_lower[gf_start:gf_end] = self.config.gridforming_vm_min_pu
-        u_upper[gf_start:gf_end] = self.config.gridforming_vm_max_pu
-
         # OLTC tap bounds (fixed)
         tap_min, tap_max = self.actuator_bounds.get_oltc_tap_bounds()
-        u_lower[gf_end:gf_end + n_oltc] = tap_min.astype(np.float64)
-        u_upper[gf_end:gf_end + n_oltc] = tap_max.astype(np.float64)
+        u_lower[n_der:n_der + n_oltc] = tap_min.astype(np.float64)
+        u_upper[n_der:n_der + n_oltc] = tap_max.astype(np.float64)
 
         # Shunt state bounds (fixed: -1, 0, +1)
         state_min, state_max = self.actuator_bounds.get_shunt_state_bounds()
-        shunt_offset = gf_end + n_oltc
+        shunt_offset = n_der + n_oltc
         u_lower[shunt_offset:] = state_min.astype(np.float64)
         u_upper[shunt_offset:] = state_max.astype(np.float64)
 
@@ -1047,7 +993,7 @@ class DSOController(BaseOFOController):
     def _get_output_limits(self) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Get output constraint limits.
 
-        Ordering: [ Q_interface | V_bus | I_line | Q_gf | Q_realized_DER ]
+        Ordering: [ Q_interface | V_bus | I_line | Q_realized_DER ]
 
         ``Q_realized_DER`` rows are present only when
         ``use_qv_local_loop=True`` (Stage 2).  Their bounds come from
@@ -1058,7 +1004,6 @@ class DSOController(BaseOFOController):
         n_interfaces = len(self.config.interface_trafo_indices)
         n_voltage = len(self.config.voltage_bus_indices)
         n_current = len(self.config.current_line_indices)
-        n_gf = len(self.config.gridforming_gen_indices)
         mapping = self.config.der_mapping
         n_der = (
             mapping.n_der if mapping is not None
@@ -1066,7 +1011,7 @@ class DSOController(BaseOFOController):
         )
         n_q_real = n_der if self.config.ofo_in_v_ref_mode else 0
         n_outputs = (
-            n_interfaces + n_voltage + n_current + n_gf + n_q_real
+            n_interfaces + n_voltage + n_current + n_q_real
         )
 
         y_lower = np.zeros(n_outputs)
@@ -1095,31 +1040,6 @@ class DSOController(BaseOFOController):
             y_upper[idx] = i_lim_ka
             idx += 1
 
-        # Q_gf bounds (STATCOM Q-circle, P-dependent — soft via rho_q_gridforming)
-        if n_gf > 0:
-            meas = getattr(self, "_last_measurement", None)
-            if (
-                meas is not None
-                and len(meas.gridforming_gen_p_mw) == n_gf
-            ):
-                p_gf = meas.gridforming_gen_p_mw
-                for k in range(n_gf):
-                    sn = float(self.config.gridforming_gen_sn_mva[k])
-                    op_diag = self.config.gridforming_gen_op_diagrams[k]
-                    p_ratio = abs(float(p_gf[k])) / sn if sn > 0.0 else 0.0
-                    q_min_k, q_max_k = (
-                        self.actuator_bounds._compute_single_der_q_capability(
-                            p_ratio=p_ratio,
-                            s_rated_mva=sn,
-                            op_diagram=op_diag,
-                        )
-                    )
-                    y_lower[idx + k] = q_min_k
-                    y_upper[idx + k] = q_max_k
-            else:
-                y_lower[idx:idx + n_gf] = -1e6
-                y_upper[idx:idx + n_gf] = +1e6
-            idx += n_gf
 
         # Q_realized_DER bounds (Stage-2 V_ref-mode only).  Per-DER
         # capability box from the op_diagram (STATCOM full circle or
@@ -1423,32 +1343,11 @@ class DSOController(BaseOFOController):
                 H = np.hstack([H_der, H_rest])
                 mappings["der_buses"] = der_bus_indices
 
-        # ── Splice V_gf columns + Q_gf rows for grid-forming converter gens ──
-        # Layout shift:
-        #   Cols (legacy):   [DER | OLTC | shunt]
-        #   Cols (with gf):  [DER | V_gf | OLTC | shunt]
-        #   Rows (legacy):   [Q_iface | V | I]
-        #   Rows (with gf):  [Q_iface | V | I | Q_gf]
-        n_gf_local = len(self.config.gridforming_gen_indices)
-        if n_gf_local > 0:
-            H = self._splice_gridforming_into_H(
-                H_legacy=H,
-                der_to_unique=(
-                    der_to_unique
-                    if self.config.der_mapping is None
-                    else None
-                ),
-                unique_buses=unique_buses,
-                der_bus_indices=der_bus_indices,
-                iface_are_3w=iface_are_3w,
-                oltc_are_3w=oltc_are_3w,
-            )
-
         # ── Stage-2: append Q_realized output rows for V_ref-mode ──────
-        # One row per DSO grid-following DER.  ∂Q_realized,i/∂V_ref,j =
+        # One row per DSO DER.  ∂Q_realized,i/∂V_ref,j =
         # T_ij (the K-transform); ∂Q_realized,i/∂(other actuator) = 0
         # (cross-coupling via local Q(V) loop deferred — would require
-        # multiplying the V_gen / V_gf / OLTC / shunt columns by the
+        # multiplying the V_gen / OLTC / shunt columns by the
         # bus-voltage sensitivity at the DER bus times -K).  This row
         # block lets the OFO see the converter PQ envelope as a soft
         # output bound, so steepening g_q now actually trades V-tracking
@@ -1920,173 +1819,3 @@ class DSOController(BaseOFOController):
         if not blocks:
             return None
         return np.hstack(blocks)
-
-    # =========================================================================
-    # Grid-forming converter (V_gf / Q_gf) splicing helper
-    # =========================================================================
-
-    def _splice_gridforming_into_H(
-        self,
-        H_legacy: NDArray[np.float64],
-        der_to_unique: Optional[List[int]],
-        unique_buses: List[int],
-        der_bus_indices: List[int],
-        iface_are_3w: bool,
-        oltc_are_3w: bool,
-    ) -> NDArray[np.float64]:
-        """Insert V_gf columns between DER and OLTC blocks, and Q_gf rows
-        after the I block, into the legacy DSO sensitivity matrix.
-
-        Parameters mirror those built up in :meth:`_build_sensitivity_matrix`
-        before this helper is called.  The returned matrix has layout::
-
-            Cols: [ DER (n_der) | V_gf (n_gf) | OLTC (n_oltc) | shunt (n_shunt) ]
-            Rows: [ Q_iface (n_iface) | V (n_v) | I (n_i) | Q_gf (n_gf) ]
-
-        See class-level docstring for the full controller picture.
-        """
-        gf_buses = list(self.config.gridforming_gen_buses)
-        n_gf = len(gf_buses)
-        n_iface = len(self.config.interface_trafo_indices)
-        n_v = len(self.config.voltage_bus_indices)
-        n_i = len(self.config.current_line_indices)
-        n_oltc = len(self.config.oltc_trafo_indices)
-        n_shunt = len(self.config.shunt_bus_indices)
-        n_legacy_rows = H_legacy.shape[0]
-        n_legacy_cols = H_legacy.shape[1]
-        n_der = n_legacy_cols - n_oltc - n_shunt
-
-        # ── V_gf column block (shape: n_legacy_rows × n_gf) ────────────
-        H_vgf = np.zeros((n_legacy_rows, n_gf), dtype=np.float64)
-
-        # Q_iface × V_gf — only for 3W interface trafos (the standard for HV couplers)
-        if iface_are_3w and n_iface > 0:
-            try:
-                dQiface_dVgf, t3w_map, gf_map = (
-                    self.sensitivities.compute_dQtrafo3w_hv_dVgen_matrix(
-                        gen_bus_indices_pp=gf_buses,
-                        trafo3w_indices=self.config.interface_trafo_indices,
-                    )
-                )
-                for k, gf_bus in enumerate(gf_buses):
-                    if gf_bus not in gf_map:
-                        continue
-                    j_gf = gf_map.index(gf_bus)
-                    for i_t3w, t_idx in enumerate(t3w_map):
-                        if t_idx not in self.config.interface_trafo_indices:
-                            continue
-                        i_row = self.config.interface_trafo_indices.index(t_idx)
-                        H_vgf[i_row, k] = dQiface_dVgf[i_t3w, j_gf]
-            except (AttributeError, ValueError):
-                pass
-
-        # V_bus × V_gf
-        if n_v > 0:
-            dV_dVgf, obs_map, gf_map = (
-                self.sensitivities.compute_dV_dVgen_matrix(
-                    gen_bus_indices_pp=gf_buses,
-                    observation_bus_indices=self.config.voltage_bus_indices,
-                )
-            )
-            for k, gf_bus in enumerate(gf_buses):
-                if gf_bus not in gf_map:
-                    continue
-                j_gf = gf_map.index(gf_bus)
-                for i_obs, obs_bus in enumerate(obs_map):
-                    i_row = self.config.voltage_bus_indices.index(obs_bus)
-                    H_vgf[n_iface + i_row, k] = dV_dVgf[i_obs, j_gf]
-
-        # I_line × V_gf
-        if n_i > 0:
-            dI_dVgf, line_map, gf_map = (
-                self.sensitivities.compute_dI_dVgen_matrix(
-                    line_indices=self.config.current_line_indices,
-                    gen_bus_indices_pp=gf_buses,
-                )
-            )
-            for k, gf_bus in enumerate(gf_buses):
-                if gf_bus not in gf_map:
-                    continue
-                j_gf = gf_map.index(gf_bus)
-                for i_line, l_idx in enumerate(line_map):
-                    H_vgf[n_iface + n_v + i_line, k] = dI_dVgf[i_line, j_gf]
-
-        # Splice V_gf columns between DER and OLTC blocks
-        H = np.hstack([H_legacy[:, :n_der], H_vgf, H_legacy[:, n_der:]])
-
-        # ── Q_gf row block (shape: n_gf × full new column count) ───────
-        n_full_cols = H.shape[1]
-        H_qgf = np.zeros((n_gf, n_full_cols), dtype=np.float64)
-
-        # ∂Q_gf/∂Q_DER  (DER columns are at positions [0, n_der))
-        # The legacy matrix uses unique_buses for sensitivities; if no
-        # mapping is active and DER columns were duplicated, we must
-        # compute against unique_buses and re-duplicate.
-        if unique_buses:
-            dQgf_dQder, _, _ = (
-                self.sensitivities.compute_dQgen_dQder_matrix(
-                    gen_bus_indices_pp=gf_buses,
-                    der_bus_indices=unique_buses,
-                )
-            )
-            if der_to_unique is None:
-                # DER mapping path: H DER columns are 1:1 with unique buses
-                # (or expanded by the base-class E matrix later). Per-DER
-                # expansion happens in _expand_H_to_der_level downstream.
-                H_qgf[:, :n_der] = dQgf_dQder
-            else:
-                # Legacy path: DER columns were duplicated by der_to_unique.
-                for d, u_idx in enumerate(der_to_unique):
-                    H_qgf[:, d] = dQgf_dQder[:, u_idx]
-
-        # ∂Q_gf/∂V_gf  (V_gf columns are at positions [n_der, n_der + n_gf))
-        dQgf_dVgf, _, gf_map_qgf = (
-            self.sensitivities.compute_dQgen_dVgen_matrix(
-                gen_bus_indices_pp_meas=gf_buses,
-                gen_bus_indices_pp_chg=gf_buses,
-            )
-        )
-        for k, gf_bus in enumerate(gf_buses):
-            col = n_der + k
-            if gf_bus in gf_map_qgf:
-                j_chg = gf_map_qgf.index(gf_bus)
-                H_qgf[:, col] = dQgf_dVgf[:, j_chg]
-
-        # ∂Q_gf/∂s_OLTC  (OLTC columns are at [n_der + n_gf, n_der + n_gf + n_oltc))
-        if n_oltc > 0:
-            try:
-                if oltc_are_3w:
-                    dQgf_dsOltc, _, _ = (
-                        self.sensitivities.compute_dQgen_ds_3w_matrix(
-                            gen_bus_indices_pp=gf_buses,
-                            oltc_trafo3w_indices=self.config.oltc_trafo_indices,
-                        )
-                    )
-                else:
-                    dQgf_dsOltc, _, _ = (
-                        self.sensitivities.compute_dQgen_ds_2w_matrix(
-                            gen_bus_indices_pp=gf_buses,
-                            oltc_trafo_indices=self.config.oltc_trafo_indices,
-                        )
-                    )
-                col_oltc_start = n_der + n_gf
-                H_qgf[:, col_oltc_start:col_oltc_start + n_oltc] = dQgf_dsOltc
-            except (AttributeError, ValueError):
-                # Helper missing or numeric failure — leave OLTC columns at 0.
-                pass
-
-        # ∂Q_gf/∂s_shunt
-        if n_shunt > 0:
-            dQgf_dShunt, _, _ = (
-                self.sensitivities.compute_dQgen_dQ_shunt_matrix(
-                    gen_bus_indices_pp=gf_buses,
-                    shunt_bus_indices=self.config.shunt_bus_indices,
-                    shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
-                )
-            )
-            col_sh_start = n_der + n_gf + n_oltc
-            H_qgf[:, col_sh_start:col_sh_start + n_shunt] = dQgf_dShunt
-
-        # Append Q_gf rows
-        H = np.vstack([H, H_qgf])
-        return H

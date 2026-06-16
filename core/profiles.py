@@ -105,9 +105,8 @@ def apply_profiles(net: pp.pandapowerNet, profiles: pd.DataFrame, t: datetime) -
                     net.sgen.loc[mask, "base_p_mw"] * float(row[prof_name])
                 )
 
-    # Promoted-DER gens (wind / PV originally on net.sgen, promoted to
-    # pp.gen by apply_der_classification) keep tracking the same
-    # profile column so their P stays exogenous, not dispatchable.
+    # Gens carrying a ``profile`` column (exogenous wind / PV P) keep
+    # tracking that profile so their P stays exogenous, not dispatchable.
     # Synchronous-machine gens have no ``profile`` set and are skipped.
     if "profile" in net.gen.columns:
         for prof_name in net.gen["profile"].dropna().unique():

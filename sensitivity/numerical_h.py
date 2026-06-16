@@ -405,7 +405,9 @@ def compute_numerical_h_tso(
     # ── Apply analytical T_prime to the DER columns when in open-loop ──
     # mode.  In closed-loop mode the QV-droop response is already baked
     # into the perturbation outputs; T_prime would double-count it.
-    if not closed_loop and n_der > 0:
+    # Gated by ``apply_qv_h_transform`` (default False => bare open-loop
+    # H = dy/dQ_DER, matching the dissertation's reference-anchored model).
+    if not closed_loop and n_der > 0 and ctrl.config.apply_qv_h_transform:
         try:
             der_bus_indices_tso = [
                 int(net.sgen.at[s, "bus"]) for s in ctrl.config.der_indices
@@ -563,7 +565,9 @@ def compute_numerical_h_dso(
     # ── Apply analytical T_prime to bus-level DER columns when in ─────
     # open-loop mode.  In closed-loop mode the QV-droop response is
     # already in the perturbation outputs.
-    if not closed_loop and n_der_bus > 0:
+    # Gated by ``apply_qv_h_transform`` (default False => bare open-loop
+    # H = dy/dQ_DER, matching the dissertation's reference-anchored model).
+    if not closed_loop and n_der_bus > 0 and ctrl.config.apply_qv_h_transform:
         try:
             T_prime = ctrl._compute_w_shift_transform_T_prime(
                 unique_buses, der_buses_full,

@@ -1,0 +1,30 @@
+# Full conda replication of the qOFO_clean environment.
+# Generated 2026-06-03.
+#
+# The conda layer provides only what pip cannot install on Windows:
+#   - python 3.12
+#   - ipopt         (NLP solver -- no pip wheel; must come from conda-forge)
+#   - blas/openblas (optimised linear-algebra backend)
+# Everything else (incl. gurobipy, PySCIPOpt, highspy) is pinned in
+# requirements-lock.txt and installed via pip.
+#
+# Rebuild on another machine:
+#     conda env create -f environment.yml
+#     conda activate qOFO_clean
+#
+# Gurobi licensing: gurobipy (the pip wheel) is installed, but solving any
+# non-trivial model needs a license. Free academic license:
+#   https://www.gurobi.com/academia/  -> then run `grbgetkey <key>`.
+# Without Gurobi the project can fall back to SCIP (PySCIPOpt),
+# HiGHS (highspy) or IPOPT.
+
+name: qOFO_clean
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - ipopt
+  - blas=*=openblas
+  - pip
+  - pip:
+      - -r requirements-lock.txt

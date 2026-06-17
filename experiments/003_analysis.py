@@ -472,7 +472,7 @@ def plot_comparison(
     print_summary(log, sidecar)
 
     has_sidecar = sidecar is not None
-    n_panels = 3 if has_sidecar else 2
+    n_panels = 4 if has_sidecar else 2   # one-step err | H err | Q tracking | V
 
     fig = plt.figure(figsize=(14, 4 * n_panels))
     gs  = GridSpec(n_panels, 1, figure=fig, hspace=0.50)
@@ -517,7 +517,31 @@ def plot_comparison(
                     color="gray")
             ax.set_title("One-step-ahead q_trafo prediction error (data not available)")
 
-    # ── Panel 2: Q_trafo setpoint vs actual ──────────────────────────────────
+    # ── Panel 2: H-estimation error vs analytical ────────────────────────────
+    if has_sidecar:
+        ax = fig.add_subplot(gs[panel]); panel += 1
+        he = h_analytical_error(sidecar)
+        if he is not None:
+            steps = he["steps"]
+            if "relative_q_trafo" in he:
+                ax.plot(steps, 100 * he["relative_q_trafo"], color="tab:purple", lw=1.6,
+                        label=r"q$_\mathrm{trafo}$ rows  "
+                              f"(final {100 * float(np.mean(he['relative_q_trafo'][-20:])):.1f}%)")
+            ax.plot(steps, 100 * he["relative"], color="tab:gray", lw=1.0, ls="--",
+                    alpha=0.7, label="full H")
+            ax.set_xlabel("DSO step k")
+            ax.set_ylabel("rel. H error [%]")
+            ax.set_title(r"H-estimation error  "
+                         r"$\|H_\mathrm{used}-H_\mathrm{analytical}\|_F/\|H_\mathrm{analytical}\|_F$"
+                         "   (NB: analytical ref includes the $T'$ droop transform)")
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+        else:
+            ax.text(0.5, 0.5, "H error unavailable (sidecar lacks h_analytical)",
+                    ha="center", va="center", transform=ax.transAxes, fontsize=11, color="gray")
+            ax.set_title("H-estimation error (data not available)")
+
+    # ── Panel 3: Q_trafo setpoint vs actual ──────────────────────────────────
     ax = fig.add_subplot(gs[panel]); panel += 1
     qt = q_trafo_tracking(log)
     times_min = qt["times_s"] / 60.0
@@ -592,14 +616,22 @@ def plot_multi_comparison(
         Save to file instead of showing.
     """
     colors = plt.cm.tab10(np.linspace(0, 0.9, len(runs)))
-    fig = plt.figure(figsize=(14, 12))
-    gs  = GridSpec(3, 1, figure=fig, hspace=0.50)
-    ax_h = fig.add_subplot(gs[0])
-    ax_q = fig.add_subplot(gs[1])
-    ax_v = fig.add_subplot(gs[2])
+    fig = plt.figure(figsize=(14, 16))
+    gs  = GridSpec(4, 1, figure=fig, hspace=0.55)
+    ax_he = fig.add_subplot(gs[0])   # H-estimation error vs analytical
+    ax_h  = fig.add_subplot(gs[1])   # one-step-ahead prediction error
+    ax_q  = fig.add_subplot(gs[2])
+    ax_v  = fig.add_subplot(gs[3])
 
     for (pkl_path, sidecar_path, label), col in zip(runs, colors):
         log, sidecar = load_run(pkl_path, sidecar_path)
+
+        # ── Panel 0: H-estimation error vs analytical ────────────────────
+        if sidecar is not None:
+            he = h_analytical_error(sidecar)
+            if he is not None and "relative_q_trafo" in he:
+                ax_he.plot(he["steps"], 100 * he["relative_q_trafo"], color=col, lw=1.8,
+                           label=f"{label}  (final {100 * float(np.mean(he['relative_q_trafo'][-20:])):.1f}%)")
 
         # ── Panel 1: one-step-ahead q_trafo prediction error ─────────────
         if sidecar is not None:
@@ -634,6 +666,14 @@ def plot_multi_comparison(
             ax_v.fill_between(times_min_v,
                               vd["dev_min"] * 1e3, vd["dev_max"] * 1e3,
                               color=col, alpha=0.08)
+
+    ax_he.set_xlabel("DSO step k")
+    ax_he.set_ylabel("rel. H error [%]  (q_trafo)")
+    ax_he.set_title(r"H-estimation error  "
+                    r"$\|H_\mathrm{used}-H_\mathrm{analytical}\|/\|H_\mathrm{analytical}\|$  "
+                    r"(q$_\mathrm{trafo}$ rows; analytical ref incl. $T'$)")
+    ax_he.legend(fontsize=8)
+    ax_he.grid(True, alpha=0.3)
 
     ax_h.set_xlabel("DSO step k")
     ax_h.set_ylabel("One-step q_trafo error [Mvar]")

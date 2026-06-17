@@ -61,7 +61,7 @@ the next step.  Four pieces do the wiring (see below):
 * :func:`install_pe_noise`      -- step wrapper: adds gaussian noise
   to the DER (Q_cor) actuator output of the OFO at every step
   (persistent excitation for sensitivity learning).  Toggled by
-  ``cfg.dso_pe_noise_enabled`` in :func:`make_base_config`.
+  ``cfg.dso_pe_noise_enabled`` in :func:`make_config`.
 * :func:`_setup_h_predictor`    -- example startup function (passed to
   the runner as ``pre_loop_hook``); primes the cache, prints the view
   once, optionally installs PE noise, and installs the predictor.
@@ -149,7 +149,7 @@ from sensitivity.numerical_h import compute_numerical_h_dso  # noqa: E402
 # ``002_M_TSO_M_DSO_COMPARE`` starts with a digit, so the import must go
 # through importlib rather than a normal ``from ... import ...``.
 _compare = importlib.import_module("experiments.002_M_TSO_M_DSO_COMPARE")
-make_002_base_config = _compare.make_base_config
+#make_002_base_config = _compare.make_config
 
 # ---------------------------------------------------------------------------
 #  Predictor selection
@@ -179,7 +179,7 @@ make_002_base_config = _compare.make_base_config
 #  profiles constant for the entire run.  Contingency events are suppressed.
 #  PE noise is forced on so estimators remain persistently excited.
 # ---------------------------------------------------------------------------
-H_PREDICTOR_MODE: str = "kalman"
+H_PREDICTOR_MODE: str = "identity"
 H_PREDICTOR_ROWS: str = "q_trafo+v"   # estimate Q_trafo + voltage rows (I_line rows kept analytical)
 # Kalman forgetting factor, applied directly (NOT period-scaled) so the estimator
 # behaves identically across DSO periods and is easy to compare run-to-run.
@@ -223,58 +223,50 @@ DSO2_INTERFACE_MODE: str = "slack"  # "slack" (decoupled, default) | "coupled"
 #  Configuration
 # ---------------------------------------------------------------------------
 
+def make_config() -> MultiTSOConfig:
+    """Run configuration for the default multi-TSO / multi-DSO run (edit here).
 
-def make_base_config() -> MultiTSOConfig:
-    """Configuration for the 003 single-DSO experiment.
-
-    Inherits the validated wind_replace + weight tuning + contingency
-    timeline from ``002_M_TSO_M_DSO_COMPARE.make_base_config()`` and
-    overrides only the flags that switch the run into the
-    "TSO local Q(V), DSO_2 OFO with Q_cor" mode.
+    Single place to change the horizon, objective weights, OFO timing,
+    profile and contingency schedule for ``main()``.  ``main_comparison()``
+    keeps its own paired config.
     """
-    cfg = make_002_base_config()
-
-    # ---- Network / scenario --------------------------------------------
-    cfg.scenario = "wind_replace"
-
-    # ---- TSO layer: no OFO; every TSO DER runs a plant-side Q(V) loop --
-    cfg.tso_mode = "local"
-    cfg.tso_local_mode = "qv"
-
-    # ---- refactor_Qcor_method q_mode plant model ----------------------
-    cfg.tso_q_mode = "qv"
-    cfg.dso_q_mode = "qv"
-    cfg.tso_qv_vref_pu = 1.03
-    cfg.dso_qv_vref_pu = 1.03
-    cfg.tso_qv_slope_pu = 0.06
-    cfg.dso_qv_slope_pu = 0.06
-    # No deadband (linear droop through V_ref).
-    cfg.tso_qv_deadband_pu = 0.01
-    cfg.dso_qv_deadband_pu = 0.01
-
-    cfg.g_q = 250
-    cfg.dso_g_v = 5*20000
-    cfg.g_w_dso_der = 1000
-    cfg.g_w_dso_oltc = 40
-
-    # cfg.contingencies = [
-    #         # ContingencyEvent(minute=30,  element_type="gen",  element_index=2, action="trip"),
-    #         # ContingencyEvent(minute=90, element_type="gen", element_index=2, action="restore"),
-    #         # ContingencyEvent(minute=50, element_type="load", bus=27,  p_mw=200, q_mvar=100, action="connect"),
-    #         # ContingencyEvent(minute=100, element_type="load", bus=27,  p_mw=200, q_mvar=100, action="trip"),
-    #         # ContingencyEvent(minute=120, element_type="load",
-    #         #                  element_index=4, action="trip"),
-    #         # ContingencyEvent(minute=160, element_type="load",
-    #         #                  element_index=4, action="restore"),
-    #         # ContingencyEvent(minute=130, element_type="line", element_index=18, action="trip"),
-    #         # ContingencyEvent(minute=150, element_type="line", element_index=18, action="restore"),
-    #         #ContingencyEvent(minute=180, element_type="gen",  element_index=5, action="trip"),
-    #         #ContingencyEvent(minute=280, element_type="gen",  element_index=5, action="restore"),
-    #         # ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
-    #         # ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
-    #         # ContingencyEvent(minute=720, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="connect"),
-    #         # ContingencyEvent(minute=900, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="trip"),
-    #     ],
+    cfg = MultiTSOConfig(
+        n_total_s=60.0 * 60 * 5,      # 36-hour (2160-min) simulation
+        tso_period_s=60.0 * 3,        # TS-OFO every 3 min
+        dso_period_s=10.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
+        g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
+        g_q=200,                      # DSO Q-tracking
+        #tso_g_q_tie=0,
+        #tso_g_res_sg=0,
+        # ── DSO objective tuning ──
+        dso_g_v=15000.0,              # reduced to avoid competing with Q tracking
+        dso_g_qi=0,                   # integral Q-tracking (0 = off)
+        dso_lambda_qi=0.95,           # leaky integrator decay
+        dso_q_integral_max_mvar=200.0,
+        dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
+        # ── TSO weights (w-shift closed-loop curvature) ──
+        g_w_der=100,
+        g_w_gen=1e8,
+        g_w_pcc=300,
+        g_w_tso_oltc=100,
+        install_tso_tertiary_shunts=False,
+        g_w_tso_shunt=12000,
+        # ── DSO weights ──
+        g_w_dso_der=1000,
+        g_w_dso_oltc=30,
+        # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
+        # max_step=1 (default) + wall-clock cooldown per OLTC type:
+        #   MT (machine 2W gen-trafo) -> 1 tap / 180 s = once per TS interval.
+        #   NC (coupler 3W interface) -> 1 tap / 60 s  = once per minute.
+        # Cooldowns are wall-clock, hence robust to dt_s / dso_period_s.
+        local_oltc_max_step_per_dt=1,
+        #oltc_cooldown_s_mt=180.0,
+        #oltc_cooldown_s_nc=60.0,
+        use_fixed_zones=True,         # literature 3-area partition
+        run_stability_analysis=False,
+        sensitivity_update_interval=1E6,
+        verbose=1,
+    )
 
     # ---- DSO layer: only DSO_2 has an OFO controller -------------------
     cfg.dso_mode = "ofo"
@@ -293,12 +285,12 @@ def make_base_config() -> MultiTSOConfig:
     cfg.q_pcc_setpoints_mvar_per_dso = {"DSO_2": [40.0, 20.0, 80.0]}
 
     # ---- Run length / timing -------------------------------------------
-    cfg.n_total_s = 60.0 * 60 * 2     # 2 h smoke
-    cfg.tso_period_s = 180.0          # cosmetic: TSO never steps anyway
+    cfg.n_total_s = 60.0 * 60 * 2  # 2 h smoke
+    cfg.tso_period_s = 180.0  # cosmetic: TSO never steps anyway
     cfg.dso_period_s = 1  # 10
     cfg.warmup_s = 0.0
-    start_time = datetime(2016, 9, 7, 10, 0)
-    use_profiles = True
+    cfg.start_time = datetime(2016, 9, 7, 10, 0)
+    cfg.use_profiles = True
 
     # ---- Plant-side Q(V) loop damping ----------------------------------
     # 44 QVLocalLoops (4 TSO STATCOMs + 40 DSO sgens) iterate in parallel
@@ -306,9 +298,9 @@ def make_base_config() -> MultiTSOConfig:
     # (S_n ~600 Mvar with slope 0.07) have ~9 GVar/pu open-loop gain;
     # the published-stable damping is 0.1 (see QVLocalLoop docstring).
     # The 002 default of 0.5 is fine for fewer loops but oscillates here.
-    cfg.qv_local_damping = 0.1
-    cfg.qv_local_max_step_frac = None
-    cfg.qv_local_tol_mvar = 0.1
+    # cfg.qv_local_damping = 0.1
+    # cfg.qv_local_max_step_frac = None
+    # cfg.qv_local_tol_mvar = 0.1
 
     # ---- Live plots off for diagnostic runs ---------------------------
     cfg.live_plot_controller = True
@@ -326,7 +318,7 @@ def make_base_config() -> MultiTSOConfig:
     # (Kalman filter / NN) where the input must be persistently exciting.
     cfg.dso_pe_noise_enabled = True
     cfg.dso_pe_noise_std_mvar = 0.25  # std of N(0, sigma^2) on Q_cor [Mvar] (quartered from 1.0: steady-state ||du|| noise floor ~0.9 Mvar; profiles still excite the varying case)
-    cfg.dso_pe_noise_seed = 42        # RNG seed for reproducibility
+    cfg.dso_pe_noise_seed = 42  # RNG seed for reproducibility
 
     # ---- Output directory ---------------------------------------------
     cfg.result_dir = os.path.join("results", "003_cigre_2026")
@@ -336,15 +328,16 @@ def make_base_config() -> MultiTSOConfig:
     # operating point; cfg.frozen_at then holds that profile constant for the
     # entire run.  This avoids the artificial mean-profile base-case.
     if FROZEN_OP_POINT:
-        cfg.use_profiles         = True
-        cfg.start_time           = FROZEN_OP_TIMESTAMP
-        cfg.frozen_at            = FROZEN_OP_TIMESTAMP
-        cfg.contingencies        = []
+        cfg.use_profiles = True
+        cfg.start_time = FROZEN_OP_TIMESTAMP
+        cfg.frozen_at = FROZEN_OP_TIMESTAMP
+        cfg.contingencies = []
         cfg.dso_pe_noise_enabled = True
         print(f"[003] FROZEN_OP_POINT=True: frozen at {FROZEN_OP_TIMESTAMP:%Y-%m-%d %H:%M}, "
               f"contingencies off, PE noise on")
 
     return cfg
+
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +362,7 @@ def make_base_config() -> MultiTSOConfig:
 #       install_h_corrector(state["dso_controllers"]["DSO_2"], my_h_predictor)
 #
 #       # Optional: gaussian persistent-excitation noise on Q_cor output.
-#       # Toggle in make_base_config (cfg.dso_pe_noise_enabled = True/False);
+#       # Toggle in make_config (cfg.dso_pe_noise_enabled = True/False);
 #       # _setup_h_predictor reads the flag and installs the wrapper.
 
 
@@ -1049,7 +1042,7 @@ def collect_training_data(
 
     Returns the absolute path of the saved file.
     """
-    cfg = make_base_config()
+    cfg = make_config()
     cfg.n_total_s = n_total_s
     cfg.dso_pe_noise_enabled = True
     cfg.dso_pe_noise_std_mvar = pe_noise_std_mvar
@@ -1607,7 +1600,7 @@ def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> Optional["
 
 def run() -> List[MultiTSOIterationRecord]:
     """Run the 003 experiment end-to-end and pickle the log."""
-    cfg = make_base_config()
+    cfg = make_config()
     out_dir = cfg.result_dir
     os.makedirs(out_dir, exist_ok=True)
 

@@ -8,14 +8,14 @@ ana.plot_comparison = lambda *a, **k: None            # silence per-run pop-ups
 RES = os.path.join(_root, "results", "003_cigre_2026")
 
 MODES  = {"identity": "Constant H", "kalman": "Kalman", "ann": "ANN"}
-exp.H_INIT_BIAS_STD, exp.H_INIT_BIAS_SEED = 0.10, 0
+exp.H_INIT_BIAS_STD, exp.H_INIT_BIAS_SEED = 0.20, 0
 exp.H_PREDICTOR_ROWS, exp.FROZEN_OP_POINT = "q_trafo+v", False
 
 _orig = exp.make_config                                # <-- current name, NOT make_base_config
 def _cfg(_o=_orig):
     cfg = _o()
     cfg.n_total_s, cfg.dso_period_s = 2*3600.0, 60.0   # 120 steps (~5 min/mode)
-    cfg.start_time, cfg.contingencies = datetime(2016, 9, 7, 6, 0), []
+    cfg.start_time, cfg.contingencies = datetime(2016, 1, 5, 12, 0), []
     return cfg
 exp.make_config = _cfg
 

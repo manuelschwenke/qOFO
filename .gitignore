@@ -1,0 +1,12 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# IDE / editor
+.idea/
+
+# Claude Code / agent workspace
+.claude/
+
+# Logs
+*.log

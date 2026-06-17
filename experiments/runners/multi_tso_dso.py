@@ -757,12 +757,17 @@ def run_multi_tso_dso(
         der_indices = list(hv.sgen_indices)
         v_buses = list(hv.bus_indices)
 
-        # HV lines — filter to PQ-bus endpoints only (same as TN lines)
-        hv_lines = [
-            li for li in hv.line_indices
-            if int(net.line.at[li, "from_bus"]) not in pv_and_slack_buses_run
-            and int(net.line.at[li, "to_bus"]) not in pv_and_slack_buses_run
-        ]
+        # HV lines — filter to PQ-bus endpoints only (same as TN lines).
+        # Dropped entirely when config.dso_monitor_currents is False, so H
+        # carries no ∂I/∂u rows and the MIQP enforces no current limits.
+        if config.dso_monitor_currents:
+            hv_lines = [
+                li for li in hv.line_indices
+                if int(net.line.at[li, "from_bus"]) not in pv_and_slack_buses_run
+                and int(net.line.at[li, "to_bus"]) not in pv_and_slack_buses_run
+            ]
+        else:
+            hv_lines = []
         hv_line_max = [float(net.line.at[li, "max_i_ka"]) for li in hv_lines]
 
         # G_w diagonal: [Q_cor_DER | OLTC_tap].  Q_cor units are Mvar,

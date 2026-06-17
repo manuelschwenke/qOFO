@@ -183,7 +183,7 @@ H_PREDICTOR_MODE: str = "identity"
 H_PREDICTOR_ROWS: str = "q_trafo+v"   # estimate Q_trafo + voltage rows (I_line rows kept analytical)
 # Kalman forgetting factor, applied directly (NOT period-scaled) so the estimator
 # behaves identically across DSO periods and is easy to compare run-to-run.
-KALMAN_LAM: float = 0.997
+KALMAN_LAM: float = 1
 # Step size for the "numerical" oracle's closed-loop finite difference.
 # Matched to the deployment per-step OFO excitation (||du_DER|| ~= 3.4 Mvar) so
 # the oracle returns the realized SECANT at the OFO scale, not the infinitesimal
@@ -253,7 +253,7 @@ def make_config() -> MultiTSOConfig:
         g_w_tso_shunt=12000,
         # ── DSO weights ──
         g_w_dso_der=1000,
-        g_w_dso_oltc=30,
+        g_w_dso_oltc=20,
         # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
         # max_step=1 (default) + wall-clock cooldown per OLTC type:
         #   MT (machine 2W gen-trafo) -> 1 tap / 180 s = once per TS interval.
@@ -271,6 +271,13 @@ def make_config() -> MultiTSOConfig:
     # ---- DSO layer: only DSO_2 has an OFO controller -------------------
     cfg.dso_mode = "ofo"
     cfg.dso_ids_to_run = ["DSO_2"]
+
+    # ---- Drop line-current rows from H (paper y = [Q_int, V]) ----------
+    # With this off the DSO_2 sensitivity matrix reduces to [Q_interface | V]:
+    # no ∂I/∂u rows enter the online estimator (Kalman/ANN) and the MIQP
+    # enforces no line-current limits.  Regenerate kalman_matrices.npz after
+    # toggling this — n_y (hence Q/R dimensions) changes.
+    cfg.dso_monitor_currents = False
 
     # ---- DSO_2 interface: slack-decoupled vs. coupled (DSO2_INTERFACE_MODE)
     cfg.dso2_interface_slack = (DSO2_INTERFACE_MODE == "slack")
@@ -303,9 +310,10 @@ def make_config() -> MultiTSOConfig:
     # cfg.qv_local_tol_mvar = 0.1
 
     # ---- Live plots off for diagnostic runs ---------------------------
-    cfg.live_plot_controller = True
-    cfg.live_plot_cascade = True
+    cfg.live_plot_controller = False
+    cfg.live_plot_cascade = False
     cfg.live_plot_system = False
+    cfg.live_plot_tracking = True
 
     # ---- Persistent excitation (sensitivity learning) -----------------
     # When enabled, gaussian noise N(0, sigma^2) is added to the DSO
@@ -317,7 +325,7 @@ def make_config() -> MultiTSOConfig:
     # perturbed (integer actuators).  Useful for downstream H estimation
     # (Kalman filter / NN) where the input must be persistently exciting.
     cfg.dso_pe_noise_enabled = True
-    cfg.dso_pe_noise_std_mvar = 0.25  # std of N(0, sigma^2) on Q_cor [Mvar] (quartered from 1.0: steady-state ||du|| noise floor ~0.9 Mvar; profiles still excite the varying case)
+    cfg.dso_pe_noise_std_mvar = 0.01  # std of N(0, sigma^2) on Q_cor [Mvar] (quartered from 1.0: steady-state ||du|| noise floor ~0.9 Mvar; profiles still excite the varying case)
     cfg.dso_pe_noise_seed = 42  # RNG seed for reproducibility
 
     # ---- Output directory ---------------------------------------------
@@ -825,17 +833,19 @@ class _KalmanHPredictor:
         delta_u = u - self._u_prev
         delta_y = y - self._y_prev
 
-        # Predict — Σ_q = ‖Δu‖·Σ_q0 ties the assumed H drift to actuator motion, so
+        # Predict — Σ_q = ‖Δu‖²·Σ_q0 ties the assumed H drift to actuator motion, so
         # process noise shrinks toward zero at convergence (Δu→0) instead of injecting
-        # fictitious diffusion.  Δu is per-channel normalised by its RMS scale so DER
-        # and OLTC moves contribute comparably; the expected PE-dither energy is removed
-        # so s reflects natural controller motion only (s→0 once the controller settles,
-        # even though the dither keeps moving).  s≈1 at a typical full step.
+        # fictitious diffusion.  The squared scaling is the covariance interpretation:
+        # if the per-step H increment scales like Δu, its covariance scales like ‖Δu‖².
+        # Δu is per-channel normalised by its RMS scale so DER and OLTC moves contribute
+        # comparably; the expected PE-dither energy is removed so s² reflects natural
+        # controller motion only (s²→0 once the controller settles, even though the dither
+        # keeps moving).  s²≈1 at a typical full step.
         # Forgetting factor keeps P from collapsing; trace cap bounds growth (PSD-safe).
-        du_n2 = float(np.sum((delta_u / self._u_scale) ** 2))
-        s = float(np.sqrt(max(0.0, du_n2 - self._pe_dither_energy)) / np.sqrt(len(delta_u)))
+        du_n2 = float(np.sum((delta_u / self._u_scale) ** 2))  # ‖Δu‖² (normalised, dimensionless)
+        s2 = max(0.0, du_n2 - self._pe_dither_energy) / len(delta_u)  # ∝ ‖Δu‖² → covariance scaling
         h_p = self._h.copy()
-        P_p = self._P / self.lam + s * self._Q
+        P_p = self._P / self.lam + s2 * self._Q
         tr = float(np.trace(P_p))
         if tr > self._P_max:
             P_p *= self._P_max / tr
@@ -1020,7 +1030,7 @@ _ANN_h_predictor = _ANNHPredictor()
 
 def collect_training_data(
     n_total_s: float = 7200.0,
-    pe_noise_std_mvar: float = 1.0,
+    pe_noise_std_mvar: float = 0.001,
     output_path: str = _TRAINING_DATA_PATH,
 ) -> str:
     """Run the 003 simulation and record measurements at every DSO_2 step.

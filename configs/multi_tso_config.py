@@ -556,6 +556,15 @@ class MultiTSOConfig:
     der_qv_deadband_pu_overrides: Dict[int, float] = field(default_factory=dict)
     """Per-DER override of the qv deadband half-width."""
 
+    dso_monitor_currents: bool = True
+    """When True (default) DSO controllers monitor line currents, so the
+    sensitivity matrix H carries ``dI/du`` rows and the MIQP enforces the
+    line-current limits.  When False the current rows are dropped entirely
+    (``current_line_indices=[]``): H reduces to ``[Q_interface | V]`` and the
+    current-limit constraints are removed.  Used by 003 so the online
+    H-estimator (Kalman / ANN) sees only reactive-power and voltage terms,
+    matching the paper's output vector ``y = [Q_int, V]``."""
+
     # -- cosphi parameters (used when q_mode == "cosphi") --------------
     tso_cosphi: float = 1.0
     """Power factor magnitude for TSO DERs in cosphi mode (1.0 ⇒ Q = 0)."""

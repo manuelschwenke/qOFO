@@ -333,6 +333,86 @@ def apply_dso_controls(
     # Shunt switching skipped for multi-zone setup.
 
 
+def decouple_trafo3w_hv_with_slack(
+    net: pp.pandapowerNet,
+    trafo3w_indices: Sequence[int],
+) -> List[int]:
+    """Replace the upstream feed at each 3W transformer's HV side with a slack.
+
+    For every transformer index in ``trafo3w_indices`` this:
+
+      1. reads the operating-point voltage ``(vm_pu, va_degree)`` at the
+         transformer's HV bus from ``net.res_bus`` (the net must be solved),
+      2. creates a new isolated bus at the same nominal voltage,
+      3. repoints the transformer's ``hv_bus`` to that new bus,
+      4. attaches a voltage-holding ``ext_grid`` (slack) at the new bus, pinned
+         to the operating-point voltage.
+
+    The transformers' downstream side (MV/LV windings and everything connected
+    there) thereby becomes an island fed solely by these stiff slacks, fully
+    decoupled from the network the HV buses originally belonged to.  Each
+    interface keeps its own voltage-holding slack, so the reactive power that
+    flows through each coupler stays a free, controllable quantity (the
+    ``res_trafo3w.q_hv_mvar`` measurement and OFO Q-tracking are unchanged),
+    while the island's active-power mismatch is shared across the slacks —
+    a distributed slack at the interface.
+
+    Run the power flow with ``distributed_slack=True`` afterwards so the
+    several boundary slacks share the island balance by ``slack_weight``.
+
+    Parameters
+    ----------
+    net : pandapowerNet
+        Combined plant network.  Must carry a converged power flow
+        (``net.res_bus`` populated) so the pinned voltages reflect the
+        intended operating point.
+    trafo3w_indices : sequence of int
+        Coupling 3W transformer indices whose HV feed is replaced (for
+        DSO_2: ``dso_ctrl.config.interface_trafo_indices``).
+
+    Returns
+    -------
+    list of int
+        The created ``ext_grid`` indices, in input order.
+    """
+    if len(net.res_bus) == 0:
+        raise RuntimeError(
+            "decouple_trafo3w_hv_with_slack requires a solved net "
+            "(net.res_bus is empty); run pp.runpp() first."
+        )
+
+    has_subnet = "subnet" in net.bus.columns
+    created: List[int] = []
+    for t in trafo3w_indices:
+        t = int(t)
+        hv_bus = int(net.trafo3w.at[t, "hv_bus"])
+        vn_kv = float(net.bus.at[hv_bus, "vn_kv"])
+        vm_pu = float(net.res_bus.at[hv_bus, "vm_pu"])
+        va_deg = float(net.res_bus.at[hv_bus, "va_degree"])
+
+        bus_kwargs = {}
+        if has_subnet:
+            bus_kwargs["subnet"] = str(net.bus.at[hv_bus, "subnet"])
+        new_bus = pp.create_bus(
+            net,
+            vn_kv=vn_kv,
+            name=f"SLACK_IFACE|trafo3w{t}",
+            **bus_kwargs,
+        )
+        net.trafo3w.at[t, "hv_bus"] = int(new_bus)
+
+        eg = pp.create_ext_grid(
+            net,
+            bus=int(new_bus),
+            vm_pu=vm_pu,
+            va_degree=va_deg,
+            slack_weight=1.0,
+            name=f"SLACK_IFACE|trafo3w{t}",
+        )
+        created.append(int(eg))
+    return created
+
+
 def _sgen_q_capability(net: pp.pandapowerNet, s_idx: int) -> tuple[float, float]:
     """Return (q_min, q_max) for sgen ``s_idx`` per its op_diagram label.
 

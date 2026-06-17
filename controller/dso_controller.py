@@ -1447,7 +1447,7 @@ class DSOController(BaseOFOController):
         # ── Stage-2: append Q_realized output rows for V_ref-mode ──────
         # One row per DSO grid-following DER.  ∂Q_realized,i/∂V_ref,j =
         # T_ij (the K-transform); ∂Q_realized,i/∂(other actuator) = 0
-        # (cross-coupling via local Q(V) loop deferred — would require
+        # (crossRz-coupling via local Q(V) loop deferred — would require
         # multiplying the V_gen / V_gf / OLTC / shunt columns by the
         # bus-voltage sensitivity at the DER bus times -K).  This row
         # block lets the OFO see the converter PQ envelope as a soft
@@ -1574,13 +1574,12 @@ class DSOController(BaseOFOController):
         except Exception:
             return None
 
-        # Apply T_prime (Q_cor transform) with the fresh Jacobian.
+        # Apply T_prime (w-shift transform) with the fresh Jacobian.
         if (
-            self.config.use_q_cor_actuator
-            and not getattr(self.config, "ofo_in_v_ref_mode", False)
+            not self.config.ofo_in_v_ref_mode
             and unique_buses
         ):
-            # Temporarily swap sensitivities so _compute_qcor_transform_T_prime
+            # Temporarily swap sensitivities so _compute_w_shift_transform_T_prime
             # uses the fresh Jacobian without caching its result permanently.
             _old_jac = self.sensitivities
             _old_t_prime = self._T_prime_cache
@@ -1589,7 +1588,7 @@ class DSOController(BaseOFOController):
             try:
                 self.sensitivities = fresh_jac
                 self._T_prime_cache = None
-                T_prime = self._compute_qcor_transform_T_prime(unique_buses, der_bus_indices)
+                T_prime = self._compute_w_shift_transform_T_prime(unique_buses, der_bus_indices)
             finally:
                 self.sensitivities = _old_jac
                 self._T_prime_cache = _old_t_prime

@@ -213,6 +213,107 @@ def h_analytical_error(sidecar: np.lib.npyio.NpzFile) -> Optional[Dict[str, np.n
     return result
 
 
+def one_step_qtrafo_error(
+    sidecar: np.lib.npyio.NpzFile,
+    which_h: str = "used",
+    du_gate: float = 1e-3,
+) -> Optional[Dict[str, np.ndarray]]:
+    """One-step-ahead q_trafo prediction error against the *realised* plant.
+
+    For each step ``k`` the deployed H matrix is used to predict the change in
+    the q_trafo measurements that the applied control change actually produced::
+
+        Δu(k)    = u(k)   - u(k-1)                   (n_u,)
+        Δy_q(k)  = y(k)[:n_q] - y(k-1)[:n_q]         (n_q,)   realised
+        pred(k)  = H_q(k) · Δu(k)                    (n_q,)   predicted
+        resid(k) = Δy_q(k) - pred(k)                 (n_q,)
+        e(k)     = ||resid(k)||                       [Mvar]
+
+    The index pairing mirrors :class:`_KalmanHPredictor` exactly: the filter
+    forms ``delta_y(k)=y(k)-y(k-1)``, ``delta_u(k)=u(k)-u(k-1)`` and scores them
+    with its *prior* ``h`` — which is precisely ``h_used(k)`` (the cache before
+    the predictor fires at step k).  Hence ``H_q(k) = h_used[k][:n_q]`` is paired
+    with the (k-1 → k) deltas, i.e. ``H[1:]`` against ``diff(Y)``/``diff(U)``.
+    With ``which_h="used"`` the returned residual therefore reproduces the
+    filter's actual innovation sequence (genuine out-of-sample prediction).
+
+    Unlike :func:`h_analytical_error`, this references the realised plant
+    response — the *secant* the controller actually rides — not the analytical
+    derivative.  It is the operationally meaningful convergence / functionality
+    metric and is directly comparable across predictor modes (identity / kalman
+    / ann), each evaluated on its own closed-loop trajectory.
+
+    Parameters
+    ----------
+    which_h
+        ``"used"``      -- H_used(k): the matrix held *before* observing Δy(k).
+                           Genuine out-of-sample (innovation) form — recommended.
+        ``"predicted"`` -- H_predicted(k): the posterior after the step's update
+                           (in-sample; optimistic for adaptive predictors).
+    du_gate
+        Keep only steps with ``||Δu(k)|| > du_gate``; settled steps carry no
+        information and would dilute the metric (and the skill score).
+
+    Returns
+    -------
+    ``None`` when the sidecar lacks ``h_used`` / ``y`` / ``u`` / ``n_q_trafo``
+    (or has < 2 steps), else a dict::
+
+        "steps"        (M,)  gated absolute step indices k
+        "resid_norm"   (M,)  ||Δy_q - H_q·Δu||            [Mvar]
+        "zero_norm"    (M,)  ||Δy_q||  (zero-predictor baseline) [Mvar]
+        "du_norm"      (M,)  ||Δu||
+        "rmse"         float RMSE of resid_norm over gated steps [Mvar]
+        "rmse_zero"    float RMSE of zero_norm   over gated steps [Mvar]
+        "skill"        float 1 - rmse/rmse_zero  (fraction of zero-pred error removed)
+        "n_q_trafo"    int
+        "n_gated"      int
+    """
+    if any(k not in sidecar for k in ("h_used", "y", "u")):
+        return None
+    key = "h_predicted" if which_h == "predicted" else "h_used"
+    if key not in sidecar:
+        key = "h_used"
+    H = sidecar[key]   # (N, n_y, n_u)
+    Y = sidecar["y"]   # (N, n_y)
+    U = sidecar["u"]   # (N, n_u)
+    N = len(H)
+    if N < 2:
+        return None
+    n_q = int(sidecar["n_q_trafo"]) if "n_q_trafo" in sidecar else 0
+    if n_q <= 0:
+        return None
+
+    dU  = U[1:] - U[:-1]                # Δu_j = u[j+1]-u[j]                 (N-1, n_u)
+    dYq = Y[1:, :n_q] - Y[:-1, :n_q]    # realised Δy_q_j                    (N-1, n_q)
+    Hq  = H[1:, :n_q, :]               # H deployed for the j→j+1 transition (N-1, n_q, n_u)
+    #                                    (= prior the KF scores in its innovation)
+    pred  = np.einsum("kij,kj->ki", Hq, dU)   # H_q·Δu                       (N-1, n_q)
+    resid = dYq - pred
+
+    resid_norm = np.linalg.norm(resid, axis=1)
+    zero_norm  = np.linalg.norm(dYq,   axis=1)
+    du_norm    = np.linalg.norm(dU,    axis=1)
+
+    mask = du_norm > du_gate
+    rn = resid_norm[mask]
+    zn = zero_norm[mask]
+    rmse      = float(np.sqrt(np.mean(rn ** 2))) if rn.size else float("nan")
+    rmse_zero = float(np.sqrt(np.mean(zn ** 2))) if zn.size else float("nan")
+
+    return {
+        "steps":      np.arange(1, N)[mask],   # absolute step k = j+1 (matches h_used[k])
+        "resid_norm": rn,
+        "zero_norm":  zn,
+        "du_norm":    du_norm[mask],
+        "rmse":       np.array(rmse),
+        "rmse_zero":  np.array(rmse_zero),
+        "skill":      np.array(1.0 - rmse / (rmse_zero + 1e-12)),
+        "n_q_trafo":  np.array(n_q),
+        "n_gated":    np.array(int(mask.sum())),
+    }
+
+
 def q_trafo_tracking(
     log: list,
     dso_id: str = "DSO_2",
@@ -315,9 +416,25 @@ def print_summary(log: list, sidecar: Optional[np.lib.npyio.NpzFile] = None) -> 
               f"min={np.nanmin(arr):+.2f}  max={np.nanmax(arr):+.2f}")
 
     if sidecar is not None:
+        ose = one_step_qtrafo_error(sidecar)
+        if ose is not None and ose["steps"].size:
+            n_q = int(ose["n_q_trafo"])
+            print("\n=== One-step-ahead q_trafo prediction error  "
+                  "||dy_q - H_q*du|| [Mvar] ===")
+            print(f"  Q_trafo ({n_q} rows) over {int(ose['n_gated'])} active steps:")
+            print(f"    predictor RMSE : {float(ose['rmse']):.4f} Mvar")
+            print(f"    zero-pred RMSE : {float(ose['rmse_zero']):.4f} Mvar  "
+                  f"(baseline ||Δy_q||)")
+            print(f"    skill          : {100 * float(ose['skill']):+.1f} %  "
+                  f"(fraction of zero-pred error removed)")
+        else:
+            print("\n[analysis] one-step q_trafo error unavailable "
+                  "(sidecar lacks y / u / h_used).")
+
         herr = h_analytical_error(sidecar)
         if herr is not None:
-            print("\n=== H analytical error  ||H_used - H_analytical|| / ||H_analytical|| ===")
+            print("\n=== H analytical error  ||H_used - H_analytical|| / ||H_analytical|| "
+                  "(secondary; references the derivative, not the realised secant) ===")
             print(f"  full H  rel [%]: mean={herr['relative'].mean()*100:.2f}  "
                   f"max={herr['relative'].max()*100:.2f}")
             print(f"  full H  abs:     mean={herr['absolute'].mean():.4e}  "
@@ -361,51 +478,44 @@ def plot_comparison(
     gs  = GridSpec(n_panels, 1, figure=fig, hspace=0.50)
     panel = 0
 
-    # ── Panel 1: H analytical error ──────────────────────────────────────────
+    # ── Panel 1: one-step-ahead q_trafo prediction error ─────────────────────
     if has_sidecar:
         ax = fig.add_subplot(gs[panel]); panel += 1
-        herr = h_analytical_error(sidecar)
-        if herr is not None:
-            steps = herr["steps"]
-            mean_full = herr["relative"].mean() * 100
-            ax.plot(steps, herr["relative"] * 100, color="tab:blue", lw=1.5,
-                    label=f"Full H (rel.)")
-            if "relative_q_trafo" in herr:
-                n_q = int(herr["n_q_trafo"])
-                mean_q = herr["relative_q_trafo"].mean() * 100
-                ax.plot(steps, herr["relative_q_trafo"] * 100,
-                        color="tab:blue", lw=1.5, ls="--",
-                        label=f"Q_trafo rows only ({n_q} rows, rel.)")
-                summary = (f"Mean error\n"
-                           f"Full H : {mean_full:.2f} %\n"
-                           f"Q_trafo: {mean_q:.2f} %")
-            else:
-                summary = f"Mean error\nFull H: {mean_full:.2f} %"
+        ose = one_step_qtrafo_error(sidecar)
+        if ose is not None and ose["steps"].size:
+            steps = ose["steps"]
+            ax.plot(steps, ose["resid_norm"], color="tab:blue", lw=1.2, alpha=0.85,
+                    label=r"$\|\Delta y_q - H_q\,\Delta u\|$  (predictor)")
+            ax.plot(steps, ose["zero_norm"], color="tab:gray", lw=1.0, ls="--",
+                    alpha=0.8, label=r"$\|\Delta y_q\|$  (zero-predictor baseline)")
+            # running mean to expose the convergence trend through the noise
+            if steps.size >= 10:
+                w = max(5, steps.size // 20)
+                rm = np.convolve(ose["resid_norm"], np.ones(w) / w, mode="valid")
+                ax.plot(steps[w - 1:], rm, color="tab:red", lw=2.0,
+                        label=f"predictor, running mean (w={w})")
+            n_q = int(ose["n_q_trafo"])
+            summary = (f"RMSE over {int(ose['n_gated'])} active steps\n"
+                       f"predictor : {float(ose['rmse']):.3f} Mvar\n"
+                       f"zero-pred : {float(ose['rmse_zero']):.3f} Mvar\n"
+                       f"skill     : {100 * float(ose['skill']):.1f} %")
             ax.text(0.99, 0.97, summary, transform=ax.transAxes,
                     fontsize=8, va="top", ha="right",
                     bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8))
             ax.set_xlabel("DSO step k")
-            ax.set_ylabel("Rel. H error [%]", color="tab:blue")
-            ax.tick_params(axis="y", labelcolor="tab:blue")
+            ax.set_ylabel(f"One-step q_trafo error [Mvar]  ({n_q} rows)")
             ax.set_title(
-                r"$\|H_\mathrm{used}(k) - H_\mathrm{analytical}(k)\|_F \;/\;"
-                r"\|H_\mathrm{analytical}(k)\|_F$"
+                r"One-step-ahead q$_\mathrm{trafo}$ prediction error  "
+                r"$\|\Delta y_q(k) - H_q(k)\,\Delta u(k)\|$   (vs. realised plant)"
             )
             ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3)
-            ax2 = ax.twinx()
-            ax2.plot(steps, herr["absolute"], color="tab:orange", lw=0.8, alpha=0.7,
-                     label="Full H (abs.)")
-            if "absolute_q_trafo" in herr:
-                ax2.plot(steps, herr["absolute_q_trafo"], color="tab:orange",
-                         lw=0.8, alpha=0.7, ls="--", label="Q_trafo rows (abs.)")
-            ax2.set_ylabel("Abs. error [p.u./Mvar]", color="tab:orange")
-            ax2.tick_params(axis="y", labelcolor="tab:orange")
         else:
-            ax.text(0.5, 0.5, "h_analytical not in sidecar\n(re-run 003 to record it)",
+            ax.text(0.5, 0.5,
+                    "one-step q_trafo error unavailable\n(sidecar lacks y / u / h_used)",
                     ha="center", va="center", transform=ax.transAxes, fontsize=11,
                     color="gray")
-            ax.set_title("H analytical error (data not available)")
+            ax.set_title("One-step-ahead q_trafo prediction error (data not available)")
 
     # ── Panel 2: Q_trafo setpoint vs actual ──────────────────────────────────
     ax = fig.add_subplot(gs[panel]); panel += 1
@@ -491,19 +601,22 @@ def plot_multi_comparison(
     for (pkl_path, sidecar_path, label), col in zip(runs, colors):
         log, sidecar = load_run(pkl_path, sidecar_path)
 
-        # ── Panel 1: H analytical error ──────────────────────────────────
+        # ── Panel 1: one-step-ahead q_trafo prediction error ─────────────
         if sidecar is not None:
-            herr = h_analytical_error(sidecar)
-            if herr is not None:
-                mean_full = herr["relative"].mean() * 100
-                ax_h.plot(herr["steps"], herr["relative"] * 100,
-                          color=col, lw=1.5,
-                          label=f"{label} full H  (mean={mean_full:.2f}%)")
-                if "relative_q_trafo" in herr:
-                    mean_q = herr["relative_q_trafo"].mean() * 100
-                    ax_h.plot(herr["steps"], herr["relative_q_trafo"] * 100,
-                              color=col, lw=1.5, ls="--",
-                              label=f"{label} Q_trafo (mean={mean_q:.2f}%)")
+            ose = one_step_qtrafo_error(sidecar)
+            if ose is not None and ose["steps"].size:
+                steps = ose["steps"]
+                rn = ose["resid_norm"]
+                # running mean for readability; raw is too noisy when overlaid
+                if steps.size >= 10:
+                    w = max(5, steps.size // 20)
+                    rm = np.convolve(rn, np.ones(w) / w, mode="valid")
+                    ax_h.plot(steps[w - 1:], rm, color=col, lw=1.8,
+                              label=f"{label}  (RMSE={float(ose['rmse']):.3f} / "
+                                    f"zero={float(ose['rmse_zero']):.3f} Mvar)")
+                else:
+                    ax_h.plot(steps, rn, color=col, lw=1.5,
+                              label=f"{label}  (RMSE={float(ose['rmse']):.3f} Mvar)")
 
         # ── Panel 2: Q_trafo mean absolute error ─────────────────────────
         qt = q_trafo_tracking(log)
@@ -523,8 +636,9 @@ def plot_multi_comparison(
                               color=col, alpha=0.08)
 
     ax_h.set_xlabel("DSO step k")
-    ax_h.set_ylabel("Rel. H error [%]")
-    ax_h.set_title(r"$\|H_\mathrm{used} - H_\mathrm{analytical}\|_F \;/\; \|H_\mathrm{analytical}\|_F$")
+    ax_h.set_ylabel("One-step q_trafo error [Mvar]")
+    ax_h.set_title(r"One-step-ahead q$_\mathrm{trafo}$ prediction error  "
+                   r"$\|\Delta y_q(k) - H_q(k)\,\Delta u(k)\|$   (vs. realised plant, running mean)")
     ax_h.legend(fontsize=8)
     ax_h.grid(True, alpha=0.3)
 
@@ -568,84 +682,79 @@ def export_csv(
     out_dir: str,
     v_ref: float = 1.03,
 ) -> List[str]:
-    """Write three CSVs to *out_dir* covering all *runs*.
+    """Write one CSV per run to *out_dir*.
 
-    Files produced
-    --------------
-    h_error.csv   — step, h_rel[_label], h_abs[_label],
-                    h_q_trafo_rel[_label], h_q_trafo_abs[_label]
-    q_tracking.csv — time_min, q_set_<T>[_label], q_act_<T>[_label]
-    voltage.csv   — time_min, v_min[_label], v_mean[_label], v_max[_label],
-                    dev_min_mpu[_label], dev_mean_mpu[_label], dev_max_mpu[_label]
+    File name
+    ---------
+    ``<mode>.csv`` where mode = ``label.split("_")[0]``
+    (e.g. label ``ann_frozen_biased30pct`` → ``ann.csv``).
 
-    Column names have a ``_<label>`` suffix only when there is more than one
-    run, so single-run exports stay clean for pgfplots.
+    Columns
+    -------
+    time_min             -- simulation time [min]
+    h_rel                -- ||H_used - H_analytical||_F / ||H_analytical||_F
+    h_q_trafo_rel        -- same restricted to Q_trafo rows (NaN if unavailable)
+    q_sum_abs_err_mvar   -- sum_i |q_set_i - q_act_i| over interface trafos [Mvar]
+
+    H-error steps are aligned to the simulation time axis via linear
+    interpolation when the sidecar step count differs from the log length.
 
     Returns list of written file paths.
     """
     os.makedirs(out_dir, exist_ok=True)
-    multi = len(runs) > 1
-    suffix = lambda lbl: f"_{lbl}" if multi else ""
-
-    h_frames:   List[pd.DataFrame] = []
-    q_frames:   List[pd.DataFrame] = []
-    v_frames:   List[pd.DataFrame] = []
+    written: List[str] = []
 
     for pkl_path, sidecar_path, label in runs:
         log, sidecar = load_run(pkl_path, sidecar_path)
-        sfx = suffix(label)
+        if not log:
+            print(f"[csv] skipping empty log: {os.path.basename(pkl_path)}")
+            continue
 
-        # ── H error ──────────────────────────────────────────────────────────
+        # ── simulation time axis and Q-sum error ─────────────────────────────
+        qt = q_trafo_tracking(log)
+        times_min = qt["times_s"] / 60.0
+        N_sim = len(times_min)
+        err = np.abs(qt["error"])
+        if err.ndim == 1:
+            err = err[:, np.newaxis]
+        q_sum = np.nansum(err, axis=1)   # (N_sim,)  sum_i |q_set_i - q_act_i|
+
+        # ── H error aligned to sim time ───────────────────────────────────────
+        h_rel   = np.full(N_sim, np.nan)
+        h_q_rel = np.full(N_sim, np.nan)
+
         if sidecar is not None:
             herr = h_analytical_error(sidecar)
             if herr is not None:
-                d: Dict = {
-                    "step":            herr["steps"],
-                    f"h_rel{sfx}":     herr["relative"],
-                    f"h_abs{sfx}":     herr["absolute"],
-                }
+                N_h = len(herr["relative"])
+                sim_idx = np.arange(N_sim, dtype=float)
+                if N_h == N_sim:
+                    h_rel = herr["relative"]
+                else:
+                    h_steps = np.linspace(0.0, float(N_sim - 1), N_h)
+                    h_rel = np.interp(sim_idx, h_steps, herr["relative"])
                 if "relative_q_trafo" in herr:
-                    d[f"h_q_trafo_rel{sfx}"] = herr["relative_q_trafo"]
-                    d[f"h_q_trafo_abs{sfx}"] = herr["absolute_q_trafo"]
-                h_frames.append(pd.DataFrame(d).set_index("step"))
+                    rq = herr["relative_q_trafo"]
+                    if N_h == N_sim:
+                        h_q_rel = rq
+                    else:
+                        h_q_rel = np.interp(sim_idx, h_steps, rq)
 
-        # ── Q tracking ───────────────────────────────────────────────────────
-        qt = q_trafo_tracking(log)
-        n_tr = qt["setpoint"].shape[1]
-        qd: Dict = {"time_min": qt["times_s"] / 60.0}
-        for i in range(n_tr):
-            name = _trafo_shortname(qt["trafo_keys"][i]) if qt["trafo_keys"] else f"T{i}"
-            qd[f"q_set_{name}{sfx}"] = qt["setpoint"][:, i]
-            qd[f"q_act_{name}{sfx}"] = qt["actual"][:, i]
-        q_frames.append(pd.DataFrame(qd).set_index("time_min"))
+        # ── assemble and save ─────────────────────────────────────────────────
+        df = pd.DataFrame({
+            "time_min":           times_min,
+            "h_rel":              h_rel,
+            "h_q_trafo_rel":      h_q_rel,
+            "q_sum_abs_err_mvar": q_sum,
+        })
 
-        # ── Voltage ───────────────────────────────────────────────────────────
-        vd = voltage_deviation(log, v_ref=v_ref)
-        vdf: Dict = {
-            "time_min":           vd["times_s"] / 60.0,
-            f"v_min{sfx}":        vd["v_min"],
-            f"v_mean{sfx}":       vd["v_mean"],
-            f"v_max{sfx}":        vd["v_max"],
-            f"dev_min_mpu{sfx}":  vd["dev_min"]  * 1e3,
-            f"dev_mean_mpu{sfx}": vd["dev_mean"] * 1e3,
-            f"dev_max_mpu{sfx}":  vd["dev_max"]  * 1e3,
-        }
-        v_frames.append(pd.DataFrame(vdf).set_index("time_min"))
-
-    written: List[str] = []
-
-    def _save(frames: List[pd.DataFrame], name: str) -> None:
-        if not frames:
-            return
-        merged = frames[0] if len(frames) == 1 else pd.concat(frames, axis=1)
-        path = os.path.join(out_dir, name)
-        merged.reset_index().to_csv(path, index=False, float_format="%.6g")
-        print(f"[csv] {path}  ({len(merged)} rows, {len(merged.columns)} data cols)")
+        mode = label.split("_")[0]
+        ts   = os.path.basename(pkl_path).split("_")[0]   # e.g. 2026-05-28--13-42-10
+        path = os.path.join(out_dir, f"{ts}_{mode}.csv")
+        df.to_csv(path, index=False, float_format="%.6g")
+        print(f"[csv] {path}  ({N_sim} rows)")
         written.append(path)
 
-    _save(h_frames, "h_error.csv")
-    _save(q_frames, "q_tracking.csv")
-    _save(v_frames, "voltage.csv")
     return written
 
 
@@ -672,9 +781,13 @@ def main() -> None:
                     help="Voltage reference [p.u.].")
     ap.add_argument("--last", type=int, default=None, metavar="N",
                     help="Compare the N most recent runs on one figure.")
+    ap.add_argument("--filter", default=None, metavar="TEXT",
+                    help="Only include pkl files whose basename contains TEXT "
+                         "(applied before --last, e.g. 'frozen' or 'biased30pct').")
     ap.add_argument(
         "--csv", nargs="?", const="", metavar="DIR",
-        help="Export h_error.csv / q_tracking.csv / voltage.csv to DIR. "
+        help="Export one CSV per run to DIR (columns: time_min, h_rel, "
+             "h_q_trafo_rel, q_sum_abs_err_mvar). "
              "Omit DIR to export alongside the pkl file (or into the "
              "result directory when used with --last).",
     )
@@ -682,6 +795,8 @@ def main() -> None:
 
     if args.last is not None:
         all_pkls = find_all_runs(args.result_dir)
+        if args.filter:
+            all_pkls = [p for p in all_pkls if args.filter in os.path.basename(p)]
         selected = all_pkls[-args.last:]
         runs = []
         for p in selected:

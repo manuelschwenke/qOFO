@@ -142,7 +142,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from configs.multi_tso_config import MultiTSOConfig  # noqa: E402
 from experiments.helpers.records import MultiTSOIterationRecord  # noqa: E402
+from experiments.helpers.plant_io import decouple_trafo3w_hv_with_slack  # noqa: E402
 from experiments.runners import run_multi_tso_dso  # noqa: E402
+from sensitivity.numerical_h import compute_numerical_h_dso  # noqa: E402
 
 # ``002_M_TSO_M_DSO_COMPARE`` starts with a digit, so the import must go
 # through importlib rather than a normal ``from ... import ...``.
@@ -156,12 +158,20 @@ make_002_base_config = _compare.make_base_config
 #    "kalman"    -- _kalman_h_predictor:        Kalman-filter random-walk estimator
 #    "rls"       -- _rls_h_predictor:           Per-row RLS with forgetting factor
 #    "ann"       -- _ANN_h_predictor:           Keras ANN (requires trained model)
+#    "numerical" -- _numerical_h_predictor:     ORACLE: true plant secant H,
+#                   recomputed each DSO step by closed-loop finite difference on
+#                   the live (decoupled) net.  Upper-bound baseline — the OFO
+#                   acts with perfect knowledge of the realized sensitivity.
 #
 #  Set H_PREDICTOR_ROWS to one of:
-#    "all"       -- replace the full H matrix with the predictor's output (default)
-#    "q_trafo"   -- replace only the Q_trafo rows (∂Q_tr/∂u, the first n_q_trafo
-#                   rows); all other rows (voltage, current) are kept from the
-#                   current _H_cache unchanged
+#    "all"        -- replace the full H matrix with the predictor's output (default)
+#    "q_trafo"    -- replace only the Q_trafo rows (∂Q_tr/∂u, the first n_q_trafo
+#                    rows); all other rows (voltage, current) are kept from the
+#                    current _H_cache unchanged
+#    "q_trafo+v"  -- replace the Q_trafo rows AND the voltage rows (∂V/∂u, the
+#                    next n_v = len(voltage_bus_indices) rows); the current
+#                    (I_line) rows are kept from _H_cache.  Adds voltage-row
+#                    online estimation on top of the interface-power rows.
 #
 #  Set FROZEN_OP_POINT = True to lock the plant at a real historical operating
 #  point (FROZEN_OP_TIMESTAMP).  Profiles are enabled so the network is
@@ -169,8 +179,17 @@ make_002_base_config = _compare.make_base_config
 #  profiles constant for the entire run.  Contingency events are suppressed.
 #  PE noise is forced on so estimators remain persistently excited.
 # ---------------------------------------------------------------------------
-H_PREDICTOR_MODE: str = "ann"
-H_PREDICTOR_ROWS: str = "q_trafo"
+H_PREDICTOR_MODE: str = "kalman"
+H_PREDICTOR_ROWS: str = "q_trafo+v"   # estimate Q_trafo + voltage rows (I_line rows kept analytical)
+# Kalman forgetting factor, applied directly (NOT period-scaled) so the estimator
+# behaves identically across DSO periods and is easy to compare run-to-run.
+KALMAN_LAM: float = 0.997
+# Step size for the "numerical" oracle's closed-loop finite difference.
+# Matched to the deployment per-step OFO excitation (||du_DER|| ~= 3.4 Mvar) so
+# the oracle returns the realized SECANT at the OFO scale, not the infinitesimal
+# derivative.  The delta-sweep diagnostic confirmed the island is ~linear over
+# [0.5, 3.4] Mvar, so the result is insensitive to the exact value in that band.
+NUMERICAL_ORACLE_DELTA_MVAR: float = 3.4
 FROZEN_OP_POINT:  bool = False
 FROZEN_OP_TIMESTAMP: datetime = datetime(2016, 9, 7, 10, 0)  # real op-point to freeze at
 
@@ -183,8 +202,21 @@ FROZEN_OP_TIMESTAMP: datetime = datetime(2016, 9, 7, 10, 0)  # real op-point to 
 #  exactly the same biased H, making comparisons directly meaningful.
 #  Set H_INIT_BIAS_STD = 0.0 to disable (default).
 # ---------------------------------------------------------------------------
-H_INIT_BIAS_STD:  float = 0.3   # e.g. 0.30 for ±30% multiplicative noise; 0.0 = off
-H_INIT_BIAS_SEED: int   = 0     # fixed seed → identical bias for every run
+H_INIT_BIAS_STD:  float = 0.1   # e.g. 0.10 for ±10% multiplicative noise; 0.0 = off
+H_INIT_BIAS_SEED: int   = 0     # fixed seed → identical b
+# ias for every run
+
+# ---------------------------------------------------------------------------
+#  DSO_2 interface mode
+#  "slack"   -- replace the TN feed at each DSO_2 coupling 3W transformer's HV
+#               side with a voltage-holding slack pinned to the operating point.
+#               DSO_2 becomes its own island fed by 3 stiff (distributed) slacks,
+#               so its online H estimation is NOT perturbed by TSO-side
+#               transients (profiles, contingencies, TSO Q(V)).
+#  "coupled" -- current behaviour: DSO_2 stays electrically coupled to the TSO
+#               (use this to simulate the ANN in the present network state).
+# ---------------------------------------------------------------------------
+DSO2_INTERFACE_MODE: str = "slack"  # "slack" (decoupled, default) | "coupled"
 
 
 # ---------------------------------------------------------------------------
@@ -221,23 +253,51 @@ def make_base_config() -> MultiTSOConfig:
     cfg.dso_qv_deadband_pu = 0.01
 
     cfg.g_q = 250
-    cfg.dso_g_v = 20000
+    cfg.dso_g_v = 5*20000
     cfg.g_w_dso_der = 1000
+    cfg.g_w_dso_oltc = 40
+
+    # cfg.contingencies = [
+    #         # ContingencyEvent(minute=30,  element_type="gen",  element_index=2, action="trip"),
+    #         # ContingencyEvent(minute=90, element_type="gen", element_index=2, action="restore"),
+    #         # ContingencyEvent(minute=50, element_type="load", bus=27,  p_mw=200, q_mvar=100, action="connect"),
+    #         # ContingencyEvent(minute=100, element_type="load", bus=27,  p_mw=200, q_mvar=100, action="trip"),
+    #         # ContingencyEvent(minute=120, element_type="load",
+    #         #                  element_index=4, action="trip"),
+    #         # ContingencyEvent(minute=160, element_type="load",
+    #         #                  element_index=4, action="restore"),
+    #         # ContingencyEvent(minute=130, element_type="line", element_index=18, action="trip"),
+    #         # ContingencyEvent(minute=150, element_type="line", element_index=18, action="restore"),
+    #         #ContingencyEvent(minute=180, element_type="gen",  element_index=5, action="trip"),
+    #         #ContingencyEvent(minute=280, element_type="gen",  element_index=5, action="restore"),
+    #         # ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
+    #         # ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
+    #         # ContingencyEvent(minute=720, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="connect"),
+    #         # ContingencyEvent(minute=900, element_type="load", bus=7,  p_mw=300, q_mvar=100, action="trip"),
+    #     ],
 
     # ---- DSO layer: only DSO_2 has an OFO controller -------------------
     cfg.dso_mode = "ofo"
     cfg.dso_ids_to_run = ["DSO_2"]
 
+    # ---- DSO_2 interface: slack-decoupled vs. coupled (DSO2_INTERFACE_MODE)
+    cfg.dso2_interface_slack = (DSO2_INTERFACE_MODE == "slack")
+    if cfg.dso2_interface_slack:
+        # Decoupling islands DSO_2 behind its own boundary slacks.  pandapower
+        # cannot run a distributed slack across several islands at once, so the
+        # whole run must use a per-island reference slack instead.
+        cfg.distributed_slack = False
+
     # ---- Exogenous Q-setpoint vector at DSO_2's three 3W trafos --------
     # Order matches ``meta.hv_networks[1].coupling_trafo_indices``.
-    cfg.q_pcc_setpoints_mvar_per_dso = {"DSO_2": [0.0, -20.0, 20.0]}
+    cfg.q_pcc_setpoints_mvar_per_dso = {"DSO_2": [40.0, 20.0, 80.0]}
 
     # ---- Run length / timing -------------------------------------------
     cfg.n_total_s = 60.0 * 60 * 2     # 2 h smoke
     cfg.tso_period_s = 180.0          # cosmetic: TSO never steps anyway
-    cfg.dso_period_s = 20.0
+    cfg.dso_period_s = 1  # 10
     cfg.warmup_s = 0.0
-    start_time = datetime(2016, 9, 7, 8, 0)
+    start_time = datetime(2016, 9, 7, 10, 0)
     use_profiles = True
 
     # ---- Plant-side Q(V) loop damping ----------------------------------
@@ -251,8 +311,8 @@ def make_base_config() -> MultiTSOConfig:
     cfg.qv_local_tol_mvar = 0.1
 
     # ---- Live plots off for diagnostic runs ---------------------------
-    cfg.live_plot_controller = False
-    cfg.live_plot_cascade = False
+    cfg.live_plot_controller = True
+    cfg.live_plot_cascade = True
     cfg.live_plot_system = False
 
     # ---- Persistent excitation (sensitivity learning) -----------------
@@ -264,8 +324,8 @@ def make_base_config() -> MultiTSOConfig:
     # does not "fight" the excitation.  OLTC tap commands are NOT
     # perturbed (integer actuators).  Useful for downstream H estimation
     # (Kalman filter / NN) where the input must be persistently exciting.
-    cfg.dso_pe_noise_enabled = False
-    cfg.dso_pe_noise_std_mvar = 5.0   # std of N(0, sigma^2) on Q_cor [Mvar]
+    cfg.dso_pe_noise_enabled = True
+    cfg.dso_pe_noise_std_mvar = 0.25  # std of N(0, sigma^2) on Q_cor [Mvar] (quartered from 1.0: steady-state ||du|| noise floor ~0.9 Mvar; profiles still excite the varying case)
     cfg.dso_pe_noise_seed = 42        # RNG seed for reproducibility
 
     # ---- Output directory ---------------------------------------------
@@ -415,7 +475,7 @@ def get_dso_h_view(
         raise RuntimeError(
             f"H-view col count mismatch: counted {len(col_kinds)} (n_der="
             f"{len(cfg.der_indices)}) but H has {H_full.shape[1]} cols.  "
-            f"Layout assumes use_q_cor_actuator=True and no grid-forming DER; "
+            f"Layout assumes w-shift actuator mode and no grid-forming DER; "
             f"V_gf or Q_realized splicing would invalidate this view."
         )
 
@@ -522,7 +582,7 @@ def install_pe_noise(
       3. The DER (continuous) slice of ``u_new`` and ``u_continuous`` on
          the returned ``ControllerOutput`` is incremented by ``eps``,
          so the runner applies ``u(k+1)' = u(k+1) + eps`` to
-         ``net.sgen.q_cor_mvar`` (see ``apply_dso_controls`` in
+         ``net.sgen.q_set_mvar`` (see ``apply_dso_controls`` in
          ``experiments/helpers/plant_io.py``).
       4. ``dso_ctrl._u_current`` is also incremented by ``eps`` so the
          next OFO step starts from ``u(k+1)'`` rather than ``u(k+1)``.
@@ -594,7 +654,7 @@ def install_pe_noise(
 #        # or:
 #        install_h_corrector(dso_ctrl, _ANN_h_predictor)
 
-_RESULT_DIR_003       = os.path.join("results", "003_cigre_2026")
+_RESULT_DIR_003       = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results", "003_cigre_2026")
 _TRAINING_DATA_PATH   = os.path.join(_RESULT_DIR_003, "training_data.npz")
 _KALMAN_MATRICES_PATH = os.path.join(_RESULT_DIR_003, "kalman_matrices.npz")
 _ANN_MODEL_PATH       = os.path.join(_RESULT_DIR_003, "ann_h_model.keras")
@@ -614,15 +674,15 @@ def get_dso2_features(dso_ctrl: "DSOController") -> Dict[str, np.ndarray]:
                    shape (n_interface,) — these are the rows of H that track Q_set
     tap_pos      : OLTC tap positions of the coupling trafos, shape (n_oltc,)
                    integer steps; same ordering as cfg.oltc_trafo_indices
-    der_q_mvar   : actual DER reactive output Q_DER = Q_cor + K·(V_ref - V) [Mvar]
+    der_q_mvar   : actual DER reactive output Q_DER = q_set + K·(V_anchor - V) [Mvar]
                    shape (n_der,) — this is what the plant actually produces
     der_p_mw     : DER active power output [MW], shape (n_der,)
-    q_cor_mvar   : Q_cor correction the OFO last commanded [Mvar], shape (n_der,)
+    q_set_mvar   : q_set setpoint the OFO last commanded [Mvar], shape (n_der,)
                    = u[:n_der]; this is what H is linearised against
     v_buses_pu   : voltages at cfg.voltage_bus_indices [p.u.], shape (n_v_bus,)
     y            : OFO output vector [q_trafo | v_buses], shape (n_y,)
                    = rows of H; built by _extract_outputs (same as inside step())
-    u            : OFO actuator vector [q_cor | tap_pos], shape (n_u,)
+    u            : OFO actuator vector [q_set | tap_pos], shape (n_u,)
                    = cols of H; = dso_ctrl._u_current
     """
     meas = dso_ctrl._last_measurement
@@ -647,7 +707,7 @@ def get_dso2_features(dso_ctrl: "DSOController") -> Dict[str, np.ndarray]:
         "tap_pos":      meas.oltc_tap_positions.astype(np.float64),
         "der_q_mvar":   meas.der_q_mvar.copy(),
         "der_p_mw":     meas.der_p_mw.copy(),
-        "q_cor_mvar":   dso_ctrl._u_current[:n_der].copy(),
+        "q_set_mvar":   dso_ctrl._u_current[:n_der].copy(),
         "v_buses_pu":   v_buses,
         "y":            dso_ctrl._extract_outputs(meas),
         "u":            dso_ctrl._u_current.copy(),
@@ -666,17 +726,27 @@ class _KalmanHPredictor:
     :func:`generate_kalman_matrices` first for data-driven matrices.
     """
 
-    def __init__(self, min_delta_u_norm: float = 0.05, forgetting_factor: float = 0.997) -> None:
+    def __init__(self, min_delta_u_norm: float = 0.05, forgetting_factor: float = 0.997,
+                 p_min_frac: float = 10.0, p_min_warmup_steps: int = 60) -> None:
         self.min_delta_u_norm = min_delta_u_norm
         # Forgetting factor prevents P from collapsing to ~0 after initial convergence.
         # Without it, K → 0 and the filter can no longer track slow H drift from
         # actuator movements, causing error to re-increase after the initial dip.
         self.lam = forgetting_factor
+        # p_min_frac: floor on tr(P) as a fraction of the initial tr(P), active only
+        # during the warmup window.  Keeps K elevated long enough to correct a large
+        # cold-start bias; after warmup P is free to collapse so noise stops accumulating.
+        self.p_min_frac = p_min_frac
+        self.p_min_warmup_steps = p_min_warmup_steps
         self._Q: Optional[np.ndarray] = None
         self._R: Optional[np.ndarray] = None
+        self._u_scale: Optional[np.ndarray] = None  # per-channel |Δu| RMS for the Σ_q norm
+        self._pe_dither_energy: float = 0.0          # expected ‖Δ(PE noise)‖² in the normed step
         self._h: Optional[np.ndarray] = None   # vectorised H estimate
         self._P: Optional[np.ndarray] = None   # estimate covariance
         self._P_max: Optional[float] = None    # trace ceiling for PSD-safe cap
+        self._P_min: Optional[float] = None    # trace floor active during warmup
+        self._step_count: int = 0
         self._y_prev: Optional[np.ndarray] = None
         self._u_prev: Optional[np.ndarray] = None
 
@@ -684,10 +754,16 @@ class _KalmanHPredictor:
         if os.path.exists(_KALMAN_MATRICES_PATH):
             d = np.load(_KALMAN_MATRICES_PATH)
             self._Q, self._R = d["Q"], d["R"]
-            print(f"[KF] loaded Q {self._Q.shape}, R {self._R.shape}")
+            # Per-channel |Δu| RMS used to normalise the Σ_q = ‖Δu‖·Σ_q0 scaling.
+            # Missing in legacy files -> ones (raw norm); regenerate for the data-driven scale.
+            n_u = int(round(n_state / n_y))
+            self._u_scale = d["u_scale"] if "u_scale" in d else np.ones(n_u)
+            print(f"[KF] loaded Q {self._Q.shape}, R {self._R.shape}, "
+                  f"u_scale {self._u_scale.shape}")
         else:
             self._Q = np.eye(n_state) * 1e-6
             self._R = np.eye(n_y) * 1e-4
+            self._u_scale = np.ones(int(round(n_state / n_y)))
             print("[KF] no kalman_matrices.npz found — using I defaults. "
                   "Run generate_kalman_matrices() for data-driven matrices.")
 
@@ -695,6 +771,8 @@ class _KalmanHPredictor:
         """Reset KF state; re-seeds from the controller's H on next call."""
         self._h = self._P = self._y_prev = self._u_prev = None
         self._P_max = None
+        self._P_min = None
+        self._step_count = 0
 
     def __call__(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
         if dso_ctrl._H_cache is None or dso_ctrl._u_current is None:
@@ -712,7 +790,7 @@ class _KalmanHPredictor:
         #   feats["tap_pos"]     -- OLTC tap positions                       (n_oltc,)
         #   feats["der_q_mvar"]  -- actual DER Q output (Q_cor + K*(Vref-V))(n_der,)
         #   feats["der_p_mw"]    -- DER active power                         (n_der,)
-        #   feats["q_cor_mvar"]  -- Q_cor commanded by OFO (= u[:n_der])    (n_der,)
+        #   feats["q_set_mvar"]  -- q_set commanded by OFO (= u[:n_der])     (n_der,)
         #   feats["v_buses_pu"]  -- voltages at monitored buses               (n_v,)
 
         n_y, n_u = dso_ctrl._H_cache.shape
@@ -733,17 +811,38 @@ class _KalmanHPredictor:
             h_rms = float(np.sqrt(np.mean(self._h ** 2))) or 1e-4
             sigma_init = 0.30 * h_rms   # ~30% per-entry std matches the init bias
             self._P = (sigma_init ** 2) * np.eye(n_state)
-            self._P_max = float(np.trace(self._P))
+            p_init_trace = float(np.trace(self._P))
+            self._P_min = self.p_min_frac * p_init_trace
+            # P_max must be at least P_min so ceiling never sits below the warmup floor.
+            self._P_max = max(p_init_trace, self._P_min)
+            self._step_count = 0
+            # Expected energy that the PE dither alone injects into the normed step,
+            # so the Σ_q scaling reflects natural controller motion, not the excitation
+            # noise.  PE noise ~ N(0,σ_u²) i.i.d. on the n_der DER channels, so the
+            # differenced dither has variance 2σ_u² per channel; normalise by u_scale.
+            cfg = dso_ctrl.config
+            sigma_u = float(getattr(cfg, "dso_pe_noise_std_mvar", 0.0) or 0.0)
+            if getattr(cfg, "dso_pe_noise_enabled", False) and sigma_u > 0.0 and self._u_scale is not None:
+                n_der = len(cfg.der_indices)
+                self._pe_dither_energy = float(
+                    2.0 * sigma_u ** 2 * np.sum(1.0 / self._u_scale[:n_der] ** 2))
             self._y_prev, self._u_prev = y, u
             return None  # keep analytical H on the first call
 
         delta_u = u - self._u_prev
         delta_y = y - self._y_prev
 
-        # Predict — forgetting factor prevents P collapsing to zero after convergence;
-        # trace cap prevents unbounded growth (PSD-safe: uniform scaling preserves PD).
+        # Predict — Σ_q = ‖Δu‖·Σ_q0 ties the assumed H drift to actuator motion, so
+        # process noise shrinks toward zero at convergence (Δu→0) instead of injecting
+        # fictitious diffusion.  Δu is per-channel normalised by its RMS scale so DER
+        # and OLTC moves contribute comparably; the expected PE-dither energy is removed
+        # so s reflects natural controller motion only (s→0 once the controller settles,
+        # even though the dither keeps moving).  s≈1 at a typical full step.
+        # Forgetting factor keeps P from collapsing; trace cap bounds growth (PSD-safe).
+        du_n2 = float(np.sum((delta_u / self._u_scale) ** 2))
+        s = float(np.sqrt(max(0.0, du_n2 - self._pe_dither_energy)) / np.sqrt(len(delta_u)))
         h_p = self._h.copy()
-        P_p = self._P / self.lam + self._Q
+        P_p = self._P / self.lam + s * self._Q
         tr = float(np.trace(P_p))
         if tr > self._P_max:
             P_p *= self._P_max / tr
@@ -755,9 +854,17 @@ class _KalmanHPredictor:
             K = np.linalg.solve(S, C @ P_p).T                  # (n_state, n_y)
             self._h = h_p + K @ (delta_y - C @ h_p)
             self._P = (np.eye(n_state) - K @ C) @ P_p
+            # P_min floor active only during warmup window: uniform top-up preserves
+            # PD and symmetry.  After warmup P is free to collapse so the filter stops
+            # injecting noise once the cold-start bias has been corrected.
+            if self._step_count < self.p_min_warmup_steps:
+                tr_post = float(np.trace(self._P))
+                if tr_post < self._P_min:
+                    self._P += (self._P_min - tr_post) / n_state * np.eye(n_state)
         else:
             self._h, self._P = h_p, P_p
 
+        self._step_count += 1
         self._y_prev, self._u_prev = y, u
         return self._h.reshape(n_y, n_u)
 
@@ -897,7 +1004,7 @@ class _ANNHPredictor:
         #   feats["tap_pos"]     -- OLTC tap positions                       (n_oltc,)
         #   feats["der_q_mvar"]  -- actual DER Q output (Q_cor + K*(Vref-V))(n_der,)
         #   feats["der_p_mw"]    -- DER active power                         (n_der,)
-        #   feats["q_cor_mvar"]  -- Q_cor commanded by OFO (= u[:n_der])    (n_der,)
+        #   feats["q_set_mvar"]  -- q_set commanded by OFO (= u[:n_der])     (n_der,)
         #   feats["v_buses_pu"]  -- voltages at monitored buses               (n_v,)
 
         n_y, n_u = dso_ctrl._H_cache.shape
@@ -937,7 +1044,7 @@ def collect_training_data(
     tap_pos      : (N, n_oltc)    OLTC tap positions
     der_q_mvar   : (N, n_der)     actual DER Q output  Q_DER = Q_cor + K·(Vref−V)
     der_p_mw     : (N, n_der)     DER active power [MW]
-    q_cor_mvar   : (N, n_der)     Q_cor commanded by OFO  (= u[:n_der])
+    q_set_mvar   : (N, n_der)     q_set commanded by OFO  (= u[:n_der])
     v_buses_pu   : (N, n_v_bus)   voltages at monitored buses [p.u.]
 
     Returns the absolute path of the saved file.
@@ -948,6 +1055,9 @@ def collect_training_data(
     cfg.dso_pe_noise_std_mvar = pe_noise_std_mvar
     cfg.live_plot_controller = False
     cfg.live_plot_cascade = False
+
+    cfg.local_sensitivities_tso=True
+    cfg.local_sensitivities_dso=True
 
     records: List[Dict[str, np.ndarray]] = []
     _net_ref: List[Any] = []
@@ -1043,6 +1153,13 @@ def generate_kalman_matrices(
     dH = np.diff(H, axis=0).reshape(N - 1, n_state)  # (N-1, n_state)
     Q  = np.diag(np.var(dH, axis=0))                  # (n_state, n_state)
 
+    # Per-channel actuator-step scale: RMS of Δu per input channel.  Used to
+    # normalise the runtime Σ_q = ‖Δu‖·Σ_q0 scaling so DER (Mvar) and OLTC (taps)
+    # moves contribute comparably and s≈1 at a typical full step.
+    dU = np.diff(U, axis=0)                            # (N-1, n_u)
+    u_scale = np.sqrt(np.mean(dU ** 2, axis=0))        # (n_u,)
+    u_scale = np.where(u_scale > 1e-9, u_scale, 1.0)   # guard zero-motion channels
+
     # Measurement noise R: covariance of Δy - H(k-1)@Δu(k) residuals
     residuals = []
     for k in range(1, N):
@@ -1060,12 +1177,14 @@ def generate_kalman_matrices(
 
     out_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(out_dir, exist_ok=True)
-    np.savez(output_path, Q=Q, R=R)
+    np.savez(output_path, Q=Q, R=R, u_scale=u_scale)
     q_d, r_d = np.diag(Q), np.diag(R)
-    print(f"[kalman] Q {Q.shape}, R {R.shape} -> {os.path.abspath(output_path)}")
+    print(f"[kalman] Q {Q.shape}, R {R.shape}, u_scale {u_scale.shape} "
+          f"-> {os.path.abspath(output_path)}")
     print(f"[kalman]   Q diag: [{q_d.min():.2e}, {q_d.max():.2e}]")
     print(f"[kalman]   R diag: [{r_d.min():.2e}, {r_d.max():.2e}]")
-    return {"Q": Q, "R": R}
+    print(f"[kalman]   u_scale: [{u_scale.min():.3f}, {u_scale.max():.3f}]")
+    return {"Q": Q, "R": R, "u_scale": u_scale}
 
 
 # ── ANN training ─────────────────────────────────────────────────────────────
@@ -1157,6 +1276,47 @@ def train_ann_model(
     np.savez(stats_path, x_mean=x_mean, x_std=x_std, t_mean=t_mean, t_std=t_std)
     print(f"[ANN] model -> {os.path.abspath(model_path)}")
     print(f"[ANN] stats -> {os.path.abspath(stats_path)}")
+
+
+class _NumericalHPredictor:
+    """ORACLE predictor: returns the TRUE plant sensitivity at the current
+    operating point, by closed-loop finite difference on the live combined net.
+
+    This is the upper-bound baseline for the H-estimation comparison: the OFO
+    acts with perfect knowledge of the realized secant at the OFO step scale
+    (``delta_q_mvar`` = :data:`NUMERICAL_ORACLE_DELTA_MVAR`).  Recomputed every
+    DSO step so it tracks operating-point drift.  Cost ~``2*(n_DER_bus +
+    n_OLTC)`` plant power flows per step.
+
+    ``combined_net`` is injected by :func:`_setup_h_predictor` (the same live
+    net object the runner mutates each step).  ``compute_numerical_h_dso``
+    deep-copies it internally, so the live converged state is never disturbed.
+    """
+
+    def __init__(self) -> None:
+        self.combined_net: Optional[Any] = None
+        self.delta_q_mvar: float = NUMERICAL_ORACLE_DELTA_MVAR
+
+    def __call__(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
+        if self.combined_net is None or dso_ctrl._H_cache is None:
+            return None
+        try:
+            H = compute_numerical_h_dso(
+                self.combined_net, dso_ctrl,
+                closed_loop=True, delta_q_mvar=self.delta_q_mvar,
+            )
+        except Exception as exc:  # noqa: BLE001 — oracle must never crash the run
+            print(f"[numerical] H recompute failed: {type(exc).__name__}: {exc}")
+            return None
+        if H is None or H.shape != dso_ctrl._H_cache.shape:
+            print(f"[numerical] shape mismatch / None "
+                  f"(got {None if H is None else H.shape}, "
+                  f"want {dso_ctrl._H_cache.shape}); keeping cache")
+            return None
+        return H
+
+
+_numerical_h_predictor = _NumericalHPredictor()
 
 
 def _unity_multiply_predictor(
@@ -1284,13 +1444,17 @@ def _make_row_masked_predictor(
 
     rows_mode
     ---------
-    ``"all"``     -- full H is written (pass-through, no mask applied).
-    ``"q_trafo"`` -- only the Q_trafo rows (``H[:n_q_trafo, :]``) are taken
-                     from the predictor's output; all remaining rows are kept
-                     from the current ``_H_cache`` unchanged.  The number of
-                     Q_trafo rows is read at call-time from
-                     ``dso_ctrl._H_mappings`` so it adapts automatically to
-                     the network topology.
+    ``"all"``       -- full H is written (pass-through, no mask applied).
+    ``"q_trafo"``   -- only the Q_trafo rows (``H[:n_q_trafo, :]``) are taken
+                       from the predictor's output; all remaining rows are kept
+                       from the current ``_H_cache`` unchanged.  The number of
+                       Q_trafo rows is read at call-time from
+                       ``dso_ctrl._H_mappings`` so it adapts automatically to
+                       the network topology.
+    ``"q_trafo+v"`` -- the Q_trafo rows AND the following ``n_v`` voltage rows
+                       (``H[:n_q_trafo + n_v, :]``, ``n_v = len(voltage_bus_indices)``)
+                       are taken from the predictor; the remaining (I_line) rows
+                       are kept from ``_H_cache``.
 
     The wrapped predictor always returns a full-shape array, so the shape
     check in :func:`install_h_corrector` continues to pass unchanged.
@@ -1308,8 +1472,11 @@ def _make_row_masked_predictor(
         n_q_trafo = len(m.get("trafos", [])) + len(m.get("trafo3w", []))
         if n_q_trafo == 0:
             return H_next
+        n_rows = n_q_trafo
+        if rows_mode == "q_trafo+v":
+            n_rows += len(dso_ctrl.config.voltage_bus_indices)   # add the voltage rows
         H_out = dso_ctrl._H_cache.copy()
-        H_out[:n_q_trafo] = H_next[:n_q_trafo]
+        H_out[:n_rows] = H_next[:n_rows]
         return H_out
 
     return _masked
@@ -1362,9 +1529,14 @@ def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> Optional["
     # we can observe which one recovers faster.  Fixed seed guarantees that
     # every run with the same H_INIT_BIAS_SEED gets an identical bias matrix.
     if H_INIT_BIAS_STD > 0.0:
+        combined_net = state.get("net")
+        H_base = dso_ctrl.compute_h_analytical(combined_net) if combined_net is not None else None
+        if H_base is None:
+            H_base = dso_ctrl._H_cache
+            print("[H] [warn] compute_h_analytical failed — falling back to split-network H_cache")
         rng_bias = np.random.default_rng(H_INIT_BIAS_SEED)
-        noise = rng_bias.normal(1.0, H_INIT_BIAS_STD, size=dso_ctrl._H_cache.shape)
-        biased = dso_ctrl._H_cache * noise
+        noise = rng_bias.normal(1.0, H_INIT_BIAS_STD, size=H_base.shape)
+        biased = H_base * noise
         if dso_ctrl._sensitivity_updater is not None:
             dso_ctrl._sensitivity_updater.override_base(biased)
         dso_ctrl._H_cache = biased
@@ -1384,11 +1556,30 @@ def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> Optional["
               f"on {len(dso_ctrl.config.der_indices)} DER Q_cor channels "
               f"(seed={cfg.dso_pe_noise_seed})")
 
+    # Scale Kalman parameters to the actual DSO period.
+    # All three defaults were tuned for 10 s steps; rescale proportionally so
+    # wall-clock behaviour is invariant to the chosen period.
+    _BASE_PERIOD_S = 10.0
+    _period_ratio  = float(getattr(cfg, "dso_period_s", _BASE_PERIOD_S)) / _BASE_PERIOD_S
+    _kalman_h_predictor.min_delta_u_norm   = 1.0                            # physical Mvar gate just above the ~0.9 noise floor (noise std 0.25): KF learns on real moves, skips noise-only steps so it freezes post-convergence
+    _kalman_h_predictor.p_min_warmup_steps = 0                              # p_min floor DISABLED: the cold-start gain it held high was injecting noise into the over-actuated null space (validated: drift 0.42->0.14 frozen)
+    _kalman_h_predictor.lam                = KALMAN_LAM                     # fixed (not period-scaled) for run-to-run comparability
+    print(f"[kalman] period_ratio={_period_ratio:.2f}  "
+          f"min_du={_kalman_h_predictor.min_delta_u_norm:.4f}  "
+          f"warmup={_kalman_h_predictor.p_min_warmup_steps} steps  "
+          f"lam={_kalman_h_predictor.lam:.5f} (fixed KALMAN_LAM)")
+
+    # Inject the live combined net into the numerical oracle so it can
+    # finite-difference the true plant sensitivity at each step.
+    _numerical_h_predictor.combined_net = state.get("net")
+    _numerical_h_predictor.delta_q_mvar = NUMERICAL_ORACLE_DELTA_MVAR
+
     _PREDICTORS = {
-        "identity": _unity_multiply_predictor,
-        "kalman":   _kalman_h_predictor,
-        "rls":      _rls_h_predictor,
-        "ann":      _ANN_h_predictor,
+        "identity":  _unity_multiply_predictor,
+        "kalman":    _kalman_h_predictor,
+        "rls":       _rls_h_predictor,
+        "ann":       _ANN_h_predictor,
+        "numerical": _numerical_h_predictor,
     }
     if H_PREDICTOR_MODE not in _PREDICTORS:
         raise ValueError(
@@ -1398,8 +1589,10 @@ def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> Optional["
     predictor = _PREDICTORS[H_PREDICTOR_MODE]
     if H_PREDICTOR_ROWS != "all":
         predictor = _make_row_masked_predictor(predictor, H_PREDICTOR_ROWS)
-        print(f"[H] row mask: {H_PREDICTOR_ROWS!r} — predictor updates only "
-              f"Q_trafo rows; remaining rows kept from cache")
+        _rows_desc = {"q_trafo": "Q_trafo rows",
+                      "q_trafo+v": "Q_trafo + voltage rows"}.get(H_PREDICTOR_ROWS, H_PREDICTOR_ROWS)
+        print(f"[H] row mask: {H_PREDICTOR_ROWS!r} — predictor updates {_rows_desc}; "
+              f"remaining rows kept from cache")
     combined_net = state.get("net")
     observer  = _DSO2Observer(predictor, combined_net=combined_net)
     install_h_corrector(dso_ctrl, observer)
@@ -1428,10 +1621,13 @@ def run() -> List[MultiTSOIterationRecord]:
     print(f"  q_pcc_setpoints={cfg.q_pcc_setpoints_mvar_per_dso}")
     print(f"  n_total_s={cfg.n_total_s:.0f}, dso_period_s={cfg.dso_period_s:.0f}")
     print(f"  H_PREDICTOR_MODE={H_PREDICTOR_MODE!r}  H_PREDICTOR_ROWS={H_PREDICTOR_ROWS!r}")
+    print(f"  DSO2_INTERFACE_MODE={DSO2_INTERFACE_MODE!r}  "
+          f"(dso2_interface_slack={cfg.dso2_interface_slack})")
     if FROZEN_OP_POINT:
         print(f"  FROZEN_OP_POINT=True  frozen_at={FROZEN_OP_TIMESTAMP:%Y-%m-%d %H:%M}, contingencies=off")
     else:
-        print(f"  FROZEN_OP_POINT=False  (profiles on, contingencies on)")
+        n_ev = len(cfg.contingencies)
+        print(f"  FROZEN_OP_POINT=False  (profiles on, contingencies={n_ev})")
     if H_INIT_BIAS_STD > 0.0:
         print(f"  H_INIT_BIAS_STD={int(H_INIT_BIAS_STD*100)}%  H_INIT_BIAS_SEED={H_INIT_BIAS_SEED} "
               f"(same bias for all predictor modes)")
@@ -1440,6 +1636,15 @@ def run() -> List[MultiTSOIterationRecord]:
     _observer_ref: List[Optional[_DSO2Observer]] = [None]
 
     def _pre_loop(state: dict) -> None:
+        if cfg.dso2_interface_slack:
+            dso_ctrl = state["dso_controllers"].get("DSO_2")
+            if dso_ctrl is None:
+                print("[iface] DSO_2 not found; interface slack NOT installed.")
+            else:
+                ifaces = list(dso_ctrl.config.interface_trafo_indices)
+                created = decouple_trafo3w_hv_with_slack(state["net"], ifaces)
+                print(f"[iface] DSO_2 decoupled from TSO: replaced HV feed of "
+                      f"3W trafos {ifaces} with pinned slacks (ext_grid {created}).")
         obs = _setup_h_predictor(cfg, state)
         _observer_ref[0] = obs
 

@@ -441,6 +441,21 @@ class MultiTSOConfig:
 
     distributed_slack: bool = True
 
+    dso2_interface_slack: bool = False
+    """Decouple DSO_2 from the TSO at its interface by replacing the TN feed
+    at each DSO_2 coupling 3W transformer's HV side with a voltage-holding
+    slack pinned to the operating point (see
+    :func:`experiments.helpers.plant_io.decouple_trafo3w_hv_with_slack`).
+
+    Unrelated to ``distributed_slack`` above, which is the pandapower
+    power-flow *solver* option (global slack distribution across all
+    generators).  ``dso2_interface_slack`` is a *network-topology* change
+    that isolates DSO_2 behind stiff boundary sources so its online H
+    estimation is not perturbed by TSO-side transients (profiles,
+    contingencies, TSO Q(V)).  Default ``False`` (DSO_2 stays coupled to the
+    TSO so the ANN can be simulated in the current network state); experiment
+    003 sets it via its ``DSO2_INTERFACE_MODE`` toggle."""
+
     enforce_q_lims_plant: bool = True
     """Pass ``enforce_q_lims=True`` to every plant-side ``pp.runpp`` in the
     main run loop so synchronous generators that hit their static

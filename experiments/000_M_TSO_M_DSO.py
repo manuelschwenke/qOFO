@@ -248,7 +248,7 @@ def make_config() -> MultiTSOConfig:
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
         dso_period_s=10.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
         g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
-        g_q=300,                      # DSO Q-tracking
+        g_q=200,                      # DSO Q-tracking
         tso_g_q_tie=0,
         tso_g_res_sg=0,
         # ── DSO objective tuning ──
@@ -259,14 +259,14 @@ def make_config() -> MultiTSOConfig:
         dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
         # ── TSO weights (w-shift closed-loop curvature) ──
         g_w_der=100,
-        g_w_gen=1e8,
+        g_w_gen=5e7,
         g_w_pcc=300,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
-        g_w_tso_shunt=10000,
+        g_w_tso_shunt=12000,
         # ── DSO weights ──
         g_w_dso_der=1000,
-        g_w_dso_oltc=30,
+        g_w_dso_oltc=20,
         # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
         # max_step=1 (default) + wall-clock cooldown per OLTC type:
         #   MT (machine 2W gen-trafo) -> 1 tap / 180 s = once per TS interval.
@@ -291,28 +291,14 @@ def make_config() -> MultiTSOConfig:
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
-            # NOTE: the original schedule also tripped lines 18 (min 45-150) and
-            # 5 (min 60-150).  With gen 2 (G4_bus32, ~680 MW in zone 3) tripped
-            # at min 120 *while both lines are out*, zone 3 loses its local
-            # source and its remaining ties simultaneously -> the power flow is
-            # genuinely infeasible (pp.diagnostic: converges only at 0.1 % load).
-            # Per the user's instruction the line trips are removed; the gen and
-            # load events are retained.  gen-2 trip alone at min 120 converges.
-            # Generator trip + restore.
-            ContingencyEvent(minute=60, element_type="gen",  element_index=2,  action="trip"),
-            ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
-            # Additional load connected then disconnected at bus 11.
-            # Reduced from the originally-requested 400 MW / 200 Mvar: with gen 2
-            # still tripped (out 120-270) the 200 Mvar step caused the cos phi=1
-            # baseline (V1) to collapse at min 180.  200 MW / 100 Mvar (the
-            # proven-stable magnitude from the 002 comparison) keeps the event
-            # while all four variants converge.
-            ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=300, action="connect"),
-            ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=300, action="trip"),
-            ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
-            ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
-            ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
+            # ContingencyEvent(minute=60, element_type="gen",  element_index=2,  action="trip"),
+            # ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
+            # ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=300, action="connect"),
+            # ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=300, action="trip"),
+            # ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
+            # ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
+            # ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
+            # ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
         ],
     )
     return cfg

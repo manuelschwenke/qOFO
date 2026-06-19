@@ -78,6 +78,11 @@ Vector layouts (DSO_2 in this script, currents and shunts excluded):
     u = [ Q_cor_DER[d]                   for d in cfg.der_indices            ]   # Mvar, sgen convention (>0 = injection); correction term added to the local Q(V) droop
         [ tap_position[t]                for t in cfg.oltc_trafo_indices     ]   # integer steps relative to neutral
 
+The OLTC taps remain OFO actuators (columns of ``H``, entries of ``u``); the
+DSO MIQP still moves them.  The online Kalman estimator, however, updates only
+the DER (``Q_cor``) columns of ``H`` and leaves the OLTC columns at their
+analytical value -- see ``KALMAN_ESTIMATE_OLTC_COLS`` and ``_KalmanHPredictor``.
+
 The DER's actual reactive output is ``Q_DER = Q_cor + K · (V_ref - V)``;
 ``Q_cor`` is what the OFO writes and what the controller's H is
 linearized against.
@@ -179,19 +184,98 @@ _compare = importlib.import_module("experiments.002_M_TSO_M_DSO_COMPARE")
 #  profiles constant for the entire run.  Contingency events are suppressed.
 #  PE noise is forced on so estimators remain persistently excited.
 # ---------------------------------------------------------------------------
-H_PREDICTOR_MODE: str = "identity"
-H_PREDICTOR_ROWS: str = "q_trafo+v"   # estimate Q_trafo + voltage rows (I_line rows kept analytical)
+H_PREDICTOR_MODE: str = "kalman"
+H_PREDICTOR_ROWS: str = "all"   # estimate Q_trafo + voltage rows (I_line rows kept analytical)
 # Kalman forgetting factor, applied directly (NOT period-scaled) so the estimator
 # behaves identically across DSO periods and is easy to compare run-to-run.
-KALMAN_LAM: float = 1
+# <1 floors Σ_P so the gain cannot collapse after convergence (keep-alive,
+# Mismatch 2): memory ≈ 1/(1-λ) steps (0.98 → ~50 steps ≈ 17 min at 20 s).
+KALMAN_LAM: float = 0.98
+
+# ---------------------------------------------------------------------------
+#  Kalman process-noise / prior-anchor knobs (drift diagnosis, 2026-06-17)
+#  Investigate whether the Kalman's drift above the constant H_0 baseline is a
+#  process-model artifact (fixable) or structural unidentifiability.
+#    KALMAN_Q_SCALE   -- multiplier on the loaded process-noise Σ_Q.
+#                        1.0  = current behaviour (random walk, Σ_Q from training).
+#                        0.0  = NO process noise: the filter becomes a Bayesian
+#                               recursive least-squares whose prior is the seed
+#                               H_0.  Σ_P only shrinks, so the estimate cannot
+#                               random-walk away; unexcited directions stay at H_0.
+#    KALMAN_PRIOR_BETA -- Ornstein-Uhlenbeck mean-reversion factor toward the seed
+#                        H_0 applied in the predict step: h^- = H_0 + β(h - H_0).
+#                        1.0 = off (pure random walk).  <1 (e.g. 0.98) gently pulls
+#                        the estimate back to H_0 each step, bounding drift even
+#                        when Σ_Q > 0 (the well-posed form of a prior pseudo-
+#                        measurement; avoids the repeated-pseudo-obs over-counting).
+# ---------------------------------------------------------------------------
+KALMAN_Q_SCALE:    float = 1.0
+KALMAN_PRIOR_BETA: float = 0.98  # <1 bounds null-space drift re-opened by keep-alive (λ<1, pe_subtract=False)
+# When True the expected PE-dither energy is subtracted from the ‖Δu‖² process-
+# noise scaling s², so the filter freezes once the controller settles
+# (s²→0 → Σ_P collapses → gain→0 → stops learning — Mismatch 2).  Default False
+# keeps the always-on PE excitation alive in s² so the filter keeps correcting H
+# from the dither; λ<1 + prior_beta<1 bound and damp Σ_P.
+KALMAN_SUBTRACT_PE_DITHER: bool = False
+
+# ---------------------------------------------------------------------------
+#  Per-entry P_init (model-error prior, Mismatch 1+3)
+#  P_init is the prior covariance on the seed H.  When the admittance-
+#  perturbation MC has written ``P_init_diag`` into kalman_matrices.npz it is
+#  used directly (per-entry model-error spread); otherwise the runtime falls
+#  back to a per-entry heuristic σ_ij = KALMAN_P_INIT_FRAC·|H_ij| — which still
+#  fixes the row-scaling that a uniform σ·I corrupts (the ~10⁻³ voltage rows no
+#  longer get an O(1) prior).  KALMAN_P_INIT_MIN_FRAC floors near-zero entries
+#  (e.g. I-line rows) so they keep a usable, non-zero prior.
+# ---------------------------------------------------------------------------
+KALMAN_P_INIT_FRAC:     float = 0.30
+KALMAN_P_INIT_MIN_FRAC: float = 0.02
+
+# ---------------------------------------------------------------------------
+#  Innovation-based topology-change detection → P reset (Gap 5)
+#  An unobserved line/coupler trip steps H; the normalised innovation squared
+#  (NIS = νᵀS⁻¹ν, ~χ²(n_y) when the estimate is correct) then spikes.  A one-
+#  sided CUSUM on (NIS − n_y) triggers a covariance re-opening (P += diag(
+#  P_reset)) so the filter re-identifies the changed columns without discarding
+#  the estimate.  Disabled by default; requires the keep-alive (λ<1) so Σ_P has
+#  not collapsed and the NIS is χ²-calibrated.  ``P_reset_diag`` comes from the
+#  outage MC; absent → fallback (KALMAN_NIS_RESET_FRAC·|H_ij|)².
+# ---------------------------------------------------------------------------
+KALMAN_NIS_DETECT_ENABLED:     bool  = False
+KALMAN_NIS_DETECTOR_MODE:      str   = "cusum"   # "cusum" | "mofn"
+KALMAN_NIS_CUSUM_SLACK:        float = 1.0       # drift allowance, ×n_y per step
+KALMAN_NIS_CUSUM_H:            float = 3.0       # CUSUM trip threshold, ×n_y (responsive to a 1-2 step jump)
+KALMAN_NIS_MOFN:               tuple = (3, 5)    # M-of-N χ²(0.99) exceedances
+KALMAN_NIS_COOLDOWN_STEPS:     int   = 30        # settle-hold: g held at 0 this many steps after start/reset
+KALMAN_NIS_RESET_FRAC:         float = 1.0       # fallback per-entry reset std (P_reset_diag absent)
+KALMAN_NIS_RESET_REARM_WARMUP: bool  = True      # re-arm the warmup P floor after a reset
+KALMAN_NIS_RESET_PMIN_FRAC:    float = 2.0       # warmup floor = frac·trace(P) after reset
+KALMAN_NIS_RESET_WARMUP_STEPS: int   = 20        # warmup-floor duration after a reset
+
+# ---------------------------------------------------------------------------
+#  Measurement-noise (R) sensor floor
+#  The MC power flow is noise-free, so the estimated R is the pure tangent-
+#  linearisation residual.  At the small deployment step it is rank-deficient
+#  (cond ~1e10) → R⁻¹ explodes the NIS and destabilises the gain.  A diagonal
+#  SCADA sensor-noise floor lifts the near-zero eigenvalues to a physical level:
+#  σ_Q on interface-Q rows, σ_V on voltage rows, σ_I on line-current rows.  Set
+#  to your SCADA spec; the defaults sit in the typical SCADA band and also
+#  calibrate the NIS to ~n_y so the topology detector works.  KALMAN_R_DIAGONAL
+#  drops the (degenerate, unreliable at small step) off-diagonals.
+# ---------------------------------------------------------------------------
+KALMAN_R_SIGMA_Q:  float = 0.9    # interface-Q measurement std [Mvar]
+KALMAN_R_SIGMA_V:  float = 0.01   # voltage measurement std [p.u.]
+KALMAN_R_SIGMA_I:  float = 0.01   # line-current measurement std [kA]
+KALMAN_R_DIAGONAL: bool  = True   # zero R's off-diagonals before adding the floor
+
 # Step size for the "numerical" oracle's closed-loop finite difference.
 # Matched to the deployment per-step OFO excitation (||du_DER|| ~= 3.4 Mvar) so
 # the oracle returns the realized SECANT at the OFO scale, not the infinitesimal
 # derivative.  The delta-sweep diagnostic confirmed the island is ~linear over
 # [0.5, 3.4] Mvar, so the result is insensitive to the exact value in that band.
 NUMERICAL_ORACLE_DELTA_MVAR: float = 3.4
-FROZEN_OP_POINT:  bool = False
-FROZEN_OP_TIMESTAMP: datetime = datetime(2016, 9, 7, 10, 0)  # real op-point to freeze at
+FROZEN_OP_POINT:  bool = True
+FROZEN_OP_TIMESTAMP: datetime = datetime(2016, 9, 7, 8, 0)  # real op-point to freeze at
 
 # ---------------------------------------------------------------------------
 #  Init-H bias injection
@@ -202,8 +286,8 @@ FROZEN_OP_TIMESTAMP: datetime = datetime(2016, 9, 7, 10, 0)  # real op-point to 
 #  exactly the same biased H, making comparisons directly meaningful.
 #  Set H_INIT_BIAS_STD = 0.0 to disable (default).
 # ---------------------------------------------------------------------------
-H_INIT_BIAS_STD:  float = 0.1   # e.g. 0.10 for ±10% multiplicative noise; 0.0 = off
-H_INIT_BIAS_SEED: int   = 0     # fixed seed → identical b
+H_INIT_BIAS_STD:  float = 0.7   # e.g. 0.10 for ±10% multiplicative noise; 0.0 = off
+H_INIT_BIAS_SEED: int   = 64     # fixed seed → identical b
 # ias for every run
 
 # ---------------------------------------------------------------------------
@@ -220,6 +304,26 @@ DSO2_INTERFACE_MODE: str = "slack"  # "slack" (decoupled, default) | "coupled"
 
 
 # ---------------------------------------------------------------------------
+#  Kalman OLTC-column estimation toggle
+#  The OLTC taps ALWAYS remain OFO actuators (columns of H, entries of u); the
+#  DSO MIQP controls them either way.  This flag only governs which H columns
+#  the Kalman estimator updates online:
+#    False (default) -- estimate ONLY the DER (Q_cor) columns of H; the OLTC
+#                       columns are left at their analytical (cache) value.
+#                       The Kalman state is vec(H[:, :n_der]) (n_state =
+#                       n_y * n_der), matching the DER-only kalman_matrices.npz
+#                       (Q (n_y*n_der)^2, u_scale (n_der,)) produced by
+#                       _collect_train_mc.py.  The OLTC contribution to Δy is
+#                       removed from the innovation using the analytical OLTC
+#                       columns, so tap motion does not bias the DER estimate.
+#    True            -- estimate the full H (all columns incl. OLTC); requires
+#                       kalman_matrices.npz dimensioned for the full n_u.
+# ---------------------------------------------------------------------------
+KALMAN_ESTIMATE_OLTC_COLS: bool = False
+
+
+from experiments.helpers import ContingencyEvent
+# ---------------------------------------------------------------------------
 #  Configuration
 # ---------------------------------------------------------------------------
 
@@ -231,15 +335,15 @@ def make_config() -> MultiTSOConfig:
     keeps its own paired config.
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 5,      # 36-hour (2160-min) simulation
+        n_total_s=60.0 * 60 * 2,      # 36-hour (2160-min) simulation
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
-        dso_period_s=10.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
+        dso_period_s=20.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
         g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
-        g_q=200,                      # DSO Q-tracking
-        #tso_g_q_tie=0,
+        g_q=150,                      # DSO Q-tracking
+        tso_g_q_tie=0,
         #tso_g_res_sg=0,
         # ── DSO objective tuning ──
-        dso_g_v=15000.0,              # reduced to avoid competing with Q tracking
+        dso_g_v=20000.0,              # reduced to avoid competing with Q tracking
         dso_g_qi=0,                   # integral Q-tracking (0 = off)
         dso_lambda_qi=0.95,           # leaky integrator decay
         dso_q_integral_max_mvar=200.0,
@@ -253,7 +357,7 @@ def make_config() -> MultiTSOConfig:
         g_w_tso_shunt=12000,
         # ── DSO weights ──
         g_w_dso_der=1000,
-        g_w_dso_oltc=20,
+        g_w_dso_oltc=30,
         # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
         # max_step=1 (default) + wall-clock cooldown per OLTC type:
         #   MT (machine 2W gen-trafo) -> 1 tap / 180 s = once per TS interval.
@@ -266,6 +370,24 @@ def make_config() -> MultiTSOConfig:
         run_stability_analysis=False,
         sensitivity_update_interval=1E6,
         verbose=1,
+        tso_mode = "local",
+        contingencies=[
+            # Example: trip line 0 at t=30 min, restore at t=60 min
+            # ContingencyEvent(minute=100, element_type="line", element_index=8, action="trip"),
+            # (minute=150, element_type="line", element_index=8, action="restore"),
+            # ContingencyEvent(minute=90, element_type="gen", element_index=5, action="trip"),
+            # ContingencyEvent(minute=180, element_type="gen", element_index=5, action="restore"),
+            # ContingencyEvent(minute=240, element_type="line", element_index=12, action="trip"),
+            # ContingencyEvent(minute=150, element_type="line", element_index=12, action="restore"),
+            # ContingencyEvent(minute=120, element_type="load", bus=5, p_mw=400, q_mvar=200, action="connect"),
+            # ContingencyEvent(minute=300, element_type="load", bus=5, p_mw=400, q_mvar=200, action="trip"),
+            # ContingencyEvent(minute=330, element_type="gen", element_index=4, action="trip"),
+            # ContingencyEvent(minute=420, element_type="gen", element_index=4, action="restore"),
+            # ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
+            # ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
+            # ContingencyEvent(minute=720, element_type="load", bus=7, p_mw=300, q_mvar=100, action="connect"),
+            # ContingencyEvent(minute=900, element_type="load", bus=7, p_mw=300, q_mvar=100, action="trip"),
+        ],
     )
 
     # ---- DSO layer: only DSO_2 has an OFO controller -------------------
@@ -289,12 +411,22 @@ def make_config() -> MultiTSOConfig:
 
     # ---- Exogenous Q-setpoint vector at DSO_2's three 3W trafos --------
     # Order matches ``meta.hv_networks[1].coupling_trafo_indices``.
-    cfg.q_pcc_setpoints_mvar_per_dso = {"DSO_2": [40.0, 20.0, 80.0]}
+    cfg.q_pcc_setpoints_mvar_per_dso = {"DSO_2": [0.0, 0.0, 0.0]}
+
+    # ---- Time-varying setpoint: bounded random walk per trafo ----------
+    # Each DSO step the three interface-Q setpoints take an independent
+    # Gaussian step (std below) around the base above, clipped to a per-trafo
+    # band -> trafo bounds [40+-band, 20+-band, 80+-band].  Fixed seed so all
+    # H-predictor modes in _run_comparison track the identical moving target.
+    cfg.q_pcc_setpoint_random_enabled  = True
+    cfg.q_pcc_setpoint_random_std_mvar = 1.0    # per-step walk increment [Mvar]
+    cfg.q_pcc_setpoint_random_band_mvar = 40.0  # per-trafo half-band around base
+    cfg.q_pcc_setpoint_random_seed     = 64
 
     # ---- Run length / timing -------------------------------------------
     cfg.n_total_s = 60.0 * 60 * 2  # 2 h smoke
     cfg.tso_period_s = 180.0  # cosmetic: TSO never steps anyway
-    cfg.dso_period_s = 1  # 10
+    cfg.dso_period_s = 60  # 10
     cfg.warmup_s = 0.0
     cfg.start_time = datetime(2016, 9, 7, 10, 0)
     cfg.use_profiles = True
@@ -313,7 +445,7 @@ def make_config() -> MultiTSOConfig:
     cfg.live_plot_controller = False
     cfg.live_plot_cascade = False
     cfg.live_plot_system = False
-    cfg.live_plot_tracking = True
+    cfg.live_plot_tracking = False
 
     # ---- Persistent excitation (sensitivity learning) -----------------
     # When enabled, gaussian noise N(0, sigma^2) is added to the DSO
@@ -326,7 +458,7 @@ def make_config() -> MultiTSOConfig:
     # (Kalman filter / NN) where the input must be persistently exciting.
     cfg.dso_pe_noise_enabled = True
     cfg.dso_pe_noise_std_mvar = 0.01  # std of N(0, sigma^2) on Q_cor [Mvar] (quartered from 1.0: steady-state ||du|| noise floor ~0.9 Mvar; profiles still excite the varying case)
-    cfg.dso_pe_noise_seed = 42  # RNG seed for reproducibility
+    cfg.dso_pe_noise_seed = 64  # RNG seed for reproducibility
 
     # ---- Output directory ---------------------------------------------
     cfg.result_dir = os.path.join("results", "003_cigre_2026")
@@ -336,7 +468,7 @@ def make_config() -> MultiTSOConfig:
     # operating point; cfg.frozen_at then holds that profile constant for the
     # entire run.  This avoids the artificial mean-profile base-case.
     if FROZEN_OP_POINT:
-        cfg.use_profiles = True
+        cfg.use_profiles = False
         cfg.start_time = FROZEN_OP_TIMESTAMP
         cfg.frozen_at = FROZEN_OP_TIMESTAMP
         cfg.contingencies = []
@@ -719,8 +851,24 @@ class _KalmanHPredictor:
     """Tracks H as a linear random-walk state with noisy Δy ≈ H·Δu observations.
 
     State model :  h(k+1) = h(k) + w(k),       w ~ N(0, Q)
-    Observation :  Δy(k)  = C(Δu) h(k) + v(k), v ~ N(0, R)
-    where h = H.flatten() (row-major) and C(Δu) = I_{n_y} ⊗ Δu^T.
+    Observation :  Δỹ(k)  = C(Δu_e) h(k) + v(k), v ~ N(0, R)
+    where h = vec_row(H[:, :n_e]) and C(Δu_e) = I_{n_y} ⊗ Δu_e^T.
+
+    Column subset (``estimate_oltc_cols``)
+    --------------------------------------
+    By default the filter estimates only the first ``n_e = n_der`` columns of H
+    (the DER / ``Q_cor`` block); the remaining columns (OLTC taps) are NOT
+    estimated and are spliced back from the controller's analytical ``_H_cache``
+    on every return.  The OLTC taps stay full OFO actuators — the DSO MIQP still
+    moves them — they are simply held at their analytical sensitivity rather than
+    learned online.  Their contribution to the measured ``Δy`` is removed from
+    the innovation (``Δỹ = Δy - H_rest·Δu_rest`` using the analytical OLTC
+    columns) so tap motion does not bias the DER estimate.  The Kalman state is
+    therefore ``vec(H[:, :n_der])`` (``n_state = n_y·n_der``), which matches the
+    DER-only ``kalman_matrices.npz`` (``Q`` of side ``n_y·n_der``, ``u_scale`` of
+    length ``n_der``) produced by ``_collect_train_mc.py``.  Set
+    ``estimate_oltc_cols = True`` to estimate the full H (``n_e = n_u``); that
+    requires matrices dimensioned for the full ``n_u``.
 
     Q and R are loaded from ``_KALMAN_MATRICES_PATH`` on the first call.
     Falls back to identity defaults if absent; run
@@ -728,8 +876,37 @@ class _KalmanHPredictor:
     """
 
     def __init__(self, min_delta_u_norm: float = 0.05, forgetting_factor: float = 0.997,
-                 p_min_frac: float = 10.0, p_min_warmup_steps: int = 60) -> None:
+                 p_min_frac: float = 10.0, p_min_warmup_steps: int = 60,
+                 estimate_oltc_cols: bool = False,
+                 q_scale: float = 1.0, prior_beta: float = 1.0) -> None:
         self.min_delta_u_norm = min_delta_u_norm
+        # When False (default) only the DER (Q_cor) columns of H are estimated;
+        # the OLTC columns are held at their analytical value (see class docstring).
+        self.estimate_oltc_cols = estimate_oltc_cols
+        # Process-noise multiplier and prior mean-reversion (drift diagnosis).
+        # q_scale=0 → Bayesian RLS (no random walk); prior_beta<1 → OU pull to seed.
+        self.q_scale = q_scale
+        self.prior_beta = prior_beta
+        # When False, the PE-dither energy is NOT subtracted from s², so the
+        # excitation keeps the process noise (hence the gain) alive — the filter
+        # keeps learning from the dither instead of freezing at the prior.
+        self.pe_subtract = True
+        # Per-entry P_init (model-error prior).  p_init_frac/p_init_min_frac drive
+        # the heuristic fallback used when the MC ``P_init_diag`` is absent.
+        self.p_init_frac = 0.30
+        self.p_init_min_frac = 0.02
+        # Innovation (NIS) topology detector + reset; see module KALMAN_NIS_* knobs.
+        self.nis_detect_enabled = False
+        self.nis_detector_mode = "cusum"
+        self.nis_cusum_slack = 1.0
+        self.nis_cusum_h = 6.0
+        self.nis_mofn = (3, 5)
+        self.nis_cooldown_steps = 100
+        self.nis_reset_frac = 1.0
+        self.nis_reset_rearm_warmup = True
+        self.nis_reset_pmin_frac = 2.0
+        self.nis_reset_warmup_steps = 20
+        self._h_anchor: Optional[np.ndarray] = None  # seed H_0, mean-reversion target
         # Forgetting factor prevents P from collapsing to ~0 after initial convergence.
         # Without it, K → 0 and the filter can no longer track slow H drift from
         # actuator movements, causing error to re-increase after the initial dip.
@@ -747,6 +924,11 @@ class _KalmanHPredictor:
         self._P: Optional[np.ndarray] = None   # estimate covariance
         self._P_max: Optional[float] = None    # trace ceiling for PSD-safe cap
         self._P_min: Optional[float] = None    # trace floor active during warmup
+        self._P_init_diag: Optional[np.ndarray] = None   # per-entry model-error prior (MC)
+        self._P_reset_diag: Optional[np.ndarray] = None  # per-entry outage spread (MC)
+        self._steps_since_reset: int = 0       # refractory counter for the NIS detector
+        self._nis_cusum_g: float = 0.0         # one-sided CUSUM accumulator
+        self._nis_hist: list = []              # recent NIS exceedance flags (mofn mode)
         self._step_count: int = 0
         self._y_prev: Optional[np.ndarray] = None
         self._u_prev: Optional[np.ndarray] = None
@@ -759,21 +941,122 @@ class _KalmanHPredictor:
             # Missing in legacy files -> ones (raw norm); regenerate for the data-driven scale.
             n_u = int(round(n_state / n_y))
             self._u_scale = d["u_scale"] if "u_scale" in d else np.ones(n_u)
+
+            # Optional per-entry diagonals (length n_state) written by the MC
+            # producers.  Length-guarded so an npz dimensioned for a different
+            # n_der is ignored rather than crashing; absent -> heuristic fallback.
+            def _opt_diag(key: str) -> Optional[np.ndarray]:
+                if key not in d:
+                    return None
+                v = np.asarray(d[key], dtype=float).ravel()
+                if v.shape[0] != n_state:
+                    print(f"[KF] {key} length {v.shape[0]} != n_state {n_state} -> ignoring")
+                    return None
+                return v
+            self._P_init_diag = _opt_diag("P_init_diag")
+            self._P_reset_diag = _opt_diag("P_reset_diag")
             print(f"[KF] loaded Q {self._Q.shape}, R {self._R.shape}, "
-                  f"u_scale {self._u_scale.shape}")
+                  f"u_scale {self._u_scale.shape}"
+                  f"{'' if self._P_init_diag is None else ', P_init_diag'}"
+                  f"{'' if self._P_reset_diag is None else ', P_reset_diag'}")
         else:
             self._Q = np.eye(n_state) * 1e-6
             self._R = np.eye(n_y) * 1e-4
             self._u_scale = np.ones(int(round(n_state / n_y)))
+            self._P_init_diag = None
+            self._P_reset_diag = None
             print("[KF] no kalman_matrices.npz found — using I defaults. "
                   "Run generate_kalman_matrices() for data-driven matrices.")
+
+    def _p_init_diag(self) -> np.ndarray:
+        """Per-entry prior variance on the seed H (the model-error belief).
+
+        Uses the MC ``P_init_diag`` (admittance-perturbation spread) when present,
+        else the heuristic σ_ij = p_init_frac·|H_ij|.  Both are per-entry so the
+        ~10⁻³ voltage rows are not swamped by a uniform σ sized to the O(1) ∂Q/∂Q
+        entries (Mismatch 1+3).  A floor (p_init_min_frac·rms(H))² keeps near-zero
+        entries (e.g. I-line rows) from getting an unrecoverable zero prior.
+        """
+        h_rms = float(np.sqrt(np.mean(self._h ** 2))) or 1e-4
+        if self._P_init_diag is not None:
+            p_diag = self._P_init_diag.copy()
+        else:
+            p_diag = (self.p_init_frac * np.abs(self._h)) ** 2
+        p_floor = (self.p_init_min_frac * h_rms) ** 2
+        return np.maximum(p_diag, p_floor)
 
     def reset(self) -> None:
         """Reset KF state; re-seeds from the controller's H on next call."""
         self._h = self._P = self._y_prev = self._u_prev = None
         self._P_max = None
         self._P_min = None
+        self._h_anchor = None
         self._step_count = 0
+        self._steps_since_reset = 0
+        self._nis_cusum_g = 0.0
+        self._nis_hist = []
+
+    def _detect_and_reset(self, innov: np.ndarray, S: np.ndarray,
+                          n_y: int, n_state: int) -> None:
+        """NIS-based topology-change detection → covariance re-opening (Gap 5).
+
+        The normalised innovation squared NIS = νᵀS⁻¹ν is ~χ²(n_y) when the H
+        estimate is correct; an unobserved line/coupler trip steps H and makes it
+        spike.  A one-sided CUSUM on (NIS − n_y) (or an M-of-N χ² test) flags the
+        jump.  The detector is held quiet (g=0) for ``nis_cooldown_steps`` after
+        start / after a reset so the cold-start and re-convergence transients do not
+        pre-load the CUSUM or false-trigger; it then accumulates and fires.
+        """
+        if self._steps_since_reset <= self.nis_cooldown_steps:
+            self._nis_cusum_g = 0.0          # settle-hold: let the filter converge first
+            self._nis_hist = []
+            return
+        try:
+            d2 = float(innov @ np.linalg.solve(S, innov))
+        except np.linalg.LinAlgError:
+            return
+        if self.nis_detector_mode == "mofn":
+            try:
+                from scipy.stats import chi2
+                thr = float(chi2.ppf(0.99, n_y))
+            except Exception:
+                thr = float(n_y + 3.0 * np.sqrt(2.0 * n_y))   # ~99% normal approx
+            self._nis_hist.append(1 if d2 > thr else 0)
+            m, n = self.nis_mofn
+            del self._nis_hist[:-n]                            # keep the last n flags
+            fired = sum(self._nis_hist) >= m
+        else:  # one-sided CUSUM on (NIS − n_y), slack n_y allows normal-sized innovations
+            self._nis_cusum_g = max(0.0, self._nis_cusum_g
+                                    + (d2 - n_y) - self.nis_cusum_slack * n_y)
+            fired = self._nis_cusum_g > self.nis_cusum_h * n_y
+        if fired:
+            self._reset_covariance(n_state)
+
+    def _reset_covariance(self, n_state: int) -> None:
+        """Open up Σ_P on a detected topology jump; keep the H estimate.
+
+        Adds the per-entry outage spread (``P_reset_diag`` from the outage MC, or
+        the (reset_frac·|H_ij|)² fallback) so the gain re-opens exactly where a
+        trip moves H, then re-raises the trace ceiling so the next predict does
+        NOT clip the inflation away — the cap is trace(P_init), far below the reset.
+        """
+        if self._P_reset_diag is not None:
+            reset_diag = self._P_reset_diag.copy()
+        else:
+            reset_diag = (self.nis_reset_frac * np.abs(self._h)) ** 2
+        self._P = self._P + np.diag(reset_diag)
+        self._P_max = max(self._P_max, float(np.trace(self._P)))
+        if self.nis_reset_rearm_warmup:
+            # Re-arm the existing warmup floor so the gain stays elevated through
+            # the first post-trip steps while the changed columns re-identify.
+            self._step_count = 0
+            self.p_min_warmup_steps = self.nis_reset_warmup_steps
+            self._P_min = self.nis_reset_pmin_frac * float(np.trace(self._P))
+        self._steps_since_reset = 0
+        self._nis_cusum_g = 0.0
+        self._nis_hist = []
+        print(f"[KF] topology reset: trace(P) -> {float(np.trace(self._P)):.3e} "
+              f"(+{float(np.sum(reset_diag)):.3e})")
 
     def __call__(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
         if dso_ctrl._H_cache is None or dso_ctrl._u_current is None:
@@ -795,7 +1078,11 @@ class _KalmanHPredictor:
         #   feats["v_buses_pu"]  -- voltages at monitored buses               (n_v,)
 
         n_y, n_u = dso_ctrl._H_cache.shape
-        n_state = n_y * n_u
+        # Estimated columns: DER (Q_cor) block only by default, else the full H.
+        # The DER columns are the leading n_der of the [Q_cor | OLTC] layout.
+        n_der = len(dso_ctrl.config.der_indices)
+        n_e = n_u if self.estimate_oltc_cols else n_der
+        n_state = n_y * n_e
 
         if self._Q is None or self._Q.shape[0] != n_state:
             self._load_matrices(n_state, n_y)
@@ -803,15 +1090,15 @@ class _KalmanHPredictor:
         y = feats["y"]
         u = feats["u"]
 
-        # Warm-up: seed h and P from the controller's analytical H
+        # Warm-up: seed h and P from the controller's analytical H (estimated
+        # columns only; OLTC columns stay in _H_cache and are spliced on return).
         if self._h is None:
-            self._h = dso_ctrl._H_cache.flatten().copy()
-            # P_init reflects actual initial uncertainty (bias on H), not Q magnitude.
-            # Tying P_init to Q would make K negligibly small when Q is tiny
-            # (e.g. when H barely changes step-to-step even with profiles on).
-            h_rms = float(np.sqrt(np.mean(self._h ** 2))) or 1e-4
-            sigma_init = 0.30 * h_rms   # ~30% per-entry std matches the init bias
-            self._P = (sigma_init ** 2) * np.eye(n_state)
+            self._h = dso_ctrl._H_cache[:, :n_e].flatten().copy()
+            self._h_anchor = self._h.copy()   # prior / mean-reversion target = seed H_0
+            # P_init is the prior covariance on the seed H (the model-error belief),
+            # NOT the per-step drift Q — per-entry (diagonal) so low-magnitude rows
+            # keep a proportionate prior (Mismatch 1+3); see _p_init_diag.
+            self._P = np.diag(self._p_init_diag())
             p_init_trace = float(np.trace(self._P))
             self._P_min = self.p_min_frac * p_init_trace
             # P_max must be at least P_min so ceiling never sits below the warmup floor.
@@ -833,29 +1120,46 @@ class _KalmanHPredictor:
         delta_u = u - self._u_prev
         delta_y = y - self._y_prev
 
+        # Restrict the regression to the estimated (DER) columns.  The
+        # non-estimated columns (OLTC) are held at their analytical value in
+        # _H_cache; subtract their contribution to Δy from the innovation so
+        # tap motion does not bias the DER estimate.  No-op when the taps do not
+        # move (Δu_rest = 0) or when estimate_oltc_cols=True (no kept columns).
+        delta_u_e = delta_u[:n_e]
+        if n_e < n_u:
+            H_rest = dso_ctrl._H_cache[:, n_e:]          # analytical OLTC columns
+            delta_y = delta_y - H_rest @ delta_u[n_e:]
+
         # Predict — Σ_q = ‖Δu‖²·Σ_q0 ties the assumed H drift to actuator motion, so
         # process noise shrinks toward zero at convergence (Δu→0) instead of injecting
         # fictitious diffusion.  The squared scaling is the covariance interpretation:
         # if the per-step H increment scales like Δu, its covariance scales like ‖Δu‖².
-        # Δu is per-channel normalised by its RMS scale so DER and OLTC moves contribute
-        # comparably; the expected PE-dither energy is removed so s² reflects natural
-        # controller motion only (s²→0 once the controller settles, even though the dither
-        # keeps moving).  s²≈1 at a typical full step.
+        # Δu_e is per-channel normalised by its RMS scale; the expected PE-dither energy
+        # is removed so s² reflects natural controller motion only (s²→0 once the
+        # controller settles, even though the dither keeps moving).  s²≈1 at a typical
+        # full step.
         # Forgetting factor keeps P from collapsing; trace cap bounds growth (PSD-safe).
-        du_n2 = float(np.sum((delta_u / self._u_scale) ** 2))  # ‖Δu‖² (normalised, dimensionless)
-        s2 = max(0.0, du_n2 - self._pe_dither_energy) / len(delta_u)  # ∝ ‖Δu‖² → covariance scaling
-        h_p = self._h.copy()
-        P_p = self._P / self.lam + s2 * self._Q
+        du_n2 = float(np.sum((delta_u_e / self._u_scale) ** 2))  # ‖Δu_e‖² (normalised, dimensionless)
+        _dither = self._pe_dither_energy if self.pe_subtract else 0.0
+        s2 = max(0.0, du_n2 - _dither) / len(delta_u_e)  # ∝ ‖Δu_e‖² → covariance scaling
+        # Mean-reversion toward the seed prior H_0 (OU): h^- = H_0 + β(h - H_0).
+        # β=1 → pure random walk (h^- = h).  β<1 gently pulls the estimate back to
+        # the prior each step, bounding null-space drift.  Σ_Q is scaled by q_scale
+        # (0 → no process noise → Bayesian RLS; Σ_P only shrinks → cannot drift).
+        beta = self.prior_beta
+        h_p = self._h_anchor + beta * (self._h - self._h_anchor)
+        P_p = (beta ** 2) * (self._P / self.lam) + self.q_scale * s2 * self._Q
         tr = float(np.trace(P_p))
         if tr > self._P_max:
             P_p *= self._P_max / tr
 
-        # Update — skip when ‖Δu‖ is too small (ill-conditioned regression)
-        if np.linalg.norm(delta_u) >= self.min_delta_u_norm:
-            C = np.kron(np.eye(n_y), delta_u.reshape(1, -1))  # (n_y, n_state)
+        # Update — skip when ‖Δu_e‖ is too small (ill-conditioned regression)
+        if np.linalg.norm(delta_u_e) >= self.min_delta_u_norm:
+            C = np.kron(np.eye(n_y), delta_u_e.reshape(1, -1))  # (n_y, n_state)
             S = C @ P_p @ C.T + self._R                        # (n_y, n_y)
+            innov = delta_y - C @ h_p                          # predicted innovation ν
             K = np.linalg.solve(S, C @ P_p).T                  # (n_state, n_y)
-            self._h = h_p + K @ (delta_y - C @ h_p)
+            self._h = h_p + K @ innov
             self._P = (np.eye(n_state) - K @ C) @ P_p
             # P_min floor active only during warmup window: uniform top-up preserves
             # PD and symmetry.  After warmup P is free to collapse so the filter stops
@@ -864,12 +1168,21 @@ class _KalmanHPredictor:
                 tr_post = float(np.trace(self._P))
                 if tr_post < self._P_min:
                     self._P += (self._P_min - tr_post) / n_state * np.eye(n_state)
+            # Topology-change detection on the normalised innovation (Gap 5):
+            # NIS = νᵀS⁻¹ν spikes when an unobserved trip steps H → re-open Σ_P.
+            if self.nis_detect_enabled:
+                self._detect_and_reset(innov, S, n_y, n_state)
         else:
             self._h, self._P = h_p, P_p
 
         self._step_count += 1
+        self._steps_since_reset += 1
         self._y_prev, self._u_prev = y, u
-        return self._h.reshape(n_y, n_u)
+        # Splice the estimated DER columns back into the full analytical H; the
+        # OLTC columns are returned unchanged (not estimated).
+        H_out = dso_ctrl._H_cache.copy()
+        H_out[:, :n_e] = self._h.reshape(n_y, n_e)
+        return H_out
 
 
 _kalman_h_predictor = _KalmanHPredictor()
@@ -1124,10 +1437,39 @@ def collect_training_data(
 
 # ── Kalman Q/R matrix estimation ─────────────────────────────────────────────
 
+def floor_measurement_noise_R(R, n_q_trafo, n_v, n_i,
+                              sigma_q=KALMAN_R_SIGMA_Q, sigma_v=KALMAN_R_SIGMA_V,
+                              sigma_i=KALMAN_R_SIGMA_I, diagonal=KALMAN_R_DIAGONAL):
+    """Add a per-row SCADA sensor-noise floor (and optionally diagonalise) to R.
+
+    The MC power flow is noise-free, so the estimated R is the pure tangent-
+    linearisation residual; at a small training step it is rank-deficient
+    (cond ~1e10) and R⁻¹ explodes the NIS and destabilises the gain.  Adding
+    diag([σ_Q²·n_q | σ_V²·n_v | σ_I²·n_i]) lifts the near-zero eigenvalues to a
+    physical floor; ``diagonal`` drops the (unreliable at small step) off-diagonals
+    first.  Row order is [Q_trafo | V_bus | I_line] (matches ``_extract_y``).
+    """
+    R = np.asarray(R, dtype=float).copy()
+    n_y = R.shape[0]
+    if int(n_q_trafo) + int(n_v) + int(n_i) != n_y:
+        print(f"[kalman] R-floor skipped: split {n_q_trafo}+{n_v}+{n_i} != n_y {n_y}")
+        return R
+    if diagonal:
+        R = np.diag(np.diag(R))
+    floor = np.concatenate([np.full(int(n_q_trafo), sigma_q ** 2),
+                            np.full(int(n_v), sigma_v ** 2),
+                            np.full(int(n_i), sigma_i ** 2)])
+    return R + np.diag(floor)
+
+
 def generate_kalman_matrices(
     data_path: str = _TRAINING_DATA_PATH,
     output_path: str = _KALMAN_MATRICES_PATH,
     min_delta_u_norm: float = 0.05,
+    n_q_trafo: Optional[int] = None,
+    n_v: Optional[int] = None,
+    n_i: Optional[int] = None,
+    apply_r_floor: bool = True,
 ) -> Dict[str, np.ndarray]:
     """Estimate Kalman process noise Q and measurement noise R from training data.
 
@@ -1178,9 +1520,31 @@ def generate_kalman_matrices(
         res = np.stack(residuals)                                   # (M, n_y)
         R   = np.cov(res.T) if n_y > 1 else np.atleast_2d(np.var(res))
 
+    # Row split [Q_trafo | V | I]: from args, else from the training-data keys.
+    if n_q_trafo is None and "n_q_trafo" in d:
+        n_q_trafo, n_v, n_i = int(d["n_q_trafo"]), int(d["n_v"]), int(d["n_i"])
+    have_split = n_q_trafo is not None and (n_q_trafo + (n_v or 0) + (n_i or 0)) == n_y
+    if apply_r_floor and have_split:
+        R = floor_measurement_noise_R(R, n_q_trafo, n_v, n_i)
+        print(f"[kalman] R sensor-floor applied (split {n_q_trafo}/{n_v}/{n_i}, "
+              f"diagonal={KALMAN_R_DIAGONAL}) -> cond={np.linalg.cond(R):.1e}")
+    elif apply_r_floor:
+        print("[kalman] R sensor-floor SKIPPED (row split unknown — pass "
+              "n_q_trafo/n_v/n_i or use _collect_train_mc Stage 4)")
+
     out_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(out_dir, exist_ok=True)
-    np.savez(output_path, Q=Q, R=R, u_scale=u_scale)
+    save_kw = dict(Q=Q, R=R, u_scale=u_scale)
+    if have_split:
+        save_kw.update(n_q_trafo=n_q_trafo, n_v=n_v, n_i=n_i)
+    # Preserve per-entry P_init_diag/P_reset_diag from a prior admittance/outage
+    # MC run (matching n_state) so regenerating Q/R does not wipe them.
+    if os.path.exists(output_path):
+        _prev = np.load(output_path)
+        for _k in ("P_init_diag", "P_reset_diag"):
+            if _k in _prev and np.asarray(_prev[_k]).ravel().shape[0] == n_state:
+                save_kw[_k] = _prev[_k]
+    np.savez(output_path, **save_kw)
     q_d, r_d = np.diag(Q), np.diag(R)
     print(f"[kalman] Q {Q.shape}, R {R.shape}, u_scale {u_scale.shape} "
           f"-> {os.path.abspath(output_path)}")
@@ -1562,15 +1926,38 @@ def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> Optional["
     # Scale Kalman parameters to the actual DSO period.
     # All three defaults were tuned for 10 s steps; rescale proportionally so
     # wall-clock behaviour is invariant to the chosen period.
-    _BASE_PERIOD_S = 10.0
+    _BASE_PERIOD_S = 20.0
     _period_ratio  = float(getattr(cfg, "dso_period_s", _BASE_PERIOD_S)) / _BASE_PERIOD_S
-    _kalman_h_predictor.min_delta_u_norm   = 1.0                            # physical Mvar gate just above the ~0.9 noise floor (noise std 0.25): KF learns on real moves, skips noise-only steps so it freezes post-convergence
+    _kalman_h_predictor.min_delta_u_norm   = 0.0                            # physical Mvar gate just above the ~0.9 noise floor (noise std 0.25): KF learns on real moves, skips noise-only steps so it freezes post-convergence
     _kalman_h_predictor.p_min_warmup_steps = 0                              # p_min floor DISABLED: the cold-start gain it held high was injecting noise into the over-actuated null space (validated: drift 0.42->0.14 frozen)
     _kalman_h_predictor.lam                = KALMAN_LAM                     # fixed (not period-scaled) for run-to-run comparability
+    _kalman_h_predictor.estimate_oltc_cols = KALMAN_ESTIMATE_OLTC_COLS      # False: estimate DER columns only, hold OLTC columns analytical
+    _kalman_h_predictor.q_scale            = KALMAN_Q_SCALE                 # 0 → Bayesian RLS (no random-walk drift)
+    _kalman_h_predictor.prior_beta         = KALMAN_PRIOR_BETA              # <1 → OU mean-reversion toward seed H_0
+    _kalman_h_predictor.pe_subtract        = KALMAN_SUBTRACT_PE_DITHER      # False → keep PE excitation alive in s² (filter keeps learning)
+    # Per-entry P_init (Mismatch 1+3) and NIS topology detector (Gap 5).
+    _kalman_h_predictor.p_init_frac           = KALMAN_P_INIT_FRAC
+    _kalman_h_predictor.p_init_min_frac       = KALMAN_P_INIT_MIN_FRAC
+    _kalman_h_predictor.nis_detect_enabled    = KALMAN_NIS_DETECT_ENABLED
+    _kalman_h_predictor.nis_detector_mode     = KALMAN_NIS_DETECTOR_MODE
+    _kalman_h_predictor.nis_cusum_slack       = KALMAN_NIS_CUSUM_SLACK
+    _kalman_h_predictor.nis_cusum_h           = KALMAN_NIS_CUSUM_H
+    _kalman_h_predictor.nis_mofn              = KALMAN_NIS_MOFN
+    _kalman_h_predictor.nis_cooldown_steps    = KALMAN_NIS_COOLDOWN_STEPS
+    _kalman_h_predictor.nis_reset_frac        = KALMAN_NIS_RESET_FRAC
+    _kalman_h_predictor.nis_reset_rearm_warmup = KALMAN_NIS_RESET_REARM_WARMUP
+    _kalman_h_predictor.nis_reset_pmin_frac   = KALMAN_NIS_RESET_PMIN_FRAC
+    _kalman_h_predictor.nis_reset_warmup_steps = KALMAN_NIS_RESET_WARMUP_STEPS
     print(f"[kalman] period_ratio={_period_ratio:.2f}  "
           f"min_du={_kalman_h_predictor.min_delta_u_norm:.4f}  "
           f"warmup={_kalman_h_predictor.p_min_warmup_steps} steps  "
-          f"lam={_kalman_h_predictor.lam:.5f} (fixed KALMAN_LAM)")
+          f"lam={_kalman_h_predictor.lam:.5f} (fixed KALMAN_LAM)  "
+          f"estimate_oltc_cols={_kalman_h_predictor.estimate_oltc_cols}  "
+          f"q_scale={_kalman_h_predictor.q_scale}  prior_beta={_kalman_h_predictor.prior_beta}  "
+          f"pe_subtract={_kalman_h_predictor.pe_subtract}  "
+          f"p_init_frac={_kalman_h_predictor.p_init_frac}  "
+          f"nis_detect={_kalman_h_predictor.nis_detect_enabled}"
+          f"{'/' + _kalman_h_predictor.nis_detector_mode if _kalman_h_predictor.nis_detect_enabled else ''}")
 
     # Inject the live combined net into the numerical oracle so it can
     # finite-difference the true plant sensitivity at each step.
@@ -1624,6 +2011,8 @@ def run() -> List[MultiTSOIterationRecord]:
     print(f"  q_pcc_setpoints={cfg.q_pcc_setpoints_mvar_per_dso}")
     print(f"  n_total_s={cfg.n_total_s:.0f}, dso_period_s={cfg.dso_period_s:.0f}")
     print(f"  H_PREDICTOR_MODE={H_PREDICTOR_MODE!r}  H_PREDICTOR_ROWS={H_PREDICTOR_ROWS!r}")
+    print(f"  KALMAN_ESTIMATE_OLTC_COLS={KALMAN_ESTIMATE_OLTC_COLS}  "
+          f"(Kalman estimates {'all H columns' if KALMAN_ESTIMATE_OLTC_COLS else 'DER columns only; OLTC columns kept analytical'})")
     print(f"  DSO2_INTERFACE_MODE={DSO2_INTERFACE_MODE!r}  "
           f"(dso2_interface_slack={cfg.dso2_interface_slack})")
     if FROZEN_OP_POINT:

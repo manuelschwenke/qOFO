@@ -616,24 +616,39 @@ def plot_multi_comparison(
         Save to file instead of showing.
     """
     colors = plt.cm.tab10(np.linspace(0, 0.9, len(runs)))
-    fig = plt.figure(figsize=(14, 16))
-    gs  = GridSpec(4, 1, figure=fig, hspace=0.55)
-    ax_he = fig.add_subplot(gs[0])   # H-estimation error vs analytical
-    ax_h  = fig.add_subplot(gs[1])   # one-step-ahead prediction error
-    ax_q  = fig.add_subplot(gs[2])
-    ax_v  = fig.add_subplot(gs[3])
+    fig = plt.figure(figsize=(16, 22))
+    gs  = GridSpec(5, 2, figure=fig, hspace=0.55, wspace=0.22)
+    ax_he   = fig.add_subplot(gs[0, 0])   # H error vs analytical (q_trafo rows)
+    ax_hef  = fig.add_subplot(gs[0, 1])   # NEW1: H error vs analytical (full matrix)
+    ax_h    = fig.add_subplot(gs[1, 0])   # one-step-ahead prediction error
+    ax_act  = fig.add_subplot(gs[1, 1])   # NEW6: predictor activity ||H_used-H_pred||
+    ax_q    = fig.add_subplot(gs[2, 0])   # interface Q mean-abs error
+    ax_qt   = fig.add_subplot(gs[2, 1])   # NEW2: per-trafo Q actual vs setpoint
+    ax_v    = fig.add_subplot(gs[3, 0])   # voltage deviation
+    ax_hent = fig.add_subplot(gs[3, 1])   # NEW5: single H-entry drift
+    ax_u    = fig.add_subplot(gs[4, 0])   # NEW3: actuator excursion (q_set drift)
+    ax_uT   = ax_u.twinx()                #        + OLTC tap excursion (right axis)
+    ax_sk   = fig.add_subplot(gs[4, 1])   # NEW4: one-step prediction skill (bar)
+
+    _ls = ["-", "--", ":", "-."]          # per-trafo line styles
+    skills: List[Tuple[str, float, object]] = []   # (label, skill, colour) for the bar
+    set_drawn = False                     # draw interface-Q setpoints once
 
     for (pkl_path, sidecar_path, label), col in zip(runs, colors):
         log, sidecar = load_run(pkl_path, sidecar_path)
 
-        # ── Panel 0: H-estimation error vs analytical ────────────────────
+        # ── Panel ax_he / ax_hef: H error vs analytical (q_trafo + full) ──
         if sidecar is not None:
             he = h_analytical_error(sidecar)
-            if he is not None and "relative_q_trafo" in he:
-                ax_he.plot(he["steps"], 100 * he["relative_q_trafo"], color=col, lw=1.8,
-                           label=f"{label}  (final {100 * float(np.mean(he['relative_q_trafo'][-20:])):.1f}%)")
+            if he is not None:
+                if "relative_q_trafo" in he:
+                    ax_he.plot(he["steps"], 100 * he["relative_q_trafo"], color=col, lw=1.8,
+                               label=f"{label}  (final {100 * float(np.mean(he['relative_q_trafo'][-20:])):.1f}%)")
+                # NEW1: full-matrix relative error (all rows, incl. voltage)
+                ax_hef.plot(he["steps"], 100 * he["relative"], color=col, lw=1.8,
+                            label=f"{label}  (final {100 * float(np.mean(he['relative'][-20:])):.1f}%)")
 
-        # ── Panel 1: one-step-ahead q_trafo prediction error ─────────────
+        # ── Panel ax_h: one-step-ahead q_trafo prediction error ──────────
         if sidecar is not None:
             ose = one_step_qtrafo_error(sidecar)
             if ose is not None and ose["steps"].size:
@@ -649,16 +664,40 @@ def plot_multi_comparison(
                 else:
                     ax_h.plot(steps, rn, color=col, lw=1.5,
                               label=f"{label}  (RMSE={float(ose['rmse']):.3f} Mvar)")
+                # NEW4: collect skill (1 - RMSE/RMSE_zero) for the bar panel
+                skills.append((label, float(ose["skill"]), col))
 
-        # ── Panel 2: Q_trafo mean absolute error ─────────────────────────
+        # ── Panel ax_act (NEW6): predictor activity ||H_used-H_pred||_F ──
+        if sidecar is not None and "h_used" in sidecar and "h_predicted" in sidecar:
+            Hu, Hp = sidecar["h_used"], sidecar["h_predicted"]
+            n = len(Hu)
+            activity = np.linalg.norm((Hp - Hu).reshape(n, -1), axis=1)
+            ax_act.plot(np.arange(n), activity, color=col, lw=1.5, label=label)
+
+        # ── Panel ax_q: interface Q mean-abs error ───────────────────────
         qt = q_trafo_tracking(log)
         err_arr = np.abs(qt["error"])
         if err_arr.ndim == 2 and err_arr.shape[0] > 0:
             times_min = qt["times_s"] / 60.0
-            mean_abs_err = np.nanmean(err_arr, axis=1)
-            ax_q.plot(times_min, mean_abs_err, color=col, lw=1.5, label=label)
+            ax_q.plot(times_min, np.nanmean(err_arr, axis=1), color=col, lw=1.5, label=label)
 
-        # ── Panel 3: Voltage deviation (mean) ────────────────────────────
+        # ── Panel ax_qt (NEW2): per-trafo Q actual vs setpoint ───────────
+        act_arr, set_arr = qt["actual"], qt["setpoint"]
+        keys = qt["trafo_keys"]
+        if isinstance(act_arr, np.ndarray) and act_arr.ndim == 2 and act_arr.shape[0] > 0:
+            tmin = qt["times_s"] / 60.0
+            for j in range(act_arr.shape[1]):
+                tname = _trafo_shortname(keys[j]) if j < len(keys) else f"t{j}"
+                ax_qt.plot(tmin, act_arr[:, j], color=col, lw=1.3,
+                           ls=_ls[j % len(_ls)], label=f"{label} {tname}")
+            if not set_drawn and isinstance(set_arr, np.ndarray) and set_arr.ndim == 2:
+                for j in range(set_arr.shape[1]):
+                    ax_qt.plot(tmin, set_arr[:, j], color="k", lw=0.9,
+                               ls=_ls[j % len(_ls)], alpha=0.5,
+                               label="setpoint" if j == 0 else None)
+                set_drawn = True
+
+        # ── Panel ax_v: voltage deviation (mean + min/max band) ──────────
         vd = voltage_deviation(log, v_ref=v_ref)
         if len(vd["times_s"]) > 0:
             times_min_v = vd["times_s"] / 60.0
@@ -667,26 +706,81 @@ def plot_multi_comparison(
                               vd["dev_min"] * 1e3, vd["dev_max"] * 1e3,
                               color=col, alpha=0.08)
 
+        # ── Panel ax_hent (NEW5): single H-entry drift dQ_int0/dq_set0 ───
+        if sidecar is not None and "h_used" in sidecar:
+            Hu = sidecar["h_used"]
+            ax_hent.plot(np.arange(len(Hu)), Hu[:, 0, 0], color=col, lw=1.7,
+                         label=f"{label} (used)")
+            if "h_analytical" in sidecar:
+                Ha = sidecar["h_analytical"]
+                ax_hent.plot(np.arange(len(Ha)), Ha[:, 0, 0], color=col, lw=1.0,
+                             ls=":", alpha=0.7)
+
+        # ── Panel ax_u/ax_uT (NEW3): actuator excursion from initial ─────
+        # u = [q_set (n_der) | tap (n_oltc)]; n_oltc == n_q_trafo (one OLTC per
+        # interface trafo).  q_set drift (left, Mvar) exposes the null-space
+        # wander; tap drift (right, integer steps) is usually ~0 on this island.
+        if sidecar is not None and "u" in sidecar:
+            U = sidecar["u"]
+            n, n_u = U.shape
+            n_q = int(sidecar["n_q_trafo"]) if "n_q_trafo" in sidecar else 0
+            n_oltc = n_q if 0 < n_q < n_u else 0
+            n_der = n_u - n_oltc
+            q_drift = np.linalg.norm(U[:, :n_der] - U[0, :n_der], axis=1)
+            ax_u.plot(np.arange(n), q_drift, color=col, lw=1.7, label=label)
+            if n_oltc > 0:
+                tap_drift = np.sum(np.abs(U[:, n_der:] - U[0, n_der:]), axis=1)
+                ax_uT.plot(np.arange(n), tap_drift, color=col, lw=1.1, ls=":")
+
+    # ── NEW4: one-step prediction skill bar (post-loop) ──────────────────
+    if skills:
+        xs = np.arange(len(skills))
+        ax_sk.bar(xs, [s[1] for s in skills], color=[s[2] for s in skills])
+        ax_sk.set_xticks(xs)
+        ax_sk.set_xticklabels([s[0] for s in skills], fontsize=8)
+        ax_sk.axhline(0, color="k", lw=0.8)
+        for x, s in zip(xs, skills):
+            ax_sk.text(x, s[1], f"{s[1]:.2f}", ha="center",
+                       va="bottom" if s[1] >= 0 else "top", fontsize=8)
+
+    # ── Cosmetics ────────────────────────────────────────────────────────
     ax_he.set_xlabel("DSO step k")
     ax_he.set_ylabel("rel. H error [%]  (q_trafo)")
-    ax_he.set_title(r"H-estimation error  "
-                    r"$\|H_\mathrm{used}-H_\mathrm{analytical}\|/\|H_\mathrm{analytical}\|$  "
-                    r"(q$_\mathrm{trafo}$ rows; analytical ref incl. $T'$)")
+    ax_he.set_title(r"H error (q$_\mathrm{trafo}$ rows)  "
+                    r"$\|H_\mathrm{used}-H_\mathrm{anal}\|/\|H_\mathrm{anal}\|$")
     ax_he.legend(fontsize=8)
     ax_he.grid(True, alpha=0.3)
+
+    ax_hef.set_xlabel("DSO step k")
+    ax_hef.set_ylabel("rel. H error [%]  (full)")
+    ax_hef.set_title(r"H error (full matrix, all rows)")
+    ax_hef.legend(fontsize=8)
+    ax_hef.grid(True, alpha=0.3)
 
     ax_h.set_xlabel("DSO step k")
     ax_h.set_ylabel("One-step q_trafo error [Mvar]")
     ax_h.set_title(r"One-step-ahead q$_\mathrm{trafo}$ prediction error  "
-                   r"$\|\Delta y_q(k) - H_q(k)\,\Delta u(k)\|$   (vs. realised plant, running mean)")
+                   r"$\|\Delta y_q(k) - H_q(k)\,\Delta u(k)\|$  (running mean)")
     ax_h.legend(fontsize=8)
     ax_h.grid(True, alpha=0.3)
+
+    ax_act.set_xlabel("DSO step k")
+    ax_act.set_ylabel(r"$\|H_\mathrm{used}-H_\mathrm{pred}\|_F$")
+    ax_act.set_title("Predictor activity (how much each step moves H)")
+    ax_act.legend(fontsize=8)
+    ax_act.grid(True, alpha=0.3)
 
     ax_q.set_xlabel("Time [min]")
     ax_q.set_ylabel("Mean |Q_err| [Mvar]")
     ax_q.set_title("Interface Q tracking error (mean over trafos)")
     ax_q.legend(fontsize=8)
     ax_q.grid(True, alpha=0.3)
+
+    ax_qt.set_xlabel("Time [min]")
+    ax_qt.set_ylabel("Q at interface trafo [Mvar]")
+    ax_qt.set_title("Per-trafo interface Q: actual (colour=mode, style=trafo) vs setpoint (black)")
+    ax_qt.legend(fontsize=6, ncol=3)
+    ax_qt.grid(True, alpha=0.3)
 
     ax_v.axhline(0,   color="k",    lw=0.8)
     ax_v.axhline( 10, color="gray", lw=0.8, ls="--", label="+10 mpu")
@@ -697,7 +791,24 @@ def plot_multi_comparison(
     ax_v.legend(fontsize=8)
     ax_v.grid(True, alpha=0.3)
 
-    fig.suptitle("003 multi-run comparison", fontsize=11)
+    ax_hent.set_xlabel("DSO step k")
+    ax_hent.set_ylabel(r"$\partial Q_{\mathrm{int},0}/\partial q_{\mathrm{set},0}$")
+    ax_hent.set_title(r"Single H entry drift: used (solid) vs analytical (dotted)")
+    ax_hent.legend(fontsize=8)
+    ax_hent.grid(True, alpha=0.3)
+
+    ax_u.set_xlabel("DSO step k")
+    ax_u.set_ylabel(r"$\|q_\mathrm{set}(k)-q_\mathrm{set}(0)\|$ [Mvar]")
+    ax_uT.set_ylabel(r"$\sum|\Delta\,\mathrm{tap}|$ [steps] (dotted)")
+    ax_u.set_title("Actuator excursion from initial: DER q_set (solid) / OLTC tap (dotted)")
+    ax_u.legend(fontsize=8)
+    ax_u.grid(True, alpha=0.3)
+
+    ax_sk.set_ylabel("skill = 1 - RMSE/RMSE_zero")
+    ax_sk.set_title("One-step prediction skill (>0 beats zero-predictor)")
+    ax_sk.grid(True, alpha=0.3, axis="y")
+
+    fig.suptitle("003 multi-run comparison", fontsize=12)
 
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)

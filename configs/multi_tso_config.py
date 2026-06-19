@@ -255,6 +255,25 @@ class MultiTSOConfig:
     controller toward ``[0, 0, 0]`` Mvar at its three interface
     transformers."""
 
+    # -- Exogenous interface-Q setpoint: bounded random walk (003) ---------
+    q_pcc_setpoint_random_enabled: bool = False
+    """When True (and ``tso_mode == 'local'``), the per-trafo interface-Q
+    setpoints in :attr:`q_pcc_setpoints_mvar_per_dso` are replaced by an
+    independent **bounded random walk** per coupling transformer, updated
+    every DSO step instead of the static vector.  Used by 003 to drive a
+    time-varying tracking target for the online H estimators.  The base
+    vector is the walk's starting point and band centre."""
+    q_pcc_setpoint_random_std_mvar: float = 5.0
+    """Per-step Gaussian increment std of the random walk [Mvar]."""
+    q_pcc_setpoint_random_band_mvar: float = 20.0
+    """Half-width of the per-trafo band around each base setpoint; the walk
+    is clipped to ``[base_i - band, base_i + band]`` for every interface
+    transformer ``i``."""
+    q_pcc_setpoint_random_seed: int = 0
+    """RNG seed for the random-walk series.  A fixed seed makes the series
+    identical across compared runs (e.g. the three H-predictor modes in
+    ``_run_comparison.py``), so all modes track the same moving target."""
+
     # NOTE: the DER plant-side actuator is the w-shift mode (vertical
     # shift of q_0 + V_ref reanchoring) — implemented unconditionally
     # by :func:`network.ieee39.build.tag_der_q_modes` and

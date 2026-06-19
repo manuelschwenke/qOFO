@@ -18,8 +18,16 @@ Following the approach from the old code (covariances_new):
     controller deploys in its MIQP (not a numerical secant).  It is stored under
     the key "H_analytical" so the KF/ANN consumers (generate_kalman_matrices,
     train_ann_model) need no change.
-  - Kalman Q is estimated from cov(ΔH) within each walk (not across
-    operating-point boundaries, which would inflate Q artificially).
+  - The Kalman process noise is the TWO-TERM split used by _KalmanHPredictor,
+    Q_eff = q_scale·s²·Q_excitation + Q_drift, and BOTH matrices are derived here:
+      * Q_excitation = cov(ΔH) within each EXCITATION walk (actuator-driven H
+        change at a fixed operating point) — the input-driven term, scaled by s²
+        at runtime.  Estimated within-walk (not across operating-point boundaries,
+        which would inflate it artificially).
+      * Q_drift = cov(ΔH) over a DRIFT PROBE at each op-point: the DER q_set is
+        held fixed while the profile timestamp is advanced by dso_period_s, so ΔH
+        is the exogenous (load/profile-driven) H drift per control step with no
+        actuator motion — the always-on keep-alive term.
   - Kalman R is estimated from cov(Δy − H·Δu) residuals (within-walk pairs
     with ‖Δu‖ > threshold) — the tangent-linearisation residual, i.e. exactly
     the model error the controller's tangent H incurs over a deployment step.
@@ -54,16 +62,19 @@ Control:
                 to force the sequential path (also useful if loky interferes
                 with the pandapower solver setup on a given machine).
   MC_N_OP       op-point timestamps (default 60).
-  MC_K_PERTURB  random-walk steps per op-point (default 15).
+  MC_K_PERTURB  excitation random-walk steps per op-point (default 15).
+  MC_K_DRIFT    drift-probe steps per op-point (default 8; → Q_drift).
   MC_SEED       master seed (default 42).
   MC_PARTIAL_OUT  shard mode (see below).
 
 Pipeline
 --------
   1. 1-step simulation → initialised net + DSO_2 controller (per worker).
-  2. Parallel MC loop: N_OP timestamps × K_PERTURB actuator walk steps.
+  2. Parallel MC loop per op-point: K_DRIFT drift-probe steps (u fixed, profile
+     advanced → Q_drift) + K_PERTURB excitation walk steps (→ Q_excitation, R).
   3. Save training_data.npz (same format as the time-series collectors).
-  4. Call generate_kalman_matrices() and train_ann_model().
+  4. Estimate Q_excitation / Q_drift / R / u_scale inline → kalman_matrices.npz,
+     then train_ann_model().
 """
 
 import sys
@@ -88,28 +99,31 @@ from experiments.helpers.plant_io import decouple_trafo3w_hv_with_slack
 exp003 = importlib.import_module("experiments.003_S_DSO_CIGRE_2026")
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-# The MC walk step magnitude must match the actual per-step OFO excitation seen at
-# deployment so that R captures the true linearisation residual at that step size.
-# The residual Δy − H·Δu scales ∝ step², so a too-large training step inflates R and
-# suppresses the runtime Kalman gain (the matched-step method is Mismatch 4).
+# Control cadence.  The collector runs at the DEPLOYMENT DSO control period so the
+# drift probe measures Q_drift per deploy-step and train_period_s matches the 003
+# comparison run (dso_period_s=20) — making the runtime Q_drift period rescale a
+# no-op (ratio 1).  Set via STEP_S below (overrides 003.make_config's 60 s).
+STEP_S = float(os.environ.get("MC_DT_S", 20.0))   # collector dt_s + dso_period_s [s]
 #
-# Timing (003.make_config): dso_period_s = 20 s, so the DSO/Kalman fires once per
-# 20 s record.  The per-step DER motion is PE-floor-dominated (PE dither
-# σ_u ≈ 0.25 Mvar/channel), hence roughly cadence-independent.
+# TARGET_STEP_MVAR — the MC walk step magnitude must match the actual per-step OFO
+# excitation seen at deployment, because R = cov(Δy − H·Δu) is the linearisation
+# residual at that step size and scales ∝ step² (an over-large step inflates R and
+# collapses the Kalman gain), and because the runtime s² = ‖Δu/u_scale‖² is ≈1 only
+# when the deploy step matches the training step.
 #
-# T (deployment per-step ||delta_u_DER||) measured over the 10 DER channels from a
-# 003 full-day run (results/003_cigre_2026/2026-06-18--11-54-34_dso2_ctrl.npz, 2160
-# records, 20 s cadence): steady-state mean 0.615 / median 0.556 Mvar; per-channel
-# RMS ≈ 0.245.  (An older 60 s reference gave 3.39 Mvar — that cadence is obsolete.)
-# The MC walk draws step_norm ~ Uniform(0, max_norm), so mean MC step = 0.5 * max_norm.
-# Matching the deployment mean => max_norm = 2 * T, i.e. Q_MAX_FRAC = 2*T / ||q_range||.
-# Q_MAX_FRAC is derived from TARGET_STEP_MVAR below, once ||q_range|| is known.
+# T (deployment per-step ‖Δu_DER‖) measured on the DER (Q_cor) columns of u from six
+# recent 003 sidecars (results/003_cigre_2026/2026-06-19--*_dso2_ctrl.npz, N=150..600,
+# post-transient): mean 0.60–0.67, median 0.52–0.60, per-channel RMS ≈0.24 Mvar —
+# stable across N and cadence (PE-dither + setpoint-tracking floor, ~period-independent).
+# The MC walk draws step_norm ~ Uniform(0, max_norm), so mean MC step = 0.5·max_norm;
+# matching the deployment MEAN ⇒ max_norm = 2·T, i.e. Q_MAX_FRAC = 2·T/‖q_range‖.
+# (The old value 10 was ~16× too large → R inflated ~280× → gain suppressed.)
 # N_OP / K_PERTURB / SEED accept env overrides so this script can run as one of
-# several PARALLEL SHARDS (see MC_PARTIAL_OUT below).  Defaults reproduce the
-# single-process run (N_OP=60, K_PERTURB=15, SEED=42).
-N_OP              = int(os.environ.get("MC_N_OP", 60))        # op-point timestamps (per shard)
-K_PERTURB         = int(os.environ.get("MC_K_PERTURB", 15))   # random-walk steps per op-point
-TARGET_STEP_MVAR  = 0.6       # measured deployment per-step ||delta_u_DER|| (mean) at 20 s cadence
+# several PARALLEL SHARDS (see MC_PARTIAL_OUT below).
+N_OP              = int(os.environ.get("MC_N_OP", 30))        # op-point timestamps (per shard)
+K_PERTURB         = int(os.environ.get("MC_K_PERTURB", 15))   # excitation random-walk steps per op-point (Q_excitation)
+K_DRIFT           = int(os.environ.get("MC_K_DRIFT", 30))      # drift-probe steps per op-point (Q_drift): u held fixed, profile time advanced
+TARGET_STEP_MVAR  = 1.0       # deployment per-step ‖Δu_DER‖; matches cfg.dso_pe_amplitude_mvar (orthogonal PE, steady-state ‖Δu‖≈amplitude)
 DU_MIN_NORM  = 0.0      # skip residual if norm(delta_u) < this (0 = keep all within-walk pairs)
 SEED         = int(os.environ.get("MC_SEED", 64))            # distinct seeds -> distinct op-points per shard
 N_JOBS       = int(os.environ.get("MC_N_JOBS", 15))          # worker processes (-1 = all cores, 1 = sequential)
@@ -119,35 +133,6 @@ HEARTBEAT_EVERY = int(os.environ.get("MC_HEARTBEAT_EVERY", 5))  # intra-op progr
 # concatenates all shards.  Statistically identical to the sequential run because
 # within-walk pairs never cross op-point boundaries.
 _PARTIAL_OUT = os.environ.get("MC_PARTIAL_OUT", "").strip()
-
-# ── P_init / P_reset producer modes (gated by env; see _run_*_mode) ─────────────
-# These two modes reuse the same _build_worker_state init but, instead of the
-# random-walk Q/R collection, sample the spread of the analytical H under (a)
-# admittance/model error → P_init_diag and (b) credible single outages →
-# P_reset_diag.  Each LOADS the existing kalman_matrices.npz (Q/R/u_scale from a
-# prior normal run) and merges its per-entry diagonal back in, so run the normal
-# MC first, then these.  Values are modeling assumptions and accept env overrides.
-def _envflag(name: str, default: bool) -> bool:
-    v = os.environ.get(name, None)
-    if v is None:
-        return default
-    return v.strip().lower() not in ("0", "false", "no", "")
-
-MC_ADM_LINE_FRAC  = float(os.environ.get("MC_ADM_LINE_FRAC", 0.15))   # ±frac on line r,x (correlated)
-MC_ADM_TRAFO_FRAC = float(os.environ.get("MC_ADM_TRAFO_FRAC", 0.08))  # ±frac on trafo vk,vkr (per-element)
-MC_ADM_RX_CORR    = _envflag("MC_ADM_RX_CORRELATED", True)            # scale r,x by the same per-line factor
-MC_PERTURB_N_OP   = int(os.environ.get("MC_PERTURB_N_OP", 50))        # op-points for the admittance P_init MC
-MC_PERTURB_K      = int(os.environ.get("MC_PERTURB_K", 6))            # perturbations per op-point
-MC_OUTAGE_N_OP    = int(os.environ.get("MC_OUTAGE_N_OP", 20))         # op-points for the outage P_reset MC
-MC_OUTAGE_INCLUDE_TRAFO3W = _envflag("MC_OUTAGE_INCLUDE_TRAFO3W", True)  # include interface 3W coupler trips
-MC_OUTAGE_STAT    = os.environ.get("MC_OUTAGE_STAT", "var").strip()   # "var" (spread) | "max" (worst-case)
-
-# ── R sensor-noise floor (noise-free MC → raw R is rank-deficient at small step) ──
-# Defaults inherit the runtime constants in exp003; override per row-type via env.
-MC_R_SIGMA_Q  = float(os.environ.get("MC_R_SIGMA_Q", exp003.KALMAN_R_SIGMA_Q))   # Mvar, interface-Q rows
-MC_R_SIGMA_V  = float(os.environ.get("MC_R_SIGMA_V", exp003.KALMAN_R_SIGMA_V))   # p.u., voltage rows
-MC_R_SIGMA_I  = float(os.environ.get("MC_R_SIGMA_I", exp003.KALMAN_R_SIGMA_I))   # kA, line-current rows
-MC_R_DIAGONAL = _envflag("MC_R_DIAGONAL", exp003.KALMAN_R_DIAGONAL)              # drop off-diagonals first
 
 # Timestamps: Jan–Aug 2016 only; test window is Sep 7 which is outside this range.
 # Using a strict seasonal split avoids operating-point leakage into the test day.
@@ -210,6 +195,12 @@ def _build_worker_state(quiet: bool = True) -> dict:
     exp003.FROZEN_OP_POINT = False
 
     cfg_init = exp003.make_config()
+    # Run the collector at the deployment control cadence (STEP_S, 20 s): the drift
+    # probe then measures Q_drift per deploy-step and train_period_s = 20 s matches
+    # the 003 comparison (dso_period_s=20) → no runtime Q_drift rescale.  Overrides
+    # make_config's 60 s.  Both fields are set so dt_s and the DSO period agree.
+    cfg_init.dt_s                 = STEP_S
+    cfg_init.dso_period_s         = STEP_S
     cfg_init.n_total_s            = cfg_init.dso_period_s   # exactly one step
     cfg_init.live_plot_controller = False
     cfg_init.live_plot_cascade    = False
@@ -308,12 +299,20 @@ def _build_worker_state(quiet: bool = True) -> dict:
         print(f"[oltc] installed {len(tap_ctrl_idx)} DiscreteTapControl(s) on DSO_2 "
               f"coupler 3W {list(map(int, oltc_idx))} -> V_mv {v_tgt:.3f} +-{v_tol:.3f} p.u.")
 
-    profiles_df = load_profiles(
-        cfg_init.profiles_csv if cfg_init.profiles_csv else DEFAULT_PROFILES_CSV
-    )
+    _csv = cfg_init.profiles_csv if cfg_init.profiles_csv else DEFAULT_PROFILES_CSV
+    profiles_df = load_profiles(_csv)
+
+    # Drift-probe profiles at the DSO control cadence.  Holding u fixed and
+    # advancing the timestamp by dso_period_s with these sub-15-min linearly
+    # interpolated profiles produces the exogenous (load/profile-driven) per-step
+    # H drift that Q_drift captures.  load_profiles interpolates the native 15-min
+    # CSV down to dso_period_s (the runtime's control period).
+    dso_period_s = float(cfg_init.dso_period_s)
+    profiles_drift_df = load_profiles(_csv, timestep_s=dso_period_s)
 
     return dict(
         net=net, dso_ctrl=dso_ctrl, profiles_df=profiles_df,
+        profiles_drift_df=profiles_drift_df, dso_period_s=dso_period_s,
         der_idx=der_idx, oltc_idx=oltc_idx, v_idx=v_idx, q_idx=q_idx, i_idx=i_idx,
         n_der=n_der, n_oltc=n_oltc, n_q_tr=n_q_tr, n_v=n_v, n_i=n_i,
         n_y=n_y, n_u=n_u,
@@ -327,24 +326,39 @@ def _build_worker_state(quiet: bool = True) -> dict:
 # ── Single operating-point walk ─────────────────────────────────────────────────
 
 def _walk_one_op(S: dict, t_mc: datetime, seed, tag: str = "", step_every: int = 0) -> tuple:
-    """Random-walk one operating point.  Returns (records, dh_within, residuals, skipped).
+    """Random-walk one operating point.  Returns
+    (records, dh_within, dh_drift, residuals, du_within, skipped).
 
-    Only the continuous DER ``q_set`` is perturbed, and ``u`` records the DER
-    q_set alone -- the OLTC tap is NOT a model input.  The coupler OLTC taps are
-    driven by the installed ``DiscreteTapControl`` (voltage band held by
-    ``pp.runpp(run_control=True)``) so each operating point has realistic taps;
-    the analytical (tangent) H is then taken from
+    Two sub-walks are run at each operating point, producing the TWO process-noise
+    terms of the Kalman's split Q_eff = q_scale·s²·Q_excitation + Q_drift:
+
+    1. Drift probe (``dh_drift``, Q_drift) -- the DER ``q_set`` is HELD at the OFO
+       setpoint while the profile timestamp is advanced by ``dso_period_s`` for
+       ``K_DRIFT`` steps (sub-15-min interpolated profiles).  ΔH then reflects the
+       exogenous load/profile-driven H drift per control step, with NO actuator
+       motion.  Time is restored to ``t_mc`` afterwards.
+    2. Excitation walk (``dh_within``/``residuals``/``du_within``, Q_excitation/R)
+       -- the continuous DER ``q_set`` is randomly perturbed at the fixed op-point;
+       ΔH reflects actuator-driven H change and ``u`` records the DER q_set alone
+       (the OLTC tap is NOT a model input).
+
+    In both, the coupler OLTC taps are driven by the installed
+    ``DiscreteTapControl`` (voltage band held by ``pp.runpp(run_control=True)``)
+    so each point has realistic taps; the analytical (tangent) H is taken from
     :meth:`DSOController.compute_h_analytical` and sliced to its DER columns, so
     the learned model is ``[Q_trafo | V] = H_DER * q_set``.
 
-    ``records``    : list of {"y", "u", "H_analytical"} dicts (converged samples).
-    ``dh_within``  : list of ΔH = vec(H_k) - vec(H_{k-1}) over consecutive walk steps.
+    ``records``    : list of {"y", "u", "H_analytical"} dicts (excitation samples).
+    ``dh_within``  : list of ΔH = vec(H_k) - vec(H_{k-1}) over excitation steps.
+    ``dh_drift``   : list of ΔH over drift-probe steps (u fixed, profile advanced).
     ``residuals``  : list of Δy - C(Δu)·vec(H_{k-1}) for excited within-walk pairs.
     ``skipped``    : count of non-converged steps (incl. the op-point equilibrium).
     """
     net          = S["net"]
     dso_ctrl     = S["dso_ctrl"]
     profiles_df  = S["profiles_df"]
+    profiles_drift_df = S["profiles_drift_df"]
+    dso_period_s = S["dso_period_s"]
     der_idx      = S["der_idx"]
     oltc_idx     = S["oltc_idx"]
     v_idx, q_idx, i_idx = S["v_idx"], S["q_idx"], S["i_idx"]
@@ -356,8 +370,10 @@ def _walk_one_op(S: dict, t_mc: datetime, seed, tag: str = "", step_every: int =
 
     records: list = []
     dh_within: list = []
+    dh_drift: list = []    # drift-probe ΔH (u fixed, profile advanced) → Q_drift
     residuals: list = []
-    du_within: list = []   # every within-walk Δu (for the Σ_q per-channel u_scale)
+    residual_du: list = [] # ‖Δu‖ per residual (for the ‖Δu‖^p R_model term)
+    du_within: list = []   # every within-walk Δu (for the per-channel u_scale)
     skipped = 0
 
     # ── Apply profiles and converge to operating-point equilibrium ───────────
@@ -367,10 +383,47 @@ def _walk_one_op(S: dict, t_mc: datetime, seed, tag: str = "", step_every: int =
     try:
         pp.runpp(net, **_RUNPP_KW)
     except Exception:
-        return records, dh_within, residuals, du_within, 1   # whole op-point unusable
+        return records, dh_within, dh_drift, residuals, residual_du, du_within, 1   # op-point unusable
 
     # Initial q_set = OFO setpoint at this op-point (read from sgen table)
     q_set_now = net.sgen.loc[der_idx, "q_set_mvar"].values.astype(float).copy()
+
+    # ── Drift probe (Q_drift): hold u fixed, advance profile time ─────────────
+    # The DER q_set is held at the OFO setpoint while the profile timestamp is
+    # advanced by dso_period_s per step.  ΔH then captures the exogenous
+    # (load/profile-driven) H drift per control step with NO actuator motion —
+    # the always-on Q_drift term.  The taps still track via DiscreteTapControl.
+    # compute_h_analytical deep-copies the net, so only apply_profiles+runpp here
+    # mutate live state; profiles are restored to t_mc before the excitation walk.
+    net.sgen.loc[der_idx, "q_set_mvar"] = q_set_now
+    prev_h_drift = None
+    t_drift = t_mc
+    for _ in range(K_DRIFT):
+        t_drift = t_drift + timedelta(seconds=dso_period_s)
+        apply_profiles(net, profiles_drift_df, t_drift)
+        _seed_qv(net)
+        try:
+            pp.runpp(net, **_RUNPP_KW)
+        except Exception:
+            skipped += 1
+            continue
+        H_d = dso_ctrl.compute_h_analytical(net)
+        if H_d is None:
+            skipped += 1
+            continue
+        H_d = H_d[:, :n_der].flatten()
+        if prev_h_drift is not None:
+            dh_drift.append(H_d - prev_h_drift)
+        prev_h_drift = H_d
+
+    # Restore the op-point profiles + equilibrium for the excitation walk.
+    apply_profiles(net, profiles_df, t_mc)
+    net.sgen.loc[der_idx, "q_set_mvar"] = q_set_now
+    _seed_qv(net)
+    try:
+        pp.runpp(net, **_RUNPP_KW)
+    except Exception:
+        return records, dh_within, dh_drift, residuals, residual_du, du_within, skipped + 1
 
     prev_rec: dict | None = None
 
@@ -433,6 +486,7 @@ def _walk_one_op(S: dict, t_mc: datetime, seed, tag: str = "", step_every: int =
                 C   = np.kron(np.eye(n_y), du.reshape(1, -1))   # (n_y, n_state)
                 res = dy - C @ prev_rec["H_analytical"].flatten()
                 residuals.append(res)
+                residual_du.append(float(np.linalg.norm(du)))
 
         prev_rec  = rec
         q_set_now = q_set_new
@@ -443,7 +497,7 @@ def _walk_one_op(S: dict, t_mc: datetime, seed, tag: str = "", step_every: int =
             print(f"  {tag} step {k + 1}/{K_PERTURB} | {len(records)} ok, "
                   f"{skipped} skipped", flush=True)
 
-    return records, dh_within, residuals, du_within, skipped
+    return records, dh_within, dh_drift, residuals, residual_du, du_within, skipped
 
 
 # ── Chunk worker: one init, then walk a group of timestamps ─────────────────────
@@ -453,7 +507,7 @@ def _process_chunk(ts_chunk: list, seed_chunk: list) -> tuple:
 
     Builds the network + DSO_2 controller ONCE (one init per chunk → one per
     worker), then walks every timestamp in the chunk, accumulating the results.
-    Returns the same 5-tuple as :func:`_walk_one_op`, concatenated over the chunk.
+    Returns the same 6-tuple as :func:`_walk_one_op`, concatenated over the chunk.
     """
     pid = os.getpid()
     t_init = time.perf_counter()
@@ -465,256 +519,55 @@ def _process_chunk(ts_chunk: list, seed_chunk: list) -> tuple:
 
     records: list = []
     dh_within: list = []
+    dh_drift: list = []
     residuals: list = []
+    residual_du: list = []
     du_within: list = []
     skipped = 0
     t0 = time.perf_counter()
     for j, (t_mc, seed) in enumerate(zip(ts_chunk, seed_chunk), start=1):
-        recs, dh, res, du, sk = _walk_one_op(
+        recs, dh, dhd, res, rdu, du, sk = _walk_one_op(
             S, t_mc, seed, tag=f"[w{pid}] op {j}/{n_ops}", step_every=HEARTBEAT_EVERY
         )
         records.extend(recs)
         dh_within.extend(dh)
+        dh_drift.extend(dhd)
         residuals.extend(res)
+        residual_du.extend(rdu)
         du_within.extend(du)
         skipped += sk
         # Per-op heartbeat (flushed): cumulative samples/skips, elapsed + ETA
         # for this worker's chunk.
         el  = time.perf_counter() - t0
         eta = el / j * (n_ops - j)
-        print(f"[w{pid}] op {j}/{n_ops} | {len(records)} samples, {skipped} skipped "
+        print(f"[w{pid}] op {j}/{n_ops} | {len(records)} samples, "
+              f"{len(dh_drift)} drift pairs, {skipped} skipped "
               f"| {el / 60:.1f} min elapsed, ~{eta / 60:.0f} min left",
               flush=True)
-    return records, dh_within, residuals, du_within, skipped
+    return records, dh_within, dh_drift, residuals, residual_du, du_within, skipped
 
 
 # ── Timestamp sampling ──────────────────────────────────────────────────────────
 
-def _sample_timestamps(rng: np.random.Generator, n: int | None = None) -> list:
-    """Sample ``n`` (default N_OP) timestamps from the Jan–Aug 2016 window (excl. Sep 7)."""
-    n = N_OP if n is None else int(n)
+def _sample_timestamps(rng: np.random.Generator) -> list:
+    """Sample N_OP timestamps from the Jan–Aug 2016 window (excl. Sep 7)."""
     total_hours = int((SAMPLE_END - SAMPLE_START).total_seconds() / 3600)
-    candidate_h = rng.integers(0, total_hours, size=n * 4)
+    candidate_h = rng.integers(0, total_hours, size=N_OP * 4)
     timestamps: list = []
     for h in candidate_h:
         t = SAMPLE_START + timedelta(hours=int(h))
         if not (EXCL_START <= t <= EXCL_END):
             timestamps.append(t)
-        if len(timestamps) == n:
+        if len(timestamps) == N_OP:
             break
-    if len(timestamps) < n:
-        raise RuntimeError(f"Could not sample {n} timestamps after exclusion window.")
+    if len(timestamps) < N_OP:
+        raise RuntimeError(f"Could not sample {N_OP} timestamps after exclusion window.")
     return timestamps
-
-
-# ── P_init / P_reset producer modes ─────────────────────────────────────────────
-
-def _merge_into_kalman_npz(**new_keys) -> str:
-    """Load the existing kalman_matrices.npz, merge ``new_keys`` in, re-save.
-
-    Keeps Q/R/u_scale (and any other previously-written diagonals) intact so the
-    P_init/P_reset producers compose with the normal Q/R run and with each other.
-    """
-    path = os.path.abspath(exp003._KALMAN_MATRICES_PATH)
-    if not os.path.exists(path):
-        raise RuntimeError(
-            f"{path} not found — run the normal MC (Q/R/u_scale) first, then this mode.")
-    d = dict(np.load(path))
-    d.update(new_keys)
-    np.savez(path, **d)
-    return path
-
-
-def _run_admittance_pinit_mode() -> None:
-    """Admittance-perturbation MC → per-entry ``P_init_diag`` (model-error prior).
-
-    For each sampled operating point, compute the nominal analytical H, then draw
-    K perturbations of the network model — line series impedances (r,x scaled by a
-    correlated per-line factor 1±MC_ADM_LINE_FRAC) and transformer short-circuit
-    impedances (vk/vkr scaled per-element by 1±MC_ADM_TRAFO_FRAC) — recompute H and
-    accumulate ΔH = vec(H_pert − H_nom)[DER cols].  ``P_init_diag = var(ΔH)`` per
-    entry is the spread of each H entry under credible model error.  Merged into
-    kalman_matrices.npz next to Q/R/u_scale.
-    """
-    print("\n" + "=" * 72)
-    print(f"  ADMITTANCE-PERTURBATION MC -> P_init_diag "
-          f"(line +-{MC_ADM_LINE_FRAC:.0%} r,x; trafo +-{MC_ADM_TRAFO_FRAC:.0%} vk,vkr)")
-    print("=" * 72)
-    S = _build_worker_state(quiet=False)
-    net, dso_ctrl = S["net"], S["dso_ctrl"]
-    profiles_df, n_der, n_y = S["profiles_df"], S["n_der"], S["n_y"]
-    n_state = n_y * n_der
-
-    rng = np.random.default_rng(SEED)
-    timestamps = _sample_timestamps(rng, MC_PERTURB_N_OP)
-
-    # Snapshot the nominal admittance parameters we perturb (positional ndarrays).
-    snap_line_r = net.line["r_ohm_per_km"].to_numpy(copy=True)
-    snap_line_x = net.line["x_ohm_per_km"].to_numpy(copy=True)
-    t3w_cols = [c for c in ("vk_hv_percent", "vkr_hv_percent", "vk_mv_percent",
-                            "vkr_mv_percent", "vk_lv_percent", "vkr_lv_percent")
-                if c in net.trafo3w.columns]
-    snap_t3w = {c: net.trafo3w[c].to_numpy(copy=True) for c in t3w_cols}
-    t2w_cols = [c for c in ("vk_percent", "vkr_percent") if c in net.trafo.columns]
-    snap_t2w = {c: net.trafo[c].to_numpy(copy=True) for c in t2w_cols}
-    n_line, n_t3w, n_t2w = len(net.line), len(net.trafo3w), len(net.trafo)
-
-    def _restore_admittance() -> None:
-        net.line["r_ohm_per_km"] = snap_line_r
-        net.line["x_ohm_per_km"] = snap_line_x
-        for c in t3w_cols:
-            net.trafo3w[c] = snap_t3w[c]
-        for c in t2w_cols:
-            net.trafo[c] = snap_t2w[c]
-
-    def _factor(frac: float, size: int) -> np.ndarray:
-        return 1.0 + rng.uniform(-frac, frac, size=size)
-
-    dH: list = []
-    skipped = 0
-    for ti, t_mc in enumerate(timestamps):
-        apply_profiles(net, profiles_df, t_mc)
-        _seed_qv(net)
-        try:
-            pp.runpp(net, **_RUNPP_KW)
-            H_nom = dso_ctrl.compute_h_analytical(net)
-        except Exception:
-            H_nom = None
-        if H_nom is None:
-            skipped += 1
-            continue
-        H_nom = H_nom[:, :n_der].flatten()
-        for _ in range(MC_PERTURB_K):
-            f_line = _factor(MC_ADM_LINE_FRAC, n_line)         # correlated r,x per line
-            net.line["r_ohm_per_km"] = snap_line_r * f_line
-            net.line["x_ohm_per_km"] = snap_line_x * (
-                f_line if MC_ADM_RX_CORR else _factor(MC_ADM_LINE_FRAC, n_line))
-            f_t3w = _factor(MC_ADM_TRAFO_FRAC, n_t3w)          # one factor / trafo → keep vk/vkr ratio
-            for c in t3w_cols:
-                net.trafo3w[c] = snap_t3w[c] * f_t3w
-            if n_t2w:
-                f_t2w = _factor(MC_ADM_TRAFO_FRAC, n_t2w)
-                for c in t2w_cols:
-                    net.trafo[c] = snap_t2w[c] * f_t2w
-            try:
-                _seed_qv(net)
-                pp.runpp(net, **_RUNPP_KW)
-                H_pert = dso_ctrl.compute_h_analytical(net)
-            except Exception:
-                H_pert = None
-            _restore_admittance()
-            if H_pert is None:
-                skipped += 1
-                continue
-            dH.append(H_pert[:, :n_der].flatten() - H_nom)
-        print(f"  op {ti + 1}/{len(timestamps)}: {len(dH)} dH ({skipped} skipped)", flush=True)
-
-    if len(dH) < 2:
-        raise RuntimeError("Too few admittance-perturbation samples for P_init_diag "
-                           "— increase MC_PERTURB_N_OP/K or check convergence.")
-    P_init_diag = np.var(np.stack(dH), axis=0)
-    P_init_diag += 1e-18                                       # strictly positive
-    assert P_init_diag.shape[0] == n_state, (P_init_diag.shape, n_state)
-    path = _merge_into_kalman_npz(P_init_diag=P_init_diag)
-    print(f"\n  P_init_diag ({P_init_diag.shape[0]}) from {len(dH)} perturbations: "
-          f"diag range [{P_init_diag.min():.2e}, {P_init_diag.max():.2e}]")
-    print(f"  -> {path}")
-
-
-def _run_outage_preset_mode() -> None:
-    """Outage-topology MC → per-entry ``P_reset_diag`` (topology-jump spread).
-
-    Enumerate credible single contingencies — every in-service line plus the
-    interface 3W coupler transformers (q_idx) when MC_OUTAGE_INCLUDE_TRAFO3W — and,
-    over sampled operating points, accumulate ΔH = vec(H_post_trip − H_nom)[DER cols].
-    Non-convergent trips are pruned.  ``P_reset_diag = var(ΔH)`` (or max(ΔH²) when
-    MC_OUTAGE_STAT="max") sizes the per-entry covariance the runtime re-opens by on
-    a detected topology jump.  Merged into kalman_matrices.npz.
-    """
-    print("\n" + "=" * 72)
-    print("  OUTAGE-TOPOLOGY MC -> P_reset_diag (lines + interface 3W couplers)")
-    print("=" * 72)
-    S = _build_worker_state(quiet=False)
-    net, dso_ctrl = S["net"], S["dso_ctrl"]
-    profiles_df, n_der, n_y, q_idx = S["profiles_df"], S["n_der"], S["n_y"], S["q_idx"]
-    n_state = n_y * n_der
-
-    rng = np.random.default_rng(SEED + 1)
-    timestamps = _sample_timestamps(rng, MC_OUTAGE_N_OP)
-
-    # Candidate single contingencies: in-service lines + interface 3W couplers.
-    line_cands = [("line", int(i)) for i in net.line.index
-                  if bool(net.line.at[i, "in_service"])]
-    trafo_cands = ([("trafo3w", int(i)) for i in q_idx]
-                   if MC_OUTAGE_INCLUDE_TRAFO3W else [])
-    candidates = line_cands + trafo_cands
-    print(f"  candidates: {len(line_cands)} lines + {len(trafo_cands)} couplers "
-          f"= {len(candidates)}")
-
-    def _set_in_service(etype: str, idx: int, val: bool) -> None:
-        getattr(net, etype).at[idx, "in_service"] = val
-
-    def _converge_nominal() -> None:
-        _seed_qv(net)
-        pp.runpp(net, **_RUNPP_KW)
-
-    dH: list = []
-    skipped = 0
-    for ti, t_mc in enumerate(timestamps):
-        apply_profiles(net, profiles_df, t_mc)
-        try:
-            _converge_nominal()
-            H_nom = dso_ctrl.compute_h_analytical(net)
-        except Exception:
-            H_nom = None
-        if H_nom is None:
-            skipped += 1
-            continue
-        H_nom = H_nom[:, :n_der].flatten()
-        for etype, idx in candidates:
-            _set_in_service(etype, idx, False)
-            try:
-                _seed_qv(net)
-                pp.runpp(net, **_RUNPP_KW)
-                H_post = dso_ctrl.compute_h_analytical(net)
-            except Exception:
-                H_post = None
-            _set_in_service(etype, idx, True)            # always restore
-            try:
-                _converge_nominal()                      # re-settle before next trip
-            except Exception:
-                pass
-            if H_post is None:
-                skipped += 1
-                continue
-            dH.append(H_post[:, :n_der].flatten() - H_nom)
-        print(f"  op {ti + 1}/{len(timestamps)}: {len(dH)} dH ({skipped} skipped)", flush=True)
-
-    if len(dH) < 2:
-        raise RuntimeError("Too few outage samples for P_reset_diag "
-                           "— increase MC_OUTAGE_N_OP or check convergence.")
-    DH = np.stack(dH)
-    P_reset_diag = np.max(DH ** 2, axis=0) if MC_OUTAGE_STAT == "max" else np.var(DH, axis=0)
-    P_reset_diag += 1e-18
-    assert P_reset_diag.shape[0] == n_state, (P_reset_diag.shape, n_state)
-    path = _merge_into_kalman_npz(P_reset_diag=P_reset_diag)
-    print(f"\n  P_reset_diag ({P_reset_diag.shape[0]}, stat={MC_OUTAGE_STAT}) from "
-          f"{len(dH)} trips: diag range [{P_reset_diag.min():.2e}, {P_reset_diag.max():.2e}]")
-    print(f"  -> {path}")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # P_init / P_reset producer modes (gated by env): each merges its per-entry
-    # diagonal into an existing kalman_matrices.npz and returns.
-    if os.environ.get("MC_ADMITTANCE_PINIT", "").strip():
-        _run_admittance_pinit_mode()
-        return
-    if os.environ.get("MC_OUTAGE_PRESET", "").strip():
-        _run_outage_preset_mode()
-        return
-
     from joblib import Parallel, delayed, effective_n_jobs
 
     # ── Step 1: initialise once in the parent (parameters + informative print) ──
@@ -724,6 +577,8 @@ def main() -> None:
     S = _build_worker_state(quiet=False)
     n_der, n_oltc, n_y, n_u = S["n_der"], S["n_oltc"], S["n_y"], S["n_u"]
     n_state = n_y * n_u
+    print(f"  control cadence STEP_S = {STEP_S:.0f} s (dt_s + dso_period_s; "
+          f"= 003 deploy period → no Q_drift rescale)")
     print(f"  ||q_range|| = {S['q_range_norm']:.3f} Mvar  ->  "
           f"Q_MAX_FRAC = 2*{TARGET_STEP_MVAR:.2f}/||q_range|| = {S['Q_MAX_FRAC']:.4f}")
     print(f"  n_der={n_der}  n_oltc={n_oltc}  n_y={n_y}  n_u={n_u}")
@@ -764,13 +619,17 @@ def main() -> None:
     # ── Merge (chunks returned in input order → records stay op-point ordered) ──
     records: list = []
     delta_h_within: list = []
+    delta_h_drift: list = []
     residuals_list: list = []
+    residual_du_list: list = []
     du_within_list: list = []
     skipped = 0
-    for recs, dh, res, du, sk in chunk_out:
+    for recs, dh, dhd, res, rdu, du, sk in chunk_out:
         records.extend(recs)
         delta_h_within.extend(dh)
+        delta_h_drift.extend(dhd)
         residuals_list.extend(res)
+        residual_du_list.extend(rdu)
         du_within_list.extend(du)
         skipped += sk
 
@@ -788,7 +647,9 @@ def main() -> None:
         u_scale = np.ones(n_u)
 
     n_samples = len(records)
-    print(f"\n  Collected {n_samples} samples  ({skipped} skipped: non-convergence)")
+    print(f"\n  Collected {n_samples} samples, {len(delta_h_within)} excitation dH "
+          f"pairs, {len(delta_h_drift)} drift dH pairs  "
+          f"({skipped} skipped: non-convergence)")
     if n_samples < 10:
         raise RuntimeError("Too few samples — increase N_OP or check power flow convergence.")
 
@@ -803,72 +664,96 @@ def main() -> None:
     # ── Shard mode: save partial (records + within-walk pairs) and stop ──────────
     if _PARTIAL_OUT:
         DH  = np.stack(delta_h_within) if delta_h_within else np.zeros((0, n_state))
+        DHD = np.stack(delta_h_drift)  if delta_h_drift  else np.zeros((0, n_state))
         RES = np.stack(residuals_list) if residuals_list else np.zeros((0, n_y))
+        RDU = np.asarray(residual_du_list, dtype=float)
         _pdir = os.path.dirname(os.path.abspath(_PARTIAL_OUT)) or "."
         os.makedirs(_pdir, exist_ok=True)
-        np.savez(_PARTIAL_OUT, _dh_within=DH, _residuals=RES, _du_within=DU, **arrays)
-        print(f"\n  [shard] {n_samples} samples, {DH.shape[0]} within-walk dH pairs, "
-              f"{RES.shape[0]} residuals, {DU.shape[0]} du pairs -> {_PARTIAL_OUT}")
+        np.savez(_PARTIAL_OUT, _dh_within=DH, _dh_drift=DHD, _residuals=RES,
+                 _residual_du=RDU, _du_within=DU, **arrays)
+        print(f"\n  [shard] {n_samples} samples, {DH.shape[0]} excitation dH pairs, "
+              f"{DHD.shape[0]} drift dH pairs, {RES.shape[0]} residuals, "
+              f"{DU.shape[0]} du pairs -> {_PARTIAL_OUT}")
         print("  [shard] Q/R + ANN deferred to _merge_train_mc.py")
         return
 
     out_path = os.path.abspath(exp003._TRAINING_DATA_PATH)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    np.savez(out_path, n_q_trafo=S["n_q_tr"], n_v=S["n_v"], n_i=S["n_i"], **arrays)
+    np.savez(out_path, **arrays)
     print(f"  {n_samples} samples -> {out_path}")
 
-    # ── Step 5: Kalman Q/R from MC-specific within-walk statistics ───────────────
+    # ── Step 5: two-term Kalman process noise + R from MC statistics ─────────────
+    # Q_excitation (input-driven, scaled by s² at runtime)  ← excitation-walk ΔH.
+    # Q_drift      (disturbance-driven, always on)          ← drift-probe ΔH.
     print("\n" + "=" * 72)
-    print("  STEP 4: estimating Kalman Q/R from MC within-walk statistics")
+    print("  STEP 4: estimating Kalman Q_excitation / Q_drift / R from MC statistics")
     print("=" * 72)
 
     if len(delta_h_within) >= 2:
-        DH  = np.stack(delta_h_within)           # (M, n_state)
-        Q   = np.diag(np.var(DH, axis=0))        # diagonal, matching generate_kalman_matrices
-        print(f"  Q estimated from {len(delta_h_within)} within-walk dH pairs")
+        DH  = np.stack(delta_h_within)               # (M, n_state)
+        Q_excitation = np.diag(np.var(DH, axis=0))   # diagonal
+        print(f"  Q_excitation from {len(delta_h_within)} excitation-walk dH pairs")
     else:
-        Q = np.eye(n_state) * 1e-6
-        print("  [warn] too few within-walk pairs for Q — using I*1e-6")
+        Q_excitation = np.eye(n_state) * 1e-6
+        print("  [warn] too few excitation pairs for Q_excitation — using I*1e-6")
 
+    if len(delta_h_drift) >= 2:
+        DHD = np.stack(delta_h_drift)                # (M, n_state)
+        Q_drift = np.diag(np.var(DHD, axis=0))       # diagonal
+        print(f"  Q_drift from {len(delta_h_drift)} drift-probe dH pairs "
+              f"(u fixed, profile advanced by dso_period_s)")
+    else:
+        Q_drift = np.eye(n_state) * 1e-9
+        print("  [warn] too few drift pairs for Q_drift — using I*1e-9 (floor)")
+
+    # ── Input-dependent R: R_eff = R_sensor + ‖Δu‖^p·R_model ────────────────────
+    # Raw MC residual cov is near rank-deficient (cond ~1e10); the diagonal R_sensor
+    # floor + diagonal R_model make R_eff PD and well-conditioned at every step.
+    # On this plant the residual is first-order (r ∝ ‖Δu‖, p=2).  Row split
+    # [Q_trafo (n_q) | V_bus (n_v)].
+    n_q = int(S["n_q_tr"])
+    p_exp = exp003.KALMAN_R_DU_EXPONENT
     if len(residuals_list) >= 2:
-        RES = np.stack(residuals_list)            # (M, n_y)
-        R   = np.cov(RES.T) if n_y > 1 else np.atleast_2d(np.var(RES))
-        print(f"  R estimated from {len(residuals_list)} within-walk residuals")
+        RES = np.stack(residuals_list)               # (M, n_y)
+        RDU = np.asarray(residual_du_list)           # (M,)
+        R_sensor, R_model = exp003.estimate_measurement_noise_terms(RES, RDU, n_q, n_y)
+        n_used = int((RDU > exp003.KALMAN_R_MODEL_MIN_DU).sum())
+        print(f"  R terms from {len(residuals_list)} residuals "
+              f"({n_used} used for R_model, p={p_exp})")
     else:
-        R = np.eye(n_y) * 1e-4
-        print("  [warn] too few excited steps for R — using I*1e-4")
+        R_sensor = exp003.floor_measurement_noise_R(np.zeros((n_y, n_y)), n_q=n_q)
+        R_model  = np.zeros((n_y, n_y))
+        print("  [warn] too few excited steps for R — R_model=0, sensor floor only")
 
-    # Ensure PD
-    Q += 1e-12 * np.eye(n_state)
-    R += 1e-12 * np.eye(n_y)
+    du_med = float(np.median(residual_du_list)) if residual_du_list else 0.0
+    R = R_sensor + exp003.KALMAN_R_MODEL_SCALE * (du_med ** p_exp) * R_model   # representative
 
-    # Sensor-noise floor on R: the MC power flow is noise-free, so the raw residual
-    # R is rank-deficient at the small deployment step (cond ~1e10) → R⁻¹ explodes
-    # the runtime NIS and destabilises the gain.  Floor + (optionally) diagonalise.
-    n_q_tr, n_v, n_i = S["n_q_tr"], S["n_v"], S["n_i"]
-    R = exp003.floor_measurement_noise_R(R, n_q_tr, n_v, n_i,
-                                         sigma_q=MC_R_SIGMA_Q, sigma_v=MC_R_SIGMA_V,
-                                         sigma_i=MC_R_SIGMA_I, diagonal=MC_R_DIAGONAL)
-    print(f"  R sensor-floor: split {n_q_tr}/{n_v}/{n_i}, diagonal={MC_R_DIAGONAL}, "
-          f"sigma_Q/V/I={MC_R_SIGMA_Q}/{MC_R_SIGMA_V}/{MC_R_SIGMA_I} -> "
-          f"cond={np.linalg.cond(R):.1e}")
+    # Ensure PD (Q only; the R_sensor floor already makes R_eff PD)
+    Q_excitation += 1e-12 * np.eye(n_state)
+    Q_drift      += 1e-12 * np.eye(n_state)
 
+    # train_period_s = the DSO control period the drift probe used (dso_period_s).
+    # The runtime rescales Q_drift from this cadence to its own deployment period.
+    train_period_s = float(S["dso_period_s"])
     kalman_path = os.path.abspath(exp003._KALMAN_MATRICES_PATH)
     os.makedirs(os.path.dirname(kalman_path), exist_ok=True)
-    save_kw = dict(Q=Q, R=R, u_scale=u_scale, n_q_trafo=n_q_tr, n_v=n_v, n_i=n_i)
-    # Preserve per-entry P_init_diag/P_reset_diag from a prior admittance/outage
-    # MC run (matching n_state) so re-running Q/R does not wipe them.
-    if os.path.exists(kalman_path):
-        _prev = np.load(kalman_path)
-        for _k in ("P_init_diag", "P_reset_diag"):
-            if _k in _prev and np.asarray(_prev[_k]).ravel().shape[0] == n_state:
-                save_kw[_k] = _prev[_k]
-    np.savez(kalman_path, **save_kw)
-    q_d, r_d = np.diag(Q), np.diag(R)
-    print(f"  Q {Q.shape}  diag: [{q_d.min():.2e}, {q_d.max():.2e}]")
-    print(f"  R {R.shape}  diag: [{r_d.min():.2e}, {r_d.max():.2e}]")
+    np.savez(kalman_path, Q_excitation=Q_excitation, Q_drift=Q_drift,
+             R_sensor=R_sensor, R_model=R_model, R=R, r_du_exponent=p_exp,
+             u_scale=u_scale, train_period_s=train_period_s, n_q=n_q)
+    qe_d, qd_d = np.diag(Q_excitation), np.diag(Q_drift)
+    rs_d, rm_d = np.diag(R_sensor), np.diag(R_model)
+    print(f"  Q_excitation {Q_excitation.shape}  diag: [{qe_d.min():.2e}, {qe_d.max():.2e}]")
+    print(f"  Q_drift      {Q_drift.shape}  diag: [{qd_d.min():.2e}, {qd_d.max():.2e}]")
+    print(f"  R_sensor     {R_sensor.shape}  diag: [{rs_d.min():.2e}, {rs_d.max():.2e}]  "
+          f"(σ_Q={exp003.KALMAN_R_SIGMA_Q}, σ_V={exp003.KALMAN_R_SIGMA_V})")
+    print(f"  R_model      {R_model.shape}  diag: [{rm_d.min():.2e}, {rm_d.max():.2e}]  "
+          f"(×‖Δu‖^{p_exp}; median ‖Δu‖={du_med:.3f})")
+    print(f"  R_eff@median cond {np.linalg.cond(R):.2e}, "
+          f"diag [{np.diag(R).min():.2e}, {np.diag(R).max():.2e}]")
     print(f"  u_scale ({u_scale.shape[0]}) from {DU.shape[0]} within-walk du: "
           f"[{u_scale.min():.3f}, {u_scale.max():.3f}]")
+    print(f"  train_period_s = {train_period_s:.0f} s "
+          f"(Q_drift cadence; runtime rescales to its deploy period)")
     print(f"  -> {kalman_path}")
 
     # ── Step 6: retrain ANN ──────────────────────────────────────────────────────

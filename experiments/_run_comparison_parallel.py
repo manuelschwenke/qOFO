@@ -80,23 +80,22 @@ def _run_one_mode(mode: str) -> tuple:
     exp = importlib.import_module("experiments.003_S_DSO_CIGRE_2026")
 
     # Shared overrides (identical to the original sequential script)
-    exp.H_INIT_BIAS_STD,  exp.H_INIT_BIAS_SEED  = 0.5, 64
+    exp.H_INIT_BIAS_STD,  exp.H_INIT_BIAS_SEED  = 0.3, 64
     exp.H_PREDICTOR_ROWS, exp.FROZEN_OP_POINT   = "all", False
-    exp.KALMAN_NIS_DETECT_ENABLED = True
 
     # Mode-specific global
     exp.H_PREDICTOR_MODE = mode
 
-    # Patch make_config
+    # Patch make_config1
     _orig_make_config = exp.make_config
     def _cfg(_o=_orig_make_config):
         cfg = _o()
-        cfg.n_total_s, cfg.dso_period_s = 600 * 60.0, 20.0
+        cfg.n_total_s, cfg.dso_period_s = 240 * 60.0, 20.0
         cfg.start_time = datetime(2016, 9, 7, 8, 0)
         cfg.contingencies = [
-            exp.ContingencyEvent(
-                minute=120, element_type="line", element_index=49, action="trip"
-            ),
+            # exp.ContingencyEvent(
+            #     minute=60, element_type="line", element_index=49, action="trip"
+            # ),
         ]
         return cfg
     exp.make_config = _cfg

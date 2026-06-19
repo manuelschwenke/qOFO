@@ -78,6 +78,11 @@ Vector layouts (DSO_2 in this script, currents and shunts excluded):
     u = [ Q_cor_DER[d]                   for d in cfg.der_indices            ]   # Mvar, sgen convention (>0 = injection); correction term added to the local Q(V) droop
         [ tap_position[t]                for t in cfg.oltc_trafo_indices     ]   # integer steps relative to neutral
 
+The OLTC taps remain OFO actuators (columns of ``H``, entries of ``u``); the
+DSO MIQP still moves them.  The online Kalman estimator, however, updates only
+the DER (``Q_cor``) columns of ``H`` and leaves the OLTC columns at their
+analytical value -- see ``_KalmanHPredictor``.
+
 The DER's actual reactive output is ``Q_DER = Q_cor + K · (V_ref - V)``;
 ``Q_cor`` is what the OFO writes and what the controller's H is
 linearized against.
@@ -180,18 +185,76 @@ _compare = importlib.import_module("experiments.002_M_TSO_M_DSO_COMPARE")
 #  PE noise is forced on so estimators remain persistently excited.
 # ---------------------------------------------------------------------------
 H_PREDICTOR_MODE: str = "kalman"
-H_PREDICTOR_ROWS: str = "q_trafo+v"   # estimate Q_trafo + voltage rows (I_line rows kept analytical)
-# Kalman forgetting factor, applied directly (NOT period-scaled) so the estimator
-# behaves identically across DSO periods and is easy to compare run-to-run.
-KALMAN_LAM: float = 0.997
+H_PREDICTOR_ROWS: str = "all"   # estimate Q_trafo + voltage rows (I_line rows kept analytical)
+
+# ---------------------------------------------------------------------------
+#  Kalman process-noise design (two-term split)
+#  The predict-step process noise covariance is
+#
+#      Q_eff(k) = KALMAN_Q_SCALE · s²(k) · Q_excitation  +  Q_drift
+#
+#  with two physically distinct, additive terms:
+#    Q_excitation -- INPUT-DRIVEN.  H is uncertain because the OFO is moving and
+#                    exciting new directions.  Scaled by the normalised step
+#                    energy s²(k) = ‖Δu_e / u_scale‖² / n_e, so it vanishes as
+#                    Δu → 0 (no fictitious diffusion once the controller settles).
+#    Q_drift      -- DISTURBANCE-DRIVEN.  H drifts due to exogenous load / profile
+#                    / contingency changes that are independent of u.  ALWAYS on,
+#                    so the filter never freezes once s² → 0 and keeps tracking.
+#
+#  Both matrices are estimated offline and loaded from kalman_matrices.npz (see
+#  generate_kalman_matrices and experiments/_collect_train_mc.py).  KALMAN_Q_SCALE
+#  is the only runtime knob: a multiplier on the excitation term (1.0 = as
+#  trained).  This is the whole process-noise model — there is no forgetting
+#  factor and no prior mean-reversion; Q_drift alone keeps the estimator alive.
+# ---------------------------------------------------------------------------
+KALMAN_Q_SCALE: float = 1.0
+
+# ---------------------------------------------------------------------------
+#  Measurement-noise R — input-dependent two-term model
+#  The observation Δy ≈ H·Δu has a residual r = Δy − H·Δu.  In the Picallo
+#  framework r is the 2nd-order Taylor remainder (∝ ‖Δu‖²) → variance ∝ ‖Δu‖⁴.
+#  BUT a diagnostic on THIS plant (2026-06-19, instrumented excitation walk, no
+#  tap motion) found r ∝ ‖Δu‖^0.99 — LINEAR, not quadratic: the dominant error is
+#  a FIRST-ORDER model bias (the analytical H differs from the realised secant by
+#  a roughly constant matrix B, so r ≈ B·Δu), and the curvature term is negligible.
+#  A linear residual has variance ∝ ‖Δu‖², so:
+#
+#      R_eff(k) = R_sensor  +  KALMAN_R_MODEL_SCALE · ‖Δu(k)‖^KALMAN_R_DU_EXPONENT · R_model
+#
+#  with KALMAN_R_DU_EXPONENT = 2 (this plant; first-order model error).  Set it to
+#  4 for a curvature-dominated plant (the Picallo case).
+#    R_sensor -- INDEPENDENT per-channel SENSOR noise, Δu-independent floor
+#                diag([σ_Q²]·n_q | [σ_V²]·n_v).  Also conditions R: the noise-free
+#                MC residual cov is near rank-deficient (cross-row corr ≈0.99,
+#                Mvar/p.u. scale split → cond ~1e10), so R_sensor + diagonal R_model
+#                makes R_eff PD and well-conditioned for the gain.
+#    R_model  -- the input-dependent MODEL error, ‖Δu‖^p-scaled.  R_model =
+#                E[(r/‖Δu‖^{p/2})²] (diagonal) — normalise the residual by the
+#                half-power so the size dependence is removed, then scale back up
+#                by ‖Δu‖^p at runtime.  The filter then trusts small, near-linear
+#                steps and distrusts large ones (secant ≠ Jacobian).  Note the
+#                exponents: Q ∝ ‖Δu‖² (state increment), R_model ∝ ‖Δu‖² here
+#                (linear model error; would be ‖Δu‖⁴ if curvature-dominated).
+#  Set σ to the real SCADA spec (currents are dropped, so no σ_I).  Both terms are
+#  estimated offline (generate_kalman_matrices / _collect_train_mc) and saved as
+#  R_sensor, R_model; KALMAN_R_MODEL_SCALE is a runtime ablation knob (0 → fixed R).
+# ---------------------------------------------------------------------------
+KALMAN_R_SIGMA_Q:     float = 0.9    # interface-Q sensor noise std [Mvar]
+KALMAN_R_SIGMA_V:     float = 0.01   # voltage     sensor noise std [p.u.]
+KALMAN_R_DIAGONAL:    bool  = True   # drop noise-free-MC off-diagonal correlations
+KALMAN_R_DU_EXPONENT: float = 2.0    # p in R_eff = R_sensor + scale·‖Δu‖^p·R_model (2 = first-order model error, this plant; 4 = Picallo curvature)
+KALMAN_R_MODEL_SCALE: float = 1.0    # multiplier on the ‖Δu‖^p model-error term (0 = fixed R_sensor)
+KALMAN_R_MODEL_MIN_DU: float = 0.1   # training guard: skip residuals with ‖Δu‖ < this when fitting R_model (avoids r/‖Δu‖^{p/2} blow-up)
+
 # Step size for the "numerical" oracle's closed-loop finite difference.
 # Matched to the deployment per-step OFO excitation (||du_DER|| ~= 3.4 Mvar) so
 # the oracle returns the realized SECANT at the OFO scale, not the infinitesimal
 # derivative.  The delta-sweep diagnostic confirmed the island is ~linear over
 # [0.5, 3.4] Mvar, so the result is insensitive to the exact value in that band.
 NUMERICAL_ORACLE_DELTA_MVAR: float = 3.4
-FROZEN_OP_POINT:  bool = False
-FROZEN_OP_TIMESTAMP: datetime = datetime(2016, 9, 7, 10, 0)  # real op-point to freeze at
+FROZEN_OP_POINT:  bool = True
+FROZEN_OP_TIMESTAMP: datetime = datetime(2016, 9, 7, 8, 0)  # real op-point to freeze at
 
 # ---------------------------------------------------------------------------
 #  Init-H bias injection
@@ -202,8 +265,8 @@ FROZEN_OP_TIMESTAMP: datetime = datetime(2016, 9, 7, 10, 0)  # real op-point to 
 #  exactly the same biased H, making comparisons directly meaningful.
 #  Set H_INIT_BIAS_STD = 0.0 to disable (default).
 # ---------------------------------------------------------------------------
-H_INIT_BIAS_STD:  float = 0.1   # e.g. 0.10 for ±10% multiplicative noise; 0.0 = off
-H_INIT_BIAS_SEED: int   = 0     # fixed seed → identical b
+H_INIT_BIAS_STD:  float = 0.3   # e.g. 0.10 for ±10% multiplicative noise; 0.0 = off
+H_INIT_BIAS_SEED: int   = 64     # fixed seed → identical b
 # ias for every run
 
 # ---------------------------------------------------------------------------
@@ -218,7 +281,36 @@ H_INIT_BIAS_SEED: int   = 0     # fixed seed → identical b
 # ---------------------------------------------------------------------------
 DSO2_INTERFACE_MODE: str = "slack"  # "slack" (decoupled, default) | "coupled"
 
+# ---------------------------------------------------------------------------
+#  Persistent-excitation (PE) mode toggle  (reversible)
+#  Selects the DSO actuator excitation used for online H identification:
+#    "white"      -- i.i.d. N(0, PE_WHITE_STD_MVAR²) per DER channel.  The
+#                    original behaviour (isotropic in expectation).
+#    "orthogonal" -- designed rotating orthonormal-basis probe of amplitude
+#                    PE_AMPLITUDE_MVAR: each n_der-step cycle excites every input
+#                    direction once, decorrelated from the OFO → balanced Fisher
+#                    information → off-diagonal H columns identifiable far faster
+#                    (see install_pe_noise).
+#  Both settings give per-step ‖Δu‖≈1.0 Mvar and per-channel RMS≈0.3, so they
+#  SHARE the same trained matrices (TARGET_STEP_MVAR=1.0) — flip freely, no
+#  per-mode retrain.  Set PE_MODE="white" to reproduce the pre-orthogonal runs.
+# ---------------------------------------------------------------------------
+PE_MODE: str           = "orthogonal"  # "white" | "orthogonal"
+PE_AMPLITUDE_MVAR: float = 1.0         # orthogonal-mode rotating-probe amplitude [Mvar]
+PE_WHITE_STD_MVAR: float = 0.3         # white-mode per-channel noise std [Mvar]
 
+# The Kalman estimator updates ONLY the DER (Q_cor) columns of H; the OLTC tap
+# columns are held at their analytical (cache) value.  The OLTC taps remain full
+# OFO actuators (columns of H, entries of u) — the DSO MIQP still moves them —
+# they are simply a KNOWN control whose sensitivity the H-builder recomputes
+# analytically at the current tap, so there is nothing to learn online.  The
+# Kalman state is therefore vec(H[:, :n_der]) (n_state = n_y·n_der), matching the
+# DER-only kalman_matrices.npz produced by _collect_train_mc.py.  The OLTC
+# contribution to Δy is removed from the innovation using the analytical OLTC
+# columns, so tap motion does not bias the DER estimate.
+
+
+from experiments.helpers import ContingencyEvent
 # ---------------------------------------------------------------------------
 #  Configuration
 # ---------------------------------------------------------------------------
@@ -231,15 +323,15 @@ def make_config() -> MultiTSOConfig:
     keeps its own paired config.
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 5,      # 36-hour (2160-min) simulation
+        n_total_s=60.0 * 60 * 2,      # 36-hour (2160-min) simulation
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
-        dso_period_s=10.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
+        dso_period_s=20.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
         g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
-        g_q=200,                      # DSO Q-tracking
-        #tso_g_q_tie=0,
+        g_q=150,                      # DSO Q-tracking
+        tso_g_q_tie=0,
         #tso_g_res_sg=0,
         # ── DSO objective tuning ──
-        dso_g_v=15000.0,              # reduced to avoid competing with Q tracking
+        dso_g_v=20000.0,              # reduced to avoid competing with Q tracking
         dso_g_qi=0,                   # integral Q-tracking (0 = off)
         dso_lambda_qi=0.95,           # leaky integrator decay
         dso_q_integral_max_mvar=200.0,
@@ -266,11 +358,36 @@ def make_config() -> MultiTSOConfig:
         run_stability_analysis=False,
         sensitivity_update_interval=1E6,
         verbose=1,
+        tso_mode = "local",
+        contingencies=[
+            # Example: trip line 0 at t=30 min, restore at t=60 min
+            # ContingencyEvent(minute=100, element_type="line", element_index=8, action="trip"),
+            # (minute=150, element_type="line", element_index=8, action="restore"),
+            # ContingencyEvent(minute=90, element_type="gen", element_index=5, action="trip"),
+            # ContingencyEvent(minute=180, element_type="gen", element_index=5, action="restore"),
+            # ContingencyEvent(minute=240, element_type="line", element_index=12, action="trip"),
+            # ContingencyEvent(minute=150, element_type="line", element_index=12, action="restore"),
+            # ContingencyEvent(minute=120, element_type="load", bus=5, p_mw=400, q_mvar=200, action="connect"),
+            # ContingencyEvent(minute=300, element_type="load", bus=5, p_mw=400, q_mvar=200, action="trip"),
+            # ContingencyEvent(minute=330, element_type="gen", element_index=4, action="trip"),
+            # ContingencyEvent(minute=420, element_type="gen", element_index=4, action="restore"),
+            # ContingencyEvent(minute=480, element_type="load", bus=27, p_mw=300, q_mvar=150, action="connect"),
+            # ContingencyEvent(minute=560, element_type="load", bus=27, p_mw=300, q_mvar=150, action="trip"),
+            # ContingencyEvent(minute=720, element_type="load", bus=7, p_mw=300, q_mvar=100, action="connect"),
+            # ContingencyEvent(minute=900, element_type="load", bus=7, p_mw=300, q_mvar=100, action="trip"),
+        ],
     )
 
     # ---- DSO layer: only DSO_2 has an OFO controller -------------------
     cfg.dso_mode = "ofo"
     cfg.dso_ids_to_run = ["DSO_2"]
+
+    # ---- Drop line-current rows from H (paper y = [Q_int, V]) ----------
+    # With this off the DSO_2 sensitivity matrix reduces to [Q_interface | V]:
+    # no ∂I/∂u rows enter the online estimator (Kalman/ANN) and the MIQP
+    # enforces no line-current limits.  Regenerate kalman_matrices.npz after
+    # toggling this — n_y (hence Q/R dimensions) changes.
+    cfg.dso_monitor_currents = False
 
     # ---- DSO_2 interface: slack-decoupled vs. coupled (DSO2_INTERFACE_MODE)
     cfg.dso2_interface_slack = (DSO2_INTERFACE_MODE == "slack")
@@ -282,12 +399,22 @@ def make_config() -> MultiTSOConfig:
 
     # ---- Exogenous Q-setpoint vector at DSO_2's three 3W trafos --------
     # Order matches ``meta.hv_networks[1].coupling_trafo_indices``.
-    cfg.q_pcc_setpoints_mvar_per_dso = {"DSO_2": [40.0, 20.0, 80.0]}
+    cfg.q_pcc_setpoints_mvar_per_dso = {"DSO_2": [0.0, 0.0, 0.0]}
+
+    # ---- Time-varying setpoint: bounded random walk per trafo ----------
+    # Each DSO step the three interface-Q setpoints take an independent
+    # Gaussian step (std below) around the base above, clipped to a per-trafo
+    # band -> trafo bounds [40+-band, 20+-band, 80+-band].  Fixed seed so all
+    # H-predictor modes in _run_comparison track the identical moving target.
+    cfg.q_pcc_setpoint_random_enabled  = True
+    cfg.q_pcc_setpoint_random_std_mvar = 0.5    # per-step walk increment [Mvar]
+    cfg.q_pcc_setpoint_random_band_mvar = 40.0  # per-trafo half-band around base
+    cfg.q_pcc_setpoint_random_seed     = 64
 
     # ---- Run length / timing -------------------------------------------
     cfg.n_total_s = 60.0 * 60 * 2  # 2 h smoke
     cfg.tso_period_s = 180.0  # cosmetic: TSO never steps anyway
-    cfg.dso_period_s = 1  # 10
+    cfg.dso_period_s = 20  # 10
     cfg.warmup_s = 0.0
     cfg.start_time = datetime(2016, 9, 7, 10, 0)
     cfg.use_profiles = True
@@ -303,9 +430,10 @@ def make_config() -> MultiTSOConfig:
     # cfg.qv_local_tol_mvar = 0.1
 
     # ---- Live plots off for diagnostic runs ---------------------------
-    cfg.live_plot_controller = True
-    cfg.live_plot_cascade = True
+    cfg.live_plot_controller = False
+    cfg.live_plot_cascade = False
     cfg.live_plot_system = False
+    cfg.live_plot_tracking = False
 
     # ---- Persistent excitation (sensitivity learning) -----------------
     # When enabled, gaussian noise N(0, sigma^2) is added to the DSO
@@ -317,8 +445,14 @@ def make_config() -> MultiTSOConfig:
     # perturbed (integer actuators).  Useful for downstream H estimation
     # (Kalman filter / NN) where the input must be persistently exciting.
     cfg.dso_pe_noise_enabled = True
-    cfg.dso_pe_noise_std_mvar = 0.25  # std of N(0, sigma^2) on Q_cor [Mvar] (quartered from 1.0: steady-state ||du|| noise floor ~0.9 Mvar; profiles still excite the varying case)
-    cfg.dso_pe_noise_seed = 42  # RNG seed for reproducibility
+    cfg.dso_pe_noise_seed = 64  # RNG seed for reproducibility (also seeds the orthogonal basis)
+    # Excitation mode + amplitudes from the top-of-file toggle (PE_MODE etc.).
+    # "white" reproduces the pre-orthogonal behaviour; "orthogonal" is the designed
+    # rotating excitation.  Both share the TARGET_STEP_MVAR=1.0 matrices (per-step
+    # ‖Δu‖≈1.0 either way) — see the PE_MODE block above.
+    cfg.dso_pe_mode           = PE_MODE
+    cfg.dso_pe_amplitude_mvar = PE_AMPLITUDE_MVAR   # orthogonal-mode probe amplitude [Mvar]
+    cfg.dso_pe_noise_std_mvar = PE_WHITE_STD_MVAR   # white-mode per-channel std [Mvar]
 
     # ---- Output directory ---------------------------------------------
     cfg.result_dir = os.path.join("results", "003_cigre_2026")
@@ -328,7 +462,7 @@ def make_config() -> MultiTSOConfig:
     # operating point; cfg.frozen_at then holds that profile constant for the
     # entire run.  This avoids the artificial mean-profile base-case.
     if FROZEN_OP_POINT:
-        cfg.use_profiles = True
+        cfg.use_profiles = False
         cfg.start_time = FROZEN_OP_TIMESTAMP
         cfg.frozen_at = FROZEN_OP_TIMESTAMP
         cfg.contingencies = []
@@ -562,69 +696,74 @@ def install_h_corrector(
 def install_pe_noise(
     dso_ctrl: "DSOController",
     *,
-    std_mvar: float,
+    std_mvar: float = 0.0,
     rng: np.random.Generator,
+    mode: str = "white",
+    amplitude_mvar: float = 0.0,
 ) -> None:
-    """Wrap ``dso_ctrl.step`` so gaussian noise is added to DER Q_cor commands.
+    """Wrap ``dso_ctrl.step`` so a persistent-excitation (PE) increment ε(k) is
+    added to the DER Q_cor commands.
 
-    Per step k:
-      1. ``dso_ctrl.step(...)`` runs as normal -- OFO computes
-         ``u(k+1) = u(k) + w`` where ``w`` is the MIQP step.
-      2. Noise ``eps ~ N(0, std_mvar^2)`` of size ``n_der`` is drawn
-         from ``rng``.
-      3. The DER (continuous) slice of ``u_new`` and ``u_continuous`` on
-         the returned ``ControllerOutput`` is incremented by ``eps``,
-         so the runner applies ``u(k+1)' = u(k+1) + eps`` to
-         ``net.sgen.q_set_mvar`` (see ``apply_dso_controls`` in
-         ``experiments/helpers/plant_io.py``).
-      4. ``dso_ctrl._u_current`` is also incremented by ``eps`` so the
-         next OFO step starts from ``u(k+1)'`` rather than ``u(k+1)``.
-         This prevents the controller from "fighting" the noise -- the
-         excitation becomes part of the controller's owned state.
-      5. OLTC (integer) commands and any other non-DER columns are NOT
-         perturbed.
+    Per step k, after the OFO MIQP returns ``u(k+1) = u(k) + w``:
+      * the DER slice of ``u_new`` / ``u_continuous`` (what the runner applies to
+        the plant) and ``dso_ctrl._u_current`` (what the next OFO step starts from)
+        are all incremented by ε(k), so the excitation becomes part of the
+        controller's owned state (it does not "fight" the noise);
+      * OLTC (integer) and any non-DER columns are NOT perturbed.
 
-    Parameters
-    ----------
-    dso_ctrl : DSOController
-        The DSO controller to wrap.
-    std_mvar : float
-        Standard deviation of the gaussian noise on each DER's Q_cor
-        command, in Mvar.  Set to 0 to effectively disable.
-    rng : np.random.Generator
-        Random source.  Use a seeded ``np.random.default_rng(seed)`` for
-        reproducibility.
+    Excitation modes
+    ----------------
+    ``"white"`` (default) -- ε(k) ~ N(0, std_mvar²) i.i.d. on each DER channel.
+        Isotropic in expectation, but at the small ``std_mvar`` used in practice the
+        off-diagonal H columns get little excitation (the OFO over-excites only its
+        gradient direction → the rest is starved, see the identifiability budget).
 
-    Notes
-    -----
-    Layout assumption: ``u_new = [Q_cor (n_der) | V_gf (n_gf) |
-    OLTC (n_oltc) | shunt (n_shunts)]`` with the DER block at indices
-    ``[0, n_der)``.  Holds for 003 (no V_gf, no shunts).  If the layout
-    changes in the future this slicing must be revisited.
+    ``"orthogonal"`` -- DESIGNED excitation: ε(k) = amplitude_mvar · B[:, k mod n_der],
+        where B is a fixed Haar-random orthonormal basis of the n_der DER space
+        (drawn once from ``rng`` via QR).  Over every n_der steps each input
+        direction gets one full-amplitude probe, decorrelated from the OFO gradient,
+        so the Fisher information Σ Δu_PE Δu_PEᵀ = amplitude² · I is balanced across
+        ALL H columns.  The time-averaged per-direction excitation std is
+        ``amplitude_mvar / √n_der`` (vs ``std_mvar`` isotropic for white), and the
+        per-step disturbance norm is exactly ``amplitude_mvar`` (one unit direction).
+        Raising ``amplitude_mvar`` lifts the off-diagonal identifiability (smaller N
+        to resolve a bias) at the cost of more tracking disturbance; keep it within
+        the near-linear band (delta-sweep linear to ~3.4 Mvar) to avoid identifying a
+        secant instead of the Jacobian.  Match the training step (TARGET_STEP_MVAR)
+        to ``amplitude_mvar`` so R/Q/u_scale stay calibrated.
 
-    Δu  =  dso_ctrl._u_current   -  u_prev_stored        # = w(k) + ε(k)
-    Δy  =  dso_ctrl._last_measurement  -  y_prev_stored
+    Layout assumption: ``u_new = [Q_cor (n_der) | OLTC (n_oltc) | ...]`` (DER block
+    at ``[0, n_der)``; holds for 003).
 
-    Because Δu now contains an independent gaussian component on every DER channel
-    (not just the correlated direction the OFO's w would choose), the regression
-    Δy ≈ H · Δu is full-rank in expectation — that's what makes H identifiable online.
-    Without the noise, w lives on a low-dimensional manifold dictated by the gradient
-    direction and the estimator can't recover off-diagonal entries.
-
+    Δu = ε(k) + w(k) carries an independent component spanning the input space, so
+    the regression Δy ≈ H·Δu is full-rank — that is what makes H identifiable online.
     """
     n_der = len(dso_ctrl.config.der_indices)
     original_step = dso_ctrl.step
+    _state = {"k": 0}
+
+    basis: Optional[np.ndarray] = None
+    if mode == "orthogonal" and n_der > 0:
+        # Haar-random orthonormal basis of the DER input space (columns = probe
+        # directions), fixed for the run so the rotation is reproducible.
+        basis, _ = np.linalg.qr(rng.standard_normal((n_der, n_der)))
 
     def step_with_pe(*args, **kwargs):
         result = original_step(*args, **kwargs)
-        if n_der > 0 and std_mvar > 0.0:
-            noise = rng.normal(0.0, std_mvar, size=n_der)
+        if n_der > 0:
+            if mode == "orthogonal" and amplitude_mvar > 0.0 and basis is not None:
+                eps = amplitude_mvar * basis[:, _state["k"] % n_der]
+                _state["k"] += 1
+            elif mode == "white" and std_mvar > 0.0:
+                eps = rng.normal(0.0, std_mvar, size=n_der)
+            else:
+                return result
             # Mutate what the runner applies to the plant ...
-            result.u_new[:n_der] += noise
-            result.u_continuous[:n_der] += noise
+            result.u_new[:n_der] += eps
+            result.u_continuous[:n_der] += eps
             # ... and what the controller starts the next step from.
             if dso_ctrl._u_current is not None:
-                dso_ctrl._u_current[:n_der] += noise
+                dso_ctrl._u_current[:n_der] += eps
         return result
 
     dso_ctrl.step = step_with_pe  # type: ignore[method-assign]
@@ -708,54 +847,129 @@ def get_dso2_features(dso_ctrl: "DSOController") -> Dict[str, np.ndarray]:
 
 
 class _KalmanHPredictor:
-    """Tracks H as a linear random-walk state with noisy Δy ≈ H·Δu observations.
+    """Tracks H as a random-walk state with noisy Δy ≈ H·Δu observations.
 
-    State model :  h(k+1) = h(k) + w(k),       w ~ N(0, Q)
-    Observation :  Δy(k)  = C(Δu) h(k) + v(k), v ~ N(0, R)
-    where h = H.flatten() (row-major) and C(Δu) = I_{n_y} ⊗ Δu^T.
+    State model :  h(k+1) = h(k) + w(k),        w ~ N(0, Q_eff(k))
+    Observation :  Δỹ(k)  = C(Δu_e) h(k) + v(k), v ~ N(0, R)
+    where h = vec_row(H[:, :n_e]) and C(Δu_e) = I_{n_y} ⊗ Δu_e^T.
 
-    Q and R are loaded from ``_KALMAN_MATRICES_PATH`` on the first call.
-    Falls back to identity defaults if absent; run
-    :func:`generate_kalman_matrices` first for data-driven matrices.
+    Two-term process noise
+    ----------------------
+    The predict-step covariance is the additive split (see module header)
+
+        Q_eff(k) = q_scale · s²(k) · Q_excitation  +  Q_drift
+
+    with s²(k) = ‖Δu_e / u_scale‖² / n_e.  The excitation term vanishes as the
+    controller settles (Δu → 0); the always-on Q_drift then keeps the gain alive
+    so the estimator never freezes.  This is the entire process-noise model —
+    there is no forgetting factor, no prior mean-reversion, and no trace
+    floor/ceiling: Q_drift carries the keep-alive role those hacks used to fake.
+
+    DER-only column estimation
+    --------------------------
+    The filter estimates only the first ``n_e = n_der`` columns of H (the DER /
+    ``Q_cor`` block); the OLTC columns are held at their analytical ``_H_cache``
+    value and spliced back on every return.  The OLTC contribution to ``Δy`` is
+    removed from the innovation (``Δỹ = Δy − H_rest·Δu_rest``) so tap motion does
+    not bias the DER estimate.  The Kalman state is ``vec(H[:, :n_der])``
+    (``n_state = n_y·n_der``), matching the DER-only ``kalman_matrices.npz``
+    produced by ``_collect_train_mc.py``.
+
+    Measurement noise is input-dependent:
+    ``R_eff(k) = R_sensor + r_model_scale·‖Δu‖^p·R_model`` — a Δu-independent sensor
+    floor plus an input-dependent model-error term.  On this plant the residual is
+    first-order (r ∝ ‖Δu‖, p=2; not the curvature-dominated Picallo p=4), so large
+    steps are distrusted (secant ≠ analytical Jacobian).
+
+    Q_excitation, Q_drift, R_sensor and R_model are loaded from
+    ``_KALMAN_MATRICES_PATH`` on the first call.  Falls back to identity defaults
+    if absent; run :func:`generate_kalman_matrices` (or _collect_train_mc.py)
+    first for data-driven matrices.
     """
 
-    def __init__(self, min_delta_u_norm: float = 0.05, forgetting_factor: float = 0.997,
-                 p_min_frac: float = 10.0, p_min_warmup_steps: int = 60) -> None:
+    def __init__(self, min_delta_u_norm: float = 0.05,
+                 q_scale: float = 1.0, r_model_scale: float = 1.0) -> None:
         self.min_delta_u_norm = min_delta_u_norm
-        # Forgetting factor prevents P from collapsing to ~0 after initial convergence.
-        # Without it, K → 0 and the filter can no longer track slow H drift from
-        # actuator movements, causing error to re-increase after the initial dip.
-        self.lam = forgetting_factor
-        # p_min_frac: floor on tr(P) as a fraction of the initial tr(P), active only
-        # during the warmup window.  Keeps K elevated long enough to correct a large
-        # cold-start bias; after warmup P is free to collapse so noise stops accumulating.
-        self.p_min_frac = p_min_frac
-        self.p_min_warmup_steps = p_min_warmup_steps
-        self._Q: Optional[np.ndarray] = None
-        self._R: Optional[np.ndarray] = None
-        self._u_scale: Optional[np.ndarray] = None  # per-channel |Δu| RMS for the Σ_q norm
-        self._pe_dither_energy: float = 0.0          # expected ‖Δ(PE noise)‖² in the normed step
-        self._h: Optional[np.ndarray] = None   # vectorised H estimate
-        self._P: Optional[np.ndarray] = None   # estimate covariance
-        self._P_max: Optional[float] = None    # trace ceiling for PSD-safe cap
-        self._P_min: Optional[float] = None    # trace floor active during warmup
-        self._step_count: int = 0
+        # Runtime multiplier on the excitation term (1.0 = as trained).
+        self.q_scale = q_scale
+        # Runtime multiplier on the ‖Δu‖^p model-error term of R (0 = fixed R_sensor).
+        self.r_model_scale = r_model_scale
+        # R input-dependence exponent p (R_eff = R_sensor + scale·‖Δu‖^p·R_model).
+        # Overwritten from the npz on load; default = the module constant.
+        self.r_du_exponent: float = KALMAN_R_DU_EXPONENT
+        # Deployment DSO control period [s].  Set by _setup_h_predictor from
+        # cfg.dso_period_s; Q_drift (a per-control-step drift variance) is
+        # rescaled from the training cadence to this one at load time.  None ->
+        # no rescale (ratio 1.0), e.g. when the predictor is used standalone.
+        self.deploy_period_s: Optional[float] = None
+        self._Q_exc: Optional[np.ndarray] = None      # input-driven, scaled by s²
+        self._Q_drift: Optional[np.ndarray] = None    # disturbance-driven, always on
+        self._R_sensor: Optional[np.ndarray] = None   # Δu-independent sensor floor
+        self._R_model: Optional[np.ndarray] = None    # model-error cov, scaled by ‖Δu‖^p
+        self._u_scale: Optional[np.ndarray] = None   # per-channel |Δu| RMS for the s² norm
+        self._h: Optional[np.ndarray] = None         # vectorised H estimate
+        self._P: Optional[np.ndarray] = None         # estimate covariance
         self._y_prev: Optional[np.ndarray] = None
         self._u_prev: Optional[np.ndarray] = None
 
     def _load_matrices(self, n_state: int, n_y: int) -> None:
         if os.path.exists(_KALMAN_MATRICES_PATH):
             d = np.load(_KALMAN_MATRICES_PATH)
-            self._Q, self._R = d["Q"], d["R"]
-            # Per-channel |Δu| RMS used to normalise the Σ_q = ‖Δu‖·Σ_q0 scaling.
-            # Missing in legacy files -> ones (raw norm); regenerate for the data-driven scale.
+            # New files store Q_excitation + Q_drift; legacy files store a single
+            # "Q" (treated as the excitation term, drift = 0 → old behaviour).
+            self._Q_exc = d["Q_excitation"] if "Q_excitation" in d else d["Q"]
+            self._Q_drift = (d["Q_drift"] if "Q_drift" in d
+                             else np.zeros_like(self._Q_exc))
+            # Input-dependent R: R_eff = R_sensor + r_model_scale·‖Δu‖^p·R_model.
+            # New files store R_sensor + R_model + r_du_exponent; legacy files store
+            # a single "R" (fixed sensor term, R_model = 0 → old behaviour).  An
+            # intermediate file may carry the old "R_curv" key (same role as R_model).
+            if "R_sensor" in d:
+                self._R_sensor = d["R_sensor"]
+                if "R_model" in d:
+                    self._R_model = d["R_model"]
+                elif "R_curv" in d:
+                    # Legacy ‖Δu‖⁴ key: built with p=4, so keep that exponent unless
+                    # the file overrides it (regenerate for the p=2 model-error fit).
+                    self._R_model = d["R_curv"]
+                    self.r_du_exponent = 4.0
+                else:
+                    self._R_model = np.zeros_like(d["R_sensor"])
+                if "r_du_exponent" in d:
+                    self.r_du_exponent = float(d["r_du_exponent"])
+            else:
+                self._R_sensor = d["R"]
+                self._R_model  = np.zeros_like(d["R"])
+            # Per-channel |Δu| RMS used to normalise the s² = ‖Δu/u_scale‖² scaling.
+            # Missing in legacy files -> ones (raw norm); regenerate for the scale.
             n_u = int(round(n_state / n_y))
             self._u_scale = d["u_scale"] if "u_scale" in d else np.ones(n_u)
-            print(f"[KF] loaded Q {self._Q.shape}, R {self._R.shape}, "
+            # Q_drift is a per-control-step drift covariance; random-walk variance
+            # grows ∝ Δt, so rescale it linearly from the training cadence
+            # (train_period_s) to the deployment cadence (deploy_period_s).  Only
+            # Q_drift needs this: Q_excitation is already cadence-aware through s²
+            # (which scales with the observed actuator step).  Legacy files lacking
+            # train_period_s, or a predictor with no deploy_period_s set, skip it.
+            train_period = float(d["train_period_s"]) if "train_period_s" in d else None
+            ratio = 1.0
+            if train_period and self.deploy_period_s and train_period > 0.0:
+                ratio = float(self.deploy_period_s) / train_period
+                self._Q_drift = self._Q_drift * ratio
+            print(f"[KF] loaded Q_excitation {self._Q_exc.shape}, "
+                  f"Q_drift {self._Q_drift.shape}, R_sensor {self._R_sensor.shape}, "
+                  f"R_model {self._R_model.shape} (‖Δu‖^{self.r_du_exponent}), "
                   f"u_scale {self._u_scale.shape}")
+            if ratio != 1.0:
+                print(f"[KF] Q_drift rescaled by deploy/train period "
+                      f"{self.deploy_period_s:.0f}/{train_period:.0f} = {ratio:.3f}")
+            elif train_period is None:
+                print("[KF] no train_period_s in matrices — Q_drift used as-is "
+                      "(regenerate to enable period rescaling)")
         else:
-            self._Q = np.eye(n_state) * 1e-6
-            self._R = np.eye(n_y) * 1e-4
+            self._Q_exc = np.eye(n_state) * 1e-6
+            self._Q_drift = np.eye(n_state) * 1e-9
+            self._R_sensor = np.eye(n_y) * 1e-4
+            self._R_model = np.zeros((n_y, n_y))
             self._u_scale = np.ones(int(round(n_state / n_y)))
             print("[KF] no kalman_matrices.npz found — using I defaults. "
                   "Run generate_kalman_matrices() for data-driven matrices.")
@@ -763,9 +977,6 @@ class _KalmanHPredictor:
     def reset(self) -> None:
         """Reset KF state; re-seeds from the controller's H on next call."""
         self._h = self._P = self._y_prev = self._u_prev = None
-        self._P_max = None
-        self._P_min = None
-        self._step_count = 0
 
     def __call__(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
         if dso_ctrl._H_cache is None or dso_ctrl._u_current is None:
@@ -787,79 +998,79 @@ class _KalmanHPredictor:
         #   feats["v_buses_pu"]  -- voltages at monitored buses               (n_v,)
 
         n_y, n_u = dso_ctrl._H_cache.shape
-        n_state = n_y * n_u
+        # Estimated columns: the leading DER (Q_cor) block only; OLTC columns are
+        # held analytical and spliced back on return (see class docstring).
+        n_der = len(dso_ctrl.config.der_indices)
+        n_e = n_der
+        n_state = n_y * n_e
 
-        if self._Q is None or self._Q.shape[0] != n_state:
+        if self._Q_exc is None or self._Q_exc.shape[0] != n_state:
             self._load_matrices(n_state, n_y)
 
         y = feats["y"]
         u = feats["u"]
 
-        # Warm-up: seed h and P from the controller's analytical H
+        # Warm-up: seed h and P from the controller's analytical H (DER columns
+        # only; OLTC columns stay in _H_cache and are spliced on return).
         if self._h is None:
-            self._h = dso_ctrl._H_cache.flatten().copy()
-            # P_init reflects actual initial uncertainty (bias on H), not Q magnitude.
-            # Tying P_init to Q would make K negligibly small when Q is tiny
-            # (e.g. when H barely changes step-to-step even with profiles on).
+            self._h = dso_ctrl._H_cache[:, :n_e].flatten().copy()
+            # P_init reflects the actual initial uncertainty (bias on the seed H),
+            # not the per-step Q magnitude: ~30% per-entry std matches the init bias.
             h_rms = float(np.sqrt(np.mean(self._h ** 2))) or 1e-4
-            sigma_init = 0.30 * h_rms   # ~30% per-entry std matches the init bias
+            sigma_init = 0.30 * h_rms
             self._P = (sigma_init ** 2) * np.eye(n_state)
-            p_init_trace = float(np.trace(self._P))
-            self._P_min = self.p_min_frac * p_init_trace
-            # P_max must be at least P_min so ceiling never sits below the warmup floor.
-            self._P_max = max(p_init_trace, self._P_min)
-            self._step_count = 0
-            # Expected energy that the PE dither alone injects into the normed step,
-            # so the Σ_q scaling reflects natural controller motion, not the excitation
-            # noise.  PE noise ~ N(0,σ_u²) i.i.d. on the n_der DER channels, so the
-            # differenced dither has variance 2σ_u² per channel; normalise by u_scale.
-            cfg = dso_ctrl.config
-            sigma_u = float(getattr(cfg, "dso_pe_noise_std_mvar", 0.0) or 0.0)
-            if getattr(cfg, "dso_pe_noise_enabled", False) and sigma_u > 0.0 and self._u_scale is not None:
-                n_der = len(cfg.der_indices)
-                self._pe_dither_energy = float(
-                    2.0 * sigma_u ** 2 * np.sum(1.0 / self._u_scale[:n_der] ** 2))
             self._y_prev, self._u_prev = y, u
             return None  # keep analytical H on the first call
 
         delta_u = u - self._u_prev
         delta_y = y - self._y_prev
 
-        # Predict — Σ_q = ‖Δu‖·Σ_q0 ties the assumed H drift to actuator motion, so
-        # process noise shrinks toward zero at convergence (Δu→0) instead of injecting
-        # fictitious diffusion.  Δu is per-channel normalised by its RMS scale so DER
-        # and OLTC moves contribute comparably; the expected PE-dither energy is removed
-        # so s reflects natural controller motion only (s→0 once the controller settles,
-        # even though the dither keeps moving).  s≈1 at a typical full step.
-        # Forgetting factor keeps P from collapsing; trace cap bounds growth (PSD-safe).
-        du_n2 = float(np.sum((delta_u / self._u_scale) ** 2))
-        s = float(np.sqrt(max(0.0, du_n2 - self._pe_dither_energy)) / np.sqrt(len(delta_u)))
-        h_p = self._h.copy()
-        P_p = self._P / self.lam + s * self._Q
-        tr = float(np.trace(P_p))
-        if tr > self._P_max:
-            P_p *= self._P_max / tr
+        # Restrict the regression to the estimated (DER) columns.  The OLTC columns
+        # are held at their analytical value in _H_cache; subtract their
+        # contribution to Δy from the innovation so tap motion does not bias the
+        # DER estimate (no-op when the taps do not move, Δu_rest = 0).
+        delta_u_e = delta_u[:n_e]
+        if n_e < n_u:
+            H_rest = dso_ctrl._H_cache[:, n_e:]          # analytical OLTC columns
+            delta_y = delta_y - H_rest @ delta_u[n_e:]
 
-        # Update — skip when ‖Δu‖ is too small (ill-conditioned regression)
-        if np.linalg.norm(delta_u) >= self.min_delta_u_norm:
-            C = np.kron(np.eye(n_y), delta_u.reshape(1, -1))  # (n_y, n_state)
-            S = C @ P_p @ C.T + self._R                        # (n_y, n_y)
+        # ── Predict: two-term process noise ────────────────────────────────────
+        # Q_eff = q_scale · s² · Q_excitation  +  Q_drift
+        #   s² = ‖Δu_e / u_scale‖² / n_e   (normalised step energy, dimensionless;
+        #        s²≈1 at a typical full step, → 0 as the controller settles).
+        # The excitation term ties assumed H drift to actuator motion (no fictitious
+        # diffusion at convergence); the always-on Q_drift carries the keep-alive
+        # role, so there is no forgetting factor, prior anchor, or trace bound.
+        s2 = float(np.sum((delta_u_e / self._u_scale) ** 2)) / len(delta_u_e)
+        Q_eff = self.q_scale * s2 * self._Q_exc + self._Q_drift
+        h_p = self._h
+        P_p = self._P + Q_eff
+
+        # Input-dependent measurement noise R_eff = R_sensor + r_model_scale·‖Δu‖^p·R_model.
+        # On this plant the residual is first-order (r ∝ ‖Δu‖, p=2): a larger step
+        # carries more model error, so the filter trusts small near-linear steps and
+        # distrusts large ones (avoids fitting a large-step secant into H).  ‖Δu_e‖ is
+        # the RAW DER step (Mvar), matching the training normalisation (distinct from
+        # the u_scale normalisation used by s²).
+        du_raw = float(np.sqrt(delta_u_e @ delta_u_e))      # ‖Δu_e‖
+        R_eff = self._R_sensor + self.r_model_scale * (du_raw ** self.r_du_exponent) * self._R_model
+
+        # ── Update: skip when ‖Δu_e‖ is too small (ill-conditioned regression) ──
+        if np.linalg.norm(delta_u_e) >= self.min_delta_u_norm:
+            C = np.kron(np.eye(n_y), delta_u_e.reshape(1, -1))  # (n_y, n_state)
+            S = C @ P_p @ C.T + R_eff                          # (n_y, n_y)
             K = np.linalg.solve(S, C @ P_p).T                  # (n_state, n_y)
             self._h = h_p + K @ (delta_y - C @ h_p)
             self._P = (np.eye(n_state) - K @ C) @ P_p
-            # P_min floor active only during warmup window: uniform top-up preserves
-            # PD and symmetry.  After warmup P is free to collapse so the filter stops
-            # injecting noise once the cold-start bias has been corrected.
-            if self._step_count < self.p_min_warmup_steps:
-                tr_post = float(np.trace(self._P))
-                if tr_post < self._P_min:
-                    self._P += (self._P_min - tr_post) / n_state * np.eye(n_state)
         else:
             self._h, self._P = h_p, P_p
 
-        self._step_count += 1
         self._y_prev, self._u_prev = y, u
-        return self._h.reshape(n_y, n_u)
+        # Splice the estimated DER columns back into the full analytical H; the
+        # OLTC columns are returned unchanged (not estimated).
+        H_out = dso_ctrl._H_cache.copy()
+        H_out[:, :n_e] = self._h.reshape(n_y, n_e)
+        return H_out
 
 
 _kalman_h_predictor = _KalmanHPredictor()
@@ -1020,7 +1231,7 @@ _ANN_h_predictor = _ANNHPredictor()
 
 def collect_training_data(
     n_total_s: float = 7200.0,
-    pe_noise_std_mvar: float = 1.0,
+    pe_noise_std_mvar: float = 0.001,
     output_path: str = _TRAINING_DATA_PATH,
 ) -> str:
     """Run the 003 simulation and record measurements at every DSO_2 step.
@@ -1114,23 +1325,115 @@ def collect_training_data(
 
 # ── Kalman Q/R matrix estimation ─────────────────────────────────────────────
 
+def floor_measurement_noise_R(
+    R: np.ndarray,
+    n_q: int,
+    sigma_q: Optional[float] = None,
+    sigma_v: Optional[float] = None,
+    diagonal: Optional[bool] = None,
+) -> np.ndarray:
+    """Condition the measurement-noise covariance R for use in the Kalman gain.
+
+    The MC residual covariance Δy − H·Δu is noise-free (pure linearisation
+    curvature), so it is near rank-deficient (cross-row corr ≈0.99, Mvar/p.u.
+    scale split → cond ~1e10), which makes R⁻¹ — hence the gain / innovation —
+    explode.  A well-posed KF R must be PD AND well-conditioned, representing
+    INDEPENDENT per-channel sensor noise.  This:
+      1. (``diagonal``) drops the spurious off-diagonal correlations, then
+      2. ADDS a sensor-noise floor ``diag([σ_Q²]·n_q | [σ_V²]·n_v)`` — the
+         residual (model) variance and the sensor variance are independent, so
+         they add.
+
+    Row order is ``[Q_trafo (n_q, Mvar) | V_bus (n_v, p.u.)]`` (currents dropped,
+    so no σ_I).  Defaults pull ``KALMAN_R_SIGMA_Q/V`` and ``KALMAN_R_DIAGONAL``.
+    """
+    sigma_q  = KALMAN_R_SIGMA_Q  if sigma_q  is None else sigma_q
+    sigma_v  = KALMAN_R_SIGMA_V  if sigma_v  is None else sigma_v
+    diagonal = KALMAN_R_DIAGONAL if diagonal is None else diagonal
+    R = np.asarray(R, dtype=float)
+    n_y = R.shape[0]
+    n_v = max(n_y - n_q, 0)
+    R_base = np.diag(np.diag(R)) if diagonal else R.copy()
+    floor  = np.concatenate([np.full(n_q, sigma_q ** 2),
+                             np.full(n_v, sigma_v ** 2)])
+    return R_base + np.diag(floor)
+
+
+def estimate_measurement_noise_terms(
+    residuals: np.ndarray,
+    du_norm: np.ndarray,
+    n_q: int,
+    n_y: int,
+    *,
+    sigma_q: Optional[float] = None,
+    sigma_v: Optional[float] = None,
+    min_du: Optional[float] = None,
+    exponent: Optional[float] = None,
+) -> tuple:
+    """Estimate the two terms of the input-dependent measurement noise R.
+
+    Returns ``(R_sensor, R_model)`` (both (n_y, n_y), diagonal) for the runtime
+    model ``R_eff(k) = R_sensor + ‖Δu(k)‖^p · R_model`` (see module header):
+
+    * ``R_sensor`` -- the Δu-independent sensor floor
+      ``diag([σ_Q²]·n_q | [σ_V²]·n_v)`` (built via
+      :func:`floor_measurement_noise_R` on a zero matrix).
+    * ``R_model``  -- the input-dependent model-error covariance.  The residual is
+      empirically ``r ∝ ‖Δu‖`` on this plant (first-order analytical-H bias; the
+      2nd-order curvature would give ``r ∝ ‖Δu‖²``), so with exponent ``p`` its
+      variance is ``∝ ‖Δu‖^p`` (p=2 here, p=4 for the curvature case).  Normalising
+      ``r̃ = r/‖Δu‖^{p/2}`` removes the size dependence, so
+      ``R_model = E[r̃ r̃ᵀ]`` (diagonal 2nd moment).  Scaled back up by ``‖Δu‖^p``
+      at runtime.
+
+    Residuals with ``‖Δu‖ < min_du`` are dropped from the R_model fit so the
+    ``1/‖Δu‖^{p/2}`` normalisation does not amplify tiny-step noise.
+    """
+    min_du   = KALMAN_R_MODEL_MIN_DU if min_du   is None else min_du
+    exponent = KALMAN_R_DU_EXPONENT  if exponent is None else exponent
+    R_sensor = floor_measurement_noise_R(
+        np.zeros((n_y, n_y)), n_q, sigma_q=sigma_q, sigma_v=sigma_v, diagonal=True
+    )
+    res = np.asarray(residuals, dtype=float).reshape(-1, n_y)
+    dun = np.asarray(du_norm, dtype=float).reshape(-1)
+    mask = dun > float(min_du)
+    if int(mask.sum()) >= 2:
+        rn = res[mask] / (dun[mask][:, None] ** (exponent / 2.0))   # r̃ = r/‖Δu‖^{p/2}
+        R_model = np.diag(np.mean(rn ** 2, axis=0))                 # diagonal 2nd moment
+    else:
+        R_model = np.zeros((n_y, n_y))
+    return R_sensor, R_model
+
+
 def generate_kalman_matrices(
     data_path: str = _TRAINING_DATA_PATH,
     output_path: str = _KALMAN_MATRICES_PATH,
     min_delta_u_norm: float = 0.05,
+    settled_delta_u_norm: float = 0.05,
 ) -> Dict[str, np.ndarray]:
-    """Estimate Kalman process noise Q and measurement noise R from training data.
+    """Estimate the two-term Kalman process noise + measurement noise from data.
 
-    Q -- diagonal covariance of ΔH(k) = H(k+1) - H(k) over all steps.
-         Controls how fast the filter allows H to drift between steps.
-    R -- empirical covariance of residuals Δy(k) - H(k-1) @ Δu(k).
-         Captures linearisation error and true measurement noise.
+    Splits the per-step H change ΔH(k) = H(k+1) − H(k) by whether the controller
+    was moving (the comment's settled-mask recipe), giving the two additive
+    process-noise terms used by :class:`_KalmanHPredictor`:
 
-    Steps with ‖Δu‖ < ``min_delta_u_norm`` are excluded from R estimation
-    to avoid inflating residuals from near-zero actuator changes.
+    Q_excitation -- diagonal var(ΔH) over EXCITED steps (‖Δu‖ ≥
+                    ``settled_delta_u_norm``): H change driven by actuator motion.
+                    Scaled by s² = ‖Δu/u_scale‖²/n_e at runtime.
+    Q_drift      -- diagonal var(ΔH) over SETTLED steps (‖Δu‖ <
+                    ``settled_delta_u_norm``): H change from exogenous
+                    disturbances (load / profiles) while the controller is at
+                    rest.  Added unscaled (always on) at runtime — the keep-alive.
+    R_sensor/R_model -- the input-dependent measurement noise
+                    R_eff = R_sensor + ‖Δu‖^p·R_model (p=KALMAN_R_DU_EXPONENT),
+                    estimated from the residual Δy(k) − H(k−1)·Δu(k) over excited
+                    steps (‖Δu‖ ≥ ``min_delta_u_norm``) via
+                    :func:`estimate_measurement_noise_terms`.
+    u_scale      -- per-channel RMS of Δu (normalises s²).
 
-    Saves a .npz with keys ``"Q"`` (n_state × n_state) and ``"R"`` (n_y × n_y).
-    Returns ``{"Q": ..., "R": ...}``.
+    Saves a .npz with keys ``Q_excitation``, ``Q_drift``, ``R_sensor``, ``R_model``,
+    ``R`` (representative, at the median step), ``r_du_exponent``, ``u_scale``,
+    ``train_period_s``, ``n_q``.
     """
     d = np.load(data_path)
     U: np.ndarray = d["u"]            # (N, n_u)  OFO actuator vector
@@ -1142,42 +1445,98 @@ def generate_kalman_matrices(
     N, n_y, n_u = H.shape
     n_state = n_y * n_u
 
-    # Process noise Q: diagonal variance of flattened H step-differences
-    dH = np.diff(H, axis=0).reshape(N - 1, n_state)  # (N-1, n_state)
-    Q  = np.diag(np.var(dH, axis=0))                  # (n_state, n_state)
+    dH = np.diff(H, axis=0).reshape(N - 1, n_state)   # (N-1, n_state)
+    dU = np.diff(U, axis=0)                            # (N-1, n_u)
+    du_norm = np.linalg.norm(dU, axis=1)              # (N-1,)
+
+    # ── Two-term process noise: split ΔH by controller motion ──────────────
+    excited = du_norm >= settled_delta_u_norm
+    settled = ~excited
+    if int(excited.sum()) >= 2:
+        Q_excitation = np.diag(np.var(dH[excited], axis=0))
+        print(f"[kalman] Q_excitation from {int(excited.sum())} excited "
+              f"(‖Δu‖≥{settled_delta_u_norm}) steps")
+    else:
+        Q_excitation = np.diag(np.var(dH, axis=0))
+        print("[kalman] too few excited steps — Q_excitation from all ΔH")
+    if int(settled.sum()) >= 2:
+        Q_drift = np.diag(np.var(dH[settled], axis=0))
+        print(f"[kalman] Q_drift from {int(settled.sum())} settled "
+              f"(‖Δu‖<{settled_delta_u_norm}) steps")
+    else:
+        Q_drift = np.eye(n_state) * 1e-9
+        print("[kalman] too few settled steps — Q_drift = I*1e-9 (floor). "
+              "(Expected for frozen / always-excited training data.)")
 
     # Per-channel actuator-step scale: RMS of Δu per input channel.  Used to
-    # normalise the runtime Σ_q = ‖Δu‖·Σ_q0 scaling so DER (Mvar) and OLTC (taps)
-    # moves contribute comparably and s≈1 at a typical full step.
-    dU = np.diff(U, axis=0)                            # (N-1, n_u)
+    # normalise the runtime s² scaling so DER (Mvar) and OLTC (taps) moves
+    # contribute comparably and s≈1 at a typical full step.
     u_scale = np.sqrt(np.mean(dU ** 2, axis=0))        # (n_u,)
     u_scale = np.where(u_scale > 1e-9, u_scale, 1.0)   # guard zero-motion channels
 
-    # Measurement noise R: covariance of Δy - H(k-1)@Δu(k) residuals
-    residuals = []
+    # Measurement noise: residual r = Δy - H(k-1)@Δu over excited steps, plus the
+    # step norm ‖Δu‖ for the input-dependent model R_eff = R_sensor + ‖Δu‖^p·R_model.
+    residuals, residual_du = [], []
     for k in range(1, N):
-        du = U[k] - U[k - 1]
-        if np.linalg.norm(du) < min_delta_u_norm:
+        du  = U[k] - U[k - 1]
+        dun = float(np.linalg.norm(du))
+        if dun < min_delta_u_norm:
             continue
         residuals.append((Y[k] - Y[k - 1]) - H[k - 1] @ du)
+        residual_du.append(dun)
 
-    if len(residuals) < 2:
-        R = np.eye(n_y) * 1e-4
-        print("[kalman] too few excited steps for R estimation — using I*1e-4")
+    # Row split [Q_trafo (n_q, Mvar) | V_bus (n_v, p.u.)]; n_q from the training
+    # data's q_trafo_mvar block, else the make_config interface count.
+    n_q = (int(d["q_trafo_mvar"].shape[1]) if "q_trafo_mvar" in d
+           else len(make_config().q_pcc_setpoints_mvar_per_dso.get("DSO_2", [0, 0, 0])))
+    if len(residuals) >= 2:
+        RES = np.stack(residuals)                       # (M, n_y)
+        DUN = np.asarray(residual_du)                   # (M,)
+        R_sensor, R_model = estimate_measurement_noise_terms(RES, DUN, n_q, n_y)
+        print(f"[kalman] R terms from {len(residuals)} residuals "
+              f"({int((DUN > KALMAN_R_MODEL_MIN_DU).sum())} used for R_model, "
+              f"p={KALMAN_R_DU_EXPONENT})")
     else:
-        res = np.stack(residuals)                                   # (M, n_y)
-        R   = np.cov(res.T) if n_y > 1 else np.atleast_2d(np.var(res))
+        R_sensor = floor_measurement_noise_R(np.zeros((n_y, n_y)), n_q)
+        R_model  = np.zeros((n_y, n_y))
+        print("[kalman] too few excited steps for R — R_model=0, sensor floor only")
+
+    # Representative R at the median step (diagnostic + legacy 'R' key).
+    du_med = float(np.median(residual_du)) if residual_du else 0.0
+    R = R_sensor + KALMAN_R_MODEL_SCALE * (du_med ** KALMAN_R_DU_EXPONENT) * R_model
+
+    # Ensure PD (Q only; the R_sensor floor already makes R_eff PD)
+    Q_excitation += 1e-12 * np.eye(n_state)
+    Q_drift      += 1e-12 * np.eye(n_state)
+
+    # train_period_s = the DSO control period the training run used (collect_
+    # training_data runs make_config() without changing dso_period_s).  The runtime
+    # rescales Q_drift from this cadence to its own deployment period.
+    train_period_s = float(make_config().dso_period_s)
 
     out_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(out_dir, exist_ok=True)
-    np.savez(output_path, Q=Q, R=R, u_scale=u_scale)
-    q_d, r_d = np.diag(Q), np.diag(R)
-    print(f"[kalman] Q {Q.shape}, R {R.shape}, u_scale {u_scale.shape} "
+    np.savez(output_path, Q_excitation=Q_excitation, Q_drift=Q_drift,
+             R_sensor=R_sensor, R_model=R_model, R=R, r_du_exponent=KALMAN_R_DU_EXPONENT,
+             u_scale=u_scale, train_period_s=train_period_s, n_q=n_q)
+    qe_d, qd_d = np.diag(Q_excitation), np.diag(Q_drift)
+    rs_d, rm_d = np.diag(R_sensor), np.diag(R_model)
+    print(f"[kalman] Q_excitation {Q_excitation.shape}, Q_drift {Q_drift.shape}, "
+          f"R_sensor/R_model {R_sensor.shape}, u_scale {u_scale.shape} "
           f"-> {os.path.abspath(output_path)}")
-    print(f"[kalman]   Q diag: [{q_d.min():.2e}, {q_d.max():.2e}]")
-    print(f"[kalman]   R diag: [{r_d.min():.2e}, {r_d.max():.2e}]")
+    print(f"[kalman]   Q_excitation diag: [{qe_d.min():.2e}, {qe_d.max():.2e}]")
+    print(f"[kalman]   Q_drift      diag: [{qd_d.min():.2e}, {qd_d.max():.2e}]")
+    print(f"[kalman]   R_sensor     diag: [{rs_d.min():.2e}, {rs_d.max():.2e}]  "
+          f"(σ_Q={KALMAN_R_SIGMA_Q}, σ_V={KALMAN_R_SIGMA_V})")
+    print(f"[kalman]   R_model      diag: [{rm_d.min():.2e}, {rm_d.max():.2e}]  "
+          f"(×‖Δu‖^{KALMAN_R_DU_EXPONENT}; median ‖Δu‖={du_med:.3f})")
+    print(f"[kalman]   R_eff@median cond {np.linalg.cond(R):.2e}, "
+          f"diag [{np.diag(R).min():.2e}, {np.diag(R).max():.2e}]")
     print(f"[kalman]   u_scale: [{u_scale.min():.3f}, {u_scale.max():.3f}]")
-    return {"Q": Q, "R": R, "u_scale": u_scale}
+    print(f"[kalman]   train_period_s: {train_period_s:.0f} s")
+    return {"Q_excitation": Q_excitation, "Q_drift": Q_drift,
+            "R_sensor": R_sensor, "R_model": R_model, "R": R,
+            "u_scale": u_scale, "train_period_s": train_period_s}
 
 
 # ── ANN training ─────────────────────────────────────────────────────────────
@@ -1362,9 +1721,6 @@ class _DSO2Observer:
         self._h_analytical: List[np.ndarray] = []
         self._y:            List[np.ndarray] = []
         self._u:            List[np.ndarray] = []
-        self._q_load:       List[np.ndarray] = []   # per-DER bus-load Q (net-input study)
-        self._der_load_idx: Optional[List[np.ndarray]] = None  # load rows per DER (latched)
-        self._der_bus_cnt:  Optional[np.ndarray] = None        # #DERs sharing each DER's bus
         self._n_q_trafo:    int = 0   # set on first call from _H_mappings
 
     def __call__(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
@@ -1396,10 +1752,6 @@ class _DSO2Observer:
         except RuntimeError:
             y = u = None
 
-        # Per-DER load Q at the DER bus: q_DER - q_load shares the same H column,
-        # so this lets an estimator use the net bus injection as the regressor.
-        q_load = self._capture_q_load(dso_ctrl) if self._combined_net is not None else None
-
         if h_used is not None and y is not None:
             self._h_used.append(h_used)
             self._h_predicted.append(h_for_next if h_for_next is not None else h_used.copy())
@@ -1407,29 +1759,8 @@ class _DSO2Observer:
                 self._h_analytical.append(h_analytical)
             self._y.append(y)
             self._u.append(u)
-            if q_load is not None:
-                self._q_load.append(q_load)
 
         return h_predicted  # None keeps _H_cache unchanged (observer is transparent)
-
-    def _capture_q_load(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
-        """Per-DER load Q (Mvar) at each DER's bus, split across co-bus DERs.
-
-        ``q_load[i] = (Σ res_load.q_mvar at DER i's bus) / (#DERs at that bus)``.
-        Co-bus DERs share an H column, so the per-DER split sums back to the bus
-        total and ``q_DER - q_load`` is the well-defined net bus injection.
-        """
-        net = self._combined_net
-        if not hasattr(net, "res_load") or len(net.res_load) == 0:
-            return None
-        if self._der_load_idx is None:                      # latch mapping once
-            der_idx = list(dso_ctrl.config.der_indices)
-            der_bus = np.array([int(net.sgen.at[s, "bus"]) for s in der_idx])
-            lbus    = net.load["bus"].astype(int).values
-            self._der_load_idx = [np.where(lbus == b)[0] for b in der_bus]
-            self._der_bus_cnt  = np.array([int(np.sum(der_bus == b)) for b in der_bus], float)
-        ql = np.nan_to_num(net.res_load["q_mvar"].values)   # shed loads -> NaN -> 0
-        return np.array([ql[idx].sum() for idx in self._der_load_idx], float) / self._der_bus_cnt
 
     def save(self, path: str) -> None:
         """Save recorded arrays to a compressed ``.npz`` file."""
@@ -1450,8 +1781,6 @@ class _DSO2Observer:
             else:
                 print(f"[observer] h_analytical has {len(self._h_analytical)} entries "
                       f"vs {len(self._h_used)} steps — skipping (shape mismatch).")
-        if self._q_load and len(self._q_load) == len(self._h_used):
-            arrays["q_load"] = np.stack(self._q_load)
         if self._n_q_trafo > 0:
             arrays["n_q_trafo"] = np.array(self._n_q_trafo)
         np.savez_compressed(path, **arrays)
@@ -1570,27 +1899,36 @@ def _setup_h_predictor(cfg: MultiTSOConfig, state: Dict[str, Any]) -> Optional["
     # installed below sits on the outside.
     if getattr(cfg, "dso_pe_noise_enabled", False):
         rng = np.random.default_rng(cfg.dso_pe_noise_seed)
+        pe_mode = getattr(cfg, "dso_pe_mode", "white")
+        pe_amp  = float(getattr(cfg, "dso_pe_amplitude_mvar", 0.0))
         install_pe_noise(
             dso_ctrl,
             std_mvar=cfg.dso_pe_noise_std_mvar,
             rng=rng,
+            mode=pe_mode,
+            amplitude_mvar=pe_amp,
         )
-        print(f"[PE] installed gaussian noise std={cfg.dso_pe_noise_std_mvar} Mvar "
-              f"on {len(dso_ctrl.config.der_indices)} DER Q_cor channels "
-              f"(seed={cfg.dso_pe_noise_seed})")
+        n_der = len(dso_ctrl.config.der_indices)
+        if pe_mode == "orthogonal":
+            print(f"[PE] installed ORTHOGONAL rotating excitation amp={pe_amp} Mvar "
+                  f"on {n_der} DER channels (per-dir std≈{pe_amp/max(n_der,1)**0.5:.3f}, "
+                  f"cycle={n_der} steps, seed={cfg.dso_pe_noise_seed})")
+        else:
+            print(f"[PE] installed WHITE noise std={cfg.dso_pe_noise_std_mvar} Mvar "
+                  f"on {n_der} DER Q_cor channels (seed={cfg.dso_pe_noise_seed})")
 
-    # Scale Kalman parameters to the actual DSO period.
-    # All three defaults were tuned for 10 s steps; rescale proportionally so
-    # wall-clock behaviour is invariant to the chosen period.
-    _BASE_PERIOD_S = 10.0
-    _period_ratio  = float(getattr(cfg, "dso_period_s", _BASE_PERIOD_S)) / _BASE_PERIOD_S
-    _kalman_h_predictor.min_delta_u_norm   = 1.0                            # physical Mvar gate just above the ~0.9 noise floor (noise std 0.25): KF learns on real moves, skips noise-only steps so it freezes post-convergence
-    _kalman_h_predictor.p_min_warmup_steps = 0                              # p_min floor DISABLED: the cold-start gain it held high was injecting noise into the over-actuated null space (validated: drift 0.42->0.14 frozen)
-    _kalman_h_predictor.lam                = KALMAN_LAM                     # fixed (not period-scaled) for run-to-run comparability
-    print(f"[kalman] period_ratio={_period_ratio:.2f}  "
-          f"min_du={_kalman_h_predictor.min_delta_u_norm:.4f}  "
-          f"warmup={_kalman_h_predictor.p_min_warmup_steps} steps  "
-          f"lam={_kalman_h_predictor.lam:.5f} (fixed KALMAN_LAM)")
+    # Kalman runtime knobs.  The two-term Q (excitation + always-on drift) makes
+    # the old keep-alive hacks (forgetting factor, prior anchor, P floor/ceiling,
+    # dither subtraction) unnecessary, so only two knobs remain.
+    _kalman_h_predictor.min_delta_u_norm = 0.0              # update gate (0 = update on every step; raise to skip noise-only steps)
+    _kalman_h_predictor.q_scale          = KALMAN_Q_SCALE   # multiplier on the excitation term (1.0 = as trained)
+    _kalman_h_predictor.r_model_scale    = KALMAN_R_MODEL_SCALE  # multiplier on the ‖Δu‖^p model-error term of R (0 = fixed R_sensor)
+    # Deployment cadence: Q_drift is rescaled from the training period to this at load.
+    _kalman_h_predictor.deploy_period_s  = float(getattr(cfg, "dso_period_s", 0.0)) or None
+    print(f"[kalman] min_du={_kalman_h_predictor.min_delta_u_norm:.4f}  "
+          f"q_scale={_kalman_h_predictor.q_scale}  r_model_scale={_kalman_h_predictor.r_model_scale}  "
+          f"deploy_period_s={_kalman_h_predictor.deploy_period_s}  "
+          f"(Q = q_scale·s²·Q_excitation + Q_drift;  R = R_sensor + r_model_scale·‖Δu‖^p·R_model)")
 
     # Inject the live combined net into the numerical oracle so it can
     # finite-difference the true plant sensitivity at each step.
@@ -1644,8 +1982,14 @@ def run() -> List[MultiTSOIterationRecord]:
     print(f"  q_pcc_setpoints={cfg.q_pcc_setpoints_mvar_per_dso}")
     print(f"  n_total_s={cfg.n_total_s:.0f}, dso_period_s={cfg.dso_period_s:.0f}")
     print(f"  H_PREDICTOR_MODE={H_PREDICTOR_MODE!r}  H_PREDICTOR_ROWS={H_PREDICTOR_ROWS!r}")
+    print(f"  KALMAN_Q_SCALE={KALMAN_Q_SCALE}  "
+          f"(process noise = q_scale·s²·Q_excitation + Q_drift; "
+          f"Kalman estimates DER columns only, OLTC columns kept analytical)")
     print(f"  DSO2_INTERFACE_MODE={DSO2_INTERFACE_MODE!r}  "
           f"(dso2_interface_slack={cfg.dso2_interface_slack})")
+    _pe_desc = (f"orthogonal rotating, amp={PE_AMPLITUDE_MVAR} Mvar"
+                if PE_MODE == "orthogonal" else f"white, std={PE_WHITE_STD_MVAR} Mvar")
+    print(f"  PE_MODE={PE_MODE!r}  ({_pe_desc})")
     if FROZEN_OP_POINT:
         print(f"  FROZEN_OP_POINT=True  frozen_at={FROZEN_OP_TIMESTAMP:%Y-%m-%d %H:%M}, contingencies=off")
     else:

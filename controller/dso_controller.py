@@ -1598,6 +1598,7 @@ class DSOController(BaseOFOController):
         # Apply T_prime (w-shift transform) with the fresh Jacobian.
         if (
             not self.config.ofo_in_v_ref_mode
+            and self.config.apply_qv_h_transform     # ← match the controller / secant paths
             and unique_buses
         ):
             # Temporarily swap sensitivities so _compute_w_shift_transform_T_prime

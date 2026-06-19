@@ -79,7 +79,9 @@ DSO_PERIOD_S      = 1          # set to match dso_period_s in make_base_config
 # single-process run (N_OP=60, K_PERTURB=15, SEED=42).
 N_OP              = int(os.environ.get("MC_N_OP", 60))        # op-point timestamps (per shard)
 K_PERTURB         = int(os.environ.get("MC_K_PERTURB", 15))   # random-walk steps per op-point
-TARGET_STEP_MVAR  = 3.4        # decoupled deployment per-step ||delta_u_DER|| (mean, post-transient)
+TARGET_STEP_MVAR  = 1.0        # decoupled deployment per-step ||delta_u_DER||: measured 0.95 Mvar
+                               # (changing, PE=0.25, 2026-06-17). Was 3.4 (stale June-3 calib, deep in
+                               # the nonlinear regime -> secant ~0.5 off the Jacobian; see frozen PE sweep).
 DU_MIN_NORM  = 0.005      # skip residual if norm(delta_u) < this (scaled for 1s steps)
 SEED         = int(os.environ.get("MC_SEED", 42))            # distinct seeds -> distinct op-points per shard
 # Shard mode: when MC_PARTIAL_OUT is set, save a partial npz (records + within-walk
@@ -106,7 +108,7 @@ print("=" * 72)
 exp003.H_INIT_BIAS_STD = 0.0
 exp003.FROZEN_OP_POINT = False
 
-cfg_init = exp003.make_base_config()
+cfg_init = exp003.make_config()   # was make_base_config() (renamed; old name no longer exists)
 cfg_init.n_total_s            = cfg_init.dso_period_s   # exactly one step
 cfg_init.live_plot_controller = False
 cfg_init.live_plot_cascade    = False

@@ -1,49 +1,67 @@
-import os, sys, glob, importlib, subprocess, traceback
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Turn-key comparison of the H-predictor modes (Constant H / Kalman / ANN),
+each in its OWN subprocess (parallel, and isolated -- no in-process state
+leakage between modes), then a timestamped multi-panel figure that pops up.
+
+    python experiments/_run_comparison.py            # changing scenario (default)
+    python experiments/_run_comparison.py frozen      # frozen-OP scenario
+
+If TensorFlow is unavailable the `ann` leg just exits non-zero and is skipped;
+drop it from MODES to silence it.  .venv312.
+"""
+from __future__ import annotations
+import os, sys, glob, importlib, subprocess
 from datetime import datetime
-_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+_here = os.path.dirname(os.path.abspath(__file__)); _root = os.path.dirname(_here)
 os.chdir(_root); sys.path.insert(0, _root)
-exp = importlib.import_module("experiments.003_S_DSO_CIGRE_2026")
-ana = importlib.import_module("experiments.003_analysis")
-ana.plot_comparison = lambda *a, **k: None            # silence per-run pop-ups
 RES = os.path.join(_root, "results", "003_cigre_2026")
+LEG = os.path.join(_here, "_run_cmp_leg.py")
 
-MODES  = {"identity": "Constant H", "kalman": "Kalman", "ann": "ANN"}
-exp.H_INIT_BIAS_STD, exp.H_INIT_BIAS_SEED = 0.10, 0
-exp.H_PREDICTOR_ROWS, exp.FROZEN_OP_POINT = "q_trafo+v", False
+SCEN  = sys.argv[1] if len(sys.argv) > 1 else "changing"
+MODES = {"identity": "Constant H", "kalman": "Kalman", "ann": "ANN"}
 
-_orig = exp.make_config                                # <-- current name, NOT make_base_config
-def _cfg(_o=_orig):
-    cfg = _o()
-    cfg.n_total_s, cfg.dso_period_s = 2*3600.0, 60.0   # 120 steps (~5 min/mode)
-    cfg.start_time, cfg.contingencies = datetime(2016, 9, 7, 6, 0), []
-    return cfg
-exp.make_config = _cfg
+print(f"launching {len(MODES)} modes in parallel ({SCEN}): {list(MODES)}")
+env = dict(os.environ, PYTHONIOENCODING="utf-8")
+procs = {m: subprocess.Popen([sys.executable, LEG, m, SCEN], env=env) for m in MODES}
+for m, p in procs.items():
+    p.wait()
+    print(f"  {m:9s} exited ({p.returncode})")
+
+ana = importlib.import_module("experiments.003_analysis")
+ana.plot_comparison = lambda *a, **k: None
 
 runs = []
-for mode, label in MODES.items():
-    exp.H_PREDICTOR_MODE = mode
-    before = set(glob.glob(os.path.join(RES, "*.pkl")))
-    try:
-        exp.run()
-    except Exception:
-        print(f"[cmp] mode={mode} FAILED (skipping):\n{traceback.format_exc()}")
-        continue
-    new = sorted(set(glob.glob(os.path.join(RES, "*.pkl"))) - before, key=os.path.getmtime)
-    if not new: continue
-    pkl  = new[-1]
-    side = os.path.join(RES, os.path.basename(pkl).split("_")[0] + "_dso2_ctrl.npz")
-    runs.append((pkl, side if os.path.exists(side) else None, label))
+for m, label in MODES.items():
+    pkl  = os.path.join(RES, f"cmp_{SCEN}_{m}.pkl")
+    side = os.path.join(RES, f"cmp_{SCEN}_{m}.npz")
+    if os.path.exists(pkl):
+        runs.append((pkl, side if os.path.exists(side) else None, label))
+    else:
+        print(f"  [cmp] {m} produced no pkl -- skipped")
 
 if not runs:
-    print("[cmp] no successful runs — nothing to plot."); sys.exit(1)
+    print("[cmp] no successful runs -- nothing to plot."); sys.exit(1)
+
+import numpy as np
+print(f"\n  === {SCEN} ===")
+print(f"  {'mode':12s}{'H-err q_trafo fin20':>22s}{'one-step skill':>16s}")
+for pkl, side, label in runs:
+    if side is None:
+        print(f"  {label:12s}{'(no sidecar)':>22s}"); continue
+    d = np.load(side)
+    he = ana.h_analytical_error(d); r = ana.one_step_qtrafo_error(d)
+    hq = float(np.mean(he["relative_q_trafo"][-20:])) if he and "relative_q_trafo" in he else float("nan")
+    sk = f"{r['skill']:+.3f}" if r else "n/a"
+    print(f"  {label:12s}{hq:>22.3f}{sk:>16s}")
 
 ts  = datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
-png = os.path.join(RES, f"comparison_changing_{ts}.png")
+png = os.path.join(RES, f"comparison_{SCEN}_{ts}.png")
 ana.plot_multi_comparison(runs, save_path=png)
 print("done ->", png)
 
-# pop the figure up in a window
 try:
-    os.startfile(png)                                   # Windows default image viewer
-except AttributeError:                                  # macOS / Linux fallback
+    os.startfile(png)
+except AttributeError:
     subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", png], check=False)

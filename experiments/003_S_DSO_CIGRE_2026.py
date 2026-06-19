@@ -179,7 +179,7 @@ _compare = importlib.import_module("experiments.002_M_TSO_M_DSO_COMPARE")
 #  profiles constant for the entire run.  Contingency events are suppressed.
 #  PE noise is forced on so estimators remain persistently excited.
 # ---------------------------------------------------------------------------
-H_PREDICTOR_MODE: str = "identity"
+H_PREDICTOR_MODE: str = "kalman"
 H_PREDICTOR_ROWS: str = "q_trafo+v"   # estimate Q_trafo + voltage rows (I_line rows kept analytical)
 # Kalman forgetting factor, applied directly (NOT period-scaled) so the estimator
 # behaves identically across DSO periods and is easy to compare run-to-run.
@@ -1362,6 +1362,9 @@ class _DSO2Observer:
         self._h_analytical: List[np.ndarray] = []
         self._y:            List[np.ndarray] = []
         self._u:            List[np.ndarray] = []
+        self._q_load:       List[np.ndarray] = []   # per-DER bus-load Q (net-input study)
+        self._der_load_idx: Optional[List[np.ndarray]] = None  # load rows per DER (latched)
+        self._der_bus_cnt:  Optional[np.ndarray] = None        # #DERs sharing each DER's bus
         self._n_q_trafo:    int = 0   # set on first call from _H_mappings
 
     def __call__(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
@@ -1393,6 +1396,10 @@ class _DSO2Observer:
         except RuntimeError:
             y = u = None
 
+        # Per-DER load Q at the DER bus: q_DER - q_load shares the same H column,
+        # so this lets an estimator use the net bus injection as the regressor.
+        q_load = self._capture_q_load(dso_ctrl) if self._combined_net is not None else None
+
         if h_used is not None and y is not None:
             self._h_used.append(h_used)
             self._h_predicted.append(h_for_next if h_for_next is not None else h_used.copy())
@@ -1400,8 +1407,29 @@ class _DSO2Observer:
                 self._h_analytical.append(h_analytical)
             self._y.append(y)
             self._u.append(u)
+            if q_load is not None:
+                self._q_load.append(q_load)
 
         return h_predicted  # None keeps _H_cache unchanged (observer is transparent)
+
+    def _capture_q_load(self, dso_ctrl: "DSOController") -> Optional[np.ndarray]:
+        """Per-DER load Q (Mvar) at each DER's bus, split across co-bus DERs.
+
+        ``q_load[i] = (Σ res_load.q_mvar at DER i's bus) / (#DERs at that bus)``.
+        Co-bus DERs share an H column, so the per-DER split sums back to the bus
+        total and ``q_DER - q_load`` is the well-defined net bus injection.
+        """
+        net = self._combined_net
+        if not hasattr(net, "res_load") or len(net.res_load) == 0:
+            return None
+        if self._der_load_idx is None:                      # latch mapping once
+            der_idx = list(dso_ctrl.config.der_indices)
+            der_bus = np.array([int(net.sgen.at[s, "bus"]) for s in der_idx])
+            lbus    = net.load["bus"].astype(int).values
+            self._der_load_idx = [np.where(lbus == b)[0] for b in der_bus]
+            self._der_bus_cnt  = np.array([int(np.sum(der_bus == b)) for b in der_bus], float)
+        ql = np.nan_to_num(net.res_load["q_mvar"].values)   # shed loads -> NaN -> 0
+        return np.array([ql[idx].sum() for idx in self._der_load_idx], float) / self._der_bus_cnt
 
     def save(self, path: str) -> None:
         """Save recorded arrays to a compressed ``.npz`` file."""
@@ -1422,6 +1450,8 @@ class _DSO2Observer:
             else:
                 print(f"[observer] h_analytical has {len(self._h_analytical)} entries "
                       f"vs {len(self._h_used)} steps — skipping (shape mismatch).")
+        if self._q_load and len(self._q_load) == len(self._h_used):
+            arrays["q_load"] = np.stack(self._q_load)
         if self._n_q_trafo > 0:
             arrays["n_q_trafo"] = np.array(self._n_q_trafo)
         np.savez_compressed(path, **arrays)

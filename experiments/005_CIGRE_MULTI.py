@@ -120,10 +120,10 @@ def make_cigre_config() -> MultiTSOConfig:
     and the TS-OFO every 6th step (``tso_period_s = 360`` s).
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 2,      # 36-hour (2160-min) simulation
+        n_total_s=60.0 * 60 * 5,      # 36-hour (2160-min) simulation
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
         dso_period_s=10.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
-        g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
+        g_v=2E5,                      # TSO voltage tracking; drives PCC Q dispatch
         g_q=200,                      # DSO Q-tracking
         tso_g_q_tie=0,
         tso_g_res_sg=0,
@@ -156,8 +156,8 @@ def make_cigre_config() -> MultiTSOConfig:
         sensitivity_update_interval=1E6,
         verbose=1,
         # Live plots OFF for the batch sweep (see module docstring).
-        live_plot_controller=True,
-        live_plot_cascade=True,
+        live_plot_controller=False,
+        live_plot_cascade=False,
         live_plot_system=False,
         live_plot_tracking=False,
         local_sensitivities_tso=True,
@@ -184,31 +184,31 @@ def make_cigre_config() -> MultiTSOConfig:
 
 #: Per-variant control-mode overrides (mirror 002_M_TSO_M_DSO_COMPARE.SCENARIOS).
 VARIANTS: Dict[str, Dict[str, Any]] = {
-    # "V1": dict(  # 002 "L0" -- TS Q(V), STS cos phi = 1
-    #     tso_mode="local", tso_local_mode="qv",
-    #     dso_mode="local", local_der_mode="cos_phi_1",
-    #     tso_q_mode="qv", dso_q_mode="cosphi",
-    #     tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
-    # ),
-    # "V2": dict(  # 002 "L1" -- TS Q(V), STS local Q(V)
-    #     tso_mode="local", tso_local_mode="qv",
-    #     dso_mode="local", local_der_mode="qv",
-    #     tso_q_mode="qv", dso_q_mode="qv",
-    #     tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
-    #     dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
-    # ),
-    # "V3": dict(  # 002 "T1" -- TS-OFO, STS local Q(V); g_w_pcc pin
-    #     tso_mode="ofo",
-    #     dso_mode="local", local_der_mode="qv",
-    #     tso_q_mode="qv", dso_q_mode="qv",
-    #     tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
-    #     dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
-    #     g_w_pcc=1.0e8,
-    # ),
-    # "V4": dict(  # 002 "C" -- cascaded TS-OFO + STS-OFO (proposed)
-    #     tso_mode="ofo",
-    #     dso_mode="ofo",
-    # ),
+    "V1": dict(  # 002 "L0" -- TS Q(V), STS cos phi = 1
+        tso_mode="local", tso_local_mode="qv",
+        dso_mode="local", local_der_mode="cos_phi_1",
+        tso_q_mode="qv", dso_q_mode="cosphi",
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+    ),
+    "V2": dict(  # 002 "L1" -- TS Q(V), STS local Q(V)
+        tso_mode="local", tso_local_mode="qv",
+        dso_mode="local", local_der_mode="qv",
+        tso_q_mode="qv", dso_q_mode="qv",
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
+    ),
+    "V3": dict(  # 002 "T1" -- TS-OFO, STS local Q(V); g_w_pcc pin
+        tso_mode="ofo",
+        dso_mode="local", local_der_mode="qv",
+        tso_q_mode="qv", dso_q_mode="qv",
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
+        g_w_pcc=1.0e8,
+    ),
+    "V4": dict(  # 002 "C" -- cascaded TS-OFO + STS-OFO (proposed)
+        tso_mode="ofo",
+        dso_mode="ofo",
+    ),
     "V5": dict(  # single centralized OFO -- best-case upper-bound reference
         control_scope="central",
         # tso_mode='ofo' keeps the machine 2W OLTCs free for the central MIQP
@@ -220,19 +220,18 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
         tso_q_mode="qv", dso_q_mode="qv",
         # Voltage-tracking weights: g_v (TN) inherited from make_cigre_config
         # (3e5); central_dso_g_v (HV) mirrors the cascaded dso_g_v (2e4).
-        g_v=3E5,  # TSO voltage tracking; drives PCC Q dispatch
+        g_v=3.5E5,  # TSO voltage tracking; drives PCC Q dispatch
         central_dso_g_v=10000.0,
         # Fire the single controller every step (best-case cadence: V5 also
         # replaces the fast STS-OFO layer).  None -> dt_s.  (tso_period_s is
         # inert in central mode; the per-zone TSO step is skipped.)
-        central_period_s=10,
-        g_w_tso_oltc=300,
-        g_w_dso_der=500,
+        central_period_s=180,
+        g_w_tso_oltc=250,
+        g_w_dso_der=400,
         g_w_dso_oltc=25,
         local_sensitivities_tso=False,
         local_sensitivities_dso=False,
-        #tso_g_res_sg=2E6,
-        #g_v=3.5E5,
+        g_w_gen=4e7,
     ),
 }
 

@@ -227,28 +227,29 @@ PROFILE_END_USABLE = datetime(2016, 12, 31, 18, 0)
 def make_cigre_config() -> MultiTSOConfig:
     """Shared run configuration for all variants (identical to 005)."""
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 5,      # 300-min simulation
-        tso_period_s=60.0 * 3,        # TS-OFO every 3 min
-        dso_period_s=10.0,            # STS-OFO each step (dt_s=60 >= 10)
-        g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
-        g_q=300,                      # DSO Q-tracking
-        tso_g_q_tie=1,
+        n_total_s=60.0 * 60 * 5,  # 36-hour (2160-min) simulation
+        tso_period_s=60.0 * 3,  # TS-OFO every 3 min
+        dso_period_s=10.0,  # DSO-OFO each plant step (dt_s=60 >= 10)
+        g_v=2E5,  # TSO voltage tracking; drives PCC Q dispatch
+        g_q=200,  # DSO Q-tracking
+        tso_g_q_tie=0,
+        tso_g_res_sg=0,
         # ── DSO objective tuning ──
-        dso_g_v=15000.0,
-        dso_g_qi=0,
-        dso_lambda_qi=0.95,
+        dso_g_v=15000.0,  # reduced to avoid competing with Q tracking
+        dso_g_qi=0,  # integral Q-tracking (0 = off)
+        dso_lambda_qi=0.95,  # leaky integrator decay
         dso_q_integral_max_mvar=200.0,
-        dso_gamma_oltc_q=0.0,
-        # ── TSO weights ──
-        g_w_der=20,
+        dso_gamma_oltc_q=0.0,  # DER-primary, OLTC-backup
+        # ── TSO weights (w-shift closed-loop curvature) ──
+        g_w_der=100,
         g_w_gen=5e7,
-        g_w_pcc=150,
+        g_w_pcc=300,
         g_w_tso_oltc=100,
         install_tso_tertiary_shunts=False,
-        g_w_tso_shunt=10000,
+        g_w_tso_shunt=12000,
         # ── DSO weights ──
         g_w_dso_der=1000,
-        g_w_dso_oltc=30,
+        g_w_dso_oltc=25,
         # ── Local-mode OLTC tap-rate limits ──
         local_oltc_max_step_per_dt=1,
         oltc_cooldown_s_mt=180.0,
@@ -316,10 +317,13 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
         dso_mode="local",
         tso_q_mode="qv", dso_q_mode="qv",
         central_dso_g_v=10000.0,
-        central_period_s=10,
-        g_w_tso_oltc=200,
-        g_w_dso_der=100,
+        central_period_s=180,
+        g_w_tso_oltc=250,
+        g_w_dso_der=400,
         g_w_dso_oltc=25,
+        local_sensitivities_tso=False,
+        local_sensitivities_dso=False,
+        g_w_gen=5e7,
     ),
 }
 
@@ -1614,7 +1618,7 @@ def main() -> None:
                     help="base seed; scenario seed = seed + attempt")
     ap.add_argument("--resume", action="store_true",
                     help="continue an interrupted batch (skip already-tried seeds)")
-    ap.add_argument("--jobs", type=int, default=20,
+    ap.add_argument("--jobs", type=int, default=10,
                     help="parallel worker processes over scenarios. The work is "
                          "memory-bandwidth bound (sparse power flow), not CPU- or "
                          "solver-bound, so throughput plateaus ~2-2.3x and peaks "

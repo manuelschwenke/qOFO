@@ -757,12 +757,17 @@ def run_multi_tso_dso(
         der_indices = list(hv.sgen_indices)
         v_buses = list(hv.bus_indices)
 
-        # HV lines — filter to PQ-bus endpoints only (same as TN lines)
-        hv_lines = [
-            li for li in hv.line_indices
-            if int(net.line.at[li, "from_bus"]) not in pv_and_slack_buses_run
-            and int(net.line.at[li, "to_bus"]) not in pv_and_slack_buses_run
-        ]
+        # HV lines — filter to PQ-bus endpoints only (same as TN lines).
+        # Dropped entirely when config.dso_monitor_currents is False, so H
+        # carries no ∂I/∂u rows and the MIQP enforces no current limits.
+        if config.dso_monitor_currents:
+            hv_lines = [
+                li for li in hv.line_indices
+                if int(net.line.at[li, "from_bus"]) not in pv_and_slack_buses_run
+                and int(net.line.at[li, "to_bus"]) not in pv_and_slack_buses_run
+            ]
+        else:
+            hv_lines = []
         hv_line_max = [float(net.line.at[li, "max_i_ka"]) for li in hv_lines]
 
         # G_w diagonal: [Q_cor_DER | OLTC_tap].  Q_cor units are Mvar,
@@ -879,6 +884,12 @@ def run_multi_tso_dso(
     last_dso_q_set_mvar: Dict[str, Optional[NDArray]] = {
         dso_id: None for dso_id in dso_ids
     }
+    # RNG for the optional bounded-random-walk interface-Q setpoint
+    # (config.q_pcc_setpoint_random_enabled).  Seeded so the series is
+    # identical across compared runs; the walk state is held in
+    # ``last_dso_q_set_mvar`` (starts at the base vector on first delivery).
+    _q_set_rng = np.random.default_rng(
+        int(getattr(config, "q_pcc_setpoint_random_seed", 0)))
 
     # =========================================================================
     # STEP 8: Initialise MultiTSOCoordinator
@@ -2096,7 +2107,7 @@ def run_multi_tso_dso(
             # the OFO sees no gradient on this column (most likely
             # cause: DER absorbed the V-tracking signal).  If sigma is
             # zero AND the new u is at a bound, the bound is clamping.
-            if verbose >= 1:
+            if verbose >= 2:
                 for z, tso_out in tso_outputs.items():
                     n_der_z = len(zone_defs[z].tso_der_indices)
                     n_pcc_z = len(zone_defs[z].pcc_trafo_indices)
@@ -2343,15 +2354,35 @@ def run_multi_tso_dso(
         # layer purely under local Q(V) control.  Only runs when the TSO
         # OFO setpoint dispatch above is inactive (``_local_tso=True``)
         # AND the runner config supplies a setpoint dictionary.
+        # When the random-walk setpoint is enabled, the target moves every DSO
+        # step (run_dso); otherwise the fixed vector is delivered at TSO cadence.
+        _rand_sp = bool(getattr(config, "q_pcc_setpoint_random_enabled", False))
+        _sp_due  = run_dso if _rand_sp else run_tso
         if (
-            run_tso
+            _sp_due
             and _local_tso
             and config.q_pcc_setpoints_mvar_per_dso
         ):
-            for dso_id, q_vec in config.q_pcc_setpoints_mvar_per_dso.items():
+            for dso_id, q_base in config.q_pcc_setpoints_mvar_per_dso.items():
                 if dso_id not in dso_controllers:
                     continue
                 dso_ctrl_t = dso_controllers[dso_id]
+                base = np.asarray(q_base, dtype=np.float64)
+                if _rand_sp:
+                    # Bounded random walk per trafo: q(k)=clip(q(k-1)+N(0,std),
+                    # base-band, base+band), starting from the base vector.  The
+                    # previous value is the walk state held in last_dso_q_set_mvar.
+                    std  = float(getattr(config, "q_pcc_setpoint_random_std_mvar", 0.0))
+                    band = float(getattr(config, "q_pcc_setpoint_random_band_mvar", 0.0))
+                    prev = last_dso_q_set_mvar.get(dso_id)
+                    if prev is None or len(prev) != len(base):
+                        prev = base.copy()
+                    q_vec = np.clip(
+                        prev + _q_set_rng.normal(0.0, std, size=base.shape),
+                        base - band, base + band,
+                    )
+                else:
+                    q_vec = base
                 msg = SetpointMessage(
                     source_controller_id="exogenous",
                     target_controller_id=dso_id,
@@ -2360,7 +2391,7 @@ def run_multi_tso_dso(
                         dso_ctrl_t.config.interface_trafo_indices,
                         dtype=np.int64,
                     ),
-                    q_setpoints_mvar=np.asarray(q_vec, dtype=np.float64),
+                    q_setpoints_mvar=q_vec.copy(),
                 )
                 dso_ctrl_t.receive_setpoint(msg)
                 rec.dso_q_set_mvar[dso_id] = float(msg.q_setpoints_mvar.sum())

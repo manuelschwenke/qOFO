@@ -244,7 +244,7 @@ KALMAN_R_SIGMA_Q:     float = 0.9    # interface-Q sensor noise std [Mvar]
 KALMAN_R_SIGMA_V:     float = 0.01   # voltage     sensor noise std [p.u.]
 KALMAN_R_DIAGONAL:    bool  = True   # drop noise-free-MC off-diagonal correlations
 KALMAN_R_DU_EXPONENT: float = 2.0    # p in R_eff = R_sensor + scale·‖Δu‖^p·R_model (2 = first-order model error, this plant; 4 = Picallo curvature)
-KALMAN_R_MODEL_SCALE: float = 1.0    # multiplier on the ‖Δu‖^p model-error term (0 = fixed R_sensor)
+KALMAN_R_MODEL_SCALE: float = 0.0    # multiplier on the ‖Δu‖^p model-error term (0 = fixed R_sensor)
 KALMAN_R_MODEL_MIN_DU: float = 0.1   # training guard: skip residuals with ‖Δu‖ < this when fitting R_model (avoids r/‖Δu‖^{p/2} blow-up)
 
 # Step size for the "numerical" oracle's closed-loop finite difference.
@@ -295,7 +295,7 @@ DSO2_INTERFACE_MODE: str = "slack"  # "slack" (decoupled, default) | "coupled"
 #  SHARE the same trained matrices (TARGET_STEP_MVAR=1.0) — flip freely, no
 #  per-mode retrain.  Set PE_MODE="white" to reproduce the pre-orthogonal runs.
 # ---------------------------------------------------------------------------
-PE_MODE: str           = "orthogonal"  # "white" | "orthogonal"
+PE_MODE: str           = "white"  # "white" | "orthogonal"
 PE_AMPLITUDE_MVAR: float = 1.0         # orthogonal-mode rotating-probe amplitude [Mvar]
 PE_WHITE_STD_MVAR: float = 0.3         # white-mode per-channel noise std [Mvar]
 
@@ -407,7 +407,7 @@ def make_config() -> MultiTSOConfig:
     # band -> trafo bounds [40+-band, 20+-band, 80+-band].  Fixed seed so all
     # H-predictor modes in _run_comparison track the identical moving target.
     cfg.q_pcc_setpoint_random_enabled  = True
-    cfg.q_pcc_setpoint_random_std_mvar = 0.5    # per-step walk increment [Mvar]
+    cfg.q_pcc_setpoint_random_std_mvar = 1    # per-step walk increment [Mvar]
     cfg.q_pcc_setpoint_random_band_mvar = 40.0  # per-trafo half-band around base
     cfg.q_pcc_setpoint_random_seed     = 64
 

@@ -90,8 +90,8 @@ def _run_one_mode(mode: str) -> tuple:
     _orig_make_config = exp.make_config
     def _cfg(_o=_orig_make_config):
         cfg = _o()
-        cfg.n_total_s, cfg.dso_period_s = 240 * 60.0, 20.0
-        cfg.start_time = datetime(2016, 9, 7, 8, 0)
+        cfg.n_total_s, cfg.dso_period_s = 12 * 60 * 60.0, 20.0
+        cfg.start_time = datetime(2016, 1, 5, 8, 0)
         cfg.contingencies = [
             # exp.ContingencyEvent(
             #     minute=60, element_type="line", element_index=49, action="trip"

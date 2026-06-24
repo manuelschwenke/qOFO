@@ -120,9 +120,9 @@ STEP_S = float(os.environ.get("MC_DT_S", 20.0))   # collector dt_s + dso_period_
 # (The old value 10 was ~16× too large → R inflated ~280× → gain suppressed.)
 # N_OP / K_PERTURB / SEED accept env overrides so this script can run as one of
 # several PARALLEL SHARDS (see MC_PARTIAL_OUT below).
-N_OP              = int(os.environ.get("MC_N_OP", 30))        # op-point timestamps (per shard)
+N_OP              = int(os.environ.get("MC_N_OP", 60))        # op-point timestamps (per shard)
 K_PERTURB         = int(os.environ.get("MC_K_PERTURB", 15))   # excitation random-walk steps per op-point (Q_excitation)
-K_DRIFT           = int(os.environ.get("MC_K_DRIFT", 30))      # drift-probe steps per op-point (Q_drift): u held fixed, profile time advanced
+K_DRIFT           = int(os.environ.get("MC_K_DRIFT", 60))      # drift-probe steps per op-point (Q_drift): u held fixed, profile time advanced
 TARGET_STEP_MVAR  = 1.0       # deployment per-step ‖Δu_DER‖; matches cfg.dso_pe_amplitude_mvar (orthogonal PE, steady-state ‖Δu‖≈amplitude)
 DU_MIN_NORM  = 0.0      # skip residual if norm(delta_u) < this (0 = keep all within-walk pairs)
 SEED         = int(os.environ.get("MC_SEED", 64))            # distinct seeds -> distinct op-points per shard

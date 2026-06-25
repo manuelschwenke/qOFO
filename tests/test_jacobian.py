@@ -535,16 +535,14 @@ class TestComputeDVDQDer:
         # Verify same sign (both positive - injecting Q raises voltage)
         assert np.sign(analytical) == np.sign(numerical) or np.abs(numerical) < 1e-6
 
-        # Note: The analytical sensitivity is in per-unit and may differ from
-        # the numerical by a factor of sn_mva (100 in this case).
-        # This is a known unit conversion issue to be addressed.
-        # For now, we verify the ratio is consistent with sn_mva scaling.
+        # ``compute_dV_dQ_der`` now returns physical [pu/Mvar] (it divides the
+        # reduced Jacobian by ``sn_mva`` at source), so the analytical value
+        # must agree with the finite-difference sensitivity to within a few %.
         if np.abs(numerical) > 1e-6:
             ratio = analytical / numerical
-            sn_mva = simple_network.sn_mva
-            # Ratio should be approximately sn_mva (with some tolerance)
-            assert 0.5 * sn_mva < ratio < 2.0 * sn_mva, (
-                f"Ratio {ratio} not consistent with sn_mva={sn_mva} scaling"
+            assert 0.95 < ratio < 1.05, (
+                f"analytical {analytical} does not match numerical {numerical} "
+                f"(ratio {ratio}); pu->Mvar conversion may be wrong"
             )
 
     def test_dV_dQ_der_self_sensitivity_positive(self, simple_network):

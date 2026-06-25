@@ -17,6 +17,8 @@ Author: Manuel Schwenke
 Date: 2025-02-05
 """
 
+from typing import Optional
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -127,6 +129,7 @@ class ShuntDisturbanceMessage:
         shunt_bus_indices: NDArray[np.int64],
         shunt_steps: NDArray[np.int64],
         shunt_q_steps_mvar: NDArray[np.float64],
+        shunt_indices: Optional[NDArray[np.int64]] = None,
     ) -> None:
         """
         Initialise a ShuntDisturbanceMessage.
@@ -142,9 +145,15 @@ class ShuntDisturbanceMessage:
         shunt_bus_indices : NDArray[np.int64]
             Pandapower bus indices of the shunts that changed step.
         shunt_steps : NDArray[np.int64]
-            Post-switch states (e.g. ``{-1, 0, +1}`` for bipolar).
+            Post-switch states (e.g. ``{-1, 0, +1}`` for bipolar, or
+            ``{0 … N}`` for an MSC / MSR lattice).
         shunt_q_steps_mvar : NDArray[np.float64]
             Rated Q per step at V = 1 pu [Mvar].
+        shunt_indices : NDArray[np.int64], optional
+            Pandapower ``net.shunt`` indices of the changed devices (parallel
+            to ``shunt_bus_indices``).  Required to disambiguate when a single
+            tertiary bus hosts more than one bank (e.g. an MSC and an MSR);
+            ``None`` (default) keeps the legacy bus-only lookup.
         """
         self.source_controller_id = source_controller_id
         self.target_controller_id = target_controller_id
@@ -152,6 +161,10 @@ class ShuntDisturbanceMessage:
         self.shunt_bus_indices = np.asarray(shunt_bus_indices, dtype=np.int64)
         self.shunt_steps = np.asarray(shunt_steps, dtype=np.int64)
         self.shunt_q_steps_mvar = np.asarray(shunt_q_steps_mvar, dtype=np.float64)
+        self.shunt_indices = (
+            None if shunt_indices is None
+            else np.asarray(shunt_indices, dtype=np.int64)
+        )
 
     @property
     def n_shunts(self) -> int:

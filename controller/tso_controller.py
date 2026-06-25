@@ -646,6 +646,24 @@ class TSOController(BaseOFOController):
             )
         self.config.v_setpoints_pu = v_setpoints_pu.copy()
 
+    def voltage_curvature_inputs(
+        self,
+    ) -> Optional[Tuple[NDArray[np.float64], NDArray[np.float64]]]:
+        """Voltage rows of H and per-bus ``g_v`` for curvature analysis.
+
+        TSO output ordering is ``[ V_bus | Q_PCC | I_line | Q_gen | Q_tie ]``,
+        so the voltage block is the leading ``n_v`` rows.  ``g_v`` is the
+        scalar :attr:`TSOControllerConfig.g_v` replicated per bus.  See
+        :meth:`BaseOFOController.voltage_curvature_inputs`.
+        """
+        n_v = len(self.config.voltage_bus_indices)
+        if n_v == 0:
+            return None
+        H = self._expand_H_to_der_level(self._build_sensitivity_matrix())
+        H_v = np.ascontiguousarray(H[:n_v, :], dtype=np.float64)
+        g_v_vec = np.full(n_v, float(self.config.g_v), dtype=np.float64)
+        return H_v, g_v_vec
+
     # =========================================================================
     # Implementation of abstract methods
     # =========================================================================
@@ -1161,6 +1179,119 @@ class TSOController(BaseOFOController):
 
         return y_lower, y_upper
 
+    def _compute_output_gradient(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """Output-space objective gradient ``∇_y f`` for this TSO zone.
+
+        Returns the gradient of the TSO objective with respect to the *outputs*
+        ``y``, in the canonical output ordering ``[V | Q_PCC | I | Q_gen | Q_tie]``
+        (same ordering as :meth:`_extract_outputs` and the rows of
+        :meth:`_build_sensitivity_matrix`).  The control-space gradient used by
+        the MIQP is recovered by projecting through the sensitivity matrix,
+        ``∇_u f = (∂y/∂u)ᵀ · ∇_y f`` (plus the direct DER-reserve term, which
+        acts on a control variable, not an output).
+
+        This is the SINGLE source of the objective gradient: the switched-shunt
+        integrator (:mod:`controller.shunt_integrator`) dots this vector with a
+        bank's boundary sensitivity column ``h_H`` to obtain ``g_H = h_Hᵀ ∇_y f``,
+        so the integrator follows literally the same objective ``f`` as the rest
+        of the TSO loop.  The consistency between this vector and
+        :meth:`_compute_objective_gradient` is pinned by
+        ``tests/test_tso_output_gradient.py``.
+
+        Per-block definitions (zero where the corresponding term is inactive):
+
+        * ``V``     : ``2 · g_v · (V − V_set)``                   (voltage tracking)
+        * ``Q_PCC`` : ``2 · g_q_tso · (Q_PCC − Q_PCC,set)``       (interface-Q tracking)
+        * ``I``     : ``0``                                       (current is a constraint, not an objective term)
+        * ``Q_gen`` : ``2 · g_res_sg · (Q_gen − Q_mid)/Q_half²``  (SG reactive-reserve centring)
+        * ``Q_tie`` : ``2 · g_q_tie · (Q_tie − Q_tie,set)``       (tie-line-Q tracking)
+
+        NOTE: the DER reactive-reserve term (``g_res_der``) is intentionally NOT
+        included here — ``Q_DER`` is a direct control variable, so that term
+        lands straight on the control gradient in
+        :meth:`_compute_objective_gradient`, not on an output.
+        """
+        n_v = len(self.config.voltage_bus_indices)
+        n_pcc = len(self.config.pcc_trafo_indices)
+        n_i = len(self.config.current_line_indices)
+        n_gen = len(self.config.gen_indices)
+        n_tie = len(self.config.tie_line_indices)
+
+        grad_v = np.zeros(n_v, dtype=np.float64)
+        grad_pcc = np.zeros(n_pcc, dtype=np.float64)
+        grad_i = np.zeros(n_i, dtype=np.float64)
+        grad_gen = np.zeros(n_gen, dtype=np.float64)
+        grad_tie = np.zeros(n_tie, dtype=np.float64)
+
+        mapping = self.config.der_mapping
+        n_der_for_u = mapping.n_der if mapping is not None else len(self.config.der_indices)
+
+        # --- Voltage-schedule tracking ------------------------------------
+        if self.config.v_setpoints_pu is not None:
+            v_current = np.zeros(n_v)
+            for j, bus_idx in enumerate(self.config.voltage_bus_indices):
+                meas_idx = np.where(measurement.bus_indices == bus_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(f"Bus {bus_idx} not found in measurement")
+                v_current[j] = measurement.voltage_magnitudes_pu[meas_idx[0]]
+            grad_v = 2.0 * self.config.g_v * (v_current - self.config.v_setpoints_pu)
+
+        # --- Q_PCC tracking ------------------------------------------------
+        if n_pcc > 0 and self.config.g_q_tso != 0.0:
+            q_pcc_meas = self._extract_trafo_reactive_power(measurement)
+            if self._u_current is not None:
+                q_pcc_set = self._u_current[n_der_for_u:n_der_for_u + n_pcc]
+            else:
+                q_pcc_set = q_pcc_meas  # zero error on first call
+            grad_pcc = 2.0 * self.config.g_q_tso * (q_pcc_meas - q_pcc_set)
+
+        # --- Q_tie tracking ------------------------------------------------
+        if n_tie > 0 and self.config.g_q_tie != 0.0:
+            q_tie_meas = np.zeros(n_tie, dtype=np.float64)
+            for k, tie_idx in enumerate(self.config.tie_line_indices):
+                meas_idx = np.where(measurement.tie_line_indices == tie_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(
+                        f"Tie line {tie_idx} not found in measurement.tie_line_indices"
+                    )
+                q_tie_meas[k] = float(measurement.tie_line_q_mvar[meas_idx[0]])
+            q_tie_set = (
+                self.config.q_tie_setpoints_mvar
+                if self.config.q_tie_setpoints_mvar is not None
+                else np.zeros(n_tie, dtype=np.float64)
+            )
+            grad_tie = 2.0 * self.config.g_q_tie * (q_tie_meas - q_tie_set)
+
+        # --- SG reactive-reserve centring ---------------------------------
+        if (
+            n_gen > 0
+            and self.config.g_res_sg != 0.0
+            and self.actuator_bounds.gen_params is not None
+            and len(measurement.gen_p_mw) == n_gen
+            and len(measurement.gen_vm_pu) == n_gen
+            and len(measurement.gen_q_mvar) == n_gen
+        ):
+            _RES_HALF_EPS = 1e-6
+            q_min_g, q_max_g = self.actuator_bounds.compute_gen_q_bounds(
+                measurement.gen_p_mw, measurement.gen_vm_pu,
+            )
+            q_mid_g = 0.5 * (q_max_g + q_min_g)
+            q_half_g = 0.5 * (q_max_g - q_min_g)
+            q_gen = np.asarray(measurement.gen_q_mvar, dtype=np.float64)
+            ok_g = q_half_g > _RES_HALF_EPS
+            grad_gen[ok_g] = (
+                2.0 * self.config.g_res_sg
+                * (q_gen[ok_g] - q_mid_g[ok_g]) / (q_half_g[ok_g] ** 2)
+            )
+            for k in range(n_gen):
+                if self._oos_gen_mask[k]:
+                    grad_gen[k] = 0.0
+
+        return np.concatenate([grad_v, grad_pcc, grad_i, grad_gen, grad_tie])
+
     def _compute_objective_gradient(
         self,
         measurement: Measurement,
@@ -1564,6 +1695,12 @@ class TSOController(BaseOFOController):
             or len(self.config.shunt_bus_indices) > 0
         )
         mappings: dict = {}
+
+        # Whether the physical builder emits leading Q_trafo (Q_PCC) rows.
+        # Defined unconditionally (depends only on config) so the V_gen / Q_PCC
+        # column-filling code below is safe even when ``has_physical_inputs`` is
+        # False — e.g. a zone whose only controls are Q_PCC setpoints.
+        has_pcc_rows = pcc_in_trafo or pcc_in_trafo3w
 
         if has_physical_inputs:
             H_physical, mappings = self.sensitivities.build_sensitivity_matrix_H(
@@ -2155,10 +2292,8 @@ class TSOController(BaseOFOController):
                 return None
         else:
             S_VQ = S_VQ_full
-        s_base = float(getattr(net, "sn_mva", 1.0))
-        if s_base > 0:
-            S_VQ = S_VQ / s_base
-
+        # ``compute_dV_dQ_der`` now returns S_VQ in pu_v/Mvar (divides by
+        # ``sn_mva`` internally); no extra base scaling here.
         return compute_w_shift_h_transform(K_diag, S_VQ)
 
     def apply_avt_reset(self, measurement: Measurement) -> None:

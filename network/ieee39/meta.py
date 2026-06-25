@@ -118,6 +118,17 @@ class IEEE39NetworkMeta:
     sub-network).  Used by the experiment runner to populate the right
     ``ZoneDefinition.shunt_bus_indices`` per TSO zone."""
 
+    tso_tertiary_shunt_kinds: Tuple[str, ...] = field(default_factory=tuple)
+    """Device class of each tertiary shunt (parallel to
+    ``tso_tertiary_shunt_indices``): ``"BIPOLAR"`` for the legacy
+    MIQP-dispatched ±1 bank, or ``"MSC"`` / ``"MSR"`` for the
+    integrator-dispatched mechanically switched capacitor / reactor banks."""
+
+    tso_tertiary_shunt_n_levels: Tuple[int, ...] = field(default_factory=tuple)
+    """Number of discrete steps ``N`` of each tertiary shunt (lattice
+    ``ℓ ∈ {0 … N}`` for MSC / MSR; ``1`` for the legacy bipolar bank).
+    Parallel to ``tso_tertiary_shunt_indices``."""
+
     dn_bus_indices: Tuple[int, ...] = field(default_factory=tuple)
     """All 20 kV distribution bus indices."""
 

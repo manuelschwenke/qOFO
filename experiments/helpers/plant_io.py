@@ -264,6 +264,31 @@ def apply_zone_tso_controls(
     return prev_shunt_steps
 
 
+def apply_shunt_commit(
+    net: pp.pandapowerNet,
+    shunt_idx: int,
+    pp_step: int,
+) -> None:
+    """Write a committed switched-shunt step to the plant (ground truth).
+
+    Used by the switched-shunt integrator path: on a bank commit the runner
+    toggles the physical device on the tertiary node here, atomically with the
+    DSO interface-setpoint feedforward and the rank-1 SMW sensitivity refresh
+    (no power flow).  ``shunt_idx`` is the explicit ``net.shunt`` index (not the
+    bus) so that a tertiary hosting both an MSC and an MSR bank is unambiguous.
+
+    Raises
+    ------
+    ValueError
+        If ``shunt_idx`` is not a valid ``net.shunt`` row.
+    """
+    if shunt_idx not in net.shunt.index:
+        raise ValueError(
+            f"apply_shunt_commit: shunt index {shunt_idx} not in net.shunt"
+        )
+    net.shunt.at[int(shunt_idx), "step"] = int(pp_step)
+
+
 def apply_dso_controls(
     net: pp.pandapowerNet,
     dso_cfg: DSOControllerConfig,

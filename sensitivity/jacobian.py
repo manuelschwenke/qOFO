@@ -280,6 +280,7 @@ class JacobianSensitivities:
         self,
         shunt_bus_idx: int,
         new_step: int,
+        shunt_idx: Optional[int] = None,
     ) -> bool:
         """Apply a rank-1 Sherman-Morrison update for a shunt step change.
 
@@ -323,11 +324,21 @@ class JacobianSensitivities:
         ``J_QV`` (= ∂(Q-mismatch)/∂V at the shunt bus) shifts by
         ``ΔJ = +2 * V_pu * q_mvar * Δstep / S_base``.
         """
-        # Locate the shunt row and current step
-        mask = self.net.shunt["bus"] == shunt_bus_idx
-        if not mask.any():
-            return False
-        sh_idx = int(self.net.shunt.index[mask][0])
+        # Locate the shunt row and current step.  When ``shunt_idx`` is given,
+        # target that specific device (a tertiary may host both an MSC and an
+        # MSR), and take its bus as the authoritative one for the PQ-position
+        # and voltage lookups below.  Otherwise fall back to the first shunt at
+        # ``shunt_bus_idx`` (legacy single-bank behaviour).
+        if shunt_idx is not None:
+            if shunt_idx not in self.net.shunt.index:
+                return False
+            sh_idx = int(shunt_idx)
+            shunt_bus_idx = int(self.net.shunt.at[sh_idx, "bus"])
+        else:
+            mask = self.net.shunt["bus"] == shunt_bus_idx
+            if not mask.any():
+                return False
+            sh_idx = int(self.net.shunt.index[mask][0])
         old_step = int(self.net.shunt.at[sh_idx, "step"])
         if int(new_step) == old_step:
             return False
@@ -414,7 +425,8 @@ class JacobianSensitivities:
         -------
         sensitivity_matrix : NDArray[np.float64]
             Matrix of shape (n_obs, n_der) where entry (i,j) is ∂V_i/∂Q_j.
-            Units: [p.u. / Mvar] (depends on network base power).
+            Units: [p.u. / Mvar] (the reduced Jacobian's pu/pu value divided by
+            the system base ``net.sn_mva``).
         observation_bus_mapping : List[int]
             Ordered list of observation bus indices actually included.
         der_bus_mapping : List[int]
@@ -457,7 +469,15 @@ class JacobianSensitivities:
         #  row      dV_1/dQ_1   dV_1/dQ_2   dV_1/dQ_m
         #           dV_2/dQ_1   dV_2/dQ_2   dV_2/dQ_m
         #           dV_n/dQ_1   dV_n/dQ_2   dV_n/dQ_m
-        sensitivity_matrix = self.dV_dQ_reduced[np.ix_(obs_jacobian_rows, der_jacobian_cols)]
+        # ``dV_dQ_reduced`` is ∂V[pu]/∂Q[pu] on the system base ``sn_mva``.
+        # Divide by ``sn_mva`` to return physical ∂V[pu]/∂Q[Mvar], matching the
+        # convention of ``compute_dI_dQ_der`` (which divides) and the per-Mvar
+        # control variables.  (Previously omitted, so callers compensated ad hoc;
+        # the conversion now lives here — see daily_log 2026-06-22.)
+        sensitivity_matrix = (
+            self.dV_dQ_reduced[np.ix_(obs_jacobian_rows, der_jacobian_cols)]
+            / float(self.net.sn_mva)
+        )
 
         return sensitivity_matrix, obs_bus_mapping, der_bus_mapping
 

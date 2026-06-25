@@ -532,6 +532,11 @@ def add_hv_networks(
     *,
     install_tso_tertiary_shunts: bool = True,
     tso_tertiary_shunt_q_mvar: float = 50.0,
+    tso_shunt_kind: str = "bipolar",
+    msc_n_levels: int = 4,
+    msr_n_levels: int = 4,
+    msc_q_step_mvar: float = 50.0,
+    msr_q_step_mvar: float = 50.0,
     verbose: bool = True,
 ) -> IEEE39NetworkMeta:
     """
@@ -668,29 +673,78 @@ def add_hv_networks(
     tso_sh_buses: List[int] = []
     tso_sh_q: List[float] = []
     tso_sh_zone: List[int] = []
+    tso_sh_kind: List[str] = []
+    tso_sh_nlev: List[int] = []
     if install_tso_tertiary_shunts:
+        if tso_shunt_kind not in ("bipolar", "msc_msr"):
+            raise ValueError(
+                f"tso_shunt_kind must be 'bipolar' or 'msc_msr', "
+                f"got {tso_shunt_kind!r}"
+            )
         for hv in hv_nets:
             tert_bus = int(hv.coupling_lv_bus_indices[0])
-            sh = pp.create_shunt(
-                net, bus=tert_bus,
-                q_mvar=float(tso_tertiary_shunt_q_mvar),
-                p_mw=0.0, vn_kv=20.0,
-                step=0, max_step=1,
-                name=f"{hv.net_id}|TSOShunt_Tertiary",
-                in_service=True,
-            )
-            tso_sh_idx.append(int(sh))
-            tso_sh_buses.append(tert_bus)
-            tso_sh_q.append(float(tso_tertiary_shunt_q_mvar))
-            tso_sh_zone.append(int(hv.zone))
+            if tso_shunt_kind == "bipolar":
+                # Legacy MIQP-dispatched bipolar bank (state ∈ {-1, 0, +1}).
+                sh = pp.create_shunt(
+                    net, bus=tert_bus,
+                    q_mvar=float(tso_tertiary_shunt_q_mvar),
+                    p_mw=0.0, vn_kv=20.0,
+                    step=0, max_step=1,
+                    name=f"{hv.net_id}|TSOShunt_Tertiary",
+                    in_service=True,
+                )
+                tso_sh_idx.append(int(sh))
+                tso_sh_buses.append(tert_bus)
+                tso_sh_q.append(float(tso_tertiary_shunt_q_mvar))
+                tso_sh_zone.append(int(hv.zone))
+                tso_sh_kind.append("BIPOLAR")
+                tso_sh_nlev.append(1)
+            else:
+                # Integrator-dispatched MSC (capacitor) + MSR (reactor) banks,
+                # both at the same tertiary bus.  Sign convention follows the
+                # pandapower load convention (see test_pp_bipolar_step):
+                #   res_shunt.q = q_mvar · step · V².
+                #   MSC injects Q (raises V)  -> q_mvar < 0, step ∈ {0 … N_C}
+                #   MSR absorbs Q (lowers V)  -> q_mvar > 0, step ∈ {0 … N_R}
+                # The two banks are distinguished downstream by their net.shunt
+                # index (NOT just the bus), so the SMW refresh and toggle target
+                # the correct device.
+                sh_c = pp.create_shunt(
+                    net, bus=tert_bus,
+                    q_mvar=-float(msc_q_step_mvar),
+                    p_mw=0.0, vn_kv=20.0,
+                    step=0, max_step=int(msc_n_levels),
+                    name=f"{hv.net_id}|TSO_MSC_Tertiary",
+                    in_service=True,
+                )
+                tso_sh_idx.append(int(sh_c))
+                tso_sh_buses.append(tert_bus)
+                tso_sh_q.append(float(msc_q_step_mvar))
+                tso_sh_zone.append(int(hv.zone))
+                tso_sh_kind.append("MSC")
+                tso_sh_nlev.append(int(msc_n_levels))
+
+                sh_r = pp.create_shunt(
+                    net, bus=tert_bus,
+                    q_mvar=+float(msr_q_step_mvar),
+                    p_mw=0.0, vn_kv=20.0,
+                    step=0, max_step=int(msr_n_levels),
+                    name=f"{hv.net_id}|TSO_MSR_Tertiary",
+                    in_service=True,
+                )
+                tso_sh_idx.append(int(sh_r))
+                tso_sh_buses.append(tert_bus)
+                tso_sh_q.append(float(msr_q_step_mvar))
+                tso_sh_zone.append(int(hv.zone))
+                tso_sh_kind.append("MSR")
+                tso_sh_nlev.append(int(msr_n_levels))
         # Defensive: pandapower may declare net.shunt['step'] as uint;
         # bipolar writes need int64 so step = -1 round-trips through pandas.
         if "step" in net.shunt.columns:
             net.shunt["step"] = net.shunt["step"].astype("int64")
         if verbose:
             print(f"[add_hv_networks] Installed {len(tso_sh_idx)} TSO-owned "
-                  f"tertiary shunts ({tso_tertiary_shunt_q_mvar:.1f} Mvar each, "
-                  f"step=0).")
+                  f"tertiary shunts (kind={tso_shunt_kind}).")
 
     # =====================================================================
     # 5. Re-initialise TSO STATCOM Q via temp PV-gens, then verify PF
@@ -812,6 +866,8 @@ def add_hv_networks(
         tso_tertiary_shunt_buses=tuple(tso_sh_buses),
         tso_tertiary_shunt_q_steps_mvar=tuple(tso_sh_q),
         tso_tertiary_shunt_zones=tuple(tso_sh_zone),
+        tso_tertiary_shunt_kinds=tuple(tso_sh_kind),
+        tso_tertiary_shunt_n_levels=tuple(tso_sh_nlev),
         # DN indices cover all HV sub-network elements
         dn_bus_indices=tuple(all_dn_buses),
         dn_line_indices=tuple(all_dn_lines),

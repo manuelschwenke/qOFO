@@ -406,10 +406,24 @@ class DSOController(BaseOFOController):
 
         After the update(s), the H cache is invalidated so the next
         ``step(measurement)`` call rebuilds H from the updated
-        ``dV_dQ_reduced``.  This refreshes the OLTC sensitivities of the
-        3-winding transformer whose tertiary hosts the shunt with the
-        correct shunt-coupling term — restoring an otherwise stale
-        ``∂Q_HV-3W / ∂s_OLTC`` column.
+        ``dV_dQ_reduced`` / ``J_inv``.  Through that updated Jacobian factor
+        the rebuild refreshes the shunt-coupling term in the 3-winding
+        transformer's interface sensitivities — both the DER column
+        (``∂Q_HV-3W / ∂Q_DER`` via ``dV_dQ_reduced``) and the OLTC column
+        (``∂Q_HV-3W / ∂s_OLTC`` via ``J_inv``), restoring otherwise stale
+        columns.
+
+        By design, the operating point ``(V, θ)`` is held fixed: NO power flow
+        is run on a switch.  Consequently the operating-point-dependent branch
+        partials of the 3W model (``∂Q_HV/∂V_hv``, ``∂g/∂τ``, the ``V_pu²``
+        scaling) keep their last full-refresh values; only the linear Jacobian
+        coupling is corrected here.  This is the intended first-order behaviour
+        (controllers never see the plant) — the susceptance change is the
+        dominant term and the rank-1 update captures it exactly.
+
+        For a tertiary that hosts more than one bank (e.g. an MSC and an MSR),
+        the message's ``shunt_indices`` disambiguates which device changed so
+        the SMW reads the correct ``q_mvar`` / step.
 
         The DSO never sees the shunt as a *control variable*; this is
         purely a model-state refresh path.
@@ -427,9 +441,13 @@ class DSOController(BaseOFOController):
                 f"controller ID '{self.controller_id}'"
             )
         any_applied = False
-        for bus, step in zip(message.shunt_bus_indices, message.shunt_steps):
+        sh_indices = message.shunt_indices
+        for k, (bus, step) in enumerate(
+            zip(message.shunt_bus_indices, message.shunt_steps)
+        ):
+            sidx = int(sh_indices[k]) if sh_indices is not None else None
             applied = self.sensitivities.apply_shunt_step_change_smw(
-                int(bus), int(step),
+                int(bus), int(step), shunt_idx=sidx,
             )
             any_applied = any_applied or applied
         if any_applied:
@@ -718,7 +736,37 @@ class DSOController(BaseOFOController):
         if n_shunt > 0:
             out["dso_shunt"] = np.arange(oltc_end, shunt_end, dtype=np.int64)
         return out
-    
+
+    def voltage_curvature_inputs(
+        self,
+    ) -> Optional[Tuple[NDArray[np.float64], NDArray[np.float64]]]:
+        """Voltage rows of H and per-bus ``g_v`` for curvature analysis.
+
+        DSO output ordering is ``[ Q_interface | V_bus | ... ]``, so the
+        voltage block is rows ``[n_interfaces : n_interfaces + n_v]`` (see
+        ``_compute_objective_gradient``).  Returns ``None`` unless a
+        voltage schedule is active with non-zero weight: a DSO whose
+        objective is dominated by interface-Q tracking has no voltage
+        curvature to precondition against, and the *voltage-only*
+        preconditioner (this prototype) must skip it rather than mis-scale
+        ``g_w`` from a non-objective block.  Preconditioning the DSO's
+        interface-Q curvature ``H_Q G_w^{-1} H_Q^T diag(g_q)`` is the
+        documented next extension.  See
+        :meth:`BaseOFOController.voltage_curvature_inputs`.
+        """
+        n_v = len(self.config.voltage_bus_indices)
+        if n_v == 0:
+            return None
+        if self.config.v_setpoints_pu is None or float(self.config.g_v) <= 0.0:
+            return None
+        n_interfaces = len(self.config.interface_trafo_indices)
+        H = self._expand_H_to_der_level(self._build_sensitivity_matrix())
+        H_v = np.ascontiguousarray(
+            H[n_interfaces:n_interfaces + n_v, :], dtype=np.float64,
+        )
+        g_v_vec = np.full(n_v, float(self.config.g_v), dtype=np.float64)
+        return H_v, g_v_vec
+
     def _extract_control_values(
         self,
         measurement: Measurement,
@@ -1554,15 +1602,9 @@ class DSOController(BaseOFOController):
                 return None
         else:
             S_VQ = S_VQ_full
-        # Units fix: ``compute_dV_dQ_der`` returns dV_pu / dQ_pu where
-        # Q_pu uses the system base ``net.sn_mva`` (typically 100 MVA).
-        # The K matrix below is in Mvar/pu_v (k = S_n/slope), so S_VQ
-        # must also be in pu_v/Mvar for the product k·S_VQ to be
-        # dimensionless.  Divide by S_base.
-        s_base = float(getattr(net, "sn_mva", 1.0))
-        if s_base > 0:
-            S_VQ = S_VQ / s_base
-
+        # ``compute_dV_dQ_der`` now returns S_VQ in pu_v/Mvar (it divides by
+        # ``sn_mva`` internally); K is in Mvar/pu_v, so K·S_VQ is dimensionless
+        # — no extra base scaling here.
         K = np.diag(K_diag)
         M = np.eye(n_b) + S_VQ @ K
         # Closed-loop sensitivity:  ∂Q/∂V_ref = K (I + S_VQ K)^{-1} = K M^{-1}.
@@ -1661,12 +1703,8 @@ class DSOController(BaseOFOController):
                 return None
         else:
             S_VQ = S_VQ_full
-        # Units fix: ``compute_dV_dQ_der`` returns dV_pu/dQ_pu on system base.
-        # K is in Mvar/pu_v, so S_VQ must be in pu_v/Mvar — divide by S_base.
-        s_base = float(getattr(net, "sn_mva", 1.0))
-        if s_base > 0:
-            S_VQ = S_VQ / s_base
-
+        # ``compute_dV_dQ_der`` now returns S_VQ in pu_v/Mvar (divides by
+        # ``sn_mva`` internally); no extra base scaling here.
         T_prime = compute_w_shift_h_transform(K_diag, S_VQ)
         # Cache for downstream consumers (input-bound calculation in
         # :meth:`_compute_input_bounds`, closed-loop correction for

@@ -86,7 +86,8 @@ def main_comparison() -> None:
     base_kwargs = dict(
         n_total_s=60.0 * 60 * 6,      # 720-min full simulation
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
-        dso_period_s=10.0,    # DSO every 5 seconds (more inner iterations)
+        dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
+        dt_s=20.0,
         g_v=150000.0,  # TSO voltage tracking; drives PCC Q dispatch
         # ── DSO objective tuning ──
         dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
@@ -246,27 +247,41 @@ def make_config() -> MultiTSOConfig:
     cfg = MultiTSOConfig(
         n_total_s=60.0 * 60 * 5,      # 36-hour (2160-min) simulation
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
-        dso_period_s=10.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
-        g_v=3E5,                      # TSO voltage tracking; drives PCC Q dispatch
+        dso_period_s=20.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
+        dt_s=20.0,
+        g_v=1E7,                      # TSO voltage tracking; drives PCC Q dispatch
         g_q=200,                      # DSO Q-tracking
         tso_g_q_tie=0,
         tso_g_res_sg=0,
         # ── DSO objective tuning ──
-        dso_g_v=15000.0,              # reduced to avoid competing with Q tracking
+        dso_g_v=1E5,              # reduced to avoid competing with Q tracking
         dso_g_qi=0,                   # integral Q-tracking (0 = off)
         dso_lambda_qi=0.95,           # leaky integrator decay
         dso_q_integral_max_mvar=200.0,
         dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
         # ── TSO weights (w-shift closed-loop curvature) ──
         g_w_der=100,
-        g_w_gen=5e7,
-        g_w_pcc=300,
-        g_w_tso_oltc=100,
-        install_tso_tertiary_shunts=False,
+        g_w_gen=5e9,
+        g_w_pcc=200,
+        g_w_tso_oltc=1E4,
+        # shunt
+        install_tso_tertiary_shunts=True,
+        shunt_dispatch="off", #"integrator"
         g_w_tso_shunt=12000,
+        tso_shunt_kind="msc_msr",  # one capacitor + one reactor bank per DSO
+        tso_shunt_msc_n_levels=2,  # MSC steps 0..N
+        tso_shunt_msr_n_levels=2,  # MSR steps 0..N
+        tso_shunt_msc_q_step_mvar=25.0,  # Mvar per MSC step
+        tso_shunt_msr_q_step_mvar=25.0,  # Mvar per MSR step
+        # integrator tuning
+        shunt_int_g_w=150,  # step = g_H/(2*g_w); SMALLER = bigger step — TUNE THIS
+        shunt_int_delta_mvar=10.0,  # hysteresis half-width (must be < q_step/2 = 25)
+        shunt_int_t_dwell_s=30*60.0,  # min seconds between commits per bank (anti-chatter)
+        shunt_int_v_min_pu=0.90,  # HV feasibility band (overshoot guard)
+        shunt_int_v_max_pu=1.10,
         # ── DSO weights ──
         g_w_dso_der=1000,
-        g_w_dso_oltc=20,
+        g_w_dso_oltc=200,
         # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
         # max_step=1 (default) + wall-clock cooldown per OLTC type:
         #   MT (machine 2W gen-trafo) -> 1 tap / 180 s = once per TS interval.
@@ -283,22 +298,28 @@ def make_config() -> MultiTSOConfig:
         live_plot_controller=True,
         live_plot_cascade=True,
         live_plot_system=False,
-        live_plot_tracking=True,
+        live_plot_tracking=False,
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
+        # Preconditioning of g_w
+        precondition_g_w = True,  # turn it on
+        precondition_lambda_target = 0.5,  # target λ_max(M); 0.9 = well-damped, <2 stable
+        # optional:
+        precondition_granularity = "class", # or "column"
+        precondition_exclude_classes = ("gen",),  # AVR setpoint left at config
         # ── Profile & contingency settings ──
         start_time=datetime(2016, 1, 5, 12, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
-            # ContingencyEvent(minute=60, element_type="gen",  element_index=2,  action="trip"),
-            # ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
-            # ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=300, action="connect"),
-            # ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=300, action="trip"),
-            # ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
-            # ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
-            # ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
-            # ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
+            ContingencyEvent(minute=60, element_type="gen",  element_index=2,  action="trip"),
+            ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
+            ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=300, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=300, action="trip"),
+            ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
+            ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
         ],
     )
     return cfg

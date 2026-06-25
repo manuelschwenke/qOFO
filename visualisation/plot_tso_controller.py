@@ -3,19 +3,22 @@ visualisation/plot_tso_controller.py
 ====================================
 Live plotter for Figure 1 — MULTI-TSO CONTROLLER.
 
-Eight tiles grouped into two colour-banded sections.
+Tiles grouped into two colour-banded sections.  Tiles 3-5 are optional
+(``show_reserves`` / ``show_tie_flows`` / ``show_line_currents``).
 
     MEASUREMENTS (orange)
         1. TSO Voltages per Zone (v_min / mean / max band per zone)
         2. TSO Generator Reactive Power Injections
-        3. TSO Reactive Power Tie-Line Flows
-        4. TSO Line Currents (max / mean / min loading % per zone)
+        3. TSO Reactive Reserve — per-zone mean normalised reserve of
+           synchronous machines (solid) and TSO DER (dashed)   [optional]
+        4. TSO Reactive Power Tie-Line Flows                    [optional]
+        5. TSO Line Currents (max / mean / min loading % per zone) [optional]
 
     ACTUATORS (dark blue)
-        5. TSO DER Reactive Power Infeed per Zone
-        6. TSO Generator AVR Setpoints
-        7. TSO Machine Transformer Setpoints (OLTC taps)
-        8. TSO Shunt States (MSC/MSR)
+        6. TSO DER Reactive Power Infeed per Zone
+        7. TSO Generator AVR Setpoints
+        8. TSO Machine Transformer Setpoints (OLTC taps)
+        9. TSO Shunt States (MSC/MSR)
 
 The figure is sized to fit one third of the screen width at full height
 and is placed into slot 0 by :func:`visualisation.style.position_figure_in_slot`.
@@ -64,6 +67,8 @@ class TSOControllerLivePlotter:
         slot_idx: int = 0,
         layout: str = "dual_screen",
         show_line_currents: bool = True,
+        show_reserves: bool = True,
+        show_tie_flows: bool = True,
         use_tex: bool = False,
     ) -> None:
         apply_serif_style(use_tex=use_tex)
@@ -79,6 +84,8 @@ class TSOControllerLivePlotter:
         self._sub_minute = sub_minute
         self._update_every = max(1, int(update_every))
         self._show_iline = bool(show_line_currents)
+        self._show_reserve = bool(show_reserves)
+        self._show_tie = bool(show_tie_flows)
         self._call_count = 0
 
         # ── Accumulators ─────────────────────────────────────────────────
@@ -89,6 +96,8 @@ class TSOControllerLivePlotter:
         self._zone_v_mean: Dict[int, List[float]] = {z: [] for z in self._zone_ids}
         self._zone_v_max:  Dict[int, List[float]] = {z: [] for z in self._zone_ids}
         self._zone_q_gen:  Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
+        self._zone_gen_reserve: Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
+        self._zone_der_reserve: Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
         self._zone_i_max:  Dict[int, List[float]] = {z: [] for z in self._zone_ids}
         self._zone_i_mean: Dict[int, List[float]] = {z: [] for z in self._zone_ids}
         self._zone_i_min:  Dict[int, List[float]] = {z: [] for z in self._zone_ids}
@@ -117,7 +126,9 @@ class TSOControllerLivePlotter:
 
         plot_h = 1.0
         band_h = 0.18
-        n_meas = 4 if self._show_iline else 3
+        # Measurement tiles: V + gen Q always; reserves / tie Q / line currents
+        # optional.  Count the active ones to size the GridSpec.
+        n_meas = 2 + int(self._show_reserve) + int(self._show_tie) + int(self._show_iline)
         heights = [band_h] + [plot_h] * n_meas + [band_h] + [plot_h] * 4
         gs = GridSpec(
             len(heights), 1, figure=self._fig,
@@ -128,17 +139,23 @@ class TSOControllerLivePlotter:
         self._ax_band_meas = self._fig.add_subplot(gs[0, 0])
         fill_section_band(self._ax_band_meas, "Measurements", COLOUR_MEAS_BAND)
 
-        # Measurement rows (voltages, gen Q, tie Q, optional line currents)
-        self._ax_v    = self._fig.add_subplot(gs[1, 0])
-        self._ax_qgen = self._fig.add_subplot(gs[2, 0], sharex=self._ax_v)
-        self._ax_tie  = self._fig.add_subplot(gs[3, 0], sharex=self._ax_v)
-        next_row = 4
+        # Measurement rows (V + gen Q always; reserves / tie Q / line currents optional)
+        row = 1
+        self._ax_v    = self._fig.add_subplot(gs[row, 0]); row += 1
+        self._ax_qgen = self._fig.add_subplot(gs[row, 0], sharex=self._ax_v); row += 1
+        if self._show_reserve:
+            self._ax_reserve = self._fig.add_subplot(gs[row, 0], sharex=self._ax_v); row += 1
+        else:
+            self._ax_reserve = None
+        if self._show_tie:
+            self._ax_tie = self._fig.add_subplot(gs[row, 0], sharex=self._ax_v); row += 1
+        else:
+            self._ax_tie = None
         if self._show_iline:
-            self._ax_iline = self._fig.add_subplot(gs[next_row, 0], sharex=self._ax_v)
-            next_row += 1
+            self._ax_iline = self._fig.add_subplot(gs[row, 0], sharex=self._ax_v); row += 1
         else:
             self._ax_iline = None
-        act_start = next_row
+        act_start = row
 
         # ACT band
         self._ax_band_act = self._fig.add_subplot(gs[act_start, 0])
@@ -150,25 +167,29 @@ class TSOControllerLivePlotter:
         self._ax_oltc  = self._fig.add_subplot(gs[act_start + 3, 0], sharex=self._ax_v)
         self._ax_shunt = self._fig.add_subplot(gs[act_start + 4, 0], sharex=self._ax_v)
 
-        self._plot_axes = [
-            self._ax_v, self._ax_qgen, self._ax_tie,
-        ]
+        self._plot_axes = [self._ax_v, self._ax_qgen]
+        if self._ax_reserve is not None:
+            self._plot_axes.append(self._ax_reserve)
+        if self._ax_tie is not None:
+            self._plot_axes.append(self._ax_tie)
         if self._ax_iline is not None:
             self._plot_axes.append(self._ax_iline)
-        self._plot_axes += [self._ax_qder]
         self._plot_axes += [
-            self._ax_vgen, self._ax_oltc, self._ax_shunt,
+            self._ax_qder, self._ax_vgen, self._ax_oltc, self._ax_shunt,
         ]
 
         tile_title(self._ax_v,     "TSO Voltages per Zone")
         tile_title(self._ax_qgen,  "TSO Generator Q Injections")
-        tile_title(self._ax_tie,   "TSO Reactive Power Tie-Line Flows")
+        if self._ax_reserve is not None:
+            tile_title(self._ax_reserve, "TSO Reactive Reserve (SG solid / DER dashed)")
+        if self._ax_tie is not None:
+            tile_title(self._ax_tie,   "TSO Reactive Power Tie-Line Flows")
         if self._ax_iline is not None:
             tile_title(self._ax_iline, "TSO Line Currents (Loading %)")
         tile_title(self._ax_qder,      "TSO DER Q Infeed per Zone")
         tile_title(self._ax_vgen,  "TSO Generator AVR Setpoints")
         tile_title(self._ax_oltc,  "TSO Machine Transformer Taps")
-        tile_title(self._ax_shunt, "TSO Shunt States")
+        tile_title(self._ax_shunt, "TSO Shunt States  (+ reactor/MSR  /  - capacitor/MSC)")
 
         for ax in self._plot_axes:
             ax.tick_params(axis="both", labelsize=8)
@@ -193,6 +214,12 @@ class TSOControllerLivePlotter:
             self._zone_v_max[z].append(rec.zone_v_max.get(z, float("nan")))
             self._zone_q_gen[z].append(
                 np.asarray(rec.zone_q_gen.get(z, []), dtype=float)
+            )
+            self._zone_gen_reserve[z].append(
+                np.asarray(rec.gen_q_reserve.get(z, []), dtype=float)
+            )
+            self._zone_der_reserve[z].append(
+                np.asarray(rec.tso_der_q_reserve.get(z, []), dtype=float)
             )
             self._zone_i_max[z].append(rec.zone_line_loading_max_pct.get(z, float("nan")))
             self._zone_i_mean[z].append(rec.zone_line_loading_mean_pct.get(z, float("nan")))
@@ -225,7 +252,10 @@ class TSOControllerLivePlotter:
     def _redraw(self) -> None:
         self._redraw_voltages()
         self._redraw_gen_q()
-        self._redraw_tie_q()
+        if self._ax_reserve is not None:
+            self._redraw_reserves()
+        if self._ax_tie is not None:
+            self._redraw_tie_q()
         if self._ax_iline is not None:
             self._redraw_line_currents()
         self._redraw_der_q()
@@ -312,6 +342,49 @@ class TSOControllerLivePlotter:
         ax.legend(handles=self._zone_legend_handles(),
                   loc="upper left", fontsize=7,
                   ncol=min(len(self._zone_ids), 3), frameon=False)
+
+    def _redraw_reserves(self) -> None:
+        ax = self._ax_reserve
+        ax.clear()
+        tile_title(ax, "TSO Reactive Reserve (SG solid / DER dashed)")
+        t = np.asarray(self._t_all, dtype=float)
+
+        def _mean_series(arrs: List[np.ndarray]) -> np.ndarray:
+            # Per-step mean reserve across the zone's elements (NaN-safe;
+            # empty / all-NaN steps -> NaN so the trace simply gaps there).
+            out = np.full(len(arrs), np.nan)
+            for i, a in enumerate(arrs):
+                if a.size and np.any(np.isfinite(a)):
+                    out[i] = np.nanmean(a)
+            return out
+
+        any_data = False
+        for i, z in enumerate(self._zone_ids):
+            c = _c(i + 1)
+            sg = _mean_series(self._zone_gen_reserve[z])
+            der = _mean_series(self._zone_der_reserve[z])
+            if np.any(np.isfinite(sg)):
+                ax.plot(t, sg, color=c, lw=1.1, ls="-")
+                any_data = True
+            if np.any(np.isfinite(der)):
+                ax.plot(t, der, color=c, lw=1.0, ls="--", alpha=0.9)
+                any_data = True
+        ax.set_ylabel("reserve (norm.)")
+        ax.set_ylim(0.0, 0.5)
+        ax.grid(True, alpha=0.3)
+        if any_data:
+            # Zone colours + a solid/dashed proxy so SG vs DER is unambiguous.
+            handles = self._zone_legend_handles()
+            handles += [
+                plt.Line2D([0], [0], color="0.3", lw=1.2, ls="-", label="SG"),
+                plt.Line2D([0], [0], color="0.3", lw=1.0, ls="--", label="DER"),
+            ]
+            ax.legend(handles=handles, loc="upper left", fontsize=6,
+                      ncol=min(len(self._zone_ids) + 2, 4), frameon=False)
+        else:
+            ax.text(0.5, 0.5, "no reserve data",
+                    transform=ax.transAxes, ha="center", va="center",
+                    color="gray", fontsize=8, style="italic")
 
     def _redraw_tie_q(self) -> None:
         ax = self._ax_tie
@@ -400,15 +473,17 @@ class TSOControllerLivePlotter:
     def _redraw_shunts(self) -> None:
         ax = self._ax_shunt
         ax.clear()
-        tile_title(ax, "TSO Shunt States")
+        tile_title(ax, "TSO Shunt States  (+ reactor/MSR  /  - capacitor/MSC)")
         ax.set_xlabel("Time / s" if self._sub_minute else "Time / min")
-        ax.set_ylabel("State")
+        ax.set_ylabel("Step  (+reac / -cap)")
         if sum(self._n_shunt.values()) == 0:
             ax.text(0.5, 0.5, "no shunts in network",
                     transform=ax.transAxes, ha="center", va="center",
                     color="gray", fontsize=8, style="italic")
             return
         t = np.asarray(self._t_tso, dtype=float)
+        # Zero baseline separates inductive (MSR, +) from capacitive (MSC, -).
+        ax.axhline(0.0, color="0.5", lw=0.6, alpha=0.6)
         self._plot_padded_multi(ax, t, self._zone_shunt, drawstyle="steps-post")
         ax.grid(True, alpha=0.3)
         handles = [

@@ -81,10 +81,10 @@ class MultiTSOConfig:
     """
 
     # -- Timing ----------------------------------------------------------------
-    dt_s:           float = 60.0
     n_total_s:      float = 60.0 * 60.0
     tso_period_s:   float = 60.0 * 3.0
-    dso_period_s:   float = 60.0 * 1.0
+    dso_period_s:   float = 20.0 * 1.0
+    dt_s:           float = dso_period_s
 
     # -- Voltage setpoint ------------------------------------------------------
     v_setpoint_pu:  float = 1.03
@@ -307,7 +307,7 @@ class MultiTSOConfig:
     for the related sensitivity correction."""
 
     # -- g_z warmup ------------------------------------------------------------
-    g_z_warmup_s:     float = 900.0
+    g_z_warmup_s:     float = 0.0
     g_z_warmup_value: float = 1E-12
 
     # -- Stability analysis ----------------------------------------------------
@@ -442,6 +442,16 @@ class MultiTSOConfig:
     DSO-line-currents tile on Figure 2.  Useful to make more vertical
     room for the remaining tiles."""
 
+    live_plot_show_reserves: bool = True
+    """When True, show the TSO reactive-reserve tile on Figure 1 (per-zone
+    mean normalised reserve of synchronous machines (solid) and TSO DER
+    (dashed), 0 = at a capability limit, 0.5 = mid-band)."""
+
+    live_plot_show_tie_flows: bool = True
+    """When True, show the TSO inter-zone tie-line reactive-flow tile on
+    Figure 1.  Set False to free vertical room when tie lines are not of
+    interest (e.g. single-zone studies)."""
+
     live_plot_layout: str = "dual_screen"
     """Window layout for the three live figures.
     ``"thirds"``      -- three figures side-by-side, 1/3 primary screen each.
@@ -536,6 +546,55 @@ class MultiTSOConfig:
     the cascaded variants) as well as the slow TS-OFO layer.  Set to a larger
     value (e.g. ``tso_period_s``) only to deliberately slow the reference.
     Ignored unless ``control_scope == 'central'``."""
+
+    debug_central_curvature: bool = False
+    """Read-only tuning probe (CIGRE V5).  When True and
+    ``control_scope == 'central'``, the runner prints the closed-loop
+    curvature spectrum of the single central controller once, right after
+    ``central_controller.initialise(...)``: the eigenvalues of
+    ``M = H_V G_w^{-1} H_V^T diag(g_v)`` (the per-tick voltage-error map
+    ``e_{k+1} = (I - M) e_k``).  OFO is stable iff ``eig(M) ⊂ (0, 2)`` and
+    well-damped for ``lambda_max(M) ≲ 1``.  Used to pick the global ``g_w``
+    scale ``kappa`` that turns V5 into a valid upper bound.  No effect on the
+    simulation itself (the probe only reads the cached H / g_v / g_w)."""
+
+    # -- Tier-2 curvature-based g_w preconditioning ---------------------------
+    precondition_g_w: bool = False
+    """Derive the proximal weights ``g_w`` of the continuous actuator classes
+    from the cached sensitivities instead of from BO/config, by (i)
+    column-norm preconditioning (Zagorowska Eq. 16 diagonal scaling) and
+    (ii) solving one global ``kappa`` so ``lambda_max(M) ==
+    precondition_lambda_target``.  Runs once per TSO/DSO controller right
+    after ``initialise(...)`` and before the loop.  Integer classes
+    (OLTC/shunt) are left at their config values (their tuning primitive is
+    switching frequency, not curvature).  Default ``False`` keeps the
+    BO/config ``g_w`` untouched, so the existing tuning path is unaffected.
+    See :mod:`controller.gw_precondition`."""
+
+    precondition_lambda_target: float = 0.9
+    """Target ``lambda_max(M)`` for :attr:`precondition_g_w` (well-damped at
+    ``~0.9``; OFO stable for ``< 2``).  One scalar fixes the closed-loop
+    gain once the per-class shape is set by the column norms."""
+
+    precondition_granularity: str = "class"
+    """``'class'`` (one shared ``g_w`` per actuator class, directly
+    comparable to a BO-tuned ``g_w_<class>``) or ``'column'`` (per-variable
+    ``g_w``, the full Zagorowska-``S`` diagonal, best conditioning)."""
+
+    precondition_floor_frac: float = 1e-6
+    """Relative floor on the column energy ``||a_i||^2`` (vs the max over
+    all columns) below which an actuator is treated as near-uncontrollable
+    and its preconditioned ``g_w`` is floored — prevents a tiny-sensitivity
+    column from collapsing ``g_w`` toward zero (= infinite gain)."""
+
+    precondition_exclude_classes: tuple = ("gen",)
+    """Continuous actuator classes to EXCLUDE from :attr:`precondition_g_w`
+    (in addition to the always-excluded integer classes).  Default
+    ``("gen",)``: the AVR voltage setpoint is a *direct* strong voltage
+    actuator (column energy ~10^10× a DER's) whose ``g_w_gen`` the user
+    already pins out of stability tuning (``FIXED_OVERRIDES``); folding it
+    into the shared curvature scaling would let it dominate ``kappa``.
+    Excluded classes keep their config ``g_w``."""
 
     # -- DSO control mode ------------------------------------------------------
     dso_mode: str = "ofo"
@@ -704,7 +763,115 @@ class MultiTSOConfig:
     tso_tertiary_shunt_q_mvar: float = 50.0
     """Per-shunt rated reactive power per step at V = 1 pu [Mvar].
     Sign convention follows pandapower load convention: ``step = +1``
-    injects +q_mvar (reactor), ``step = -1`` injects −q_mvar (capacitor)."""
+    injects +q_mvar (reactor), ``step = -1`` injects −q_mvar (capacitor).
+    Used only by the legacy bipolar (``shunt_dispatch='miqp'``) build."""
+
+    # -- Switched-shunt dispatch mode + MSC/MSR integrator ---------------------
+    shunt_dispatch: str = "off"
+    """How TSO-owned tertiary shunts are dispatched:
+      * ``'off'``        — no tertiary shunts (legacy no-shunt topology).
+      * ``'miqp'``       — legacy bipolar ±1 bank as an integer variable inside
+                           the OLTC MIQP (``install_tso_tertiary_shunts`` build).
+      * ``'integrator'`` — N-step MSC + MSR banks dispatched by the separate
+                           integrating mechanism in
+                           :mod:`controller.shunt_integrator`, OUTSIDE the MIQP.
+    The MIQP carries shunt integers only in ``'miqp'`` mode (see the TSO
+    controller's ``n_shunt_miqp`` gating)."""
+
+    tso_shunt_kind: str = "msc_msr"
+    """Network-build device class for ``shunt_dispatch='integrator'`` — passed
+    to :func:`network.ieee39.hv_networks.add_hv_networks`.  ``'msc_msr'``
+    installs one capacitor (MSC) and one reactor (MSR) bank per DSO tertiary."""
+
+    tso_shunt_msc_n_levels: int = 4
+    """Number of MSC (capacitor) steps per bank (lattice ℓ ∈ {0 … N})."""
+
+    tso_shunt_msr_n_levels: int = 4
+    """Number of MSR (reactor) steps per bank (lattice ℓ ∈ {0 … N})."""
+
+    tso_shunt_msc_q_step_mvar: float = 50.0
+    """MSC nameplate reactive power per step at V = 1 pu [Mvar] (magnitude)."""
+
+    tso_shunt_msr_q_step_mvar: float = 50.0
+    """MSR nameplate reactive power per step at V = 1 pu [Mvar] (magnitude)."""
+
+    shunt_int_g_w: float = 1.0
+    """Quadratic step weight for the integrator's continuous-relaxation update,
+    per bank.  Consistent with the rest of the controller (alpha fixed = 1,
+    step amplitude tuned via ``g_w``): the relaxation advances by
+    ``g_H / (2 * g_w)`` each TSO iteration, so a SMALLER weight gives a LARGER
+    step.  Tune so a sustained reactive pressure crosses the half-step +
+    hysteresis band over several TSO iterations (slow bulk commit), not in one.
+    NOTE: the boundary voltage sensitivity is small, so the gradient ``g_H`` is
+    small — expect ``g_w`` well below 1 in practice."""
+
+    shunt_int_delta_mvar: float = 5.0
+    """Hysteresis half-width [Mvar].  Must satisfy
+    ``0 < delta < q_step/2`` for both the MSC and MSR step sizes."""
+
+    shunt_int_t_dwell_s: float = 300.0
+    """Minimum dwell time between commits of the same bank [s]."""
+
+    shunt_int_daily_budget: int = 8
+    """Maximum commits per bank within any rolling 24 h window."""
+
+    shunt_int_v_min_pu: float = 0.95
+    """Lower HV-boundary voltage limit [p.u.] used by the integrator's
+    overshoot feasibility guard."""
+
+    shunt_int_v_max_pu: float = 1.10
+    """Upper HV-boundary voltage limit [p.u.] used by the integrator's
+    overshoot feasibility guard."""
+
+    def validate_integrator_mode(self) -> None:
+        """Fail-fast consistency check for the switched-shunt dispatch mode.
+
+        Raises ``ValueError`` on any inconsistent or out-of-range setting; the
+        per-bank numeric guards (``delta ∈ (0, q_step/2)`` etc.) are additionally
+        enforced by :class:`controller.shunt_integrator.ShuntBankConfig`."""
+        if self.shunt_dispatch not in ("off", "miqp", "integrator"):
+            raise ValueError(
+                f"shunt_dispatch must be 'off', 'miqp' or 'integrator', "
+                f"got {self.shunt_dispatch!r}"
+            )
+        if self.shunt_dispatch != "integrator":
+            return
+        if not self.install_tso_tertiary_shunts:
+            raise ValueError(
+                "shunt_dispatch='integrator' requires "
+                "install_tso_tertiary_shunts=True"
+            )
+        if self.tso_shunt_kind != "msc_msr":
+            raise ValueError(
+                "shunt_dispatch='integrator' requires tso_shunt_kind='msc_msr', "
+                f"got {self.tso_shunt_kind!r}"
+            )
+        q_min = min(self.tso_shunt_msc_q_step_mvar, self.tso_shunt_msr_q_step_mvar)
+        if not (0.0 < self.shunt_int_delta_mvar < 0.5 * q_min):
+            raise ValueError(
+                f"shunt_int_delta_mvar must lie in (0, q_step/2) = "
+                f"(0, {0.5 * q_min}), got {self.shunt_int_delta_mvar}"
+            )
+        if self.shunt_int_g_w <= 0.0:
+            raise ValueError(
+                f"shunt_int_g_w must be > 0, got {self.shunt_int_g_w}"
+            )
+        if self.shunt_int_t_dwell_s < 0.0:
+            raise ValueError(
+                f"shunt_int_t_dwell_s must be >= 0, got {self.shunt_int_t_dwell_s}"
+            )
+        if self.shunt_int_daily_budget < 0:
+            raise ValueError(
+                f"shunt_int_daily_budget must be >= 0, got "
+                f"{self.shunt_int_daily_budget}"
+            )
+        if self.shunt_int_v_min_pu >= self.shunt_int_v_max_pu:
+            raise ValueError(
+                f"shunt_int_v_min_pu ({self.shunt_int_v_min_pu}) must be < "
+                f"shunt_int_v_max_pu ({self.shunt_int_v_max_pu})"
+            )
+        if min(self.tso_shunt_msc_n_levels, self.tso_shunt_msr_n_levels) < 1:
+            raise ValueError("MSC/MSR n_levels must be >= 1")
 
     tso_g_q_pcc: float = 0.0
     """Q-tracking weight on the (re-enabled) Q_PCC output rows of the TSO

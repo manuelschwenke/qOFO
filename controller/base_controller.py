@@ -1183,3 +1183,71 @@ class BaseOFOController(ABC):
         mapping = self._get_der_mapping()
         E = mapping.E if mapping is not None else None
         return H_bus, E
+
+    # ------------------------------------------------------------------
+    #  Curvature-based g_w preconditioning (Tier-2 gain selection)
+    # ------------------------------------------------------------------
+
+    def voltage_curvature_inputs(
+        self,
+    ) -> Optional[Tuple[NDArray[np.float64], NDArray[np.float64]]]:
+        """Return ``(H_v, g_v_vec)`` for closed-loop curvature analysis.
+
+        ``H_v`` is the block of the *expanded* sensitivity matrix holding
+        the voltage-tracking rows (``∂V/∂u``), shape ``(n_v, n_controls)``;
+        ``g_v_vec`` is the per-bus voltage weight, shape ``(n_v,)`` (the
+        bare ``g_v``; the gradient's factor 2 is absorbed by the QP's
+        ``1/2``, matching ``M = H_v G_w^{-1} H_v^T diag(g_v)``).
+
+        Subclasses with a voltage-tracking objective override this and
+        slice the correct rows from their own output ordering.  The
+        default returns ``None`` (no voltage curvature available), which
+        makes the preconditioner a no-op for this controller.
+        """
+        return None
+
+    def apply_preconditioned_g_w(
+        self,
+        g_w_vec: NDArray[np.float64],
+    ) -> None:
+        """Replace the proximal weights with a preconditioned per-variable
+        vector (see :mod:`controller.gw_precondition`).
+
+        The supplied vector is already the *final* per-variable ``g_w``
+        the MIQP should use (curvature preconditioning operates on the
+        expanded H columns, so any per-DER incidence weighting is already
+        baked in).  It is therefore installed verbatim as both
+        ``params.g_w`` and the per-variable cache — the DER-mapping
+        rescaling of :meth:`_compute_per_variable_weights` is intentionally
+        **not** re-applied (that would double-count the incidence weights).
+
+        Must be called after :meth:`initialise`.  When adaptive ``g_w`` is
+        enabled, the online adapter is rebuilt so it warm-starts from the
+        preconditioned weights (Tier-2 sets the initial gain, Tier-3 adapts
+        it online) — a coherent composition, not a conflict.
+
+        Parameters
+        ----------
+        g_w_vec
+            Per-variable proximal weights, shape ``(n_controls,)``,
+            strictly positive.
+        """
+        import dataclasses
+
+        if self._u_current is None:
+            raise RuntimeError(
+                "apply_preconditioned_g_w requires initialise() first."
+            )
+        g_w_vec = np.asarray(g_w_vec, dtype=np.float64)
+        if g_w_vec.shape != (self.n_controls,):
+            raise ValueError(
+                f"g_w_vec shape {g_w_vec.shape} != ({self.n_controls},)"
+            )
+        if np.any(g_w_vec <= 0.0):
+            raise ValueError("preconditioned g_w must be strictly positive")
+
+        self.params = dataclasses.replace(self.params, g_w=g_w_vec.copy())
+        # Install verbatim (do NOT re-apply DER-incidence weighting).
+        self._g_w_vector_cache = g_w_vec.copy()
+        # Rebuild the online adapter (if any) so it warm-starts here.
+        self._init_g_w_adapter()

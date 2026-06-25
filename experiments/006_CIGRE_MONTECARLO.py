@@ -229,45 +229,80 @@ def make_cigre_config() -> MultiTSOConfig:
     cfg = MultiTSOConfig(
         n_total_s=60.0 * 60 * 5,  # 36-hour (2160-min) simulation
         tso_period_s=60.0 * 3,  # TS-OFO every 3 min
-        dso_period_s=10.0,  # DSO-OFO each plant step (dt_s=60 >= 10)
-        g_v=2E5,  # TSO voltage tracking; drives PCC Q dispatch
+        dso_period_s=20.0,  # DSO-OFO each plant step (dt_s=60 >= 10)
+        dt_s=20,
+        g_v=1E7,  # TSO voltage tracking; drives PCC Q dispatch
         g_q=200,  # DSO Q-tracking
         tso_g_q_tie=0,
         tso_g_res_sg=0,
         # ── DSO objective tuning ──
-        dso_g_v=15000.0,  # reduced to avoid competing with Q tracking
+        dso_g_v=1E5,  # reduced to avoid competing with Q tracking
         dso_g_qi=0,  # integral Q-tracking (0 = off)
         dso_lambda_qi=0.95,  # leaky integrator decay
         dso_q_integral_max_mvar=200.0,
         dso_gamma_oltc_q=0.0,  # DER-primary, OLTC-backup
         # ── TSO weights (w-shift closed-loop curvature) ──
         g_w_der=100,
-        g_w_gen=5e7,
-        g_w_pcc=300,
-        g_w_tso_oltc=100,
+        g_w_gen=5e9,
+        g_w_pcc=200,
+        g_w_tso_oltc=1E4,
+        # shunt
         install_tso_tertiary_shunts=False,
+        shunt_dispatch="off",  # "integrator"
         g_w_tso_shunt=12000,
+        tso_shunt_kind="msc_msr",  # one capacitor + one reactor bank per DSO
+        tso_shunt_msc_n_levels=2,  # MSC steps 0..N
+        tso_shunt_msr_n_levels=2,  # MSR steps 0..N
+        tso_shunt_msc_q_step_mvar=25.0,  # Mvar per MSC step
+        tso_shunt_msr_q_step_mvar=25.0,  # Mvar per MSR step
+        # integrator tuning
+        shunt_int_g_w=150,  # step = g_H/(2*g_w); SMALLER = bigger step — TUNE THIS
+        shunt_int_delta_mvar=10.0,  # hysteresis half-width (must be < q_step/2 = 25)
+        shunt_int_t_dwell_s=30 * 60.0,  # min seconds between commits per bank (anti-chatter)
+        shunt_int_v_min_pu=0.90,  # HV feasibility band (overshoot guard)
+        shunt_int_v_max_pu=1.10,
         # ── DSO weights ──
         g_w_dso_der=1000,
-        g_w_dso_oltc=25,
-        # ── Local-mode OLTC tap-rate limits ──
+        g_w_dso_oltc=200,
+        # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
+        # max_step=1 (default) + wall-clock cooldown per OLTC type:
+        #   MT (machine 2W gen-trafo) -> 1 tap / 180 s = once per TS interval.
+        #   NC (coupler 3W interface) -> 1 tap / 60 s  = once per minute.
+        # Cooldowns are wall-clock, hence robust to dt_s / dso_period_s.
         local_oltc_max_step_per_dt=1,
         oltc_cooldown_s_mt=180.0,
         oltc_cooldown_s_nc=60.0,
-        use_fixed_zones=True,
+        use_fixed_zones=True,  # literature 3-area partition
         run_stability_analysis=False,
         sensitivity_update_interval=1E6,
         verbose=1,
+        tso_qv_vref_pu=1.03,
+        tso_qv_slope_pu=0.06,
+        tso_qv_deadband_pu=0.01,
+        dso_qv_vref_pu=1.03,
+        dso_qv_slope_pu=0.06,
+        dso_qv_deadband_pu=0.01,
+        # Live plots OFF for the batch sweep (see module docstring).
         live_plot_controller=False,
         live_plot_cascade=False,
         live_plot_system=False,
+        live_plot_tracking=False,
+        live_plot_show_reserves=True,
+        live_plot_show_tie_flows=False,
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
-        # ── Profile settings (contingencies overridden per scenario) ──
-        start_time=datetime(2016, 1, 5, 10, 0),
+        # Preconditioning of g_w
+        precondition_g_w=False,  # turn it on
+        precondition_lambda_target=0.5,  # target λ_max(M); 0.9 = well-damped, <2 stable
+        # optional:
+        precondition_granularity="class",  # or "column"
+        precondition_exclude_classes=("gen",),  # AVR setpoint left at config
+        # ── Profile & contingency settings ──
+        start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
-        contingencies=[],
+        contingencies=[
+        ],
     )
     cfg.scenario = "wind_replace"
     cfg.warmup_s = 0.0
@@ -316,17 +351,33 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
         tso_mode="ofo",
         dso_mode="local",
         tso_q_mode="qv", dso_q_mode="qv",
-        central_dso_g_v=10000.0,
-        central_period_s=180,
-        g_w_tso_oltc=250,
-        g_w_dso_der=400,
-        g_w_dso_oltc=25,
         local_sensitivities_tso=False,
         local_sensitivities_dso=False,
-        g_w_gen=5e7,
+        # ── Tuning (plan golden-popping-hartmanis): make V5 a VALID upper
+        #    bound (>= V4 on rms_v_ts_pu).  Strategy: match V4's per-loop gain
+        #    ratios g_v/g_w, match V4's control cadence, then cool the whole g_w
+        #    block by one global KAPPA_V5 (set from the lambda_max probe below).
+        central_dso_g_v=1E5,        # HV voltage weight = V4 dso_g_v
+        central_period_s=20,       # = V4 tso_period_s: cadence-matched comparison
+        # -- V4 gain ratios restored (g_v/g_w per class), then x KAPPA_V5 on g_w --
+        # g_v=1E7,                    # TN voltage weight = V4 g_v (was 5E7)
+        # g_w_der=100,                # = V4 (TSO DER);  ratio g_v/g_w_der = 1e5
+        # g_w_dso_der=1000,           # = V4 (DSO DER);  ratio cdso_g_v/g_w = 1e2
+        # g_w_gen=5E9,                # = V4 (very cautious AVR)
+        # g_w_tso_oltc=1E4,           # = V4 (was 2E4)
+        # g_w_dso_oltc=200,           # = V4 (was 1E3)
+        # debug_central_curvature=True,  # enable to print lambda_max(M) at t=0
     ),
 }
-
+KAPPA_V5: float = 1.25  # lambda_max(M)=1.237 at kappa=1 -> 1.25 gives ~0.99 (well-damped)
+_V5_GW_KEYS = ("g_w_der", "g_w_dso_der", "g_w_gen", "g_w_tso_oltc", "g_w_dso_oltc")
+if KAPPA_V5 != 1.0:
+    # Only scale the g_w keys that V5 sets *explicitly*; when a key is commented
+    # out above, V5 inherits it from make_cigre_config() and KAPPA_V5 does not
+    # apply to it (run_variant only setattr()s keys present in VARIANTS["V5"]).
+    for _k in _V5_GW_KEYS:
+        if _k in VARIANTS["V5"]:
+            VARIANTS["V5"][_k] = VARIANTS["V5"][_k] * KAPPA_V5
 
 # ===========================================================================
 #  Valid-element enumeration (built once)
@@ -893,6 +944,244 @@ def run_one_scenario(seed: int, capture: bool = False,
     return {"seed": int(seed), "accepted": bool(all_converged),
             "failing_variant": failing_variant, "failing_reason": failing_reason,
             "n_events": len(schedule)}
+
+
+# ===========================================================================
+#  Re-run a SINGLE variant on the already-accepted scenarios (in place)
+# ===========================================================================
+#  Use case: V1..V5 were all simulated once (expensive).  Afterwards only one
+#  variant's *parameters* change (e.g. retuning V5 via ``VARIANTS["V5"]`` /
+#  ``KAPPA_V5``).  Instead of re-running every variant on every scenario, this
+#  path reloads the exact paired scenarios (``start_time`` + contingency
+#  ``schedule``) that V1..V4 already saw from ``RUNS_DIR/scenario_<seed>.json``,
+#  re-runs ONLY the chosen variant with the current parameters, and overwrites
+#  that variant's slice of the per-seed staging (metrics row in the JSON, arrays
+#  in ``ts_<seed>.npz``).  Every other variant is left byte-identical, so the
+#  paired comparison is preserved.  ``collect_and_finalize`` then rebuilds the
+#  master CSVs / canonical timeseries / tables / figures from the staging.
+#
+#  Divergence policy: a scenario was accepted because all variants (incl. the
+#  *old* variant params) converged.  If the *new* params diverge on a scenario
+#  we KEEP the scenario (V1..V4 untouched) but DROP that variant for that run,
+#  rather than mixing two parameter sets in one column or discarding V1..V4.  The
+#  variant therefore reports n <= N runs; the dropped count is summarised.
+
+
+def _events_from_rows(rows: List[Dict[str, Any]]) -> List[ContingencyEvent]:
+    """Reconstruct a contingency schedule from the per-seed JSON ``schedule``
+    rows (the dicts produced by :func:`schedule_to_rows`).  This is the exact
+    schedule V1..V4 ran on, so re-running a variant against it is a clean paired
+    comparison -- it does not depend on regenerating the schedule from the seed
+    (which would silently differ if the schedule-generation constants changed)."""
+    out: List[ContingencyEvent] = []
+    for r in rows:
+        bus = r.get("bus", "")
+        bus = None if (bus is None or bus == "") else int(bus)
+        p = r.get("p_mw", "")
+        p = float("nan") if (p is None or p == "") else float(p)
+        q = r.get("q_mvar", "")
+        q = float("nan") if (q is None or q == "") else float(q)
+        out.append(ContingencyEvent(
+            minute=int(r["minute"]), element_type=str(r["element_type"]),
+            element_index=int(r["element_index"]), action=str(r["action"]),
+            bus=bus, p_mw=p, q_mvar=q,
+        ))
+    out.sort(key=lambda e: (e.minute, e.element_type, e.action))
+    return out
+
+
+def _rerun_one_scenario_variant(seed: int, variant: str,
+                                capture: bool = False) -> Dict[str, Any]:
+    """Re-run a single ``variant`` on the accepted scenario ``seed``, in place.
+
+    Reloads ``(start_time, schedule)`` from ``RUNS_DIR/scenario_<seed>.json``,
+    runs only ``variant`` with the CURRENT ``VARIANTS[variant]`` parameters, and
+    rewrites just that variant's slice of the JSON metrics and ``ts_<seed>.npz``.
+    Module-level so it is picklable for ``ProcessPoolExecutor``.
+
+    Returns ``{seed, variant, status, reason}`` with ``status`` in
+    ``{"converged", "diverged", "skipped"}``.
+    """
+    os.makedirs(RUNS_DIR, exist_ok=True)
+    json_path = os.path.join(RUNS_DIR, f"scenario_{seed}.json")
+    ts_path = os.path.join(RUNS_DIR, f"ts_{seed}.npz")
+
+    try:
+        with open(json_path, encoding="utf-8") as fh:
+            j = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return {"seed": int(seed), "variant": variant, "status": "skipped",
+                "reason": f"unreadable scenario json ({type(exc).__name__})"}
+
+    if not j.get("accepted"):
+        return {"seed": int(seed), "variant": variant, "status": "skipped",
+                "reason": "scenario not accepted (no V1..V4 baseline)"}
+
+    sel_info = _get_sel_info()
+    start_time = datetime.fromisoformat(j["start_time"])
+    schedule = _events_from_rows(j.get("schedule", []))
+
+    logf = open(os.path.join(RUNS_DIR, f"rerun_{variant}_{seed}.txt"), "w",
+                encoding="utf-8", errors="replace") if capture else None
+    try:
+        with contextlib.ExitStack() as stack:
+            if logf is not None:
+                stack.enter_context(contextlib.redirect_stdout(logf))
+                stack.enter_context(contextlib.redirect_stderr(logf))
+            print(f"=== rerun {variant}  seed={seed}  "
+                  f"start={start_time:%Y-%m-%d %H:%M}  {len(schedule)} events ===")
+            log, conv, reason, margins = run_variant(variant, start_time, schedule)
+            if conv:
+                s = cigre_summary_table(
+                    {variant: log}, v_set=V_SET,
+                    gen_s_rated_mva=_get_gen_srated(),
+                ).iloc[0]
+                new_metric = {"variant": variant, "converged": True,
+                              **{m: float(s[m]) for m in METRIC_COLS}}
+                t_min, vrms, pq, zv = extract_timeseries(log, sel_info)
+            else:
+                new_metric = None
+                if margins:
+                    _dump_mc_reach_margins(seed, variant, margins)
+            del log
+    finally:
+        if logf is not None:
+            logf.close()
+
+    # ── Rewrite the JSON metrics: drop the old `variant` row, add the new one
+    #    (if converged).  Keep V1..V4 (and any other variant) untouched. ──────
+    j["metrics"] = [m for m in j.get("metrics", []) if m.get("variant") != variant]
+    if conv and new_metric is not None:
+        j["metrics"].append(new_metric)
+    _ord = {V: i for i, V in enumerate(VARIANT_ORDER)}
+    j["metrics"].sort(key=lambda m: _ord.get(m.get("variant"), 99))
+    j.setdefault("rerun", {})[variant] = {
+        "converged": bool(conv), "reason": reason,
+        "at": datetime.now().isoformat(timespec="seconds"),
+    }
+    with open(json_path, "w", encoding="utf-8") as fh:
+        json.dump(j, fh)
+
+    # ── Rewrite ts_<seed>.npz: drop this variant's arrays, add the new ones. ──
+    arrs: Dict[str, np.ndarray] = {}
+    if os.path.isfile(ts_path):
+        with np.load(ts_path, allow_pickle=False) as z:
+            arrs = {k: z[k] for k in z.files}
+    # Drop every key belonging to `variant` (keys are "<kind>__<variant>__...";
+    # "t_min" has no "__" and is always kept).
+    arrs = {k: v for k, v in arrs.items()
+            if "__" not in k or k.split("__")[1] != variant}
+    if conv:
+        arrs.setdefault("t_min", t_min)
+        arrs[f"vrms__{variant}"] = vrms
+        for nm, (P, Q) in pq.items():
+            arrs[f"P__{variant}__{nm}"] = P
+            arrs[f"Q__{variant}__{nm}"] = Q
+        for z_, stats in zv.items():
+            for stat, arr in stats.items():
+                arrs[f"Vz__{variant}__{z_}__{stat}"] = arr
+    np.savez_compressed(ts_path, **arrs)
+
+    return {"seed": int(seed), "variant": variant,
+            "status": ("converged" if conv else "diverged"), "reason": reason}
+
+
+def rerun_variant_only(variant: str, n_runs: int, jobs: int = 1,
+                       backup: bool = True) -> None:
+    """Re-simulate a single ``variant`` on the existing accepted scenarios and
+    merge it back in, keeping all other variants' results as-is.
+
+    Operates on the same set ``collect_and_finalize`` would keep: the first
+    ``n_runs`` accepted scenarios by ascending seed (or all accepted when
+    ``n_runs <= 0``).  Re-finalizes at the end so the master CSVs, canonical
+    ``timeseries/run_XXXX.npz``, Table-3 and figures are rebuilt.
+    """
+    if variant not in VARIANTS:
+        raise SystemExit(f"--rerun-variant: unknown variant {variant!r} "
+                         f"(valid: {', '.join(VARIANT_ORDER)})")
+    os.makedirs(RUNS_DIR, exist_ok=True)
+
+    recs: List[Dict[str, Any]] = []
+    for f in glob.glob(os.path.join(RUNS_DIR, "scenario_*.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                recs.append(json.load(fh))
+        except (OSError, ValueError):
+            continue
+    accepted = sorted((r for r in recs if r.get("accepted")),
+                      key=lambda r: int(r["seed"]))
+    chosen = accepted[:n_runs] if (n_runs and n_runs > 0) else accepted
+    if not chosen:
+        raise SystemExit(
+            f"--rerun-variant: no accepted scenarios found in {RUNS_DIR}. "
+            "Run the full batch first (the per-seed staging must exist).")
+    seeds = [int(r["seed"]) for r in chosen]
+
+    print("=" * 72)
+    print(f"  RE-RUN VARIANT {variant} ONLY over {len(seeds)} accepted "
+          f"scenario(s); all other variants kept as-is.")
+    print(f"  Active {variant} overrides (edit VARIANTS[{variant!r}] / "
+          f"KAPPA_V5 to change):")
+    for k, v in VARIANTS[variant].items():
+        print(f"      {k} = {v}")
+    print("=" * 72)
+
+    # ── Safety backup of the per-seed staging we are about to overwrite ───────
+    if backup:
+        bdir = os.path.join(
+            OUT_ROOT, f"_runs_backup_{variant}_{datetime.now():%Y%m%d_%H%M%S}")
+        os.makedirs(bdir, exist_ok=True)
+        for s in seeds:
+            for nm in (f"scenario_{s}.json", f"ts_{s}.npz"):
+                src = os.path.join(RUNS_DIR, nm)
+                if os.path.isfile(src):
+                    shutil.copy2(src, os.path.join(bdir, nm))
+        print(f"  [backup] pre-rerun staging copied to {bdir}")
+
+    # Warm parent caches (validates the element/gen build before forking).
+    _get_elements()
+    _get_sel_info()
+    _get_gen_srated()
+
+    results: List[Dict[str, Any]] = []
+    if jobs <= 1:
+        print(f"[serial] re-running {variant} on {len(seeds)} scenarios ...")
+        for s in seeds:
+            r = _rerun_one_scenario_variant(s, variant, capture=False)
+            results.append(r)
+            print(f"  [seed {r['seed']}] {variant}: {r['status']}"
+                  + (f" ({r['reason']})" if r.get("reason") else ""))
+    else:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        print(f"[parallel] {jobs} workers re-running {variant} "
+              f"(per-worker output -> {RUNS_DIR}/rerun_{variant}_<seed>.txt) ...")
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            futs = {ex.submit(_rerun_one_scenario_variant, s, variant, True): s
+                    for s in seeds}
+            for fut in as_completed(futs):
+                s = futs[fut]
+                try:
+                    r = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    r = {"seed": int(s), "variant": variant,
+                         "status": "skipped", "reason":
+                         f"worker error: {type(exc).__name__}: {exc}"}
+                results.append(r)
+                print(f"  [seed {r['seed']}] {variant}: {r['status']}"
+                      + (f" ({r['reason']})" if r.get("reason") else ""))
+
+    n_conv = sum(r["status"] == "converged" for r in results)
+    n_div = sum(r["status"] == "diverged" for r in results)
+    n_skip = sum(r["status"] == "skipped" for r in results)
+    print("\n" + "#" * 72)
+    print(f"  {variant} re-run complete: {n_conv} converged, "
+          f"{n_div} diverged (variant dropped for those runs), {n_skip} skipped.")
+    if n_div:
+        print(f"  -> {variant} now has {n_conv}/{len(seeds)} runs; other "
+              "variants unchanged.")
+    print("#" * 72)
+
+    collect_and_finalize(n_runs)
 
 
 # ===========================================================================
@@ -1618,7 +1907,7 @@ def main() -> None:
                     help="base seed; scenario seed = seed + attempt")
     ap.add_argument("--resume", action="store_true",
                     help="continue an interrupted batch (skip already-tried seeds)")
-    ap.add_argument("--jobs", type=int, default=10,
+    ap.add_argument("--jobs", type=int, default=20,
                     help="parallel worker processes over scenarios. The work is "
                          "memory-bandwidth bound (sparse power flow), not CPU- or "
                          "solver-bound, so throughput plateaus ~2-2.3x and peaks "
@@ -1637,6 +1926,15 @@ def main() -> None:
     ap.add_argument("--replot", action="store_true",
                     help="rebuild tables + figures from the per-seed staging "
                          "(RUNS_DIR) / existing CSVs only, no simulation")
+    ap.add_argument("--rerun-variant", type=str, default=None, metavar="V",
+                    help="re-simulate ONLY this variant (e.g. V5) on the already "
+                         "accepted scenarios with the CURRENT VARIANTS[V] / "
+                         "KAPPA_V5 parameters, keeping all other variants' results "
+                         "as-is; then rebuild tables + figures. Requires the "
+                         "per-seed staging from a prior full batch.")
+    ap.add_argument("--no-backup", action="store_true",
+                    help="with --rerun-variant, skip the safety copy of the "
+                         "per-seed staging before overwriting it")
     args = ap.parse_args()
 
     if args.box_metrics:
@@ -1654,6 +1952,13 @@ def main() -> None:
         print("=" * 72)
         collect_and_finalize(args.runs)
         print(f"\n[done] tables + figures rebuilt in {OUT_ROOT}/")
+        return
+
+    if args.rerun_variant:
+        rerun_variant_only(args.rerun_variant, args.runs,
+                           jobs=max(1, args.jobs), backup=not args.no_backup)
+        print(f"\n[done] {args.rerun_variant} re-merged; outputs in {OUT_ROOT}/ "
+              f"(and figures mirrored to {PAPER_FIG_DIR})")
         return
 
     run_monte_carlo(args.runs, args.seed, args.resume, jobs=max(1, args.jobs),

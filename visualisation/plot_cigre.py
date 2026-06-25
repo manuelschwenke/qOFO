@@ -58,18 +58,22 @@ CIGRE_PALETTE: Dict[str, str] = {
     "V3": TU_COLOURS[1],   # #004E8A blue   -- one-sided OFO
     "V4": TU_COLOURS[4],   # #008877 teal   -- proposed (cascaded OFO)
     "V5": "#000000",       # black (dashed) -- centralized upper-bound reference
+    "V5-20s": "#000000",  # black (dashed) -- centralized upper-bound reference
 }
 #: The proposed variant is drawn slightly heavier so it reads as the headline.
 _PROPOSED = "V4"
 #: The single centralized controller is the best-case upper-bound reference;
 #: drawn as a heavier black dashed line so it reads as the benchmark envelope.
 _REFERENCE = "V5"
+_REFERENCE_20s = "V5-20s"
 
 
 def _variant_style(name: str) -> dict:
     col = CIGRE_PALETTE.get(name, TU_COLOURS[hash(name) % len(TU_COLOURS)])
     if name == _REFERENCE:
         return dict(color=col, linewidth=1.0, zorder=6, linestyle=(0, (5, 2)))
+    if name == _REFERENCE_20s:
+        return dict(color=col, linewidth=1.0, zorder=6, linestyle=(0, (1, 2)))
     lw = 1.2 if name == _PROPOSED else 1.0
     z = 5 if name == _PROPOSED else 3
     return dict(color=col, linewidth=lw, zorder=z)
@@ -155,6 +159,22 @@ def _ordered_variants(logs: Dict[str, List[MultiTSOIterationRecord]],
     return canonical + extra
 
 
+def _tso_step_logs(
+    log: List[MultiTSOIterationRecord],
+) -> List[MultiTSOIterationRecord]:
+    """Decimate *log* to the records written at a TSO-controller firing.
+
+    The runner tags every record with ``tso_active`` (``True`` on the step
+    where the per-zone TSO MIQP re-dispatched, i.e. roughly every
+    ``tso_period_s``).  Keeping only those records makes the CIGRE time-series
+    figures show one point per TSO decision instead of one per plant step
+    (``dt_s``), removing the within-period zero-order-hold staircase.  Falls
+    back to the full log if no record carries the flag (e.g. older pickles).
+    """
+    sub = [r for r in log if getattr(r, "tso_active", False)]
+    return sub or list(log)
+
+
 def _draw_event_markers(axes, events, *, label_ax_index: int = 0) -> None:
     """Mark contingency events with thin vertical rules + rotated labels.
 
@@ -216,13 +236,16 @@ def plot_fig3a_voltage(
         print("  [plot_cigre] Fig.3a: no variants with data -- skipped")
         return
 
+    rename_map = {"V5-20s": "V5"}
+    display_names = [rename_map.get(n, n) for n in variants]  # <-- applied once here
+
     if not per_zone:
         fig, ax = plt.subplots(1, 1, figsize=(_FIG3_WIDTH_IN, 2.7))
 
         for name in variants:
             d = voltage_rms_err_all(logs[name], v_set)
-            y = d["rms_err_pu"] * 1e3  # p.u. -> mp.u. for readability
-            ax.plot(d["t_min"], y, label=name, **_variant_style(name))
+            y = d["rms_err_pu"] * 1e3
+            ax.plot(d["t_min"], y, **_variant_style(name))  # label not needed here
 
         ax.set_ylabel(r"$\bar e_\mathrm{v}$ / mp.u.")
         ax.set_xlabel("Time / min")
@@ -249,7 +272,7 @@ def plot_fig3a_voltage(
         ]
         ax.legend(
             handles,
-            variants,
+            display_names,  # <-- renamed labels
             loc="upper right",
             ncol=1,
             frameon=True,
@@ -305,7 +328,7 @@ def plot_fig3a_voltage(
                 continue
             t_min = np.asarray(pz["t_min"], dtype=float)
             y = pz["rms_err_pu"][zone] * 1e3  # p.u. -> mp.u.
-            ax.plot(t_min, y, label=name, **_variant_style(name))
+            ax.plot(t_min, y, **_variant_style(name))  # label not needed here
 
         ax.set_ylabel(rf"$\bar e_{{\mathrm{{v}},{zone}}}$ / mp.u.")
         ax.set_ylim(bottom=0.0)
@@ -335,7 +358,7 @@ def plot_fig3a_voltage(
     ]
     axes[0].legend(
         handles,
-        variants,
+        display_names,  # <-- renamed labels
         loc="upper right",
         ncol=1,
         frameon=True,
@@ -357,7 +380,6 @@ def plot_fig3a_voltage(
         tight=False,
     )
     plt.close(fig)
-
 
 # ---------------------------------------------------------------------------
 #  Fig. 3b -- per-STS interface Q: dispatched setpoint vs measured flow
@@ -914,13 +936,23 @@ def make_cigre_figures(
     iface_show_v5: bool = False,
     events: Optional[Sequence] = None,
     png_dir: Optional[str] = None,
+    tso_steps_only: bool = False,
 ) -> None:
     """Render Figs 3a/3b-5 into every directory in *out_dirs* (PDF) and *png_dir*.
 
     *events* is an optional list of ``(t_min, label)`` contingency markers
     overlaid on the two tracking figures (3a, 3b).
+
+    *tso_steps_only*: when True, decimate every variant's log to the records
+    written at a TSO-controller firing (≈ every ``tso_period_s``) via
+    :func:`_tso_step_logs`, so the figures show one point per TSO decision
+    instead of one per plant step (``dt_s``).  Affects all four figures,
+    including the Fig. 4 capability scatter (its point cloud is thinned to the
+    TSO-firing operating points).
     """
     apply_cigre_style()
+    if tso_steps_only:
+        logs = {name: _tso_step_logs(rec_list) for name, rec_list in logs.items()}
     plot_fig3a_voltage(logs, out_dirs, v_set=v_set, events=events, png_dir=png_dir)
     plot_fig3b_iface(logs, out_dirs, show_v5=iface_show_v5, events=events,
                      png_dir=png_dir)

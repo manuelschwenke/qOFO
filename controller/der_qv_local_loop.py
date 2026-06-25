@@ -506,11 +506,9 @@ def cache_per_sgen_svq(
 
     obs_perm = [obs_map.index(b) for b in der_buses_unique]
     der_perm = [der_map.index(b) for b in der_buses_unique]
-    S_VQ_pu_per_pu = S_VQ_full[np.ix_(obs_perm, der_perm)]
-    s_base = float(getattr(net, "sn_mva", 1.0))
-    if s_base <= 0:
-        s_base = 1.0
-    diag = np.diag(S_VQ_pu_per_pu) / s_base
+    # ``compute_dV_dQ_der`` now returns pu_v/Mvar directly (divides by sn_mva).
+    S_VQ_pu_per_mvar = S_VQ_full[np.ix_(obs_perm, der_perm)]
+    diag = np.diag(S_VQ_pu_per_mvar)
     bus_to_svq = {b: float(diag[i]) for i, b in enumerate(der_buses_unique)}
 
     for s in sgen_indices:
@@ -929,9 +927,8 @@ def seed_qv_equilibrium(
                 return n_updated
         else:
             S_VQ_bus = S_VQ_full
-        s_base = float(getattr(net, "sn_mva", 1.0))
-        if s_base > 0:
-            S_VQ_bus = S_VQ_bus / s_base
+        # ``compute_dV_dQ_der`` now returns pu_v/Mvar directly (divides by
+        # sn_mva); no extra base scaling here.
 
         # Per-DER S_VQ: row i = V at DER i's bus, col j = Q at DER j's bus.
         bus_to_idx = {b: i for i, b in enumerate(unique_buses)}

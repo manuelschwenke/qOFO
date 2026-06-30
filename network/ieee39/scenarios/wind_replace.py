@@ -86,7 +86,7 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     # slack anchor) as synchronous anchors — only G8 is replaced by a
     # STATCOM wind park.  Zone 2 keeps G3 (pandapower gen_idx 1, term 31,
     # grid 9, 650 MW) as the synchronous anchor; G2 (ex-slack) is replaced.
-    _z1_gens_to_remove_term = {36, 29}       # G8 only — G10 (term 29, Hydro) retained + 37 maybe?
+    _z1_gens_to_remove_term = {36}       # G8 only — G10 (term 29, Hydro) retained + 37 maybe?
     _z2_gens_to_remove_term = {30}       # G2 (ex-slack); keep G3 at term 31 + 32 maybe?
     _z3_gens_to_remove_term = {33, 34}   # G5 (grid 18, shares with G4) + G6 (grid 21)
 

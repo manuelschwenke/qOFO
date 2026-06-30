@@ -295,6 +295,26 @@ class CentralOFOController(TSOController):
     #  Objective: voltage tracking only, per-bus weights (EHV vs HV)
     # ------------------------------------------------------------------
 
+    def voltage_curvature_inputs(
+        self,
+    ) -> Optional[Tuple[NDArray[np.float64], NDArray[np.float64]]]:
+        """Voltage rows of H and per-bus ``g_v`` for curvature analysis.
+
+        The monolithic objective is voltage-tracking only, output ordering
+        ``[ V_bus | I_line | Q_gen ]``, so the voltage block is the leading
+        ``n_v`` rows and the weights are the per-bus :attr:`g_v_per_bus`
+        (``g_v`` on TN buses, ``central_dso_g_v`` on HV buses).  This is the
+        exact ``(H_v, g_v)`` the V5 curvature probe uses.  See
+        :meth:`BaseOFOController.voltage_curvature_inputs`.
+        """
+        n_v = len(self.config.voltage_bus_indices)
+        if n_v == 0:
+            return None
+        H = self._expand_H_to_der_level(self._build_sensitivity_matrix())
+        H_v = np.ascontiguousarray(H[:n_v, :], dtype=np.float64)
+        g_v_vec = np.asarray(self.g_v_per_bus, dtype=np.float64)
+        return H_v, g_v_vec
+
     def _compute_objective_gradient(
         self, measurement: Measurement,
     ) -> NDArray[np.float64]:

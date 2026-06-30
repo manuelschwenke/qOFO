@@ -143,6 +143,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from configs.multi_tso_config import MultiTSOConfig  # noqa: E402
 from experiments.helpers.records import MultiTSOIterationRecord  # noqa: E402
+from experiments.paths import results_path  # noqa: E402
 from experiments.runners import run_multi_tso_dso  # noqa: E402
 
 # ``002_M_TSO_M_DSO_COMPARE`` starts with a digit, so the import must go
@@ -233,7 +234,7 @@ def make_base_config() -> MultiTSOConfig:
     cfg.dso_pe_noise_seed = 42        # RNG seed for reproducibility
 
     # ---- Output directory ---------------------------------------------
-    cfg.result_dir = os.path.join("results", "003_cigre_2026")
+    cfg.result_dir = results_path("003_cigre_2026")
 
     return cfg
 
@@ -648,3 +649,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

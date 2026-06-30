@@ -73,6 +73,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from configs.multi_tso_config import MultiTSOConfig
 from experiments.helpers.records import ContingencyEvent, MultiTSOIterationRecord
+from experiments.paths import results_path
 from experiments.runners import run_multi_tso_dso
 from visualisation.plot_compare_scenarios import plot_scenario_comparison
 
@@ -191,7 +192,7 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
     # ── TSO-only OFO (T0, T1) ───────────────────────────────────────────
     # OFO MIQP active at the transmission layer; DSO uses the local
     # plant-side controllers (no DSO MIQP).  Mitigation H from
-    # ``experiments/results/002_compare/diagnostics_T-OFO/summary.md``:
+    # ``results/002_compare/diagnostics_T-OFO/summary.md``:
     # the DSO has no MIQP tracking Q_PCC,set, so the OFO regulariser
     # pin (``g_w_pcc=1e8``) keeps each Q_PCC setpoint near its current
     # value while the TSO OFO drives V via V_gen / OLTC / shunt.
@@ -255,7 +256,7 @@ def run_one_scenario(name: str, overrides: Dict[str, Any], out_root: str
     return log
 
 
-def load_logs(out_root: str = os.path.join("results", "002_compare"),
+def load_logs(out_root: str = results_path("002_compare"),
               names: Optional[List[str]] = None,
               ) -> Dict[str, List[MultiTSOIterationRecord]]:
     """Reload pickled scenario logs from a previous run.
@@ -289,7 +290,7 @@ def load_logs(out_root: str = os.path.join("results", "002_compare"),
     return out
 
 
-def replot(out_root: str = os.path.join("results", "002_compare")) -> None:
+def replot(out_root: str = results_path("002_compare")) -> None:
     """Regenerate all comparison figures from the persisted ``log.pkl``
     files in ``out_root`` -- useful when a previous run wrote the pickles
     but the plot pass failed (e.g. PDF locked open in a viewer).
@@ -319,7 +320,7 @@ def main(only: Optional[List[str]] = None,
     produce full-suite comparison figures (existing pickles for
     skipped scenarios are picked up).
     """
-    out_root = os.path.join("results", "002_compare")
+    out_root = results_path("002_compare")
     os.makedirs(out_root, exist_ok=True)
 
     selected = list(SCENARIOS.keys())
@@ -384,3 +385,4 @@ if __name__ == "__main__":
             only=_parse_csv_arg(sys.argv, "--only"),
             skip=_parse_csv_arg(sys.argv, "--skip"),
         )
+

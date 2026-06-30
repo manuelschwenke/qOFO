@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Union
 
 
@@ -88,6 +89,15 @@ class MultiTSOConfig:
 
     # -- Voltage setpoint ------------------------------------------------------
     v_setpoint_pu:  float = 1.03
+
+    zone_v_setpoints_pu: Optional[Dict[int, float]] = None
+    """Optional per-zone voltage-schedule override ``{zone_id: V_set_pu}``.
+    When provided, each zone tracks its own ``V_set`` instead of the global
+    ``v_setpoint_pu`` (zones not listed fall back to ``v_setpoint_pu``).  Used to
+    create deliberate inter-zone voltage divergence (e.g. 1.05 / 1.03 / 1.01) —
+    the scenario where horizontal tie coordination has something to decouple.
+    The tie coordinator's per-tie anchor is the midpoint of the two zones'
+    schedules, so divergent schedules give a non-trivial natural ΔV_ref."""
 
     # -- Objective weights -----------------------------------------------------
     g_v:            float = 50000.0
@@ -410,7 +420,7 @@ class MultiTSOConfig:
 
     # -- Output ----------------------------------------------------------------
     verbose:    int = 0
-    result_dir: str = "results"
+    result_dir: str = str(Path(__file__).resolve().parents[1] / "results")
 
     # -- Live plot -------------------------------------------------------------
     live_plot_controller: bool = False
@@ -451,6 +461,14 @@ class MultiTSOConfig:
     """When True, show the TSO inter-zone tie-line reactive-flow tile on
     Figure 1.  Set False to free vertical room when tie lines are not of
     interest (e.g. single-zone studies)."""
+
+    live_plot_tie_coordination: bool = False
+    """Enable Figure 5 — HORIZONTAL TSO-TSO COORDINATION live plot
+    (:class:`visualisation.plot_tie_coordination.TieCoordinationLivePlotter`).
+    Per inter-zone tie line: the consistency dual λ_e, the tie-line reactive
+    flow with the ±``tie_q_band_mvar`` soft cap shaded, the two boundary
+    voltages V_i / V_j with the corridor reference v_ref, and the feedforward
+    drop dv_ff.  Requires ``enable_tie_coordination`` to produce data."""
 
     live_plot_layout: str = "dual_screen"
     """Window layout for the three live figures.
@@ -924,6 +942,79 @@ class MultiTSOConfig:
     """Soft-constraint slack penalty for Q_tie output bound (Phase B
     optional).  Mirrors ``g_z_q_pcc``.  Default 0.0 = no slack-based
     bound enforcement on Q_tie."""
+
+    # ── Horizontal TSO-TSO coordination (two-loop ΔV_ref) ────────────────────
+    enable_tie_coordination: bool = False
+    """Master gate for the horizontal TSO-TSO tie coordinator
+    (:class:`controller.tie_coordinator.HorizontalTieCoordinator`).  When
+    False (default) nothing changes — the per-zone TSO loop is byte-for-byte
+    the baseline.  When True, the runner builds one tie coordinator over all
+    inter-zone tie lines, ensures each tie endpoint bus is a monitored voltage
+    bus, and runs one horizontal round per TSO step: collect realised boundary
+    voltages -> negotiate the agreed difference ΔV_ref (relax toward the
+    realised difference, anchor toward 0) -> push per-side boundary voltage
+    setpoints to the two zones, which track them through their *primary* g_v
+    objective (no price).  The exchange band is an orthogonal Q_tie soft cap
+    (``tie_q_band_mvar`` + ``g_z_q_tie`` > 0).
+
+    NOTE: default False — coordination changes multi-zone results and should be
+    validated on the target scenario (it is neutral-to-helpful on controllable
+    ties, inert on structurally-pinned ties) before enabling broadly."""
+
+    tie_grad_step: float = 0.5
+    """Dimensionless descent step for the combined boundary-gradient coordination.
+    The runner sets the coordinator's ``grad_alpha = tie_grad_step / (2·g_v)``
+    (≈ the voltage-tracking curvature), so this knob is ``g_v``-agnostic
+    (``0.5`` = half the Newton step)."""
+
+    tie_grad_eps: float = 1e-3
+    """Per-zone, per-round cap on objective *worsening*, as a **dimensionless
+    fraction of the unit-error objective level** — the "don't worsen my own too
+    much" safeguard.  The runner sets the coordinator's absolute
+    ``grad_eps = tie_grad_eps · g_v``, so this knob is ``g_v``-agnostic.  Larger
+    ⇒ more inter-zone redistribution permitted per round; ``0`` ⇒ only strictly
+    jointly-beneficial moves."""
+
+    tie_coord_period_s: float = 0.0
+    """Outer-loop (tie-coordination) update period [s] — the inner/outer
+    *timescale separation*.  The coordinator advances ΔV_ref only every
+    ``tie_coord_period_s``; between updates ΔV_ref is HELD, so the inner zone OFO
+    loops get several steps to realise the agreed per-side ``v_ref`` before it
+    moves again, which damps the outer-loop limit cycle.  Should be an integer
+    multiple of ``tso_period_s`` (the round is gated inside the TSO step).
+    ``0`` (default) ⇒ coordinate every TSO step (1:1, no separation)."""
+
+    tie_anchor: float = 0.2
+    """Weak subsidiarity pull ≥ 0 biasing ΔV_ref → 0 when the zones are jointly
+    indifferent (a tiebreaker, not the driver)."""
+
+    tie_deadband_v_pu: float = 0.001
+    """Deadband Δ [p.u.] on the anchor: ``|ΔV_ref| ≤ Δ`` is left untouched."""
+
+    tie_kappa: float = 0.5
+    """Per-side split of ΔV_ref between the two ends (0.5 = symmetric)."""
+
+    tie_dvref_max: float = 0.06
+    """Clip on the agreed difference, ``|ΔV_ref| ≤ tie_dvref_max`` [p.u.]."""
+
+    tie_reserve_headroom_scale_mvar: float = 100.0
+    """Headroom scale H0 [Mvar] for the per-zone reserve *diagnostic* μ.
+
+    The runner converts directional absolute headroom to scarcity as
+    ``μ = H0 / (min(H_cap, H_ind) + H0)``. Thus zones with little remaining
+    reactive headroom approach μ=1, while zones with large absolute headroom
+    approach μ=0.  Under the gradient-exchange coordinator the reserve term is
+    already intrinsic to each zone's boundary gradient ``γ`` (via ``g_res`` in
+    the objective), so μ is recorded for diagnostics only and no longer drives
+    an economic anchor.
+    """
+
+    tie_q_band_mvar: float = 100.0
+    """Subsidiarity soft-cap band on each tie-line reactive exchange [Mvar]
+    (orthogonal to the ΔV_ref negotiation).  Applied to the Q_tie output bound
+    as ``[−band, +band]`` and enforced via the ``g_z_q_tie`` slack (which MUST
+    be > 0 to bite; with it 0 the band gets free slack and is inert).  Only
+    used when ``enable_tie_coordination`` is True."""
 
     tso_g_res_sg: float = 0.0
     """Explicit reactive-RESERVE weight for TS synchronous generators.

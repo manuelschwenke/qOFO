@@ -58,7 +58,11 @@ from core.network_state import NetworkState
 from core.measurement import Measurement
 from core.actuator_bounds import ActuatorBounds
 from core.der_mapping import DERMapping
-from core.message import SetpointMessage, CapabilityMessage
+from core.message import (
+    SetpointMessage,
+    CapabilityMessage,
+    TieCoordinationMessage,
+)
 from sensitivity.jacobian import JacobianSensitivities
 from sensitivity.sensitivity_updater import SensitivityUpdater
 
@@ -231,6 +235,17 @@ class TSOControllerConfig:
     optional).  Mirrors ``g_z_q_pcc``.  Default 0.0 = no slack-based
     bound enforcement on Q_tie."""
 
+    q_tie_band_mvar: Optional[NDArray[np.float64]] = None
+    """Subsidiarity soft-cap band on the tie-line reactive exchange [Mvar].
+    When provided (length = ``len(tie_line_indices)``, non-negative), the
+    Q_tie output bound in :meth:`_get_output_limits` is tightened from the
+    wide-open Phase-A interval to ``[−band, +band]`` per tie, enforced as a
+    soft slack penalised by ``g_z_q_tie`` (which must be > 0 for the cap to
+    bite).  This is the "Q_tie soft cap" guardrail of the V-coordination
+    scheme: the horizontal tie coordinator sets the *voltage* corridor, while
+    this band bounds the emergent reactive exchange without tracking it.
+    ``None`` (default) preserves the legacy wide-open Q_tie bound."""
+
     # ── Explicit reactive-reserve penalisation (optional, togglable) ────────
     g_res_sg: float = 0.0
     """Explicit reserve-penalisation weight for transmission-connected
@@ -383,6 +398,17 @@ class TSOControllerConfig:
                 f"q_tie_setpoints_mvar length ({len(self.q_tie_setpoints_mvar)}) "
                 f"must match tie_line_indices length ({n_tie})"
             )
+        if self.q_tie_band_mvar is not None:
+            self.q_tie_band_mvar = np.asarray(
+                self.q_tie_band_mvar, dtype=np.float64
+            )
+            if len(self.q_tie_band_mvar) != n_tie:
+                raise ValueError(
+                    f"q_tie_band_mvar length ({len(self.q_tie_band_mvar)}) "
+                    f"must match tie_line_indices length ({n_tie})"
+                )
+            if np.any(self.q_tie_band_mvar < 0.0):
+                raise ValueError("q_tie_band_mvar entries must be non-negative")
 
 
 class TSOController(BaseOFOController):
@@ -563,6 +589,239 @@ class TSOController(BaseOFOController):
             msg_idx = msg_idx_candidates[0]
             self.pcc_capability_min_mvar[i] = message.q_min_mvar[msg_idx]
             self.pcc_capability_max_mvar[i] = message.q_max_mvar[msg_idx]
+
+    def receive_tie_coordination(
+        self,
+        message: TieCoordinationMessage,
+    ) -> None:
+        """
+        Receive a horizontal tie-coordination message from the tie coordinator.
+
+        For each tie line in the message, redirects the voltage-tracking
+        setpoint at the in-zone boundary bus to the agreed per-side reference
+        ``v_ref_pu``.  Tracking the redirected setpoint reuses the *existing*
+        primary voltage-tracking term (``g_v``) — there is no price term, so the
+        coordination cannot compete with or override voltage tracking.  The
+        agreed difference ``ΔV_ref`` is realised implicitly as the gap between
+        the two zones' redirected boundary setpoints.
+
+        Parameters
+        ----------
+        message : TieCoordinationMessage
+            Coordination message targeting this controller.
+
+        Raises
+        ------
+        ValueError
+            If the message targets a different controller, or a boundary bus is
+            not among this controller's monitored voltage buses.
+        RuntimeError
+            If voltage tracking is disabled (``v_setpoints_pu is None``); the
+            V-coordination scheme requires it.
+        """
+        if message.target_controller_id != self.controller_id:
+            raise ValueError(
+                f"Message target '{message.target_controller_id}' does not "
+                f"match controller ID '{self.controller_id}'"
+            )
+        if self.config.v_setpoints_pu is None:
+            raise RuntimeError(
+                "Tie coordination requires voltage tracking; "
+                "v_setpoints_pu is None."
+            )
+        # Ensure the setpoint vector is a writable float array we may mutate.
+        self.config.v_setpoints_pu = np.array(
+            self.config.v_setpoints_pu, dtype=np.float64,
+        )
+        v_bus = list(self.config.voltage_bus_indices)
+
+        for k in range(message.n_ties):
+            bus = int(message.boundary_bus_indices[k])
+            if bus not in v_bus:
+                raise ValueError(
+                    f"Tie boundary bus {bus} is not in voltage_bus_indices of "
+                    f"controller '{self.controller_id}'; add it to the "
+                    f"monitored voltage buses to enable V-coordination."
+                )
+            pos = v_bus.index(bus)
+            self.config.v_setpoints_pu[pos] = float(message.v_ref_pu[k])
+
+    def report_tie_boundary_voltage(
+        self,
+        measurement: Measurement,
+        boundary_bus: int,
+    ) -> float:
+        """
+        Return the measured voltage [p.u.] at a tie-line boundary bus.
+
+        Convenience reader for the tie coordinator's realised-voltage input
+        (the coordinator never sees the plant).  Mirrors the per-bus lookup
+        used throughout the gradient code.
+
+        Parameters
+        ----------
+        measurement : Measurement
+            Current system measurements for this zone.
+        boundary_bus : int
+            Pandapower bus index of the in-zone tie endpoint.
+
+        Raises
+        ------
+        ValueError
+            If the bus is not present in the measurement.
+        """
+        meas_idx = np.where(measurement.bus_indices == boundary_bus)[0]
+        if len(meas_idx) == 0:
+            raise ValueError(
+                f"Boundary bus {boundary_bus} not found in measurement"
+            )
+        return float(measurement.voltage_magnitudes_pu[meas_idx[0]])
+
+    def _reserve_num_den(self, measurement: Measurement) -> Tuple[float, float]:
+        """Capability-weighted reserve sums over this zone's in-service
+        **synchronous generators only** (TS-DER excluded for now):
+
+            num = Σ_k s_k · w_k ,   den = Σ_k w_k ,
+            s_k = min(1, |Q_k − Q_mid,k| / Q_half,k)   (scarcity, 0 mid-band .. 1 at limit)
+            w_k = Q_half,k                              (reactive capability)
+
+        Weighting by capability lets a large machine's idle headroom dominate
+        the zone aggregate — essential so a zone hosting a big (quasi-slack)
+        machine reads *abundant*, not scarce.  The midpoint / half-band are from
+        the same state-dependent capability curve as ``g_res_sg``.
+        """
+        _EPS = 1e-6
+        num = den = 0.0
+        n_gen = len(self.config.gen_indices)
+        if (
+            n_gen > 0
+            and self.actuator_bounds.gen_params is not None
+            and len(measurement.gen_p_mw) == n_gen
+            and len(measurement.gen_vm_pu) == n_gen
+            and len(measurement.gen_q_mvar) == n_gen
+        ):
+            q_min, q_max = self.actuator_bounds.compute_gen_q_bounds(
+                measurement.gen_p_mw, measurement.gen_vm_pu,
+            )
+            q_mid = 0.5 * (q_max + q_min)
+            q_half = 0.5 * (q_max - q_min)
+            q = np.asarray(measurement.gen_q_mvar, dtype=np.float64)
+            for k in range(n_gen):
+                if self._oos_gen_mask[k] or q_half[k] <= _EPS:
+                    continue
+                w = float(q_half[k])
+                s = min(1.0, abs(float(q[k]) - float(q_mid[k])) / w)
+                num += s * w
+                den += w
+        return num, den
+
+    def report_reserve_scarcity(self, measurement: Measurement) -> float:
+        """Capability-weighted reactive-reserve *scarcity* in [0, 1] (SG-only).
+
+        ``0`` = abundant (mid-band / large idle headroom); ``1`` = saturated.
+        See :meth:`_reserve_num_den`.  Used by the tie coordinator's reserve
+        extension.  ``0.0`` when no capability info is available.
+
+        NOTE: this counts only the gens this controller owns
+        (``config.gen_indices``).  Quasi-slack / equivalent machines that sit
+        outside any zone's controllable set are folded into their *electrical*
+        zone by the runner (see the horizontal round) using
+        :meth:`report_reserve_capability` — otherwise a zone hosting such a
+        machine would read scarce despite its large idle reserve.
+        """
+        num, den = self._reserve_num_den(measurement)
+        return num / den if den > 1e-9 else 0.0
+
+    def report_reserve_capability(self, measurement: Measurement) -> float:
+        """Total reactive capability ``Σ Q_half`` [Mvar] over this zone's
+        in-service synchronous generators (the denominator of the
+        capability-weighted scarcity).  Lets the runner blend in extra
+        (quasi-slack) machines: ``μ = (scarcity·cap + Σ s·w) / (cap + Σ w)``."""
+        return self._reserve_num_den(measurement)[1]
+
+    def report_reserve_headroom(self, measurement: Measurement) -> Tuple[float, float]:
+        """Directional absolute reactive headroom ``(H_cap, H_ind)`` [Mvar].
+
+        ``H_cap = sum(max(q_max - q, 0))`` is the remaining ability to
+        increase positive reactive injection. ``H_ind = sum(max(q - q_min, 0))``
+        is the remaining ability to move toward absorption. The aggregate
+        includes in-service synchronous generators and TSO-connected DER owned
+        by this zone; equivalent/slack machines outside ``config.gen_indices``
+        are folded in by the multi-TSO runner.
+        """
+        h_cap = 0.0
+        h_ind = 0.0
+        n_gen = len(self.config.gen_indices)
+        if (
+            n_gen > 0
+            and self.actuator_bounds.gen_params is not None
+            and len(measurement.gen_p_mw) == n_gen
+            and len(measurement.gen_vm_pu) == n_gen
+            and len(measurement.gen_q_mvar) == n_gen
+        ):
+            q_min, q_max = self.actuator_bounds.compute_gen_q_bounds(
+                measurement.gen_p_mw, measurement.gen_vm_pu,
+            )
+            q = np.asarray(measurement.gen_q_mvar, dtype=np.float64)
+            for k in range(n_gen):
+                if self._oos_gen_mask[k]:
+                    continue
+                h_cap += max(float(q_max[k]) - float(q[k]), 0.0)
+                h_ind += max(float(q[k]) - float(q_min[k]), 0.0)
+
+        n_der = len(self.config.der_indices)
+        if (
+            n_der > 0
+            and len(measurement.der_p_mw) == n_der
+            and len(measurement.der_q_mvar) == n_der
+        ):
+            q_min_d, q_max_d = self.actuator_bounds.compute_der_q_bounds(
+                np.asarray(measurement.der_p_mw, dtype=np.float64)
+            )
+            q_d = np.asarray(measurement.der_q_mvar, dtype=np.float64)
+            h_cap += float(np.maximum(q_max_d - q_d, 0.0).sum())
+            h_ind += float(np.maximum(q_d - q_min_d, 0.0).sum())
+
+        return h_cap, h_ind
+
+    def report_boundary_gradient(
+        self,
+        measurement: Measurement,
+        boundary_bus: int,
+    ) -> float:
+        """Marginal of this zone's full OFO objective w.r.t. its boundary voltage.
+
+        Returns ``γ = (∇J · h_b) / (h_b · h_b)`` where ``∇J`` is the control-space
+        objective gradient (:meth:`_compute_objective_gradient` — voltage
+        tracking + reserve + effort, every weighted term) and ``h_b`` is the
+        boundary bus's voltage row of the expanded sensitivity matrix
+        (``∂V_b/∂u``).  Geometrically it is the directional derivative of the
+        objective along the minimum-norm control move that raises the boundary
+        voltage — the marginal cost to this zone of nudging its boundary up,
+        accounting for *all* objective components (a reserve-strained zone pays
+        more).  Because it uses the iterating gradient (not the converged
+        setpoint marginal), the envelope theorem does not zero the reserve term.
+        Used by the tie coordinator's combined-gradient descent.
+
+        Raises
+        ------
+        ValueError
+            If the boundary bus is not a monitored voltage bus.
+        """
+        v_bus = list(self.config.voltage_bus_indices)
+        if boundary_bus not in v_bus:
+            raise ValueError(
+                f"Boundary bus {boundary_bus} is not in voltage_bus_indices of "
+                f"controller '{self.controller_id}'."
+            )
+        pos = v_bus.index(boundary_bus)  # voltage block is the leading rows of H
+        grad_f = self._compute_objective_gradient(measurement)
+        H = self._expand_H_to_der_level(self._build_sensitivity_matrix())
+        h_b = np.ascontiguousarray(H[pos, :], dtype=np.float64)
+        denom = float(h_b @ h_b)
+        if denom <= 1e-18:
+            return 0.0
+        return float((grad_f @ h_b) / denom)
 
     def generate_setpoint_messages(
         self,
@@ -1171,10 +1430,18 @@ class TSOController(BaseOFOController):
                     y_upper[idx + k] = +1e6
             idx += n_gen
 
-        # --- Q_tie bounds (Phase A: wide-open, informational only) -------
+        # --- Q_tie bounds -------------------------------------------------
+        # Phase A (default): wide-open, informational only.  V-coordination
+        # scheme: when q_tie_band_mvar is set, tighten to [−band, +band] per
+        # tie as the subsidiarity soft cap (enforced via g_z_q_tie slack).
         if n_tie > 0:
-            y_lower[idx:idx + n_tie] = -1e6
-            y_upper[idx:idx + n_tie] = +1e6
+            if self.config.q_tie_band_mvar is not None:
+                band = np.asarray(self.config.q_tie_band_mvar, dtype=np.float64)
+                y_lower[idx:idx + n_tie] = -band
+                y_upper[idx:idx + n_tie] = +band
+            else:
+                y_lower[idx:idx + n_tie] = -1e6
+                y_upper[idx:idx + n_tie] = +1e6
             idx += n_tie
 
         return y_lower, y_upper
@@ -1290,6 +1557,9 @@ class TSOController(BaseOFOController):
                 if self._oos_gen_mask[k]:
                     grad_gen[k] = 0.0
 
+        # Horizontal tie coordination adds NO objective term here: it only
+        # redirects boundary-bus voltage setpoints (handled by the existing
+        # voltage-tracking block above), so the gradient is unchanged.
         return np.concatenate([grad_v, grad_pcc, grad_i, grad_gen, grad_tie])
 
     def _compute_objective_gradient(
@@ -1518,6 +1788,9 @@ class TSOController(BaseOFOController):
                 _contrib_der[:n_der_ctrl] = coeff_der
                 self._debug_reserve_term("DER", _contrib_der, grad_f)
 
+        # Horizontal tie coordination adds NO control-space term: it acts purely
+        # through the redirected boundary voltage setpoints in the voltage block
+        # above (two-loop ΔV_ref design — the price term was removed).
         return grad_f
 
     def _debug_reserve_term(

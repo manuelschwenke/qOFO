@@ -83,6 +83,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from configs.multi_tso_config import MultiTSOConfig
 from experiments.helpers.records import ContingencyEvent, MultiTSOIterationRecord
+from experiments.paths import results_path
 from experiments.runners import run_multi_tso_dso
 
 # ``002_M_TSO_M_DSO_COMPARE`` starts with a digit, so import via importlib.
@@ -467,7 +468,7 @@ def replot(out_root: str) -> None:
 
 
 def main(only: Optional[List[str]] = None) -> None:
-    out_root = os.path.join("results", "004_local_vs_full")
+    out_root = results_path("004_local_vs_full")
     os.makedirs(out_root, exist_ok=True)
 
     selected = list(SCENARIOS.keys())
@@ -511,6 +512,8 @@ def _parse_csv_arg(argv: List[str], flag: str) -> Optional[List[str]]:
 
 if __name__ == "__main__":
     if "--replot" in sys.argv:
-        replot(os.path.join("results", "004_local_vs_full"))
+        replot(results_path("004_local_vs_full"))
     else:
         main(only=_parse_csv_arg(sys.argv, "--only"))
+
+

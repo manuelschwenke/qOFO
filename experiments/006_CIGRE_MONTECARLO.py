@@ -111,6 +111,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from configs.multi_tso_config import MultiTSOConfig
 from experiments.helpers.records import ContingencyEvent, MultiTSOIterationRecord
+from experiments.paths import results_path
 from experiments.runners import run_multi_tso_dso
 from analysis.reachability import ReachabilityViolation
 from experiments.helpers.comparison_metrics import (
@@ -125,7 +126,7 @@ from experiments.helpers.comparison_metrics import (
 # ===========================================================================
 
 #: Output directory inside the repo.
-OUT_ROOT = os.path.join("results", "006_cigre_mc")
+OUT_ROOT = results_path("006_cigre_mc")
 #: Per-run compact time-series store (feeds the aggregate figures + --replot).
 TS_DIR = os.path.join(OUT_ROOT, "timeseries")
 #: Throwaway result_dir for the per-variant runs (controllers may write here).
@@ -361,15 +362,15 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
         central_period_s=20,       # = V4 tso_period_s: cadence-matched comparison
         # -- V4 gain ratios restored (g_v/g_w per class), then x KAPPA_V5 on g_w --
         # g_v=1E7,                    # TN voltage weight = V4 g_v (was 5E7)
-        # g_w_der=100,                # = V4 (TSO DER);  ratio g_v/g_w_der = 1e5
-        # g_w_dso_der=1000,           # = V4 (DSO DER);  ratio cdso_g_v/g_w = 1e2
-        # g_w_gen=5E9,                # = V4 (very cautious AVR)
-        # g_w_tso_oltc=1E4,           # = V4 (was 2E4)
-        # g_w_dso_oltc=200,           # = V4 (was 1E3)
+        g_w_der=100,                # = V4 (TSO DER);  ratio g_v/g_w_der = 1e5
+        g_w_dso_der=1000,           # = V4 (DSO DER);  ratio cdso_g_v/g_w = 1e2
+        g_w_gen=5E9,                # = V4 (very cautious AVR)
+        g_w_tso_oltc=1E4,           # = V4 (was 2E4)
+        g_w_dso_oltc=200,           # = V4 (was 1E3)
         # debug_central_curvature=True,  # enable to print lambda_max(M) at t=0
     ),
 }
-KAPPA_V5: float = 1.25  # lambda_max(M)=1.237 at kappa=1 -> 1.25 gives ~0.99 (well-damped)
+KAPPA_V5: float = 1.5  # lambda_max(M)=1.237 at kappa=1 -> 1.25 gives ~0.99 (well-damped)
 _V5_GW_KEYS = ("g_w_der", "g_w_dso_der", "g_w_gen", "g_w_tso_oltc", "g_w_dso_oltc")
 if KAPPA_V5 != 1.0:
     # Only scale the g_w keys that V5 sets *explicitly*; when a key is commented
@@ -1815,7 +1816,7 @@ def plot_paper_combined_box(runs: List[Dict[str, np.ndarray]]) -> None:
     # ── Panel 1: RMS dV TS / p.u. (all variants) ──
     v1 = [V for V in VARIANT_ORDER if (df["variant"] == V).any()]
     _scalar_box(ax1, v1, "rms_v_ts_pu")
-    ax1.set_title(r"RMS $\Delta V$ TS / p.u.", loc="left", fontsize=FS)
+    ax1.set_title(r"$\bar{e}_\mathrm{v}$ / p.u.", loc="left", fontsize=FS)
 
     # ── Panel 2: TS voltage range by zone (double width, V2-V5) ──
     v2 = [V for V in VARIANT_ORDER if V in vfound and V != "V1"]
@@ -1865,12 +1866,12 @@ def plot_paper_combined_box(runs: List[Dict[str, np.ndarray]]) -> None:
     else:
         ax2.text(0.5, 0.5, "no per-zone voltage\n(re-run to populate)",
                  ha="center", va="center", transform=ax2.transAxes, fontsize=FS)
-    ax2.set_title("TS voltage range by zone / p.u.", loc="left", fontsize=FS)
+    ax2.set_title(r"$v_\mathrm{TS}$ / p.u.", loc="left", fontsize=FS)
 
     # ── Panel 3: gen Q utilisation (V2-V4 only) ──
     v3 = [V for V in ("V2", "V3", "V4") if (df["variant"] == V).any()]
     _scalar_box(ax3, v3, "res_util")
-    ax3.set_title("gen Q utilisation", loc="left", fontsize=FS)
+    ax3.set_title(r"$\bar{u}_\mathrm{q}$", loc="left", fontsize=FS)
 
     fig.tight_layout()
     _save_pdf(fig, "Fig_mc_paper_combined", [OUT_ROOT, PAPER_FIG_DIR],
@@ -1968,3 +1969,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

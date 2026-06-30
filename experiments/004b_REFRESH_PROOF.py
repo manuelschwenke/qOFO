@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from configs.multi_tso_config import MultiTSOConfig
 from experiments.helpers.records import MultiTSOIterationRecord
+from experiments.paths import results_path
 from experiments.runners import run_multi_tso_dso
 
 # ``004_LOCAL_VS_FULL_SENS`` starts with a digit, so import via importlib.
@@ -279,7 +280,7 @@ def plot_comparison(logs: Dict[str, List[MultiTSOIterationRecord]], out_dir: str
 
 
 def main(only: Optional[List[str]] = None) -> None:
-    out_root = os.path.join("results", "004b_refresh_proof")
+    out_root = results_path("004b_refresh_proof")
     os.makedirs(out_root, exist_ok=True)
     selected = list(SCENARIOS.keys())
     if only is not None:
@@ -306,3 +307,4 @@ if __name__ == "__main__":
         main(only=only)
     else:
         main()
+

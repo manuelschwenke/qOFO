@@ -78,6 +78,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from configs.multi_tso_config import MultiTSOConfig
 from experiments.helpers.records import ContingencyEvent, MultiTSOIterationRecord
+from experiments.paths import results_path
 from experiments.runners import run_multi_tso_dso
 from analysis.reachability import ReachabilityViolation
 
@@ -87,7 +88,7 @@ from analysis.reachability import ReachabilityViolation
 # ---------------------------------------------------------------------------
 
 #: Output directory inside the repo.
-OUT_ROOT = os.path.join("results", "005_cigre")
+OUT_ROOT = results_path("005_cigre")
 
 #: The CIGRE paper's figure directory (PDFs are written here too).
 PAPER_FIG_DIR = r"C:\Users\Manuel Schwenke\Desktop\CIGRE_2026\Figures"
@@ -148,6 +149,10 @@ def make_cigre_config() -> MultiTSOConfig:
         tso_shunt_msr_n_levels=2,  # MSR steps 0..N
         tso_shunt_msc_q_step_mvar=25.0,  # Mvar per MSC step
         tso_shunt_msr_q_step_mvar=25.0,  # Mvar per MSR step
+        # tie coordination
+        enable_tie_coordination=True,
+        zone_v_setpoints_pu={1: 1.04, 2: 1.02, 3: 1.00},
+        tie_grad_step=0.5, tie_anchor=0.5,
         # integrator tuning
         shunt_int_g_w=150,  # step = g_H/(2*g_w); SMALLER = bigger step — TUNE THIS
         shunt_int_delta_mvar=10.0,  # hysteresis half-width (must be < q_step/2 = 25)
@@ -661,3 +666,4 @@ if __name__ == "__main__":
     else:
         main(only=_parse_csv_arg(sys.argv, "--only"),
              skip=_parse_csv_arg(sys.argv, "--skip"))
+

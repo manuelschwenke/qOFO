@@ -245,7 +245,7 @@ def make_config() -> MultiTSOConfig:
     keeps its own paired config.
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 5,      # 36-hour (2160-min) simulation
+        n_total_s=60.0 * 60 * 2,      # 36-hour (2160-min) simulation
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
         dso_period_s=20.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
         dt_s=20.0,
@@ -259,13 +259,24 @@ def make_config() -> MultiTSOConfig:
         dso_lambda_qi=0.95,           # leaky integrator decay
         dso_q_integral_max_mvar=200.0,
         dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
+        # ── TSO-TSO tie coordination (gradient-exchange; see Ch.7 §7.5) ──
+        enable_tie_coordination=False,
+        zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},  # divergent per-zone schedule (win-win case)
+        g_z_q_tie=0.0,            # OPTIONAL orthogonal guardrail: enforce Q_tie soft cap (0 = off)
+        tie_q_band_mvar=100.0,     # +/- soft cap on per-tie reactive flow [Mvar] (only if g_z_q_tie>0)
+        tie_grad_step=0.1,        # Newton-step fraction (g_v-agnostic)
+        tie_grad_eps=1e-3,        # per-zone worsening cap / mutual-aid budget (0 = strict Pareto)
+        tie_anchor=1,           # weak subsidiarity pull toward dV_ref = 0
+        tie_deadband_v_pu=0.002,
+        tie_dvref_max=0.05,       # clip on |dV_ref| [p.u.]
+        tie_coord_period_s=900.0, # outer loop every 5th TSO step (5 x 180s) -- timescale separation
         # ── TSO weights (w-shift closed-loop curvature) ──
         g_w_der=100,
         g_w_gen=5e9,
         g_w_pcc=200,
-        g_w_tso_oltc=1E4,
+        g_w_tso_oltc=5E3, # 1E4
         # shunt
-        install_tso_tertiary_shunts=True,
+        install_tso_tertiary_shunts=False,
         shunt_dispatch="off", #"integrator"
         g_w_tso_shunt=12000,
         tso_shunt_kind="msc_msr",  # one capacitor + one reactor bank per DSO
@@ -281,7 +292,7 @@ def make_config() -> MultiTSOConfig:
         shunt_int_v_max_pu=1.10,
         # ── DSO weights ──
         g_w_dso_der=1000,
-        g_w_dso_oltc=200,
+        g_w_dso_oltc=150, #200
         # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
         # max_step=1 (default) + wall-clock cooldown per OLTC type:
         #   MT (machine 2W gen-trafo) -> 1 tap / 180 s = once per TS interval.
@@ -299,27 +310,34 @@ def make_config() -> MultiTSOConfig:
         live_plot_cascade=True,
         live_plot_system=False,
         live_plot_tracking=False,
+        live_plot_tie_coordination=False,
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
         # Preconditioning of g_w
-        precondition_g_w = True,  # turn it on
+        precondition_g_w = False,  # turn it on
         precondition_lambda_target = 0.5,  # target λ_max(M); 0.9 = well-damped, <2 stable
         # optional:
         precondition_granularity = "class", # or "column"
         precondition_exclude_classes = ("gen",),  # AVR setpoint left at config
         # ── Profile & contingency settings ──
-        start_time=datetime(2016, 1, 5, 12, 0),
+        start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles=True,
         use_zonal_gen_dispatch=True,
         contingencies=[
-            ContingencyEvent(minute=60, element_type="gen",  element_index=2,  action="trip"),
-            ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
-            ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=300, action="connect"),
-            ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=300, action="trip"),
-            ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
-            ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
-            ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
+            # 400 Mvar reactive load step at the zone-2 / L14 boundary bus (bus 9)
+            # at t=120 min: stresses zone 2's boundary voltage so the TSO-TSO
+            # coordinator must act (zone 1, slack-rich, supports across L14).
+            ContingencyEvent(minute=20, element_type="load", bus=9,
+                             p_mw=0, q_mvar=400, action="connect"),
+            # --- further examples (disabled) ---
+            # ContingencyEvent(minute=60, element_type="gen",  element_index=2,  action="trip"),
+            # ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
+            # ContingencyEvent(minute=90, element_type="load", bus=15, p_mw=0, q_mvar=300, action="connect"),
+            # ContingencyEvent(minute=360, element_type="load", bus=15, p_mw=0, q_mvar=300, action="trip"),
+            # ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
+            # ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
+            # ContingencyEvent(minute=260, element_type="line", element_index=25, action="trip"),
+            # ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
         ],
     )
     return cfg

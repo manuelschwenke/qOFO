@@ -506,6 +506,34 @@ def run_multi_tso_dso(
                 zone_der_buses[z].append(s_bus)
                 break
 
+    # ── Propagate the per-zone voltage schedule to the autonomous V layer ──────
+    # zone_v_setpoints_pu sets each zone's OFO *tracking reference*.  For that
+    # reference to be physically realisable (not fought by the plant), the
+    # autonomous voltage layer must be anchored at the same schedule:
+    #   (1) synchronous-machine AVR setpoints (gen.vm_pu) — g_w_gen (~5e9) freezes
+    #       these at the uniform build value (build.py sets all to ext_grid_vm_pu),
+    #       so the OFO can never reach a divergent schedule; they must START there.
+    #   (2) TSO-DER Q(V) droop nominal centre (qv_vref_pu) — the loops re-anchor on
+    #       measured V at runtime (plant_io), so they follow once the AVRs hold the
+    #       zone; the nominal only fixes the cold-start / equilibrium seed.
+    # Gated on an explicit schedule; uniform/None leaves the build values intact.
+    if config.zone_v_setpoints_pu is not None:
+        _sched = config.zone_v_setpoints_pu
+        for z, gs in zone_gen_indices.items():
+            if z in _sched:
+                for g in gs:
+                    net.gen.at[g, "vm_pu"] = float(_sched[z])
+        for eg in net.ext_grid.index:
+            eb = int(net.ext_grid.at[eg, "bus"])
+            ez = next((zz for zz, bs in zone_map.items() if eb in set(bs)), None)
+            if ez in _sched:
+                net.ext_grid.at[eg, "vm_pu"] = float(_sched[ez])
+        if "qv_vref_pu" in net.sgen.columns:
+            for z, ss in zone_der_indices.items():
+                if z in _sched:
+                    for s in ss:
+                        net.sgen.at[s, "qv_vref_pu"] = float(_sched[z])
+
     # ── Partition machine-transformer OLTCs per zone ───────────────────────────
     # Exclude the slack gen's machine trafo from the controllable OLTC set.
     # Its LV bus is the PYPOWER angle reference, so
@@ -661,7 +689,10 @@ def run_multi_tso_dso(
             oltc_trafo_indices=zone_oltc_trafos[z],
             shunt_bus_indices=zone_shunt_buses[z],
             shunt_q_steps_mvar=zone_shunt_qsteps[z],
-            v_setpoint_pu=v_set,
+            v_setpoint_pu=(
+                float(config.zone_v_setpoints_pu.get(z, v_set))
+                if config.zone_v_setpoints_pu is not None else v_set
+            ),
             # alpha removed (absorbed into g_w)
             g_v=config.g_v,
             g_w_der=config.g_w_der,
@@ -713,6 +744,47 @@ def run_multi_tso_dso(
             )
             if ties:
                 tie_line_map[(z_i, z_j)] = list(ties)
+
+    # ── Horizontal TSO-TSO tie coordination: build links + ensure each tie
+    #    endpoint bus is a monitored voltage bus (gated; no-op when off) ───────
+    # Done BEFORE controller construction so the extended v_bus_indices flow
+    # into each zone's output vector / H / g_z sizing below.
+    tie_links: List["TieLink"] = []
+    if config.enable_tie_coordination:
+        from controller.tie_coordinator import TieLink
+        # Per-zone {tie line id -> in-zone endpoint bus} from the existing
+        # ZoneDefinition tie fields (already validated, parallel arrays).
+        _endpoint_of: Dict[int, Dict[int, int]] = {
+            z: {
+                int(t): int(b)
+                for t, b in zip(zd.tie_line_indices, zd.tie_line_endpoint_buses)
+            }
+            for z, zd in zone_defs.items()
+        }
+        for (z_i, z_j), line_ids in tie_line_map.items():
+            for L in line_ids:
+                bi = _endpoint_of.get(z_i, {}).get(int(L))
+                bj = _endpoint_of.get(z_j, {}).get(int(L))
+                if bi is None or bj is None:
+                    continue
+                tie_links.append(TieLink(
+                    tie_id=int(L), zone_i=z_i, zone_j=z_j,
+                    bus_i=bi, bus_j=bj,
+                    controller_i=f"tso_zone_{z_i}",
+                    controller_j=f"tso_zone_{z_j}",
+                    v_nom_i=float(zone_defs[z_i].v_setpoint_pu),
+                    v_nom_j=float(zone_defs[z_j].v_setpoint_pu),
+                ))
+        # Ensure each endpoint bus is observed so the corridor setpoint + price
+        # act on a real V row of that zone's controller.
+        for lk in tie_links:
+            for z, bus in ((lk.zone_i, lk.bus_i), (lk.zone_j, lk.bus_j)):
+                zd = zone_defs[z]
+                if bus not in zd.v_bus_indices:
+                    zd.v_bus_indices = list(zd.v_bus_indices) + [int(bus)]
+        if verbose >= 1:
+            print(f"  [tie-coord] {len(tie_links)} tie link(s) over "
+                  f"{len(tie_line_map)} zone pair(s)")
 
     gen_limits_static: Dict[int, Dict[str, float]] = {} # ToDo: what are these limits? we want to use op-diagram!
     for g_idx in net.gen.index:
@@ -811,6 +883,11 @@ def run_multi_tso_dso(
             q_tie_setpoints_mvar=zd.q_tie_setpoints_mvar,
             g_q_tie=config.tso_g_q_tie,
             g_z_q_tie=config.g_z_q_tie,
+            q_tie_band_mvar=(
+                np.full(len(zd.tie_line_indices), config.tie_q_band_mvar)
+                if (config.enable_tie_coordination and zd.tie_line_indices)
+                else None
+            ),
             g_res_sg=config.tso_g_res_sg,
             g_res_der=config.tso_g_res_der,
             qv_slope_pu=config.tso_qv_slope_pu,
@@ -889,6 +966,102 @@ def run_multi_tso_dso(
     if verbose >= 1:
         print(f"  [T] step [5] TSO controller construction: {perf_counter() - _t_step5:.2f} s")
 
+    # Horizontal TSO-TSO tie coordinator (gated; None when off).
+    tie_coordinator = None
+    # Equivalent/slack machines not owned by any zone controller, mapped to
+    # their electrical zone and folded into the headroom aggregate. Each entry:
+    # (gen_idx, zone, q_min, q_max).
+    tie_extra_gens: List[Tuple[int, int, float, float]] = []
+    _owned_gens = {int(g) for zd in zone_defs.values() for g in zd.gen_indices}
+    _bus_zone = {int(b): z for z, buses in tn_zone_map.items() for b in buses}
+
+    def _gen_elec_zone(g: int):
+        tb = int(net.gen.at[g, "bus"])
+        if tb in _bus_zone:
+            return _bus_zone[tb]
+        for t in net.trafo.index:
+            if int(net.trafo.at[t, "lv_bus"]) == tb:
+                hb = int(net.trafo.at[t, "hv_bus"])
+                if hb in _bus_zone:
+                    return _bus_zone[hb]
+        return None
+
+    for g in net.gen.index:
+        if int(g) in _owned_gens:
+            continue
+        z = _gen_elec_zone(int(g))
+        if z is None:
+            continue
+        qmin = float(net.gen.at[g, "min_q_mvar"])
+        qmax = float(net.gen.at[g, "max_q_mvar"])
+        tie_extra_gens.append((int(g), z, qmin, qmax))
+
+    if config.enable_tie_coordination and tie_links:
+        from controller.tie_coordinator import (
+            HorizontalTieCoordinator, TieCoordinatorConfig,
+        )
+        tie_coordinator = HorizontalTieCoordinator(
+            links=tie_links,
+            config=TieCoordinatorConfig(
+                # Both knobs are g_v-agnostic: grad_alpha ≈ 1/(2·g_v) is the
+                # voltage-tracking curvature (so tie_grad_step is a Newton-step
+                # fraction); grad_eps scales with the objective level g_v (so
+                # tie_grad_eps is the per-zone worsening cap as a fraction of the
+                # unit-error objective).  Without the g_v scaling the safeguard
+                # blocks all motion when g_v ≫ 1.
+                grad_alpha=config.tie_grad_step / (2.0 * max(float(config.g_v), 1.0)),
+                grad_eps=config.tie_grad_eps * max(float(config.g_v), 1.0),
+                anchor=config.tie_anchor,
+                deadband_v_pu=config.tie_deadband_v_pu,
+                kappa=config.tie_kappa,
+                dvref_max=config.tie_dvref_max,
+            ),
+        )
+        if config.g_z_q_tie <= 0.0:
+            import warnings
+            warnings.warn(
+                "enable_tie_coordination is True but g_z_q_tie <= 0; the "
+                "Q_tie soft cap will be inert (free slack). Set g_z_q_tie > 0 "
+                "to enforce the tie_q_band_mvar band.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    if verbose >= 1 and tie_extra_gens:
+        print(f"  [reserve] folding {len(tie_extra_gens)} equivalent/slack "
+              f"gen(s) into zone headroom: {[(g, z) for g, z, _, _ in tie_extra_gens]}")
+
+    def _compute_zone_reserve_signal(
+        measurements_now: Dict[int, Measurement],
+    ) -> Tuple[Dict[int, float], Dict[int, float], Dict[int, float], Dict[int, float]]:
+        """Return μ plus directional absolute headroom diagnostics per zone."""
+        h_cap: Dict[int, float] = {}
+        h_ind: Dict[int, float] = {}
+        for z, _ctrl in tso_controllers.items():
+            if z not in measurements_now:
+                continue
+            cap, ind = _ctrl.report_reserve_headroom(measurements_now[z])
+            h_cap[z] = float(cap)
+            h_ind[z] = float(ind)
+        for _g, _gz, _qmin, _qmax in tie_extra_gens:
+            if _gz not in h_cap:
+                h_cap[_gz] = 0.0
+                h_ind[_gz] = 0.0
+            if _g not in net.gen.index or not bool(net.gen.at[_g, "in_service"]):
+                continue
+            if _g not in net.res_gen.index:
+                continue
+            _q = float(net.res_gen.at[_g, "q_mvar"])
+            h_cap[_gz] += max(float(_qmax) - _q, 0.0)
+            h_ind[_gz] += max(_q - float(_qmin), 0.0)
+
+        scale = max(float(config.tie_reserve_headroom_scale_mvar), 1e-6)
+        zones = sorted(set(h_cap) | set(h_ind))
+        h_min = {
+            z: min(max(h_cap.get(z, 0.0), 0.0), max(h_ind.get(z, 0.0), 0.0))
+            for z in zones
+        }
+        reserve = {z: scale / (h_min[z] + scale) for z in zones}
+        return reserve, h_cap, h_ind, h_min
 
     # =========================================================================
     # STEP 7: Initialise DSO controllers (one per HV sub-network, all zones)
@@ -2144,6 +2317,23 @@ def run_multi_tso_dso(
             use_tex=config.live_plot_use_tex,
         )
 
+    # Figure 5 — HORIZONTAL TSO-TSO COORDINATION (gated; None when off).
+    _plotter_tie = None
+    if config.live_plot_tie_coordination and tie_links:
+        from visualisation.plot_tie_coordination import TieCoordinationLivePlotter
+        _plotter_tie = TieCoordinationLivePlotter(
+            tie_ids=[lk.tie_id for lk in tie_links],
+            tie_labels={
+                lk.tie_id: f"Z{lk.zone_i}–Z{lk.zone_j} (L{lk.tie_id})"
+                for lk in tie_links
+            },
+            q_band_mvar=config.tie_q_band_mvar,
+            deadband_v_pu=config.tie_deadband_v_pu,
+            sub_minute=False, update_every=1, slot_idx=3,
+            layout=config.live_plot_layout,
+            use_tex=config.live_plot_use_tex,
+        )
+
     def _is_period_hit(time_s: float, period_s: float) -> bool:
         """True if time_s is a multiple of period_s (within 1 s tolerance)."""
         rem = time_s % period_s
@@ -2649,6 +2839,83 @@ def run_multi_tso_dso(
                 z: measure_zone_tso(net, zd, step)
                 for z, zd in zone_defs.items()
             }
+
+            # Reserve-economic signal: absolute directional headroom first,
+            # scarcity scalar second. Recorded also for true OFF baselines.
+            _reserve, _hcap, _hind, _hmin = _compute_zone_reserve_signal(measurements)
+            for _z, _mu in _reserve.items():
+                rec.zone_reserve_scarcity[_z] = _mu
+                rec.zone_reserve_headroom_cap_mvar[_z] = _hcap.get(_z, 0.0)
+                rec.zone_reserve_headroom_ind_mvar[_z] = _hind.get(_z, 0.0)
+                rec.zone_reserve_headroom_min_mvar[_z] = _hmin.get(_z, 0.0)
+
+            # Horizontal TSO-TSO round (BEFORE the zones solve): each zone shares
+            # the marginal of its full OFO objective w.r.t. its boundary voltage
+            # (γ = ∇J·h_b / ‖h_b‖², incl. voltage tracking + reserve + effort);
+            # the coordinator descends the combined gradient with a per-zone
+            # safeguard.  (_reserve above is now diagnostic-only.)
+            #
+            # Coordination cadence: the OUTER loop advances ΔV_ref only every
+            # tie_coord_period_s (a multiple of tso_period_s); between updates the
+            # agreed ΔV_ref is HELD — the zones keep tracking the last per-side
+            # v_ref via their primary g_v, so the inner loop gets several steps to
+            # realise it (inner/outer timescale separation that damps the
+            # outer-loop limit cycle).  tie_coord_period_s <= 0 ⇒ every TSO step.
+            if tie_coordinator is not None:
+                _coord_now = (
+                    config.tie_coord_period_s <= 0.0
+                    or step == 1
+                    or _is_period_hit(time_s, config.tie_coord_period_s)
+                )
+                gradients: Dict[int, Tuple[float, float]] = {}
+                for lk in tie_links:
+                    # Realised boundary voltages + tie flow recorded EVERY TSO step
+                    # (plot continuity); the objective gradient γ — the expensive
+                    # part — is formed only on coordination steps.
+                    try:
+                        v_i = tso_controllers[lk.zone_i].report_tie_boundary_voltage(
+                            measurements[lk.zone_i], lk.bus_i,
+                        )
+                        v_j = tso_controllers[lk.zone_j].report_tie_boundary_voltage(
+                            measurements[lk.zone_j], lk.bus_j,
+                        )
+                    except (KeyError, ValueError):
+                        continue
+                    rec.tie_v_i[lk.tie_id] = v_i
+                    rec.tie_v_j[lk.tie_id] = v_j
+                    rec.tie_dv_realized[lk.tie_id] = v_i - v_j
+                    # Per-line tie Q at the zone-i endpoint (into-line convention).
+                    m_i = measurements[lk.zone_i]
+                    _qi = np.where(m_i.tie_line_indices == lk.tie_id)[0]
+                    if len(_qi) > 0:
+                        rec.tie_q_mvar[lk.tie_id] = float(
+                            m_i.tie_line_q_mvar[_qi[0]]
+                        )
+                    if _coord_now:
+                        try:
+                            g_i = tso_controllers[lk.zone_i].report_boundary_gradient(
+                                measurements[lk.zone_i], lk.bus_i,
+                            )
+                            g_j = tso_controllers[lk.zone_j].report_boundary_gradient(
+                                measurements[lk.zone_j], lk.bus_j,
+                            )
+                        except (KeyError, ValueError):
+                            continue
+                        gradients[lk.tie_id] = (g_i, g_j)
+                if _coord_now:
+                    tie_coordinator.update(gradients)
+                    for _msg in tie_coordinator.generate_messages():
+                        _zid = int(_msg.target_controller_id.rsplit("_", 1)[-1])
+                        if _zid in tso_controllers:
+                            tso_controllers[_zid].receive_tie_coordination(_msg)
+                # Record the (updated or HELD) coordinator state every TSO step.
+                _tie_state = tie_coordinator.state()
+                for lk in tie_links:
+                    s = _tie_state[lk.tie_id]
+                    rec.tie_dvref[lk.tie_id] = s["dvref"]
+                    rec.tie_grad_i[lk.tie_id] = s["grad_i"]
+                    rec.tie_grad_j[lk.tie_id] = s["grad_j"]
+                    rec.tie_grad_combined[lk.tie_id] = s["grad_combined"]
 
             # Snapshot u_current[pcc_slice] per zone BEFORE coordinator.step
             # so the diagnostic below can show u_new - u_old per Q_PCC,set.
@@ -3623,6 +3890,8 @@ def run_multi_tso_dso(
             _plotter_sys.update(rec)
         if _plotter_track is not None:
             _plotter_track.update(rec)
+        if _plotter_tie is not None:
+            _plotter_tie.update(rec)
 
         if not _in_warmup:
             log.append(rec)

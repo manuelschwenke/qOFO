@@ -593,8 +593,13 @@ def _record_zone_live_plot_observables(
                 continue
             q_from = float(net.res_line.at[li, "q_from_mvar"])
             fb = int(net.line.at[li, "from_bus"])
-            total += q_from if fb in bus_set_i else -q_from
+            signed = q_from if fb in bus_set_i else -q_from
+            total += signed
             any_val = True
+            # Per-line flow (signed, leaving the lower-id zone zi), recorded
+            # unconditionally post-PF so individual ties (e.g. L14) can be
+            # isolated regardless of whether the coordinator is active.
+            rec.tie_q_mvar[int(li)] = signed
         if any_val:
             rec.zone_tie_q_mvar[(zi, zj)] = total
 

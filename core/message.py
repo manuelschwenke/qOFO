@@ -5,13 +5,16 @@ Message Module
 This module defines message classes for communication between TSO and DSO
 controllers in the cascaded OFO framework.
 
-Three message types are defined:
+Four message types are defined:
     - SetpointMessage: TSO to DSO, contains reactive power setpoints
     - CapabilityMessage: DSO to TSO, contains reactive power capability bounds
     - ShuntDisturbanceMessage: TSO to DSO, signals a TSO-owned shunt step
       change at a tertiary bus inside the DSO's network so the DSO can
       apply a rank-1 Sherman–Morrison update to its cached Jacobian
       inverse without re-measuring or re-running pp.runpp.
+    - TieCoordinationMessage: horizontal TSO to TSO (via the tie coordinator),
+      carries the boundary-voltage corridor setpoint and the consistency price
+      for each shared tie line (V-coordination + Q_tie soft cap scheme).
 
 Author: Manuel Schwenke
 Date: 2025-02-05
@@ -238,8 +241,81 @@ class CapabilityMessage:
         self.interface_transformer_indices = interface_transformer_indices
         self.q_min_mvar = q_min_mvar
         self.q_max_mvar = q_max_mvar
-    
+
     @property
     def n_interfaces(self) -> int:
         """Return the number of interface transformers in this message."""
         return len(self.interface_transformer_indices)
+
+
+class TieCoordinationMessage:
+    """
+    Horizontal message from the tie coordinator to a peer TSO controller.
+
+    Carries, for each shared tie line that touches the target zone, the per-side
+    boundary-voltage setpoint to track at the in-zone endpoint bus.  This is the
+    inner half of the two-loop V-coordination scheme: the zone tracks this
+    setpoint through its *primary* voltage objective (``g_v``) — there is no
+    price term.  The agreed difference ``ΔV_ref`` (negotiated by the outer loop)
+    is encoded implicitly as ``V_ref_i − V_ref_j``.  The Q_tie subsidiarity band
+    is enforced separately and locally via
+    :attr:`TSOControllerConfig.q_tie_band_mvar` and ``g_z_q_tie``.
+
+    See :class:`controller.tie_coordinator.HorizontalTieCoordinator` for the
+    update rule that produces these values and
+    :meth:`controller.tso_controller.TSOController.receive_tie_coordination`
+    for how the recipient applies them.
+
+    Attributes
+    ----------
+    source_controller_id : str
+        Identifier of the sending coordinator.
+    target_controller_id : str
+        Identifier of the receiving TSO controller (the zone).
+    iteration : int
+        Horizontal coordination round index at which this message was produced.
+    tie_line_indices : NDArray[np.int64]
+        Pandapower line indices of the tie lines covered by this message.
+    boundary_bus_indices : NDArray[np.int64]
+        Pandapower bus index of the in-zone endpoint (boundary bus) of each tie
+        line, parallel to ``tie_line_indices``.  Each must be a monitored
+        voltage bus of the recipient controller.
+    v_ref_pu : NDArray[np.float64]
+        Per-side boundary-voltage setpoint [p.u.] to track at each boundary bus
+        (``V_anchor ± (split)·ΔV_ref``).  Tracked by the zone's primary voltage
+        objective; no price accompanies it.
+    """
+
+    def __init__(
+        self,
+        source_controller_id: str,
+        target_controller_id: str,
+        iteration: int,
+        tie_line_indices: NDArray[np.int64],
+        boundary_bus_indices: NDArray[np.int64],
+        v_ref_pu: NDArray[np.float64],
+    ) -> None:
+        """Initialise a TieCoordinationMessage."""
+        self.source_controller_id = source_controller_id
+        self.target_controller_id = target_controller_id
+        self.iteration = iteration
+        self.tie_line_indices = np.asarray(tie_line_indices, dtype=np.int64)
+        self.boundary_bus_indices = np.asarray(
+            boundary_bus_indices, dtype=np.int64
+        )
+        self.v_ref_pu = np.asarray(v_ref_pu, dtype=np.float64)
+        n = len(self.tie_line_indices)
+        if not (
+            len(self.boundary_bus_indices) == n
+            and len(self.v_ref_pu) == n
+        ):
+            raise ValueError(
+                "TieCoordinationMessage array fields must share the same "
+                f"length; got tie={n}, bus={len(self.boundary_bus_indices)}, "
+                f"v_ref={len(self.v_ref_pu)}"
+            )
+
+    @property
+    def n_ties(self) -> int:
+        """Return the number of tie lines referenced by this message."""
+        return len(self.tie_line_indices)

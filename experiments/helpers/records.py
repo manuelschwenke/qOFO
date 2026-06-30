@@ -260,6 +260,37 @@ class MultiTSOIterationRecord:
     # all physical boundary lines between the two zones.
     zone_tie_q_mvar: Dict[Tuple[int, int], float] = field(default_factory=dict)
 
+    # ── Horizontal TSO-TSO tie-coordination observables (two-loop ΔV_ref) ────
+    # All keyed by tie_id (pandapower line index of the individual tie line);
+    # the coordination fields are populated when config.enable_tie_coordination
+    # is set (tie_q_mvar is populated unconditionally post-PF).  Feed the
+    # TIE-COORDINATION live plot (config.live_plot_tie_coordination).
+    tie_dvref:       Dict[int, float] = field(default_factory=dict)
+    """Agreed boundary-voltage difference ΔV_ref [p.u.] per tie (outer loop)."""
+    tie_dv_realized: Dict[int, float] = field(default_factory=dict)
+    """Realised boundary-voltage difference V_i − V_j [p.u.] per tie."""
+    tie_grad_i:      Dict[int, float] = field(default_factory=dict)
+    """Zone-i boundary objective-gradient γ_i = ∇J_i·h_b/‖h_b‖² per tie."""
+    tie_grad_j:      Dict[int, float] = field(default_factory=dict)
+    """Zone-j boundary objective-gradient γ_j per tie."""
+    tie_grad_combined: Dict[int, float] = field(default_factory=dict)
+    """Combined gradient G = κ·γ_i − (1−κ)·γ_j = ∂(J_i+J_j)/∂ΔV_ref per tie."""
+    zone_reserve_scarcity: Dict[int, float] = field(default_factory=dict)
+    """Per-zone aggregate reactive-reserve scarcity in [0,1] (0 abundant, 1
+    saturated) — the μ_i signal driving the reserve extension."""
+    zone_reserve_headroom_cap_mvar: Dict[int, float] = field(default_factory=dict)
+    """Per-zone remaining positive-Q injection headroom H_cap [Mvar]."""
+    zone_reserve_headroom_ind_mvar: Dict[int, float] = field(default_factory=dict)
+    """Per-zone remaining negative-Q / absorption headroom H_ind [Mvar]."""
+    zone_reserve_headroom_min_mvar: Dict[int, float] = field(default_factory=dict)
+    """Per-zone limiting directional headroom min(H_cap, H_ind) [Mvar]."""
+    tie_v_i:     Dict[int, float] = field(default_factory=dict)
+    """Realised boundary voltage [p.u.] at the zone-i endpoint per tie line."""
+    tie_v_j:     Dict[int, float] = field(default_factory=dict)
+    """Realised boundary voltage [p.u.] at the zone-j endpoint per tie line."""
+    tie_q_mvar:  Dict[int, float] = field(default_factory=dict)
+    """Per-tie-line reactive flow [Mvar] at the zone-i endpoint (into line)."""
+
     # Per-zone TSO shunt states (MSC/MSR tap positions; empty array if none).
     zone_tso_shunt_states: Dict[int, NDArray] = field(default_factory=dict)
 

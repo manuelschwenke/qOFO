@@ -1,7 +1,9 @@
 # BME — Boundary Marginal Exchange: Status File
 
 Driving spec: *Boundary Marginal Exchange (BME) — Multi-TSO Coordination for OFO-MIQP*
-(design specification and build plan, received 2026-07-02).
+(design specification and build plan, received 2026-07-02; saved verbatim as
+`docs/BME_SPEC.md`). Session handover for continuation sessions:
+`docs/BME_HANDOVER.md`.
 This file is the living status record required by spec §5; one section per phase,
 updated at phase boundaries. All DECISION outcomes (§7 of the spec) are recorded
 here with dates.

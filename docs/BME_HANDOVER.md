@@ -1,4 +1,4 @@
-# BME — Session handover (updated 2026-07-02, end of Phase 2)
+# BME — Session handover (updated 2026-07-02, end of Phase 3)
 
 For the next Claude Code session continuing the BME build. Read in this order:
 
@@ -14,8 +14,9 @@ For the next Claude Code session continuing the BME build. Read in this order:
 |---|---|---|
 | 0 — Reconnaissance + audits + decisions | ✅ | `426293e` |
 | 1 — BoundaryTopology / RestrictedSensitivityProvider / MarginalComputer | ✅ 26 tests green | `d2d7f1c` |
-| 2 — CommonObjective (+ Convention-A g_own primitives) | ✅ 24 tests green | see git log 2026-07-02 |
-| 3 — CoordinationBus + signals | ❌ next | — |
+| 2 — CommonObjective (+ Convention-A g_own primitives) | ✅ 24 tests green | `1a0881e` |
+| 3 — CoordinationBus + signals | ✅ 15 tests green | see git log 2026-07-02 |
+| 4 — Controller integration (the core) | ❌ next | — |
 
 All spec DECISIONS are resolved with Manuel (2026-07-02) — do NOT re-ask;
 read `BME_STATUS.md` §0.7. The ones that shape all remaining code:
@@ -101,29 +102,65 @@ read `BME_STATUS.md` §0.7. The ones that shape all remaining code:
   implemented per the spec's literal reading; a voltage-level restriction
   is a config decision, not to be made silently.
 
-## Phase 3 (next): CoordinationBus + signals — spec §5 tasks + tests
+## What Phase 3 built (15 tests green)
 
-Design notes:
+- `core/coordination_bus.py`: `MarginalSignal` / `SwitchNotice` (frozen,
+  validated, read-only vectors), `CoordinationBus` (delay d, drop
+  probability with drops drawn AT PUBLISH TIME from a seeded bus-owned
+  RNG — deterministic regardless of query order; duplicate publishes
+  raise; never self-delivers; `drop_log`), `MarginalReceiver` (per-sender
+  β low-pass, consecutive-step enforcement, `ReceivedMarginals` with
+  `mu_neighbour_sum`) with the §3.8 policies explicit: cold start exactly
+  d steps, missing-signal RAISES when drops disabled, hold-last-FILTERED
+  under drops, `extended_cold` zero contribution if a sender's first
+  signal was dropped, filter initialised by the first sample. Exported
+  from `core/__init__.py`. Tests `tests/test_coordination_bus.py` (pure
+  numpy, fast).
+- The SELF-marginal never touches bus or filter — Phase 4 adds μ_i
+  locally (Convention A). Receiver returns the NEIGHBOUR sum only.
+- Expected senders default to all other zones (H_{b,i} spans all of B).
 
-- Dataclasses `MarginalSignal` / `SwitchNotice` (spec §4 shapes; frozen,
-  registry-order μ vector + v_b snapshot). Natural home: a new module
-  beside `core/message.py` (which holds the vertical `CapabilityMessage` /
-  `ShuntDisturbanceMessage` patterns) — e.g. `core/coordination_bus.py`.
-- `CoordinationBus`: in-process pub/sub, integer delay d (publish at k →
-  visible at k+d, NOT earlier), optional drop probability (own
-  `np.random.default_rng(seed)`, deterministic), no hidden global state.
-- Receiver-side low-pass μ^filt = (1−β)·μ^filt + β·μ (β = 0.3, D3) lives
-  with the RECEIVER (per §3.4) — self-marginal bypasses bus AND filter
-  (Convention A, d = 0/β = 1 for the self term).
-- Cold start (§3.8): first d steps explicitly uncoordinated + logged;
-  after warm-up a missing expected signal RAISES unless drop simulation is
-  enabled → hold-last-filtered-value, logged per occurrence.
-- Today all horizontal exchange is same-step direct method calls in the
-  runner (l. 2882–2955) — the bus with d ≥ 1 is genuinely new; keep it
-  runner-agnostic (zones interact with bus + plant only, §3.9).
-- Tests (spec §5 Phase 3): delay semantics, cold-start behaviour,
-  missing-signal raise, hold-last-value under drops, fixed-seed
-  determinism.
+## Phase 4 (next): Controller integration — spec §5 tasks + tests
+
+The core phase; hard gate = distributed-equals-centralised gradient test.
+
+- **Config**: map spec §4's `coordination:` block onto `MultiTSOConfig`
+  (flat fields, per-zone override dicts idiom — `configs/multi_tso_config.py`):
+  `coordination_mode: none|vref|bme` (default "none"), `bme_delay_steps=1`,
+  `bme_drop_probability=0.0`, `bme_beta_filter=0.3`, `bme_seed`,
+  `bme_w_band` (+ band edges; w_loss=1 fixed by D2). No parallel config
+  system. `mode="vref"` = gate the EXISTING `enable_tie_coordination`
+  path unchanged; make the two mutually exclusive (fail-fast).
+- **mode="bme" objective switch** (D2/Q1/Q3): TSO layer objective becomes
+  Φ_i — g_v schedule tracking OFF, `g_q_tie` forced 0 (raise if explicitly
+  non-zero), reserve terms off; hard/soft V output constraints stay local
+  and unchanged; DSO cascade untouched.
+- **Gradient assembly** (Convention A, §0.2 revision): per step
+  g_i^bme = g_own + H_{b,i}ᵀ·(μ_i + mu_neighbour_sum), where
+  g_own is assembled from `ZoneGradients.d_*` primitives following the
+  controller's u-column order `[Q_DER | Q_PCC_set | V_gen | s_OLTC | s_shunt]`
+  (per-DER expansion via the existing `_expand_H_to_der_level` E matrix);
+  H_{b,i} from `RestrictedSensitivityProvider.view(zone)`; μ_i from
+  `ZoneGradients.mu()` (undelayed, unfiltered); neighbour sum from
+  `MarginalReceiver.update(k)` (cold start → price term = H_{b,i}ᵀ·μ_i
+  only, logged).
+- **Per-step sequence** (spec §5): measure → rebuild ZoneGradients at the
+  refreshed operating point (MarginalComputer + ZoneGradients are built
+  per Jacobian instance — rebuild when the runner refreshes sensitivities)
+  → compute μ_i → publish → receiver.update → assemble g → solve MIQP →
+  apply. Slotting/ε-acceptance are Phase 5 — leave hooks.
+- **G_w/α rescaling** (risk #1, the v1 price failure mode): Φ is in MW —
+  orders of magnitude below the g_v=1e7-scale private objective. Use
+  `controller/gw_precondition.py` for the bme experiment configs.
+- **Tests** (spec §5 Phase 4): (i) `mode="none"` trajectory identical to
+  pre-BME baseline; (ii) single-area identity bme == none; (iii) HARD
+  GATE: stacked (g_1,g_2,g_3) with d=0, β=1 equals the FD gradient of
+  global Φ w.r.t. stacked u at ≥10 randomised points — the Convention-A
+  split dΦ/du_i = ∂Φ_i/∂u_i|_{v_b} + H_{b,i}ᵀ·Σ_all μ_j; (iv) vref
+  regression.
+- **Before wiring the runner: resolve Q7 with Manuel** (band/loss set on
+  runner nets includes DN feeder buses below the PCCs — include-all vs
+  voltage-level restriction).
 
 ## Practical gotchas (save yourself an hour)
 

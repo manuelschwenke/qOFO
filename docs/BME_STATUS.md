@@ -13,7 +13,7 @@ here with dates.
 | 0 | Repository reconnaissance | ✅ 2026-07-02 (closed: DECISIONS D1–D8 and Q1/Q2/Q3/Q5 resolved with Manuel, see §0.7) |
 | 1 | Boundary topology and sensitivities | ✅ 2026-07-02 (26 tests green; see Phase 1 section) |
 | 2 | Common objective | ✅ 2026-07-02 (24 tests green; see Phase 2 section) |
-| 3 | Coordination bus and signals | ❌ not started |
+| 3 | Coordination bus and signals | ✅ 2026-07-02 (15 tests green; see Phase 3 section) |
 | 4 | Controller integration | ❌ not started |
 | 5 | Discrete hygiene | ❌ not started |
 | 6 | Evaluation ladder + Monte Carlo | ❌ not started |
@@ -500,3 +500,51 @@ Carried to later phases: real-PCC-coupler / 3W-loss FD on runner nets
 (Phase 4 integration tests — 3W branch weights and aux-star loss gradients
 are implemented but the base net has no trafo3w); Q7 decision; OOS-element
 masking hooks (Phase 4).
+
+---
+
+## Phase 3 — Coordination bus and signals ✅ (2026-07-02)
+
+New module `core/coordination_bus.py` (beside the vertical message classes
+of `core/message.py`; §3-symbol header map, British English, fail-fast):
+
+| Component | Content |
+|---|---|
+| `MarginalSignal` / `SwitchNotice` | Spec §4 frozen dataclasses, repo-adapted (`zone_id: int`, `step`): registry-order μ + v_b^meas snapshot / dv_b^pred + device tuple. Vectors validated (1-D, finite, registry length) and frozen read-only on construction |
+| `CoordinationBus` | In-process pub/sub for ≥2 zones: integer delay d ≥ 0 (D4; message published at k is visible at k+d, NOT earlier — and signals are per-step, no stale carry-over), optional drop probability ∈ [0, 1] with a bus-owned seeded RNG (> 0 without a seed raises); drop decisions are drawn AT PUBLISH TIME, one per (message, receiver) in ascending receiver order → pattern depends only on the publish sequence, never on query order/repetition. Self-delivery never happens. Duplicate (zone, step) marginal publishes raise; multiple notices per step are allowed (one per committed move). Structured `drop_log` |
+| `MarginalReceiver` | Receiver-side §3.4 low-pass μ^filt = (1−β)·μ^filt + β·μ(k−d) per SENDER (D3 β = 0.3; β = 1 disables smoothing — identity-test configuration); must be stepped consecutively (gaps raise — a skipped step would corrupt the filter cadence). Returns `ReceivedMarginals(step, coordinated, mu_neighbour_sum)`; **the self-marginal never touches bus or filter** (Convention A — the controller adds μ_i locally, Phase 4) |
+| Explicit §3.8 policies | Cold start: exactly d steps `coordinated=False`, one `cold_start` event each. Warm + missing signal: RAISES when drops disabled (protocol violation); with drops enabled → hold-last-FILTERED-value (`hold_last` event per occurrence). First signal dropped → no state to hold: contributes exactly zero until first arrival (`extended_cold` event per occurrence — documented policy, not a silent default). Filter initialisation: first received sample (β = 1 once), documented |
+
+Tests — `tests/test_coordination_bus.py`: **15 passed** (pure in-process,
+no pandapower; full regression sweep incl. Phases 1–2 and core-importing
+suites: 97 passed).
+
+Acceptance criteria (spec §5 Phase 3):
+
+- ✅ Delay semantics: published at k → visible at k+d for every other
+  zone, empty before, per-step (nothing at k+d+1 unless published at
+  k+1); d = 0 same-step exchange works (needed by the Phase 4 identity
+  test); notices share the delay and never return to the sender.
+- ✅ Cold start: logs and runs uncoordinated for exactly d steps, then
+  the first warm step sums the first samples.
+- ✅ Missing-signal-after-warm-up raises when drops are disabled.
+- ✅ Hold-last-value: under p = 0.5 (seed 7) every warm step's neighbour
+  sum is reproduced from the event log + filter states — held senders'
+  states are bit-identical frozen, delivered senders follow the exact
+  β-recursion, never-arrived senders contribute zero; p = 1 gives a
+  zero neighbour sum with `extended_cold` logged per sender and step.
+- ✅ Determinism: same seed → identical drop log and identical filtered
+  sums; different seed → different pattern.
+
+Design notes recorded:
+
+- Expected senders default to ALL other zones (not only tie-adjacent
+  ones): the price term H_{b,i}ᵀ·Σ_j μ_j spans all of B, so every zone's
+  marginal is relevant — sparsity lives in the μ vectors, not in the
+  routing.
+- A dropped NOTICE is lost (logged), not held — it is an event, not a
+  state; hold-last only applies to the μ state channel.
+- The bus is runner-agnostic (§3.9): zones will interact with the bus
+  and the plant only; Phase 4 wires `publish → receiver.update` into the
+  per-step sequence and maps the spec §4 `coordination:` block onto
+  `MultiTSOConfig` fields.

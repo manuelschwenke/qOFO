@@ -19,17 +19,33 @@ For the next Claude Code session continuing the BME build. Read in this order:
 All spec DECISIONS are resolved with Manuel (2026-07-02) — do NOT re-ask;
 read `BME_STATUS.md` §0.7. The ones that shape all remaining code:
 
-- **Convention B** (audit A1): zones' own gradients are total derivatives via
-  the shared full-network Jacobian ⇒ the BME price term uses
-  **J = neighbours only** (self-marginal would double-count).
+- **Gradient architecture: Convention A** (REVISED 2026-07-02 after Manuel's
+  locality clarification — supersedes an earlier Convention-B recording; see
+  `BME_STATUS.md` §0.2 revision note). Under `mode="bme"`:
+  `g_i^own = ∂Φ_i/∂u_i` with boundary voltages HELD FIXED, computed from the
+  zone-internal port-frozen Jacobian (same J_int factorisation as
+  `MarginalComputer` — local by construction), and the price term sums
+  **J = ALL zones including i itself** (self-marginal μ_i undelayed and
+  unfiltered; neighbour μ_j delayed d, filtered β). Identity to verify:
+  `dΦ/du_i = ∂Φ_i/∂u_i|_{v_b fixed} + H_{b,i}ᵀ·Σ_{all j} μ_j`.
+  The audit FINDING that the *existing private* gradient assembly is
+  Convention B (default shared-Jacobian mode) still stands — it applies to
+  `mode="none"`, not to the BME Φ-gradient.
+- **Only supra-local object: the H_{b,i} slice** (∂v_b/∂u_i, boundary rows ×
+  own actuator columns), served by `RestrictedSensitivityProvider` from the
+  plant's global Jacobian purely as the simulation stand-in for what each TSO
+  would identify from its own actuator moves + boundary measurements.
+  Everything else (Φ_i, μ_i, g_own) is area-local by construction.
+- `mode="bme"` does NOT restrict `local_sensitivities_tso` — each zone's OWN
+  loop (output constraints, prediction) may keep its Ward Jacobian; that only
+  carries the pre-existing experiment-004 model-quality trade-off, orthogonal
+  to the Φ-gradient identity.
 - Under `mode="bme"`: TSO objective becomes Φ_i = w_loss·P_loss + φ_band
   (w_loss = 1); **g_v schedule tracking OFF**; `g_q_tie` forced 0 (fail-fast);
   hard/soft voltage output constraints stay local and UNCHANGED; DSO cascade
   untouched. w_band calibrated in Phase 6; keep a w_band = 0 (losses-only)
   ablation rung. G_w/α rescaling via `controller/gw_precondition.py` will be
   needed (the old v1 price design died on exactly this scale mismatch).
-- `mode="bme"` REFUSES `local_sensitivities_tso=True` (Ward-PQ mode is
-  neither Convention A nor B).
 - `mode="vref"` = wrap the EXISTING `controller/tie_coordinator.py` path
   unchanged (§3.7 hypothesis NOT confirmed — separate paths).
 - Discrete hygiene: round robin slotting; ε-acceptance applies to MIQP
@@ -75,8 +91,13 @@ Design notes prepared this session:
   Q4 in `BME_STATUS.md` §0.6: coverage of ALL owned branches).
 - Loss gradients dP_loss/d(θ, V) are analytic from branch admittances and
   endpoint complex voltages; chain through `MarginalComputer.response_full()`
-  for the μ loss part, and through the zone H rows for the control-space
-  part (Convention B).
+  for the μ loss part. For the control-space part, Convention A needs the
+  **port-frozen input response** ∂x_int/∂u_i|_{v_b fixed}: extend the
+  `MarginalComputer` J_int machinery with mismatch-derivative columns
+  ∂g_int/∂u_i (Q injections at interior buses; interior 2W taps via the
+  existing `_compute_dg_dtau_2w`-style helpers; gen vm via
+  `_compute_dg_dVgen`) — all zone-internal quantities. `CommonObjective`
+  then chains ∇Φ_i through this operator for g_own, and through R_i for μ_i.
 - φ_band hinge: value + one-sided gradients at the edges get their own unit
   tests (spec Phase 2); band edges default ±3 % (D2), owned buses =
   `topology.zone_buses(z)`; note PV-bus V is pinned (their band gradient has

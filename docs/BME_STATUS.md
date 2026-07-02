@@ -78,6 +78,26 @@ fixed. This mode is therefore **neither Convention A (frozen boundary) nor B
 `coordination_mode="bme"` fail-fasts unless the full-network sensitivity path is
 active (see Open questions Q2).
 
+**REVISION 2026-07-02 (same day, after Manuel's locality clarification —
+supersedes the implementation choice above, not the audit finding):** the audit
+finding stands as a fact — the *existing private-objective* gradient assembly
+is Convention B in the default mode. But the **BME Φ-gradient under
+`mode="bme"` will use Convention A**: `g_i^own = ∂Φ_i/∂u_i` with the boundary
+voltages **held fixed**, computed from the zone-internal port-frozen Jacobian
+(local by construction — the same J_int factorisation as `MarginalComputer`),
+and **J = all zones including i itself** (the self-marginal μ_i enters through
+the price term, undelayed and unfiltered since it never crosses a border).
+Everything in the BME gradient is then area-local **except the one H_{b,i}
+slice** (§3.9 concession, access-wrapped; ≙ what each TSO would identify from
+its own input moves + boundary measurements). Consequences: (i) `mode="bme"`
+does NOT restrict `local_sensitivities_tso` — the zone's own loop
+(output constraints, prediction, Q_PCC handling) may keep its Ward Jacobian,
+carrying only the pre-existing experiment-004 model-quality trade-off,
+orthogonal to the Φ-gradient identity; (ii) Phase 2's `CommonObjective` must
+expose the frozen-boundary own-gradient pieces; (iii) the Phase 4 identity
+test 2 uses the Convention-A split
+`dΦ/du_i = ∂Φ_i/∂u_i|_{v_b fixed} + H_{b,i}ᵀ·Σ_{all j} μ_j`.
+
 ### 0.3 Audit A2 — v_ref hypothesis: **not confirmed as stated; delta documented**
 
 The spec's §3.7 hypothesis (implemented scheme = BME with a quadratic boundary
@@ -246,11 +266,16 @@ Open questions resolved the same day:
 - **Q1** → folded into D2 (Φ replaces g_v tracking at TSO layer under `mode="bme"`;
   voltage security stays as local constraints — which matches Manuel's
   "voltage optimisation is left to local control" position).
-- **Q2** → full-network sensitivity **values** behind the access-enforcing
-  `RestrictedSensitivityProvider`; `mode="bme"` refuses
-  `local_sensitivities_tso=True` in v1 (Ward-PQ mode is neither Convention A
-  nor B). The informational concession and its realism story are recorded in
-  §0.5 and §0.11.
+- **Q2** → **REVISED 2026-07-02** (after Manuel's locality clarification;
+  see the §0.2 revision note): the BME Φ-gradient uses **Convention A**
+  (port-frozen local own-gradient; self-marginal through the price term;
+  J = all zones incl. self). Only H_{b,i} remains supra-local — served as
+  full-network **values** behind the access-enforcing
+  `RestrictedSensitivityProvider`, as the simulation stand-in for what each
+  TSO would identify locally (own moves + boundary measurements).
+  `mode="bme"` therefore does **not** restrict `local_sensitivities_tso`;
+  the zone's own loop may keep its Ward Jacobian (004 trade-off, orthogonal
+  to BME correctness). Concession and realism story: §0.5 and §0.11.
 - **Q3** → ✅ `g_q_tie` forced to 0 under `mode="bme"` (fail-fast if explicitly
   set non-zero).
 - **Q5** → ✅ delegated: ε-acceptance applies to MIQP integers; MSC/MSR

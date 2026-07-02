@@ -225,6 +225,9 @@ is genuinely new machinery.
    neither Convention A nor B (§0.2). Proposal: `mode="bme"` requires the
    full-network sensitivity path and raises otherwise (fail-fast); the local-net
    variant is future work alongside online estimation of H_{b,i}.
+   *(This Phase-0 proposal is SUPERSEDED — see the §0.2 revision note and the
+   Q2 resolution in §0.7: Convention A, no restriction on
+   `local_sensitivities_tso`.)*
 3. **Q3 — `tso_g_q_tie` (default 10.0) under BME.** The private tie-flow tracking
    term steers the same boundary the price term prices; keeping both
    double-steers. Proposal: `mode="bme"` forces g_q_tie = 0 (fail-fast if

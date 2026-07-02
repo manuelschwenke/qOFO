@@ -30,6 +30,7 @@ from network.split_tn_dn_net import (
     CouplerPowerFlow,
     SplitResult,
 )
+from network.boundary_topology import BoundaryTopology, TieLine
 
 __all__ = [
     "build_tuda_net",
@@ -38,4 +39,6 @@ __all__ = [
     "validate_split",
     "CouplerPowerFlow",
     "SplitResult",
+    "BoundaryTopology",
+    "TieLine",
 ]

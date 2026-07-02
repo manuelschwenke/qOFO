@@ -9,7 +9,7 @@ here with dates.
 | Phase | Title | Status |
 |---|---|---|
 | 0 | Repository reconnaissance | ✅ 2026-07-02 (closed: DECISIONS D1–D8 and Q1/Q2/Q3/Q5 resolved with Manuel, see §0.7) |
-| 1 | Boundary topology and sensitivities | 🚧 started 2026-07-02 |
+| 1 | Boundary topology and sensitivities | ✅ 2026-07-02 (26 tests green; see Phase 1 section) |
 | 2 | Common objective | ❌ not started |
 | 3 | Coordination bus and signals | ❌ not started |
 | 4 | Controller integration | ❌ not started |
@@ -157,9 +157,13 @@ Boundary registry candidate: B = {1, 2, 8, 13, 14, 16, 17, 26, 38} (0-idx)
   (line 2 → zone 1 and line 5 → zone 3), i.e. B_12 ∩ B_23 ≠ ∅. The v_ref
   setpoint-redirect cannot compose there (known limitation, concept doc §7.4);
   BME's additive price composes naturally — a concrete argument for the design.
-- **Slack on the boundary:** bus 38 (IEEE 39) hosts the ext_grid slack. Its
-  voltage is pinned, so ∂V_b38/∂u ≈ 0 rows and its band penalty is inert;
-  harmless but must be documented (affects D1 ownership bookkeeping).
+- **Slack near the boundary** *(corrected in Phase 1)*: bus 38 (IEEE 39) does
+  NOT host a pinned voltage source. `swap_slack_to_bus38` installs a
+  ``slack=True`` gen at a **10.5 kV terminal bus behind a machine trafo**;
+  bus 38 itself is a PQ bus with a live Jacobian voltage state, so its
+  H_{b,i} row and μ entries are ordinary non-zero quantities (strongly
+  regulated by the adjacent slack machine, but not pinned). The Phase 0
+  claim of "inert rows / inert band penalty at IEEE 39" was wrong.
 - **Minor surprise to verify in Phase 1:** 0-idx bus 19 (IEEE 20) is absent from
   every zone bus list (zone 3 has 13 of its 14 nominal buses). It is
   zone-interior either way and does not affect the boundary; root cause (subnet
@@ -227,7 +231,7 @@ is genuinely new machinery.
 
 | ID | Decision | Outcome (2026-07-02) |
 |---|---|---|
-| D1 | Ownership convention | ✅ Tie-line losses split 50/50 per tie. Band penalty of each boundary bus owned by the bus's own zone (unambiguous — every bus has exactly one zone). Slack bus IEEE 39's band penalty is structurally inert (pinned V) — documented, not special-cased. |
+| D1 | Ownership convention | ✅ Tie-line losses split 50/50 per tie. Band penalty of each boundary bus owned by the bus's own zone (unambiguous — every bus has exactly one zone). *(Phase 1 correction: bus 38 / IEEE 39 is a live PQ bus — the slack sits behind its machine trafo — so no boundary band penalty is structurally inert.)* |
 | D2 | w_loss, w_band, edges | ✅ w_loss = 1. **φ_band retained** after clarification: it is *not* voltage optimisation (no schedule is coordinated; hard/soft V output constraints stay local and unchanged) but a soft security margin that makes a zone's voltage *stress* visible in the exchanged price μ — exactly zero inside the band, so Φ ≈ pure losses in normal operation. w_band magnitude and soft-band edges calibrated in the Phase 6 sweep (spec default ±3 % as starting point); an explicit **w_band = 0 (losses-only) ablation** rung is added to the ladder to honour the "losses are the only common currency" reading. Folded-in Q1 resolution: under `mode="bme"` the TSO-layer objective becomes Φ_i (g_v schedule tracking OFF); gradient rescaling via `gw_precondition`. |
 | D3 | Filter β | ✅ 0.3 default (Manuel: no preference); MC-swept in Phase 6. |
 | D4 | Delay d | ✅ Default d = 1; d = 0 supported (in-process same-step exchange, required by the identity test anyway); sweep {0, 1, 2, 5}. |
@@ -315,3 +319,64 @@ when Φ replaces g_v-scale tracking (D2 — the v1 price failure showed exactly
 this failure mode); (ii) the distributed-equals-centralised gradient test
 tolerance under the shared-Jacobian + measurement pipeline; (iii) interaction
 of slotting with existing cooldowns (D5).
+
+---
+
+## Phase 1 — Boundary topology and sensitivities ✅ (2026-07-02)
+
+New modules (each with a §3-symbol header map, British English, fail-fast):
+
+| File | Content |
+|---|---|
+| `network/boundary_topology.py` | `BoundaryTopology`, `TieLine` — registry B (fixed ascending order), B_ij, tie orientation zone_i < zone_j, own/adjacent boundary per zone, **closure-based ownership** (D1: every in-service bus owned by exactly one zone; generator-terminal and orphan buses inherit the zone they are electrically embedded in), tie-loss shares 50/50, **separator assertion** (hard error; cross-zone non-line branches also raise with the "enlarge B" message of §3.2) |
+| `sensitivity/boundary_sensitivity.py` | `ZoneInputSpec` (u_i column structure `[Q_DER \| Q_PCC_set \| V_gen \| s_OLTC \| s_shunt]`, bus-level DER columns — per-DER expansion stays controller-side), `RestrictedSensitivityProvider` (assembles H_{b,i} from the shared full-network Jacobian, mirroring the controller's column conventions incl. the PCC load-convention negation and the shunt V² step scaling), `ZoneBoundaryView` (zone-bound handle exposing ONLY `h_b()`; out-of-scope access raises `PermissionError` — §3.9 made enforceable) |
+| `sensitivity/marginal_computer.py` | `MarginalComputer` — area-internal reduced Jacobian with the zone's own boundary buses as ports: R = −J_int⁻¹ · ∂g_int/∂V_port (θ_port fixed, D7 magnitudes-only); `response_v()` = ∂v_int/∂v_b, `response_full()` (θ and V, for the Phase 2 loss gradient), `mu(grad_v_int, grad_direct)` embedding into registry order with **exactly-zero** entries outside the zone's adjacent set (§3.4 sparsity, enforced); pinned ports handled via the ∂g/∂V voltage-source column; 3W star buses of zone-owned trafos included in the interior block |
+
+Tests — `tests/test_boundary_topology.py`, `tests/test_boundary_sensitivity.py`,
+`tests/test_marginal_computer.py`: **26 passed** (plus the existing
+`test_sensitivity_updater.py` re-run green after the package-export additions
+to `network/__init__.py` and `sensitivity/__init__.py`).
+
+Acceptance criteria (spec §5 Phase 1):
+
+- ✅ Separator check passes on the 3-area IEEE 39 case; a deliberately broken
+  partition raises (boundary bus dropped from its zone → spanning component),
+  and a synthetic cross-zone trafo raises.
+- ✅ FD validation of H_{b,i} columns on the 3-area case: V_gen (all three
+  zones, ≤5 % + 1e-5), Q_DER (≤5 %), one **whole OLTC tap step** and one whole
+  shunt step (secant-vs-tangent, ≤15 %). Q_PCC_set columns share the
+  Q-injection primitive (negated load convention) and are covered by the same
+  code path; a runner-net FD with real 3W PCC couplers lands with Phase 4's
+  integration tests.
+- ✅ FD validation of μ per area: synthetic quadratic Φ over interior PQ buses,
+  port sub-network oracle (each own-boundary bus pinned by a voltage source at
+  the plant operating point), central differences per port — agreement ≤2 %.
+  Bonus: the §3.2 separator *consequence* is asserted numerically first (the
+  port sub-network reproduces every interior plant voltage to <1e-6 pu).
+- ✅ Sparsity: μ entries at non-adjacent boundary buses are exactly zero;
+  direct terms outside the adjacent set raise.
+- ✅ `RestrictedSensitivityProvider` raises (`PermissionError`) on out-of-scope
+  access; the zone view exposes no other read surface; returned matrices are
+  copies (cache cannot be poisoned).
+
+Findings / corrections made during Phase 1:
+
+1. **Slack correction** (propagated to §0.4 and D1): the system slack is a
+   ``slack=True`` gen at a 10.5 kV terminal bus (pp bus 40, the ppc reference)
+   behind boundary bus 38's machine trafo — bus 38 itself is PQ, its H/μ rows
+   are live. `pinned_boundary_buses` is empty on this case; the pinned-bus
+   handling remains implemented for nets where a boundary bus genuinely hosts
+   a voltage source.
+2. **Bus 19 (IEEE 20) mystery resolved**: `build_ieee39_net` REMOVES it — the
+   two-trafo chain 19–20–34 is collapsed into one machine trafo
+   (`network/ieee39/build.py` l. 249–291). Documented by test.
+3. **Slack-machine actuator exclusion**: the slack gen and its machine trafo
+   are not zone actuators (no Jacobian column at the reference bus) — matching
+   the runner's `ZoneDefinition` convention; the provider fail-fasts if they
+   are requested.
+4. The adjacent-boundary sets overlap as expected (IEEE bus 3 in B_12 ∩ B_23);
+   μ registry embedding handles this without special-casing.
+
+Carried to later phases: real-PCC-coupler FD (Phase 4 integration nets);
+OOS-gen/OLTC column masking hooks (Phase 4, wired from controller state);
+loss-gradient chaining through `response_full()` (Phase 2).

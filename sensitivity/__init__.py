@@ -35,6 +35,12 @@ from sensitivity.network_reduction import (
     build_dso_local_net,
     build_tso_local_net,
 )
+from sensitivity.boundary_sensitivity import (
+    RestrictedSensitivityProvider,
+    ZoneBoundaryView,
+    ZoneInputSpec,
+)
+from sensitivity.marginal_computer import MarginalComputer
 
 __all__ = [
     "SensitivityUpdater",
@@ -42,6 +48,10 @@ __all__ = [
     "build_dso_local_net",
     "TSOLocalNetResult",
     "DSOLocalNetResult",
+    "RestrictedSensitivityProvider",
+    "ZoneBoundaryView",
+    "ZoneInputSpec",
+    "MarginalComputer",
     # "compute_voltage_sensitivity",
     # "compute_transformer_q_sensitivity",
     # "compute_oltc_voltage_sensitivity",

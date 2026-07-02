@@ -1,4 +1,4 @@
-# BME — Session handover (written 2026-07-02, end of Phase 1)
+# BME — Session handover (updated 2026-07-02, end of Phase 2)
 
 For the next Claude Code session continuing the BME build. Read in this order:
 
@@ -14,7 +14,8 @@ For the next Claude Code session continuing the BME build. Read in this order:
 |---|---|---|
 | 0 — Reconnaissance + audits + decisions | ✅ | `426293e` |
 | 1 — BoundaryTopology / RestrictedSensitivityProvider / MarginalComputer | ✅ 26 tests green | `d2d7f1c` |
-| 2 — CommonObjective | ❌ next | — |
+| 2 — CommonObjective (+ Convention-A g_own primitives) | ✅ 24 tests green | see git log 2026-07-02 |
+| 3 — CoordinationBus + signals | ❌ next | — |
 
 All spec DECISIONS are resolved with Manuel (2026-07-02) — do NOT re-ask;
 read `BME_STATUS.md` §0.7. The ones that shape all remaining code:
@@ -76,34 +77,53 @@ read `BME_STATUS.md` §0.7. The ones that shape all remaining code:
   `create_ext_grid` per port at the plant operating point → reproduces
   interior voltages < 1e-6 pu, then central-difference the port vm.
 
-## Phase 2 (next): CommonObjective — spec §5 tasks + tests
+## What Phase 2 built (all tests green)
 
-Design notes prepared this session:
+- `controller/common_objective.py` — `CommonObjective` (Φ_i values from res
+  tables, D1 ownership + 50/50 ties, φ_band C¹ hinge, `phi_global()`
+  invariant oracle; w_band is REQUIRED, no default — 0.0 is the ablation
+  rung) and `ZoneGradients` (`mu()`, plus Convention-A g_own primitives
+  `d_q_injection` / `d_pcc_set` / `d_vgen` / `d_tap_2w` / `d_shunt`).
+- `sensitivity/marginal_computer.py` extended: `mu_x()` (full-state μ
+  chaining, angles + aux stars), `frozen_input_response()` and
+  `response_to_q_injection/vgen/tap_2w` (port-frozen Convention-A
+  operators; ownership-enforced; hv-side taps only).
+- `sensitivity/index_helper.py`: `get_ppc_line_index()`.
+- Tests `tests/test_common_objective.py` (24): partition invariant (21 OPs ×
+  2 rungs, ≤1e-9), μ FD at every adjacent boundary bus ≤2 % (far endpoints
+  isolate the direct tie terms), hinge edges, g_own FD (Q ≤5 %, V_gen ≤5 %,
+  taps/shunt whole-step ≤15 %), locality/fail-fast.
+- GOTCHA resolved: `_compute_dg_dtau_2w` ALREADY existed in jacobian.py
+  (returns a 3-tuple incl. dQ_direct) — `jacobian.py` is net-unchanged.
+- **Q7 raised (open, ask Manuel before Phase 4 runner integration):**
+  N_i^own = `zone_buses()` closure ⇒ on runner nets the band (and losses)
+  would include DN feeder buses under the PCC couplers. Include-all is
+  implemented per the spec's literal reading; a voltage-level restriction
+  is a config decision, not to be made silently.
 
-- Φ_i losses: use ACTUAL branch losses over owned branches (pandapower
-  res tables: `res_line.pl_mw`, `res_trafo.pl_mw`, `res_trafo3w.pl_mw`) for
-  the value / partition invariant; ties weighted by `tie_loss_shares()`.
-  Ownership of branches: both endpoints owned by one zone ⇒ that zone
-  (guaranteed by the separator); tie lines 50/50.
-  The controller's form-B loss (`_loss_line_coeffs`, c_ℓ·|I_ℓ|² over
-  monitored lines) is a SURROGATE — fine for the controller gradient, but
-  the invariant test Σ Φ_i == Φ_global must use actual losses (open point
-  Q4 in `BME_STATUS.md` §0.6: coverage of ALL owned branches).
-- Loss gradients dP_loss/d(θ, V) are analytic from branch admittances and
-  endpoint complex voltages; chain through `MarginalComputer.response_full()`
-  for the μ loss part. For the control-space part, Convention A needs the
-  **port-frozen input response** ∂x_int/∂u_i|_{v_b fixed}: extend the
-  `MarginalComputer` J_int machinery with mismatch-derivative columns
-  ∂g_int/∂u_i (Q injections at interior buses; interior 2W taps via the
-  existing `_compute_dg_dtau_2w`-style helpers; gen vm via
-  `_compute_dg_dVgen`) — all zone-internal quantities. `CommonObjective`
-  then chains ∇Φ_i through this operator for g_own, and through R_i for μ_i.
-- φ_band hinge: value + one-sided gradients at the edges get their own unit
-  tests (spec Phase 2); band edges default ±3 % (D2), owned buses =
-  `topology.zone_buses(z)`; note PV-bus V is pinned (their band gradient has
-  no internal-response channel — document).
-- Partition invariant test: ≥ 20 randomised operating points (perturb loads /
-  gen vm with fixed seed, re-run PF).
+## Phase 3 (next): CoordinationBus + signals — spec §5 tasks + tests
+
+Design notes:
+
+- Dataclasses `MarginalSignal` / `SwitchNotice` (spec §4 shapes; frozen,
+  registry-order μ vector + v_b snapshot). Natural home: a new module
+  beside `core/message.py` (which holds the vertical `CapabilityMessage` /
+  `ShuntDisturbanceMessage` patterns) — e.g. `core/coordination_bus.py`.
+- `CoordinationBus`: in-process pub/sub, integer delay d (publish at k →
+  visible at k+d, NOT earlier), optional drop probability (own
+  `np.random.default_rng(seed)`, deterministic), no hidden global state.
+- Receiver-side low-pass μ^filt = (1−β)·μ^filt + β·μ (β = 0.3, D3) lives
+  with the RECEIVER (per §3.4) — self-marginal bypasses bus AND filter
+  (Convention A, d = 0/β = 1 for the self term).
+- Cold start (§3.8): first d steps explicitly uncoordinated + logged;
+  after warm-up a missing expected signal RAISES unless drop simulation is
+  enabled → hold-last-filtered-value, logged per occurrence.
+- Today all horizontal exchange is same-step direct method calls in the
+  runner (l. 2882–2955) — the bus with d ≥ 1 is genuinely new; keep it
+  runner-agnostic (zones interact with bus + plant only, §3.9).
+- Tests (spec §5 Phase 3): delay semantics, cold-start behaviour,
+  missing-signal raise, hold-last-value under drops, fixed-seed
+  determinism.
 
 ## Practical gotchas (save yourself an hour)
 

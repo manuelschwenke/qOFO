@@ -19,6 +19,17 @@ Symbol map (code ↔ spec)
 * ``response_full()``    ↔ ∂x_int,j/∂v_b for the full internal state
                            (θ and V) — needed by the Phase 2 loss gradient,
                            which depends on angles as well.
+* ``mu_x(...)``          ↔ μ_j assembled from a gradient over the FULL
+                           internal state (θ and V, aux states included) —
+                           required once the loss part of Φ_j (angle
+                           dependent) enters in Phase 2.
+* ``frozen_input_response`` /
+  ``response_to_*``      ↔ ∂x_int,j/∂u_j |_{v_b fixed} (§3.5 Convention A):
+                           the zone-internal state response to the zone's
+                           own inputs with ALL boundary voltages held
+                           fixed, Δx_int = -J_int⁻¹ · ∂g_int/∂u. This is
+                           the "port-frozen" operator behind
+                           g_j^own = ∂Φ_j/∂u_j |_{v_b fixed}.
 * ``ports``              ↔ the zone's own boundary buses (its share of B).
 * ``adjacent``           ↔ support of μ_j: own ports ∪ far endpoints of the
                            zone's ties (far endpoints receive *direct*
@@ -203,6 +214,12 @@ class MarginalComputer:
                 "partition."
             )
 
+        # Kept for the port-frozen input responses (§3.5 Convention A):
+        # Δx_int = -J_int⁻¹ · ∂g_int/∂u, with ∂g_int/∂u the rows_int slice
+        # of the full mismatch-derivative vector.
+        self._J_int = J_int
+        self._rows_int = rows
+
         self._state_labels = state_labels
         self._interior_pq_buses = interior_pq_buses
         self._v_row_positions = [
@@ -228,6 +245,16 @@ class MarginalComputer:
     # ------------------------------------------------------------------
     #  Public operators
     # ------------------------------------------------------------------
+
+    @property
+    def sens(self) -> JacobianSensitivities:
+        """The zone's Jacobian source (shared full-network instance in
+        the runner's default mode; extracted entries are area-local)."""
+        return self._sens
+
+    @property
+    def topology(self) -> BoundaryTopology:
+        return self._topo
 
     @property
     def interior_pq_buses(self) -> List[int]:
@@ -279,11 +306,44 @@ class MarginalComputer:
                 f"({len(self._interior_pq_buses)},) aligned with "
                 "interior_pq_buses."
             )
+        grad_x = np.zeros(self._R.shape[0], dtype=np.float64)
+        grad_x[self._v_row_positions] = grad_v_int
+        return self.mu_x(grad_x, grad_direct)
+
+    def mu_x(
+        self,
+        grad_x_int: NDArray[np.float64],
+        grad_direct: Optional[Dict[int, float]] = None,
+    ) -> NDArray[np.float64]:
+        """Assemble μ_zone ∈ R^{|B|} from a gradient over the FULL
+        internal state (§3.4, angle-dependent Φ terms included).
+
+        Parameters
+        ----------
+        grad_x_int :
+            ∇_{x_int} Φ_zone aligned with the state labels of
+            :meth:`response_full` (θ in rad, V in pu; aux star states
+            included).
+        grad_direct :
+            Direct terms ∂Φ_zone/∂v_b per boundary bus, as in :meth:`mu`.
+
+        Returns
+        -------
+        NDArray
+            μ_zone with exactly-zero entries outside :attr:`adjacent`
+            (sparsity, §3.4).
+        """
+        grad_x_int = np.asarray(grad_x_int, dtype=np.float64)
+        if grad_x_int.shape != (self._R.shape[0],):
+            raise ValueError(
+                f"grad_x_int has shape {grad_x_int.shape}; expected "
+                f"({self._R.shape[0]},) aligned with the state labels of "
+                "response_full()."
+            )
         out = np.zeros(len(self._topo.registry), dtype=np.float64)
-        R_v = self._R[self._v_row_positions, :]
         for k, p in enumerate(self.ports):
             out[self._topo.registry_pos[p]] = float(
-                R_v[:, k] @ grad_v_int
+                self._R[:, k] @ grad_x_int
             )
         if grad_direct:
             adjacent = set(self.adjacent)
@@ -298,3 +358,101 @@ class MarginalComputer:
                     )
                 out[self._topo.registry_pos[b]] += float(val)
         return out
+
+    # ------------------------------------------------------------------
+    #  Port-frozen input responses (§3.5 Convention A)
+    # ------------------------------------------------------------------
+
+    def frozen_input_response(
+        self, dg_full: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        """Δx_int = -J_int⁻¹ · ∂g_int/∂u for a full-length mismatch
+        derivative vector ``∂g/∂u`` (Jacobian state ordering
+        ``[P_PV, P_PQ, Q_PQ]``); rows outside the zone's interior block
+        are dropped — that is exactly the "boundary voltages held fixed"
+        operation (the pinned ports absorb their own mismatch rows).
+
+        Returns the internal state response aligned with the state
+        labels of :meth:`response_full`.
+        """
+        dg_full = np.asarray(dg_full, dtype=np.float64)
+        if dg_full.shape != (self._sens.x_size,):
+            raise ValueError(
+                f"dg_full has shape {dg_full.shape}; expected "
+                f"({self._sens.x_size},) in Jacobian state ordering."
+            )
+        return -np.linalg.solve(self._J_int, dg_full[self._rows_int])
+
+    def _require_owned_bus(self, bus: int, what: str) -> None:
+        owner = self._topo.bus_owner(int(bus))
+        if owner != self.zone_id:
+            raise ValueError(
+                f"{what} at bus {bus} belongs to zone {owner}, not zone "
+                f"{self.zone_id} — a zone may only evaluate port-frozen "
+                "responses of its OWN actuators (§3.9 locality)."
+            )
+
+    def response_to_q_injection(self, bus: int) -> NDArray[np.float64]:
+        """Port-frozen state response to a reactive power injection at a
+        zone-owned bus, per Mvar (generator convention: Q > 0 injects).
+
+        A boundary-port bus yields the exact zero response (its voltage
+        is held fixed; the effect travels through H_{b,i} and the price
+        term instead)."""
+        self._require_owned_bus(bus, "Q injection")
+        net = self._sens.net
+        _, v_idx = get_jacobian_indices(net, int(bus))
+        if v_idx is None:
+            raise ValueError(
+                f"Q injection at bus {bus}: the bus has no voltage state "
+                "in the Jacobian (PV or slack bus) — a reactive injection "
+                "there is absorbed by the local voltage source."
+            )
+        dg = np.zeros(self._sens.x_size, dtype=np.float64)
+        # g = S_calc - S_inj: +1 Mvar injection lowers the Q-mismatch row.
+        dg[self._sens.n_theta + v_idx] = -1.0 / float(net.sn_mva)
+        return self.frozen_input_response(dg)
+
+    def response_to_vgen(self, gen_terminal_bus: int) -> NDArray[np.float64]:
+        """Port-frozen state response to a PV-bus voltage magnitude
+        setpoint at a zone-owned generator terminal bus, per pu."""
+        self._require_owned_bus(gen_terminal_bus, "V_gen setpoint")
+        net = self._sens.net
+        theta_idx, v_idx = get_jacobian_indices(net, int(gen_terminal_bus))
+        if v_idx is not None:
+            raise ValueError(
+                f"V_gen at bus {gen_terminal_bus}: the bus has a voltage "
+                "state (PQ) — not a pinned PV generator bus."
+            )
+        if theta_idx is None:
+            raise ValueError(
+                f"V_gen at bus {gen_terminal_bus}: the bus is the "
+                "reference — the slack machine is not a zone actuator "
+                "(BME Phase 1 convention)."
+            )
+        ppc_bus = pp_bus_to_ppc_bus(net, int(gen_terminal_bus))
+        dg = self._sens._compute_dg_dVgen(ppc_bus)
+        return self.frozen_input_response(dg)
+
+    def response_to_tap_2w(self, trafo_idx: int) -> NDArray[np.float64]:
+        """Port-frozen state response to a two-winding transformer tap
+        step at a zone-owned transformer, per whole tap step."""
+        net = self._sens.net
+        if trafo_idx not in net.trafo.index:
+            raise ValueError(f"trafo {trafo_idx} not in net.trafo")
+        side = str(net.trafo.at[trafo_idx, "tap_side"])
+        if side != "hv":
+            raise ValueError(
+                f"trafo {trafo_idx}: tap_side '{side}' is not supported — "
+                "the ∂g/∂τ assembly (mirroring compute_dV_ds_2w) assumes "
+                "an hv-side tap ratio."
+            )
+        for c in ("hv_bus", "lv_bus"):
+            self._require_owned_bus(
+                int(net.trafo.at[trafo_idx, c]), f"OLTC trafo {trafo_idx}"
+            )
+        # The existing helper also returns dQ_direct (τ-dependence of Q
+        # observed at a PV endpoint) — not needed here: Φ's explicit
+        # τ-dependence is the branch-loss term handled by the caller.
+        dg, delta_tau, _ = self._sens._compute_dg_dtau_2w(int(trafo_idx))
+        return self.frozen_input_response(dg) * delta_tau

@@ -104,6 +104,55 @@ def get_ppc_trafo_index(net: pp.pandapowerNet, trafo_idx: int) -> Optional[int]:
     return ppc_idx
 
 
+def get_ppc_line_index(net: pp.pandapowerNet, line_idx: int) -> Optional[int]:
+    """
+    Get the pypower branch index for a pandapower line.
+
+    Mirrors :func:`get_ppc_trafo_index`: branches are ordered as
+    [lines, trafos, trafo3w, ...] in ``_ppc['branch']``, and the position
+    within ``net.line`` (not the raw index) is used so that nets with
+    non-contiguous line indices are handled correctly.
+
+    Parameters
+    ----------
+    net : pp.pandapowerNet
+        Pandapower network with solved power flow.
+    line_idx : int
+        Pandapower line index.
+
+    Returns
+    -------
+    ppc_idx : int or None
+        Index in _ppc['branch'] array, or None if not found.
+
+    Raises
+    ------
+    ValueError
+        If the network does not have the required internal lookup data.
+    """
+    if not hasattr(net, '_ppc'):
+        raise ValueError("Network must have converged power flow with _ppc data.")
+
+    try:
+        pos = list(net.line.index).index(line_idx)
+    except ValueError:
+        return None
+
+    if hasattr(net, '_pd2ppc_lookups') and net._pd2ppc_lookups is not None:
+        branch_lookup = net._pd2ppc_lookups.get('branch')
+        if branch_lookup is not None and 'line' in branch_lookup:
+            line_start = branch_lookup['line'][0]
+            ppc_idx = line_start + pos
+            if ppc_idx >= len(net._ppc['branch']):
+                return None
+            return ppc_idx
+
+    # Fallback: lines lead the branch table
+    if pos >= len(net._ppc['branch']):
+        return None
+    return pos
+
+
 def pp_bus_to_ppc_bus(net: pp.pandapowerNet, pp_bus_idx: int) -> int:
     """
     Map a pandapower bus index to its internal pypower (_ppc) bus index.

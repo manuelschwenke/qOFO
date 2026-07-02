@@ -12,7 +12,7 @@ here with dates.
 |---|---|---|
 | 0 | Repository reconnaissance | ✅ 2026-07-02 (closed: DECISIONS D1–D8 and Q1/Q2/Q3/Q5 resolved with Manuel, see §0.7) |
 | 1 | Boundary topology and sensitivities | ✅ 2026-07-02 (26 tests green; see Phase 1 section) |
-| 2 | Common objective | ❌ not started |
+| 2 | Common objective | ✅ 2026-07-02 (24 tests green; see Phase 2 section) |
 | 3 | Coordination bus and signals | ❌ not started |
 | 4 | Controller integration | ❌ not started |
 | 5 | Discrete hygiene | ❌ not started |
@@ -409,4 +409,94 @@ Findings / corrections made during Phase 1:
 
 Carried to later phases: real-PCC-coupler FD (Phase 4 integration nets);
 OOS-gen/OLTC column masking hooks (Phase 4, wired from controller state);
-loss-gradient chaining through `response_full()` (Phase 2).
+loss-gradient chaining through `response_full()` (Phase 2 — ✅ done).
+
+---
+
+## Phase 2 — Common objective ✅ (2026-07-02)
+
+New / extended modules (§3-symbol header maps, British English, fail-fast):
+
+| File | Content |
+|---|---|
+| `controller/common_objective.py` (NEW) | `CommonObjective`: Φ_i = w_loss·P_i^loss + Σ φ_band (§3.3; D1 ownership — interior branches by endpoint owner, tie lines split 50/50 via `tie_loss_shares()`, N_i^own = `topology.zone_buses(i)`), the φ_band C¹ hinge (value + gradient), `phi_global()` computed INDEPENDENTLY of the ownership map (the invariant oracle), and `gradients(comp)` → `ZoneGradients`: μ_i assembly (§3.4) and the Convention-A g_own primitives `d_q_injection` / `d_pcc_set` / `d_vgen` / `d_tap_2w` / `d_shunt` (§3.5). w_band has NO default (D2 leaves the magnitude to Phase 6; 0.0 = losses-only ablation rung) |
+| `sensitivity/marginal_computer.py` (extended) | `mu_x()` — μ from a gradient over the FULL internal state (θ and V, aux 3W star states included), chained through the existing R; `mu()` now delegates to it. `frozen_input_response()` + `response_to_q_injection` / `response_to_vgen` / `response_to_tap_2w` — the port-frozen operators ∂x_int/∂u|_{v_b fixed} = −J_int⁻¹·∂g_int/∂u (J_int kept from the Phase 1 build; ownership-enforced, §3.9 locality; hv-side taps only, fail-fast otherwise) |
+| `sensitivity/index_helper.py` (extended) | `get_ppc_line_index()` (mirrors `get_ppc_trafo_index`, positional within `net.line`) |
+| `controller/__init__.py` | exports `CommonObjective`, `PhiBreakdown`, `ZoneGradients` |
+
+Formulation notes:
+
+- **Values** use the ACTUAL branch losses from the res tables
+  (`res_line/res_trafo/res_trafo3w.pl_mw`) — the controller's form-B
+  monitored-line surrogate (Q4) is NOT used for Φ values; Q4 is thereby
+  resolved for the invariant (full owned-branch coverage by construction).
+- **State-space loss gradient** dP^loss/d(θ, V) is analytic from the ppc
+  branch model (weighted row-sums of the MATPOWER dSbr_dV identities over
+  `Yf`/`Yt`; module header carries the formulas), converted to MW on the
+  system base. Reconciliation ppc-losses == res-tables verified to machine
+  precision on the 3-area case before implementation.
+- **μ_i** = R-chained interior gradient (`mu_x`) + direct terms ∂Φ_i/∂v_b
+  at adjacent boundary buses: owned-branch/tie-share loss sensitivity at
+  own ports AND far tie endpoints; band gradient at own ports only (D1 —
+  the far endpoint's band belongs to its owner).
+- **g_own (Convention A)**: ∇_{x_int}Φ_iᵀ·(port-frozen response) plus the
+  explicit input terms — V_gen: pinned-terminal loss + band sensitivity
+  (the terminal magnitude IS the input; no μ channel, but a live g_own
+  channel — the Phase-1 "PV rows inert" note applies to μ only); OLTC:
+  closed-form ∂P^loss_ℓ/∂τ of the transformer's own branch; Q/PCC/shunt:
+  none (state-only). PCC columns are the negated injection (load
+  convention); shunt columns carry the −q_step·V² scaling — both mirror
+  `RestrictedSensitivityProvider`/controller conventions exactly.
+
+Tests — `tests/test_common_objective.py`: **24 passed** (full BME suite 60;
+controller-side regression `test_tso_output_gradient` / tie-coordination /
+loss-objective suites re-run green — 32 passed).
+
+Acceptance criteria (spec §5 Phase 2):
+
+- ✅ **Partition invariant** Σ_i Φ_i == Φ_global at the base point + 20
+  randomised operating points (loads ±10 %, gen setpoints ±0.01 pu, seed
+  123), ≤1e-9 relative, for BOTH rungs (losses-only w_band=0 and an active
+  tight band w_band=100 @ [0.99, 1.01]). Independent oracles: Φ_global
+  (w_band=0) equals the raw res-table totals to 1e-12; zone 1's tie split
+  recomputed by hand (lines 2, 14, 25 at 50 %).
+- ✅ **FD of ∂Φ_i/∂v_b**: μ_i vs central differences at EVERY adjacent
+  boundary bus (Phase 1 port-subnet oracle extended by the far tie
+  endpoints, all adjacent buses pinned) — ≤2 %, both objective rungs; own
+  ports exercise the internal-response chain, far endpoints isolate the
+  direct tie-share terms. Sparsity: exact zeros outside the adjacent set.
+- ✅ **Hinge behaviour**: zero inside and AT the edges, quadratic outside,
+  gradient continuous (C¹), one-sided curvature 2·w_band / 0 at both edges.
+- ✅ (beyond the letter of §5, per §0.2 revision (ii)) **Convention-A g_own
+  primitives FD-validated** with ports pinned: Q injection ≤5 % (2 interior
+  buses/zone), V_gen ≤5 % (1 gen/zone), OLTC whole-step secant ≤15 %
+  (incl. trafo 0 whose hv bus IS a boundary port — port rows correctly
+  frozen), synthetic 20 Mvar shunt step ≤15 %. Locality (`PermissionError`
+  analogue: foreign actuators raise), PV-bus injection raises, slack
+  machine excluded, PCC negation pinned.
+
+Findings / corrections made during Phase 2:
+
+1. `JacobianSensitivities._compute_dg_dtau_2w` ALREADY existed (l. 2696,
+   tie-coordination era) returning `(dg_dtau, Δτ, dQ_direct)` — reused as-is
+   (a briefly added duplicate was removed; `sensitivity/jacobian.py` is
+   net-unchanged by this phase). `dQ_direct` (τ-dependence of Q observed at
+   a PV endpoint) is not needed for Φ: the explicit τ-dependence of the
+   losses enters through the branch-loss term instead.
+2. **Q7 (NEW, open — Manuel's call, interacts with D2):** N_i^own =
+   `zone_buses()` closure includes the 10.5 kV machine-terminal buses (their
+   band terms are live via V_gen inputs), and on RUNNER nets it would also
+   include the DN feeder buses under the PCC couplers — i.e. φ_band would
+   penalise DN voltages at TSO level, and Φ would include DN losses. The
+   spec's literal N_i^own reading is implemented (include-all); whether the
+   band set should be restricted (e.g. by voltage level) is a Phase 4/6
+   config decision to surface BEFORE the first runner integration.
+3. Tap direct term uses the exact ppc ratio (τ from `branch[:, 8]`, hv/lv
+   side handled); the indirect ∂g/∂τ part keeps the repo's τ = 1 + s·Δτ
+   convention — identical on this net (ratio exactly 1.0, all taps hv-side,
+   verified) and policed by the whole-step FD tests either way.
+
+Carried to later phases: real-PCC-coupler / 3W-loss FD on runner nets
+(Phase 4 integration tests — 3W branch weights and aux-star loss gradients
+are implemented but the base net has no trafo3w); Q7 decision; OOS-element
+masking hooks (Phase 4).

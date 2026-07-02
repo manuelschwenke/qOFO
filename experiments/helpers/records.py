@@ -242,6 +242,16 @@ class MultiTSOIterationRecord:
     zone_line_loading_mean_pct: Dict[int, float] = field(default_factory=dict)
     zone_line_loading_min_pct:  Dict[int, float] = field(default_factory=dict)
 
+    # Per-zone active-power line loss [MW], ground truth (net.res_line.pl_mw)
+    # summed over exactly zd.line_indices -- the SAME EHV line set a zone's
+    # TSO loss objective (TSOControllerConfig.g_loss, current_line_indices)
+    # targets, so this is the right ground-truth check for "did g_loss lower
+    # this zone's own losses" (mirrors total_losses_mw's role at the whole-
+    # network level).  Does NOT include the zone's PCC/OLTC transformers or
+    # its DSO sub-networks' own HV lines -- those sit outside the objective's
+    # current_line_indices.
+    zone_losses_mw: Dict[int, float] = field(default_factory=dict)
+
     # Per-zone TSO DER active power (array, one entry per TSO DER).
     zone_tso_der_p_mw: Dict[int, NDArray] = field(default_factory=dict)
 

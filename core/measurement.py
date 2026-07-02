@@ -33,6 +33,17 @@ class Measurement:
         Pandapower bus indices where voltage is measured.
     voltage_magnitudes_pu : NDArray[np.float64]
         Measured voltage magnitudes in per-unit.
+    voltage_angles_deg : NDArray[np.float64]
+        Measured voltage phase angles in degrees, aligned with
+        ``bus_indices``.  Populated from ``net.res_bus.va_degree`` by the
+        ``measure_*`` helpers.  This is the PMU (phasor) channel: with the
+        angles the *exact* branch loss
+        ``P_loss = Σ_ℓ g_ℓ (V_i² + V_j² − 2 V_i V_j cos θ_ij)`` and its
+        full gradient become observable.  The default magnitude-only
+        controllers ignore this field; the loss term uses it only when
+        ``TSOControllerConfig.loss_use_phasor=True`` (not yet implemented —
+        see the loss-objective design note).  Empty array when no angle
+        information is supplied.
     branch_indices : NDArray[np.int64]
         Pandapower branch (line) indices where current is measured.
     current_magnitudes_ka : NDArray[np.float64]
@@ -101,6 +112,7 @@ class Measurement:
         der_vm_pu_ref: NDArray[np.float64] = None,
         oltc3w_indices: NDArray[np.int64] = None,
         oltc3w_tap_positions: NDArray[np.int64] = None,
+        voltage_angles_deg: NDArray[np.float64] = None,
     ) -> None:
         """
         Initialise a Measurement instance.
@@ -147,6 +159,12 @@ class Measurement:
         self.iteration = iteration
         self.bus_indices = bus_indices
         self.voltage_magnitudes_pu = voltage_magnitudes_pu
+        # PMU phasor channel (angles in degrees, aligned with bus_indices).
+        # Defaults to empty when only magnitude measurements are available.
+        self.voltage_angles_deg = (
+            voltage_angles_deg if voltage_angles_deg is not None
+            else np.array([], dtype=np.float64)
+        )
         self.branch_indices = branch_indices
         self.current_magnitudes_ka = current_magnitudes_ka
         self.interface_transformer_indices = interface_transformer_indices
@@ -225,6 +243,7 @@ def measure_tso(net, cfg, it: int):
 
     all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
     vm = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
+    va = net.res_bus.loc[all_bus, "va_degree"].values.astype(np.float64)
     i_ka = np.array(
         [float(net.res_line.at[li, "i_from_ka"]) for li in cfg.current_line_indices],
         dtype=np.float64,
@@ -261,6 +280,7 @@ def measure_tso(net, cfg, it: int):
         iteration=it,
         bus_indices=all_bus,
         voltage_magnitudes_pu=vm,
+        voltage_angles_deg=va,
         branch_indices=np.array(cfg.current_line_indices, dtype=np.int64),
         current_magnitudes_ka=i_ka,
         interface_transformer_indices=np.array(cfg.pcc_trafo_indices, dtype=np.int64),
@@ -357,6 +377,7 @@ def measure_zone_tso(net, zone_def, it: int) -> "Measurement":
     """
     all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
     vm_all = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
+    va_all = net.res_bus.loc[all_bus, "va_degree"].values.astype(np.float64)
 
     i_ka = np.array(
         [float(net.res_line.at[li, "i_from_ka"]) for li in zone_def.line_indices],
@@ -448,6 +469,7 @@ def measure_zone_tso(net, zone_def, it: int) -> "Measurement":
         iteration=it,
         bus_indices=all_bus,
         voltage_magnitudes_pu=vm_all,
+        voltage_angles_deg=va_all,
         branch_indices=np.array(zone_def.line_indices, dtype=np.int64),
         current_magnitudes_ka=i_ka,
         interface_transformer_indices=np.array(zone_def.pcc_trafo_indices, dtype=np.int64),
@@ -566,6 +588,7 @@ def measure_central(net, central_cfg, it: int) -> "Measurement":
     """
     all_bus = np.array(sorted(net.res_bus.index), dtype=np.int64)
     vm_all = net.res_bus.loc[all_bus, "vm_pu"].values.astype(np.float64)
+    va_all = net.res_bus.loc[all_bus, "va_degree"].values.astype(np.float64)
 
     i_ka = np.array(
         [float(net.res_line.at[li, "i_from_ka"]) for li in central_cfg.current_line_indices],
@@ -627,6 +650,7 @@ def measure_central(net, central_cfg, it: int) -> "Measurement":
         iteration=it,
         bus_indices=all_bus,
         voltage_magnitudes_pu=vm_all,
+        voltage_angles_deg=va_all,
         branch_indices=np.array(central_cfg.current_line_indices, dtype=np.int64),
         current_magnitudes_ka=i_ka,
         interface_transformer_indices=np.array([], dtype=np.int64),

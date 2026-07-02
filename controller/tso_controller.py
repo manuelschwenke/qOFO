@@ -315,6 +315,51 @@ class TSOControllerConfig:
     corresponding diagonal of K is zeroed in the closed-loop transform
     (DER's slope effectively becomes 0 — w-shift no longer moves Q)."""
 
+    # ── Transmission-loss minimisation (optional, togglable) ────────────────
+    g_loss: float = 0.0
+    """Weight on the active transmission-loss term in the TSO objective
+    (units: per MW of modelled line loss).  Adds ``g_loss · P_loss`` with
+
+        ``P_loss = Σ_ℓ c_ℓ · |I_ℓ|²``   (form B — current-magnitude form),
+
+    summed over the monitored current lines ``current_line_indices``, where
+    ``c_ℓ`` [MW per kA²] is the per-line loss coefficient (default
+    ``c_ℓ = 3·R_ℓ`` — three-phase I²R, ``R_ℓ`` the series resistance of line
+    ``ℓ`` in ohm; see :attr:`loss_line_coeff_mw_per_ka2`).  Because ``|I_ℓ|``
+    is a monitored OUTPUT, the term is realised through the *existing* current
+    rows of the sensitivity matrix: ``∂P_loss/∂I_ℓ = 2·g_loss·c_ℓ·|I_ℓ|`` is
+    projected to control space via the cached ``∂I_ℓ/∂u`` (no new sensitivity
+    primitive).  The measured ``|I_ℓ|`` is the OFO linearisation anchor, so
+    the gradient is re-anchored on the true operating point every step.
+
+    Default ``0.0`` keeps the loss term out of the objective entirely
+    (legacy behaviour).  Toggle pattern mirrors :attr:`g_q_tie`.  NOTE: the
+    loss sum spans exactly the lines in ``current_line_indices`` — to count
+    additional in-zone branches, add them there (the I-rows then carry their
+    ``∂I/∂u`` automatically).  See
+    :class:`configs.multi_tso_config.MultiTSOConfig.tso_g_loss`."""
+
+    loss_line_coeff_mw_per_ka2: Optional[List[float]] = None
+    """Optional per-line override of the loss coefficient ``c_ℓ`` [MW per
+    kA²] used in the loss term, same length and ordering as
+    ``current_line_indices``.  When ``None`` (default) the coefficient is
+    derived from the cached network as ``c_ℓ = 3 · R_ℓ`` with
+    ``R_ℓ = r_ohm_per_km · length_km / parallel`` read from
+    ``sensitivities.net.line`` (the same net that produces ``∂I/∂u``).
+    Set a line's entry to ``0.0`` to exclude it from the loss sum while
+    keeping it as a monitored/thermally-limited current output."""
+
+    loss_use_phasor: bool = False
+    """PMU hook for the loss term.  ``False`` (default) uses the
+    magnitude/current form B above (the only measurement assumed so far).
+    ``True`` selects the phasor form — the exact branch loss
+    ``P_loss = Σ_ℓ g_ℓ(V_i²+V_j²−2V_iV_j cosθ_ij)`` evaluated from measured
+    voltage phasors (``Measurement.voltage_angles_deg``), with the gradient
+    projected through the complex current sensitivity.  The phasor path is
+    NOT yet implemented; setting this to ``True`` raises ``NotImplementedError``
+    at gradient time.  Reserved so the controller can later consume full
+    voltage phasors without changing the objective wiring."""
+
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
         # When a DER mapping is provided, derive der_indices from it
@@ -410,6 +455,36 @@ class TSOControllerConfig:
             if np.any(self.q_tie_band_mvar < 0.0):
                 raise ValueError("q_tie_band_mvar entries must be non-negative")
 
+        # ── Loss-term validation ────────────────────────────────────────────
+        if self.g_loss < 0.0:
+            raise ValueError(f"g_loss must be non-negative, got {self.g_loss}")
+        if self.loss_line_coeff_mw_per_ka2 is not None:
+            if len(self.loss_line_coeff_mw_per_ka2) != len(self.current_line_indices):
+                raise ValueError(
+                    f"loss_line_coeff_mw_per_ka2 length "
+                    f"({len(self.loss_line_coeff_mw_per_ka2)}) must match "
+                    f"current_line_indices length "
+                    f"({len(self.current_line_indices)})"
+                )
+            if np.any(np.asarray(self.loss_line_coeff_mw_per_ka2) < 0.0):
+                raise ValueError(
+                    "loss_line_coeff_mw_per_ka2 entries must be non-negative"
+                )
+        if self.g_loss != 0.0 and len(self.current_line_indices) == 0:
+            # The loss term sums over the current outputs; with no monitored
+            # current line it has nothing to act on and is a silent no-op
+            # (the gradient code returns zeros when n_i == 0).  Warn rather
+            # than raise so a global g_loss in a multi-zone sweep does not
+            # crash on a zone that legitimately monitors no lines.
+            import warnings
+            warnings.warn(
+                "g_loss != 0 but current_line_indices is empty: the "
+                "transmission-loss term is inert for this controller (no "
+                "monitored current line to sum over).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
 
 class TSOController(BaseOFOController):
     """
@@ -494,6 +569,11 @@ class TSOController(BaseOFOController):
         self._H_cache: Optional[NDArray[np.float64]] = None
         self._H_mappings: Optional[Dict] = None
         self._sensitivity_updater: Optional[SensitivityUpdater] = None
+
+        # Cached per-line loss coefficients c_ℓ [MW per kA²] for the loss
+        # term (form B).  Depends only on the (static) monitored-line set
+        # and line resistances, so it is computed once on first use.
+        self._loss_coeff_cache: Optional[NDArray[np.float64]] = None
 
         # Cached measurement for capability-curve bounds (set in step())
         self._last_measurement: Optional[Measurement] = None
@@ -1446,6 +1526,108 @@ class TSOController(BaseOFOController):
 
         return y_lower, y_upper
 
+    def _loss_line_coeffs(self) -> NDArray[np.float64]:
+        """Per-monitored-line loss coefficient ``c_ℓ`` [MW per kA²].
+
+        Returns the vector ``c`` (length ``len(current_line_indices)``) such
+        that the modelled three-phase active loss of line ``ℓ`` is
+        ``P_loss,ℓ ≈ c_ℓ · |I_ℓ|²`` with ``|I_ℓ|`` the from-side current
+        magnitude in kA (the quantity measured and whose ``∂I/∂u`` lives in
+        the cached ``H``).
+
+        Default ``c_ℓ = 3·R_ℓ`` with ``R_ℓ = r_ohm_per_km·length_km/parallel``
+        read from ``self.sensitivities.net`` — the *same* network used to
+        build ``∂I/∂u``, so the coefficient and the sensitivity are mutually
+        consistent (e.g. under the local-network sensitivity option both come
+        from the reduced net).  Overridable per line via
+        ``config.loss_line_coeff_mw_per_ka2``.  Cached after first call.
+        """
+        if self._loss_coeff_cache is not None:
+            return self._loss_coeff_cache
+
+        n_i = len(self.config.current_line_indices)
+        if self.config.loss_line_coeff_mw_per_ka2 is not None:
+            c = np.asarray(
+                self.config.loss_line_coeff_mw_per_ka2, dtype=np.float64,
+            ).copy()
+        else:
+            net = self.sensitivities.net
+            c = np.zeros(n_i, dtype=np.float64)
+            for k, li in enumerate(self.config.current_line_indices):
+                r_per_km = float(net.line.at[li, "r_ohm_per_km"])
+                length_km = float(net.line.at[li, "length_km"])
+                try:
+                    parallel = float(net.line.at[li, "parallel"])
+                except (KeyError, ValueError):
+                    parallel = 1.0
+                if parallel <= 0.0:
+                    parallel = 1.0
+                r_ohm = r_per_km * length_km / parallel
+                # P_loss[MW] = 3 · |I[A]|² · R[Ω] / 1e6, |I[A]| = i_ka·1e3
+                #            = 3 · R[Ω] · i_ka².
+                c[k] = 3.0 * r_ohm
+        self._loss_coeff_cache = c
+        return c
+
+    def _loss_output_grad_i(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """Loss contribution to the ``I`` block of the output gradient ``∇_y f``.
+
+        Form B (current-magnitude measurements): with
+        ``P_loss = Σ_ℓ c_ℓ·|I_ℓ|²`` the per-line entry is
+
+            ``∂(g_loss·P_loss)/∂I_ℓ = 2·g_loss·c_ℓ·|I_ℓ|``,
+
+        evaluated at the MEASURED current ``|I_ℓ|`` (the OFO linearisation
+        anchor).  Returns a zero vector when the loss term is disabled
+        (``g_loss == 0``) or there are no monitored current lines — preserving
+        the legacy "current is a pure constraint" behaviour.  Routes to the
+        (not-yet-implemented) phasor path when ``loss_use_phasor`` is set.
+        """
+        n_i = len(self.config.current_line_indices)
+        grad_i = np.zeros(n_i, dtype=np.float64)
+        if n_i == 0 or self.config.g_loss == 0.0:
+            return grad_i
+        if self.config.loss_use_phasor:
+            return self._loss_output_grad_i_phasor(measurement)
+
+        c = self._loss_line_coeffs()
+        i_meas = np.zeros(n_i, dtype=np.float64)
+        for k, li in enumerate(self.config.current_line_indices):
+            m = np.where(measurement.branch_indices == li)[0]
+            if len(m) == 0:
+                raise ValueError(
+                    f"Line {li} not found in measurement.branch_indices "
+                    f"(needed for the transmission-loss term)"
+                )
+            i_meas[k] = float(measurement.current_magnitudes_ka[m[0]])
+        return 2.0 * self.config.g_loss * c * i_meas
+
+    def _loss_output_grad_i_phasor(
+        self,
+        measurement: Measurement,
+    ) -> NDArray[np.float64]:
+        """PMU (phasor) loss-gradient path — reserved, not yet implemented.
+
+        With voltage phasors available (``measurement.voltage_angles_deg``),
+        the exact branch loss
+        ``P_loss = Σ_ℓ g_ℓ(V_i²+V_j²−2V_iV_j cosθ_ij)`` can be evaluated and
+        differentiated.  Unlike form B, the phasor gradient is NOT confined to
+        the ``I`` block — it also has voltage-magnitude/angle components — so
+        wiring it requires extending ``_compute_output_gradient`` (and the
+        consistency test ``tests/test_tso_output_gradient.py``) beyond the
+        current rows.  Left as an explicit stub so the option is visible.
+        """
+        raise NotImplementedError(
+            "Phasor (PMU) transmission-loss form is not implemented yet. "
+            "Set TSOControllerConfig.loss_use_phasor=False to use the "
+            "current-magnitude form (form B). The voltage phasors are already "
+            "carried on Measurement.voltage_angles_deg for when the exact "
+            "P_loss = Σ g_ℓ(V_i²+V_j²−2 V_i V_j cosθ_ij) form is added."
+        )
+
     def _compute_output_gradient(
         self,
         measurement: Measurement,
@@ -1472,7 +1654,7 @@ class TSOController(BaseOFOController):
 
         * ``V``     : ``2 · g_v · (V − V_set)``                   (voltage tracking)
         * ``Q_PCC`` : ``2 · g_q_tso · (Q_PCC − Q_PCC,set)``       (interface-Q tracking)
-        * ``I``     : ``0``                                       (current is a constraint, not an objective term)
+        * ``I``     : ``2 · g_loss · c_ℓ · |I_ℓ|``                (transmission-loss form B; ``0`` when ``g_loss == 0``)
         * ``Q_gen`` : ``2 · g_res_sg · (Q_gen − Q_mid)/Q_half²``  (SG reactive-reserve centring)
         * ``Q_tie`` : ``2 · g_q_tie · (Q_tie − Q_tie,set)``       (tie-line-Q tracking)
 
@@ -1489,7 +1671,9 @@ class TSOController(BaseOFOController):
 
         grad_v = np.zeros(n_v, dtype=np.float64)
         grad_pcc = np.zeros(n_pcc, dtype=np.float64)
-        grad_i = np.zeros(n_i, dtype=np.float64)
+        # I block: zero unless the transmission-loss term is enabled
+        # (form B), in which case ∂P_loss/∂I_ℓ = 2·g_loss·c_ℓ·|I_ℓ|.
+        grad_i = self._loss_output_grad_i(measurement)
         grad_gen = np.zeros(n_gen, dtype=np.float64)
         grad_tie = np.zeros(n_tie, dtype=np.float64)
 
@@ -1787,6 +1971,24 @@ class TSOController(BaseOFOController):
                 _contrib_der = np.zeros_like(grad_f)
                 _contrib_der[:n_der_ctrl] = coeff_der
                 self._debug_reserve_term("DER", _contrib_der, grad_f)
+
+        # --- Component 6: Transmission-loss minimisation (form B) ----------
+        # P_loss = Σ_ℓ c_ℓ·|I_ℓ|² is a function of the monitored current
+        # outputs, so its control-space gradient is the I-block of ∇_y f
+        # projected through the cached ∂I/∂u (the existing current rows of H).
+        # Using the SAME _loss_output_grad_i vector here as in
+        # _compute_output_gradient keeps the invariant grad_f == ∇_y f · H
+        # (pinned by tests/test_tso_output_gradient.py).  No new sensitivity
+        # is computed — the loss reuses the current-row sensitivities.
+        if n_i > 0 and self.config.g_loss != 0.0:
+            if not H_built:
+                H_bus = self._build_sensitivity_matrix()
+                H = self._expand_H_to_der_level(H_bus)
+                H_built = True
+            grad_i_loss = self._loss_output_grad_i(measurement)
+            i_row_start = n_v + n_pcc
+            dI_du = H[i_row_start:i_row_start + n_i, :]
+            grad_f += grad_i_loss @ dI_du
 
         # Horizontal tie coordination adds NO control-space term: it acts purely
         # through the redirected boundary voltage setpoints in the voltage block

@@ -253,6 +253,7 @@ def make_config() -> MultiTSOConfig:
         g_q=200,                      # DSO Q-tracking
         tso_g_q_tie=0,
         tso_g_res_sg=0,
+        tso_g_loss=0,
         # ── DSO objective tuning ──
         dso_g_v=1E5,              # reduced to avoid competing with Q tracking
         dso_g_qi=0,                   # integral Q-tracking (0 = off)
@@ -261,12 +262,12 @@ def make_config() -> MultiTSOConfig:
         dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
         # ── TSO-TSO tie coordination (gradient-exchange; see Ch.7 §7.5) ──
         enable_tie_coordination=False,
-        zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},  # divergent per-zone schedule (win-win case)
+        zone_v_setpoints_pu={1: 1.05, 2: 1.03, 3: 1.04},  # divergent per-zone schedule (win-win case)
         g_z_q_tie=0.0,            # OPTIONAL orthogonal guardrail: enforce Q_tie soft cap (0 = off)
         tie_q_band_mvar=100.0,     # +/- soft cap on per-tie reactive flow [Mvar] (only if g_z_q_tie>0)
-        tie_grad_step=0.1,        # Newton-step fraction (g_v-agnostic)
+        tie_grad_step=1,        # Newton-step fraction (g_v-agnostic)
         tie_grad_eps=1e-3,        # per-zone worsening cap / mutual-aid budget (0 = strict Pareto)
-        tie_anchor=1,           # weak subsidiarity pull toward dV_ref = 0
+        tie_anchor=0.5,           # weak subsidiarity pull toward dV_ref = 0
         tie_deadband_v_pu=0.002,
         tie_dvref_max=0.05,       # clip on |dV_ref| [p.u.]
         tie_coord_period_s=900.0, # outer loop every 5th TSO step (5 x 180s) -- timescale separation
@@ -307,7 +308,7 @@ def make_config() -> MultiTSOConfig:
         verbose=1,
         # Live plotting on (controller + cascade); system overview off.
         live_plot_controller=True,
-        live_plot_cascade=True,
+        live_plot_cascade=False,
         live_plot_system=False,
         live_plot_tracking=False,
         live_plot_tie_coordination=False,

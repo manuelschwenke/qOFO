@@ -91,7 +91,7 @@ from analysis.reachability import ReachabilityViolation
 OUT_ROOT = results_path("005_cigre")
 
 #: The CIGRE paper's figure directory (PDFs are written here too).
-PAPER_FIG_DIR = r"C:\Users\Manuel Schwenke\Desktop\CIGRE_2026\Figures"
+PAPER_FIG_DIR = r"C:\Users\Manuel Schwenke\Desktop\CIGRE_2026\Figures\dump"
 
 #: Generators to show in the Fig. 4 *subset* (paper) plot.  Match by generator
 #: name (str) or net.gen index (int).  ``None`` -> one representative per zone.
@@ -152,7 +152,8 @@ def make_cigre_config() -> MultiTSOConfig:
         # tie coordination
         enable_tie_coordination=True,
         zone_v_setpoints_pu={1: 1.04, 2: 1.02, 3: 1.00},
-        tie_grad_step=0.5, tie_anchor=0.5,
+        tie_grad_step=0.1, tie_anchor=0.5,
+        tie_grad_eps=1E-4,
         # integrator tuning
         shunt_int_g_w=150,  # step = g_H/(2*g_w); SMALLER = bigger step — TUNE THIS
         shunt_int_delta_mvar=10.0,  # hysteresis half-width (must be < q_step/2 = 25)
@@ -217,53 +218,58 @@ def make_cigre_config() -> MultiTSOConfig:
 
 #: Per-variant control-mode overrides (mirror 002_M_TSO_M_DSO_COMPARE.SCENARIOS).
 VARIANTS: Dict[str, Dict[str, Any]] = {
-    "V1": dict(  # 002 "L0" -- TS Q(V), STS cos phi = 1
-        tso_mode="local", tso_local_mode="qv",
-        dso_mode="local", local_der_mode="cos_phi_1",
-        tso_q_mode="qv", dso_q_mode="cosphi",
-        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
-    ),
-    "V2": dict(  # 002 "L1" -- TS Q(V), STS local Q(V)
-        tso_mode="local", tso_local_mode="qv",
-        dso_mode="local", local_der_mode="qv",
-        tso_q_mode="qv", dso_q_mode="qv",
-        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
-        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
-    ),
-    "V3": dict(  # 002 "T1" -- TS-OFO, STS local Q(V); g_w_pcc pin
-        tso_mode="ofo",
-        dso_mode="local", local_der_mode="qv",
-        tso_q_mode="qv", dso_q_mode="qv",
-        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
-        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
-        g_w_pcc=1.0e10,
-    ),
+    # "V1": dict(  # 002 "L0" -- TS Q(V), STS cos phi = 1
+    #     tso_mode="local", tso_local_mode="qv",
+    #     dso_mode="local", local_der_mode="cos_phi_1",
+    #     tso_q_mode="qv", dso_q_mode="cosphi",
+    #     tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+    # ),
+    # "V2": dict(  # 002 "L1" -- TS Q(V), STS local Q(V)
+    #     tso_mode="local", tso_local_mode="qv",
+    #     dso_mode="local", local_der_mode="qv",
+    #     tso_q_mode="qv", dso_q_mode="qv",
+    #     tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+    #     dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
+    # ),
+    # "V3": dict(  # 002 "T1" -- TS-OFO, STS local Q(V); g_w_pcc pin
+    #     tso_mode="ofo",
+    #     dso_mode="local", local_der_mode="qv",
+    #     tso_q_mode="qv", dso_q_mode="qv",
+    #     tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+    #     dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
+    #     g_w_pcc=1.0e10,
+    # ),
     "V4": dict(  # 002 "C" -- cascaded TS-OFO + STS-OFO (proposed)
         tso_mode="ofo",
         dso_mode="ofo",
     ),
-    "V5": dict(  # single centralized OFO -- best-case upper-bound reference
-        control_scope="central",
+    "V4_NOCOORD": dict(  # 002 "C" -- cascaded TS-OFO + STS-OFO (proposed)
         tso_mode="ofo",
-        dso_mode="local",
-        tso_q_mode="qv", dso_q_mode="qv",
-        local_sensitivities_tso=False,
-        local_sensitivities_dso=False,
-        # ── Tuning (plan golden-popping-hartmanis): make V5 a VALID upper
-        #    bound (>= V4 on rms_v_ts_pu).  Strategy: match V4's per-loop gain
-        #    ratios g_v/g_w, match V4's control cadence, then cool the whole g_w
-        #    block by one global KAPPA_V5 (set from the lambda_max probe below).
-        central_dso_g_v=1E5,        # HV voltage weight = V4 dso_g_v
-        central_period_s=180,       # = V4 tso_period_s: cadence-matched comparison
-        # -- V4 gain ratios restored (g_v/g_w per class), then x KAPPA_V5 on g_w --
-        # g_v=1E7,                    # TN voltage weight = V4 g_v (was 5E7)
-        # g_w_der=100,                # = V4 (TSO DER);  ratio g_v/g_w_der = 1e5
-        # g_w_dso_der=1000,           # = V4 (DSO DER);  ratio cdso_g_v/g_w = 1e2
-        # g_w_gen=5E9,                # = V4 (very cautious AVR)
-        # g_w_tso_oltc=1E4,           # = V4 (was 2E4)
-        # g_w_dso_oltc=200,           # = V4 (was 1E3)
-        # debug_central_curvature=True,  # enable to print lambda_max(M) at t=0
+        dso_mode="ofo",
+        enable_tie_coordination=False,
     ),
+    # "V5": dict(  # single centralized OFO -- best-case upper-bound reference
+    #     control_scope="central",
+    #     tso_mode="ofo",
+    #     dso_mode="local",
+    #     tso_q_mode="qv", dso_q_mode="qv",
+    #     local_sensitivities_tso=False,
+    #     local_sensitivities_dso=False,
+    #     # ── Tuning (plan golden-popping-hartmanis): make V5 a VALID upper
+    #     #    bound (>= V4 on rms_v_ts_pu).  Strategy: match V4's per-loop gain
+    #     #    ratios g_v/g_w, match V4's control cadence, then cool the whole g_w
+    #     #    block by one global KAPPA_V5 (set from the lambda_max probe below).
+    #     central_dso_g_v=1E5,        # HV voltage weight = V4 dso_g_v
+    #     central_period_s=180,       # = V4 tso_period_s: cadence-matched comparison
+    #     # -- V4 gain ratios restored (g_v/g_w per class), then x KAPPA_V5 on g_w --
+    #     # g_v=1E7,                    # TN voltage weight = V4 g_v (was 5E7)
+    #     # g_w_der=100,                # = V4 (TSO DER);  ratio g_v/g_w_der = 1e5
+    #     # g_w_dso_der=1000,           # = V4 (DSO DER);  ratio cdso_g_v/g_w = 1e2
+    #     # g_w_gen=5E9,                # = V4 (very cautious AVR)
+    #     # g_w_tso_oltc=1E4,           # = V4 (was 2E4)
+    #     # g_w_dso_oltc=200,           # = V4 (was 1E3)
+    #     # debug_central_curvature=True,  # enable to print lambda_max(M) at t=0
+    # ),
 }
 
 #: Global g_w cooling factor for V5 (plan Step 2).  V5 is monolithic, so the
@@ -282,10 +288,10 @@ if KAPPA_V5 != 1.0:
 #: the same g_v/g_w are well-damped at both rates); only ``central_period_s`` differs.
 #: Reported in the console summary table for the paper text, NOT drawn in any figure
 #: (see ``FIG_EXCLUDE``) so the headline figures keep V5@180s as the sole reference.
-VARIANTS["V5-20s"] = {**VARIANTS["V5"], "central_period_s": 20}
+#VARIANTS["V5-20s"] = {**VARIANTS["V5"], "central_period_s": 20}
 
 #: Variants kept out of the rendered figures (still appear in the summary table/CSV).
-FIG_EXCLUDE = {"V5"} #{"V5_20s"}
+FIG_EXCLUDE = {} #{"V5"} #{"V5_20s"}
 
 
 # ---------------------------------------------------------------------------

@@ -318,6 +318,25 @@ def run_multi_tso_dso(
     v_set = config.v_setpoint_pu
     verbose = config.verbose
 
+    def _zone_scalar(zone_dict: Optional[Dict[int, float]], zone_id: int,
+                      fallback: float) -> float:
+        """Per-zone override lookup mirroring the ``zone_v_setpoints_pu``
+        idiom used throughout this function: ``zone_dict[zone_id]`` if
+        present, else ``fallback``."""
+        return (float(zone_dict.get(zone_id, fallback))
+                if zone_dict is not None else float(fallback))
+
+    def _zone_weight_scale(ctrl: "TSOController") -> float:
+        """Sum of this zone's own active TSO objective weights -- see
+        ``MultiTSOConfig.tie_normalize_gradients`` docstring.  Used only to
+        rescale that zone's boundary gradient onto the SAME footing as a
+        zone whose weight scale equals the global ``g_v`` (a no-op there).
+        Falls back to 1.0 if a zone somehow has every weight at 0 (avoids
+        a division by zero; such a zone contributes nothing to gamma anyway)."""
+        c = ctrl.config
+        w = c.g_v + c.g_q_tso + c.g_q_tie + c.g_loss + c.g_res_sg + c.g_res_der
+        return w if w > 0.0 else 1.0
+
     # Single centralized controller path (CIGRE V5 best-case reference).
     # When True, one CentralOFOController owns every actuator and observes
     # every measurement; the 3-zone partition + per-HV metadata are retained
@@ -694,7 +713,7 @@ def run_multi_tso_dso(
                 if config.zone_v_setpoints_pu is not None else v_set
             ),
             # alpha removed (absorbed into g_w)
-            g_v=config.g_v,
+            g_v=_zone_scalar(config.zone_g_v, z, config.g_v),
             g_w_der=config.g_w_der,
             g_w_gen=config.g_w_gen,
             g_w_pcc=config.g_w_pcc,
@@ -824,8 +843,9 @@ def run_multi_tso_dso(
         # ── G_w diagonal for this zone's u vector ────────────────────────────
         gw_diag = zd.gw_diagonal()
         # Output-slack weights in g_z (output-vector) order.
+        _g_z_voltage_z = _zone_scalar(config.zone_g_z_voltage, z, config.g_z_voltage)
         gz_diag_target = np.concatenate([
-            np.full(len(zd.v_bus_indices),     config.g_z_voltage),  # V slacks
+            np.full(len(zd.v_bus_indices),     _g_z_voltage_z),      # V slacks
             np.full(len(zd.pcc_trafo_indices), config.g_z_q_pcc),    # Q_PCC slacks
             np.full(len(zd.line_indices),      config.g_z_current),  # current slacks
             np.full(len(zd.gen_indices),       config.g_z_q_gen),    # Q_gen slacks
@@ -870,6 +890,8 @@ def run_multi_tso_dso(
             voltage_bus_indices=zd.v_bus_indices,
             current_line_indices=zd.line_indices,
             current_line_max_i_ka=zd.line_max_i_ka if zd.line_indices else None,
+            v_min_pu=_zone_scalar(config.zone_v_min_pu, z, config.v_min_pu),
+            v_max_pu=_zone_scalar(config.zone_v_max_pu, z, config.v_max_pu),
             v_setpoints_pu=np.full(len(zd.v_bus_indices), zd.v_setpoint_pu),
             g_v=zd.g_v,
             gen_indices=zd.gen_indices,
@@ -888,10 +910,18 @@ def run_multi_tso_dso(
                 if (config.enable_tie_coordination and zd.tie_line_indices)
                 else None
             ),
-            g_res_sg=config.tso_g_res_sg,
-            g_res_der=config.tso_g_res_der,
+            g_res_sg=_zone_scalar(config.zone_tso_g_res_sg, z, config.tso_g_res_sg),
+            g_res_der=_zone_scalar(config.zone_tso_g_res_der, z, config.tso_g_res_der),
             qv_slope_pu=config.tso_qv_slope_pu,
+            g_loss=_zone_scalar(config.zone_tso_g_loss, z, config.tso_g_loss),
+            loss_use_phasor=config.tso_loss_use_phasor,
         )
+
+        if verbose >= 1:
+            print(f"  [zone {z}] g_v={tso_cfg.g_v:g}  "
+                  f"v_min/max_pu=[{tso_cfg.v_min_pu:.3f},{tso_cfg.v_max_pu:.3f}]  "
+                  f"g_res_sg={tso_cfg.g_res_sg:g}  g_res_der={tso_cfg.g_res_der:g}  "
+                  f"g_loss={tso_cfg.g_loss:g}  g_z_voltage={_g_z_voltage_z:g}")
 
         # ActuatorBounds for DERs in this zone
         if zd.tso_der_indices:
@@ -2901,6 +2931,13 @@ def run_multi_tso_dso(
                             )
                         except (KeyError, ValueError):
                             continue
+                        if config.tie_normalize_gradients:
+                            # Rescale onto the global g_v's footing -- see
+                            # MultiTSOConfig.tie_normalize_gradients docstring.
+                            # No-op (factor 1.0) whenever a zone's own weight
+                            # scale already equals config.g_v.
+                            g_i *= config.g_v / _zone_weight_scale(tso_controllers[lk.zone_i])
+                            g_j *= config.g_v / _zone_weight_scale(tso_controllers[lk.zone_j])
                         gradients[lk.tie_id] = (g_i, g_j)
                 if _coord_now:
                     tie_coordinator.update(gradients)
@@ -3773,6 +3810,14 @@ def run_multi_tso_dso(
                     [int(net.trafo.at[idx, "tap_pos"]) for idx in zd.oltc_trafo_indices],
                     dtype=np.int64,
                 )
+
+            # Zone's own EHV line loss [MW], ground truth over exactly the
+            # lines its TSO loss objective (g_loss, current_line_indices)
+            # targets -- see MultiTSOIterationRecord.zone_losses_mw docstring.
+            rec.zone_losses_mw[z] = (
+                float(net.res_line.loc[zd.line_indices, "pl_mw"].sum())
+                if zd.line_indices else 0.0
+            )
 
         # ── Total network losses (single scalar per record) ──────────────────
         rec.total_losses_mw = (

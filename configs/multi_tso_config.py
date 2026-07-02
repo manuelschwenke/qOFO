@@ -99,8 +99,52 @@ class MultiTSOConfig:
     The tie coordinator's per-tie anchor is the midpoint of the two zones'
     schedules, so divergent schedules give a non-trivial natural ΔV_ref."""
 
+    # -- Voltage bounds (EHV hard limits) --------------------------------------
+    v_min_pu: float = 0.90
+    """Global hard lower bound on EHV bus voltage [p.u.], applied uniformly to
+    every zone's ``TSOControllerConfig.v_min_pu`` unless overridden per zone by
+    :attr:`zone_v_min_pu`.  Matches ``TSOControllerConfig.v_min_pu``'s own
+    dataclass default exactly: the runner previously never passed ``v_min_pu``
+    at all, silently relying on that same default, so leaving this field
+    untouched reproduces legacy behaviour byte-for-byte."""
+
+    v_max_pu: float = 1.10
+    """Global hard upper bound on EHV bus voltage [p.u.].  See :attr:`v_min_pu`;
+    matches ``TSOControllerConfig.v_max_pu``'s dataclass default (1.10)."""
+
+    zone_v_min_pu: Optional[Dict[int, float]] = None
+    """Optional per-zone override of the EHV hard lower voltage bound
+    ``{zone_id: v_min_pu}`` (zones not listed fall back to :attr:`v_min_pu`).
+    Routed to that zone's ``TSOControllerConfig.v_min_pu`` at zone
+    construction time.  Typical use: tighten a zone's corridor (e.g.
+    ``1.00``) when its voltage-tracking weight (:attr:`zone_g_v`) is turned
+    off and the hard corridor becomes that zone's sole voltage discipline."""
+
+    zone_v_max_pu: Optional[Dict[int, float]] = None
+    """Optional per-zone override of the EHV hard upper voltage bound
+    ``{zone_id: v_max_pu}``.  See :attr:`zone_v_min_pu`; routed to
+    ``TSOControllerConfig.v_max_pu``."""
+
     # -- Objective weights -----------------------------------------------------
     g_v:            float = 50000.0
+    zone_g_v: Optional[Dict[int, float]] = None
+    """Optional per-zone voltage-tracking-weight override ``{zone_id: g_v}``
+    (zones not listed fall back to the global :attr:`g_v`).  Routed to that
+    zone's ``ZoneDefinition.g_v`` / ``TSOControllerConfig.g_v`` at zone
+    construction time.  Set a zone's entry to ``0.0`` to remove that zone's
+    voltage-schedule term from the objective entirely (``g_v=0`` combined
+    with any ``v_setpoints_pu`` value gives an identical zero gradient
+    contribution), while the zone keeps its hard ``[v_min_pu, v_max_pu]``
+    corridor (:attr:`zone_v_min_pu` / :attr:`zone_v_max_pu`) and still
+    reports a ``v_setpoints_pu`` value used ONLY as the horizontal
+    tie-coordinator's per-side ``V_anchor`` (see :attr:`zone_v_setpoints_pu`).
+    Used to build zones that instead prioritise loss minimisation
+    (:attr:`zone_tso_g_loss`) or reserve centering (:attr:`zone_tso_g_res_sg`
+    / :attr:`zone_tso_g_res_der`) without a competing voltage-tracking
+    gradient.  NOTE: this does NOT affect the horizontal tie coordinator's
+    own step-size scaling (``TieCoordinatorConfig.grad_alpha`` / ``grad_eps``),
+    which the runner derives from the GLOBAL ``g_v`` only (see
+    :attr:`tie_grad_step` / :attr:`tie_grad_eps`)."""
     g_q:            float = 1.0
     dso_g_v:        float = 50000.0
 
@@ -301,6 +345,19 @@ class MultiTSOConfig:
 
     # -- Slack variable penalty (g_z) ------------------------------------------
     g_z_voltage:   float = 1E-12
+    zone_g_z_voltage: Optional[Dict[int, float]] = None
+    """Optional per-zone override of :attr:`g_z_voltage`
+    ``{zone_id: g_z_voltage}`` (zones not listed fall back to the global
+    ``g_z_voltage``).  Routed to that zone's voltage-slack weight at zone
+    construction time.  The global default (``1E-12``) is a near-inert
+    placeholder that relies on ``g_v`` tracking to keep voltage inside
+    ``[v_min_pu, v_max_pu]`` in the ordinary case; a zone running
+    :attr:`zone_g_v` ``= 0`` (e.g. a "bounds-only" strategy, see
+    :attr:`zone_v_min_pu` / :attr:`zone_v_max_pu`) has nothing else pulling
+    it back inside its corridor, so that zone's ``[v_min_pu, v_max_pu]`` is
+    otherwise a purely nominal (non-binding) constraint.  Raise this zone's
+    entry (e.g. to the order of its competing objective weight, such as
+    :attr:`zone_tso_g_loss`) to make the corridor actually bind."""
     g_z_current:   float = 0.0
     g_z_interface: float = 0.0
     g_z_q_gen:     float = 1E2
@@ -1016,6 +1073,41 @@ class MultiTSOConfig:
     be > 0 to bite; with it 0 the band gets free slack and is inert).  Only
     used when ``enable_tie_coordination`` is True."""
 
+    tie_normalize_gradients: bool = False
+    """EXPERIMENTAL (2026-07-01, prototype — not yet validated broadly).  When
+    False (default) the coordinator combines each side's RAW boundary gradient
+    ``γ_i = ∇J_i·h_b/‖h_b‖²`` unchanged — byte-for-byte the original behaviour.
+
+    ``γ_i`` is NOT normalised by zone i's own objective weight scale, only by
+    the boundary sensitivity's own norm.  In every validated scenario so far
+    (007/008, uniform or divergent voltage references) every zone tracks
+    voltage with the SAME global ``g_v``, so this was never an issue.  It
+    becomes one the moment zones run genuinely different objective TYPES at
+    different weight scales (e.g. ``experiments/010_...``: a ``g_v=1e7``
+    tracking zone next to a ``g_loss=3e5`` zone next to a ``g_res=1e4``
+    zone) — measured directly on that scenario, one side's raw ``γ`` was
+    12,000-30,000× the other's, i.e. the quieter zone has essentially no
+    effective voice in the negotiation on that tie, regardless of ``tie_kappa``
+    (a fixed SPLIT of two very different magnitudes is dominated by the
+    larger one, not equalised by it).
+
+    When True, each side's raw ``γ`` is rescaled by ``g_v / zone_weight_scale``
+    before being combined, where ``zone_weight_scale`` is that zone's own
+    ``g_v + g_q_tso + g_q_tie + g_loss + g_res_sg + g_res_der`` (the sum of
+    ITS active objective weights).  This is a *quick* first-order correction,
+    not the fully principled fix (which would project each zone's own
+    closed-loop curvature onto the boundary direction, generalising
+    :mod:`controller.gw_precondition` — see the 2026-07-01 discussion, not yet
+    implemented).  It is exact (a no-op, rescale factor ≡ 1.0) whenever a
+    zone's own weight scale equals the global ``g_v`` — i.e. every existing
+    007/008 scenario is completely unaffected by turning this on, since there
+    every zone's weight IS ``g_v``.  Only scenarios with a genuinely
+    heterogeneous per-zone objective mix (:attr:`zone_g_v` overridden to 0,
+    :attr:`zone_tso_g_loss` / :attr:`zone_tso_g_res_sg` / :attr:`zone_tso_g_res_der`
+    active) see any effect.  ``tie_grad_step`` / ``tie_grad_eps`` do not need
+    retuning — they still scale off the global ``g_v``, which after this
+    rescaling is the common footing every zone's gradient is expressed in."""
+
     tso_g_res_sg: float = 0.0
     """Explicit reactive-RESERVE weight for TS synchronous generators.
     Routed to ``TSOControllerConfig.g_res_sg`` at zone construction time.
@@ -1027,6 +1119,14 @@ class MultiTSOConfig:
     Default ``0.0`` = term off (reserve minimised only implicitly via the
     DSO cascade).  Toggle pattern mirrors ``tso_g_q_tie``."""
 
+    zone_tso_g_res_sg: Optional[Dict[int, float]] = None
+    """Optional per-zone override of :attr:`tso_g_res_sg`
+    ``{zone_id: g_res_sg}`` (zones not listed fall back to the global
+    ``tso_g_res_sg``).  Routed to that zone's ``TSOControllerConfig.g_res_sg``
+    at zone construction time.  Lets one zone run "pure reserve
+    optimisation" (large weight) while others keep the term off (``0.0``,
+    the global default).  Toggle pattern mirrors :attr:`zone_v_setpoints_pu`."""
+
     tso_g_res_der: float = 0.0
     """Explicit reactive-RESERVE weight for TS-connected DER (continuous,
     Q-controlled sgens).  Routed to ``TSOControllerConfig.g_res_der``.
@@ -1036,6 +1136,41 @@ class MultiTSOConfig:
     can prefer one resource class over the other.  Default ``0.0`` (off).
     DSO-connected DER reserve is NOT covered here (it belongs to the DSO
     layer)."""
+
+    zone_tso_g_res_der: Optional[Dict[int, float]] = None
+    """Optional per-zone override of :attr:`tso_g_res_der`
+    ``{zone_id: g_res_der}``.  See :attr:`zone_tso_g_res_sg`; routed to
+    ``TSOControllerConfig.g_res_der``."""
+
+    tso_g_loss: float = 0.0
+    """Active transmission-loss weight for the TSO objective.  Routed to
+    ``TSOControllerConfig.g_loss`` at zone construction.  Adds
+    ``tso_g_loss · Σ_ℓ c_ℓ·|I_ℓ|²`` per zone (form B — current-magnitude
+    form), summed over each zone's monitored current lines
+    ``current_line_indices`` with default coefficient ``c_ℓ = 3·R_ℓ`` (MW).
+    The term reuses the cached ∂I/∂u current rows (no new sensitivity).
+    Default ``0.0`` = loss term off (legacy).  Toggle pattern mirrors
+    ``tso_g_res_sg``.  Requires each loss-counting zone to monitor at least
+    one current line; tune relative to ``tso_g_v`` / ``g_w`` so loss does not
+    overwhelm voltage tracking (loss is a tertiary objective — see
+    :attr:`TSOControllerConfig.g_loss`)."""
+
+    zone_tso_g_loss: Optional[Dict[int, float]] = None
+    """Optional per-zone override of :attr:`tso_g_loss`
+    ``{zone_id: g_loss}`` (zones not listed fall back to the global
+    ``tso_g_loss``).  Routed to that zone's ``TSOControllerConfig.g_loss``.
+    Lets one zone (e.g. a DSO-rich zone with a large EHV current-carrying
+    corridor) prioritise transmission-loss minimisation while others keep
+    the term off.  The "biting" scale is scenario-dependent (see this
+    file's ``tso_g_q_tie`` tuning note for the general pattern) — validate
+    on a smoke run before trusting a full-horizon study."""
+
+    tso_loss_use_phasor: bool = False
+    """PMU hook routed to ``TSOControllerConfig.loss_use_phasor``.  ``False``
+    (default) uses the magnitude/current loss form.  ``True`` selects the
+    not-yet-implemented phasor form (raises at gradient time).  Reserved so
+    voltage phasors can later feed an exact branch-loss objective without
+    re-wiring."""
 
     # ---- Adaptive g_w helpers ------------------------------------------------
     def tso_adapt_g_w_classes(self) -> tuple:

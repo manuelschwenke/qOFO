@@ -487,16 +487,21 @@ def test_pcc_column_negation(case, objectives):
     assert grads.d_pcc_set(bus) == -grads.d_q_injection(bus)
 
 
-def test_slack_machine_not_an_actuator(case, objectives):
-    """The slack machine's V is not a zone input (Phase 1 convention)."""
+def test_slack_machine_vgen_supported(case, objectives):
+    """REVISED (Phase 4 smoke finding): the runner's ZoneDefinition
+    carries the slack machine's AVR setpoint as an ordinary actuator, so
+    d_vgen must support the reference bus (the slack magnitude is an
+    exogenous power-flow input with a well-defined ∂g/∂V_ref). The value
+    is FD-pinned by the identity hard-gate test; here: finite and
+    non-trivial."""
     net, topo, _, computers = case
     obj = objectives["loss_only"]
     slack = [g for g in net.gen.index if bool(net.gen.at[g, "slack"])]
     assert slack
     zone = topo.bus_owner(int(net.gen.at[slack[0], "bus"]))
     grads = obj.gradients(computers[zone])
-    with pytest.raises(ValueError, match="slack machine"):
-        grads.d_vgen(int(slack[0]))
+    val = grads.d_vgen(int(slack[0]))
+    assert np.isfinite(val) and val != 0.0
 
 
 def test_topology_mismatch_raises(case, objectives):

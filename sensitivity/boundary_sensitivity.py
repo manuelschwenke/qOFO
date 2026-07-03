@@ -323,7 +323,8 @@ class RestrictedSensitivityProvider:
             put(col, -sens.J_inv @ dg)
             col += 1
         for t in spec.oltc_trafo_indices:
-            dg, delta_tau, _ = sens._compute_dg_dtau_2w(int(t))
+            from sensitivity.marginal_computer import dg_dtau_2w_tolerant
+            dg, delta_tau = dg_dtau_2w_tolerant(sens, int(t))
             put(col, -(sens.J_inv @ dg) * delta_tau)
             col += 1
         for bus, q_step in zip(

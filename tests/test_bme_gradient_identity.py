@@ -103,7 +103,13 @@ def _build_specs(net, topo, computers, *, full: bool):
     (incl. the PCC stand-in and the port-hv trafo 0 edge case); the
     reduced variant keeps the 10-point sweep cheap."""
     gens = _zone_gens(net, topo)
-    oltc_full = {1: (9, 0), 2: (1,), 3: (6,)}
+    slack_gen = int(net.gen.index[net.gen.slack][0])
+    # Zone 1 additionally carries the SLACK machine columns (its AVR
+    # setpoint and its machine trafo 12 are ordinary actuators in the
+    # runner's ZoneDefinition — discovered in the Phase 4 smoke run):
+    # the slack magnitude is an exogenous PF input with a well-defined
+    # ∂g/∂V_ref, and the slack-trafo tap uses the tolerant ∂g/∂τ path.
+    oltc_full = {1: (9, 0, 12), 2: (1,), 3: (6,)}
     oltc_reduced = {1: (9,), 2: (1,), 3: (6,)}
     specs = {}
     for z in topo.zone_ids:
@@ -117,7 +123,9 @@ def _build_specs(net, topo, computers, *, full: bool):
                 # exercises the load-convention column on the base net;
                 # real 3W couplers land with the runner nets.
                 pcc_trafo_indices=(3,) if z == 2 else (),
-                gen_indices=(gens[z][0],),
+                gen_indices=(
+                    (gens[z][0], slack_gen) if z == 1 else (gens[z][0],)
+                ),
                 oltc_trafo_indices=oltc_full[z],
                 shunt_bus_indices=(ts_pq[2],),
                 shunt_q_steps_mvar=(20.0,),

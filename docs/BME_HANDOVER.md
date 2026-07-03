@@ -16,8 +16,22 @@ For the next Claude Code session continuing the BME build. Read in this order:
 | 1 — BoundaryTopology / RestrictedSensitivityProvider / MarginalComputer | ✅ 26 tests green | `d2d7f1c` |
 | 2 — CommonObjective (+ Convention-A g_own primitives) | ✅ 24 tests green | `1a0881e` |
 | 3 — CoordinationBus + signals | ✅ 15 tests green | `dc8cf9b` |
-| 4a — Q7 scope + BMEGradientAssembler + HARD GATE identity ✅ (D7 REVISED → complex boundary) | ✅ 15 tests green (BME suite 86) | see git log 2026-07-02 |
-| 4b — config / TSOController / runner wiring + trajectory regressions | ❌ next | — |
+| 4a — Q7 scope + BMEGradientAssembler + HARD GATE identity ✅ (D7 REVISED → complex boundary) | ✅ 15 tests green (BME suite 86) | `f481479` |
+| 4b — config / TSOController / runner wiring | ✅ | `81d3e23`, `d71d030` |
+| 4c — validation runs: mode="none"/vref BITWISE == pre-BME baseline; bme smoke runs end-to-end; slack-actuator correction | ✅ | see git log 2026-07-03 |
+| 5 — Discrete hygiene (notices, slotting, ε-acceptance, ledger) | ❌ next | — |
+
+**READ FIRST for Phase 5:** `BME_STATUS.md` Phase 4 sections (esp. the
+slack-actuator correction and the smoke-config requirements) + spec §3.8
+/ §5 Phase 5. Reuse targets from Phase 0: the DSO shunt feedforward
+pattern (runner l. ~3302–3376: atomic commit + `q_itf_sh_offset` +
+`ShuntDisturbanceMessage` + SMW masking) is the template for §3.8.1
+switch-notice consumption; `SwitchNotice` + bus delay/drop already exist
+(Phase 3); MIQP-integer vs shunt-integrator scoping per Q5 (ε-acceptance
+= MIQP integers only; integrator banks emit notices + ledger entries).
+Open calibration items for Phase 6: `gw_precondition` rescaling of the
+bme rung (risk #1 — the smoke confirmed Φ-scale moves are near-zero
+against the g_v=1e7-tuned G_w), D6 (ε_switch, c_switch), w_band + edges.
 
 **READ FIRST for 4b:** `BME_STATUS.md` Phase 4 section — Q7 outcome
 (TS-level scope, `vn_kv_min`), the D7 REVISION (boundary coordinates are

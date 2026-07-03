@@ -73,6 +73,71 @@ from sensitivity.index_helper import (
 )
 
 
+def dg_dtau_2w_tolerant(
+    sens: JacobianSensitivities, trafo_idx: int
+) -> Tuple[NDArray[np.float64], float]:
+    """Mismatch derivative ∂g/∂τ for a 2W transformer tap, tolerating a
+    terminal at the reference bus (mirrors the accumulate-only-existing-
+    rows behaviour of ``compute_dV_ds_2w``; the existing
+    ``_compute_dg_dtau_2w`` helper raises there, which the slack machine
+    trafo — an ordinary OLTC actuator in the runner's ZoneDefinition —
+    must not).
+
+    Returns ``(dg_dtau, delta_tau)``; the state response per tap step is
+    ``Δx = -J⁻¹ · dg_dtau · Δτ``.
+    """
+    net = sens.net
+    if trafo_idx not in net.trafo.index:
+        raise ValueError(f"Transformer {trafo_idx} not found in network.")
+    from sensitivity.index_helper import get_ppc_trafo_index
+    ppc_br = get_ppc_trafo_index(net, trafo_idx)
+    if ppc_br is None:
+        raise ValueError(
+            f"Could not find pypower branch index for transformer "
+            f"{trafo_idx}."
+        )
+    hv_bus = net.trafo.at[trafo_idx, "hv_bus"]
+    lv_bus = net.trafo.at[trafo_idx, "lv_bus"]
+    V_i = net.res_bus.at[hv_bus, "vm_pu"]
+    V_j = net.res_bus.at[lv_bus, "vm_pu"]
+    theta = (
+        np.deg2rad(net.res_bus.at[hv_bus, "va_degree"])
+        - np.deg2rad(net.res_bus.at[lv_bus, "va_degree"])
+    )
+    s0 = net.trafo.at[trafo_idx, "tap_pos"]
+    delta_tau = net.trafo.at[trafo_idx, "tap_step_percent"] / 100.0
+    tau = 1.0 + s0 * delta_tau
+    y_pu = 1.0 / complex(
+        net._ppc["branch"][ppc_br, 2], net._ppc["branch"][ppc_br, 3]
+    )
+    g, b = y_pu.real, y_pu.imag
+
+    theta_i_idx, v_i_idx = get_jacobian_indices(net, hv_bus)
+    theta_j_idx, v_j_idx = get_jacobian_indices(net, lv_bus)
+    if theta_i_idx is None and theta_j_idx is None:
+        raise ValueError(
+            f"trafo {trafo_idx}: neither terminal carries a Jacobian "
+            "state — no tap response can be formed."
+        )
+
+    dg = np.zeros(sens.x_size, dtype=np.float64)
+    dPi = (V_i * V_j * (g * np.cos(theta) + b * np.sin(theta)) / tau**2
+           - 2 * g * V_i**2 / tau**3)
+    dPj = V_j * V_i * (g * np.cos(theta) - b * np.sin(theta)) / tau**2
+    dQi = (V_i * V_j * (g * np.sin(theta) - b * np.cos(theta)) / tau**2
+           + 2 * b * V_i**2 / tau**3)
+    dQj = V_j * V_i * (-g * np.sin(theta) - b * np.cos(theta)) / tau**2
+    if theta_i_idx is not None:
+        dg[theta_i_idx] += dPi
+    if theta_j_idx is not None:
+        dg[theta_j_idx] += dPj
+    if v_i_idx is not None:
+        dg[sens.n_theta + v_i_idx] += dQi
+    if v_j_idx is not None and (sens.n_theta + v_j_idx) < sens.x_size:
+        dg[sens.n_theta + v_j_idx] += dQj
+    return dg, float(delta_tau)
+
+
 class MarginalComputer:
     """Internal-response operators and μ assembly for one TSO zone.
 
@@ -463,21 +528,23 @@ class MarginalComputer:
         return self.frozen_input_response(dg)
 
     def response_to_vgen(self, gen_terminal_bus: int) -> NDArray[np.float64]:
-        """Port-frozen state response to a PV-bus voltage magnitude
-        setpoint at a zone-owned generator terminal bus, per pu."""
+        """Port-frozen state response to a pinned-bus voltage magnitude
+        setpoint at a zone-owned generator terminal bus, per pu.
+
+        Covers PV buses AND the reference bus: the runner's
+        ``ZoneDefinition`` includes the slack machine's AVR setpoint as
+        an ordinary actuator, and the slack magnitude is an exogenous
+        power-flow input whose mismatch derivative ∂g/∂V_ref is
+        well-defined (the Phase 1 "no Jacobian column at the reference
+        bus" note concerned the missing STATE column, not this input
+        channel)."""
         self._require_owned_bus(gen_terminal_bus, "V_gen setpoint")
         net = self._sens.net
-        theta_idx, v_idx = get_jacobian_indices(net, int(gen_terminal_bus))
+        _, v_idx = get_jacobian_indices(net, int(gen_terminal_bus))
         if v_idx is not None:
             raise ValueError(
                 f"V_gen at bus {gen_terminal_bus}: the bus has a voltage "
-                "state (PQ) — not a pinned PV generator bus."
-            )
-        if theta_idx is None:
-            raise ValueError(
-                f"V_gen at bus {gen_terminal_bus}: the bus is the "
-                "reference — the slack machine is not a zone actuator "
-                "(BME Phase 1 convention)."
+                "state (PQ) — not a pinned generator bus."
             )
         ppc_bus = pp_bus_to_ppc_bus(net, int(gen_terminal_bus))
         dg = self._sens._compute_dg_dVgen(ppc_bus)
@@ -500,8 +567,8 @@ class MarginalComputer:
             self._require_owned_bus(
                 int(net.trafo.at[trafo_idx, c]), f"OLTC trafo {trafo_idx}"
             )
-        # The existing helper also returns dQ_direct (τ-dependence of Q
-        # observed at a PV endpoint) — not needed here: Φ's explicit
-        # τ-dependence is the branch-loss term handled by the caller.
-        dg, delta_tau, _ = self._sens._compute_dg_dtau_2w(int(trafo_idx))
+        # Tolerant assembly: the slack machine trafo (lv terminal at the
+        # reference bus) is an ordinary OLTC actuator in the runner's
+        # ZoneDefinition; the existing _compute_dg_dtau_2w raises there.
+        dg, delta_tau = dg_dtau_2w_tolerant(self._sens, int(trafo_idx))
         return self.frozen_input_response(dg) * delta_tau

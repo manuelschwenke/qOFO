@@ -14,7 +14,7 @@ here with dates.
 | 1 | Boundary topology and sensitivities | ✅ 2026-07-02 (26 tests green; see Phase 1 section) |
 | 2 | Common objective | ✅ 2026-07-02 (24 tests green; see Phase 2 section) |
 | 3 | Coordination bus and signals | ✅ 2026-07-02 (15 tests green; see Phase 3 section) |
-| 4 | Controller integration | 🚧 2026-07-02 — CORE DONE: hard-gate identity test PASSED (15 tests; Q7 resolved, D7 REVISED to complex boundary — see Phase 4 section); config/controller/runner wiring pending |
+| 4 | Controller integration | ✅ 2026-07-03 — hard gate PASSED (incl. slack columns); runner wired; mode="none" and vref BITWISE identical to the pre-BME baseline; bme end-to-end smoke runs (see Phase 4 section) |
 | 5 | Discrete hygiene | ❌ not started |
 | 6 | Evaluation ladder + Monte Carlo | ❌ not started |
 | 7 | Analysis artefacts | ❌ not started |
@@ -680,13 +680,44 @@ portless zone in a multi-zone topology still raises.
    - Suites re-run green (56: output-gradient invariant, tie
      coordinator + hooks, identity hard gate, bus).
 
-### Remaining for Phase 4 (before ✅)
+### End-to-end validation runs ✅ (2026-07-03 — Phase 4 closed)
 
-4. **End-to-end validation runs** (no pytest coverage exists for the
-   runner itself): (a) a short mode="bme" smoke on the 005-style CIGRE
-   scenario — expect the G_w/α scale mismatch (risk #1) to need
-   `gw_precondition` calibration in the experiment config before the
-   loop behaves; (b) mode="none" trajectory comparison against the
-   pre-BME baseline commit (code-inspection says byte-identical — the
-   only touched shared paths are inert branch checks — but the spec
-   demands the trajectory check); (c) vref regression run.
+Scenario: 005 CIGRE cascade config shortened to 30 sim-minutes (90 plant
+steps, 10 TSO ticks), headless.
+
+- **mode="none" == pre-BME baseline, BITWISE.** Same run from a
+  worktree of commit `0d7c47b` (last pre-BME-code commit) vs current
+  HEAD: 90-step loss trajectories identical to the last bit
+  (max |Δ| = 0.0). The solver stack is deterministic, so the spec's
+  strong reading holds.
+- **vref regression, BITWISE.** `enable_tie_coordination=True` +
+  `coordination_mode="vref"` (the alias) reproduces the pre-BME tie
+  coordination run exactly (max |Δ| = 0.0).
+- **mode="bme" end-to-end smoke: runs.** Full per-step chain executes
+  on the real cascade net (3W PCC couplers, DN feeders — first live
+  exercise of the Q7 scope and the 3W machinery): 90 steps, 36.1 s vs
+  32.5 s baseline (~10 % per-tick machinery overhead), cold start
+  logged, no failures. Behavioural calibration is EXPECTED to be open:
+  the MW-scale Φ gradient against G_w weights tuned for the g_v = 1e7
+  private objective makes near-zero moves — the `gw_precondition`
+  rescaling (risk #1) is the Phase 6 rung-configuration task, not a
+  wiring defect.
+- Smoke config requirements found: the 005 config runs
+  `local_sensitivities_* = True` — the bme rung must set both False
+  plus `refresh_shared_jac_on_tso=True` (v1 validation raises
+  otherwise, as designed).
+
+**Phase 1 finding CORRECTED (via the smoke run): the slack machine IS a
+zone actuator.** The runner's `ZoneDefinition` carries the slack
+machine's AVR setpoint (gen at the reference bus) and its machine trafo
+(12) as ordinary actuators — the Phase 1 "slack not an actuator"
+exclusion was wrong for the runner convention. BME support added:
+`response_to_vgen` accepts the reference bus (the slack magnitude is an
+exogenous PF input with well-defined ∂g/∂V_ref — the missing STATE
+column never mattered for this input channel), and a tolerant ∂g/∂τ
+assembly (`dg_dtau_2w_tolerant`, mirrors `compute_dV_ds_2w`'s
+accumulate-existing-rows behaviour) replaces the raising helper for tap
+responses and the stacked H_b rows. The identity hard-gate test now
+covers BOTH new column types (zone 1 full spec: slack V_gen + trafo 12)
+— FD-confirmed. The Phase 2 `test_slack_machine_not_an_actuator` was
+revised accordingly (`test_slack_machine_vgen_supported`).

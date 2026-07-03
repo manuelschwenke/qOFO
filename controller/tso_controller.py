@@ -670,6 +670,80 @@ class TSOController(BaseOFOController):
             self.pcc_capability_min_mvar[i] = message.q_min_mvar[msg_idx]
             self.pcc_capability_max_mvar[i] = message.q_max_mvar[msg_idx]
 
+    # ── BME (Boundary Marginal Exchange) — coordination_mode="bme" ──────
+    # Class-level defaults: a controller not enrolled in BME carries no
+    # per-instance state and behaves byte-for-byte as before.
+    bme_mode: bool = False
+    _bme_grad_bus = None  # injected g_i^bme, bus-level DER columns
+
+    def enable_bme_mode(self) -> None:
+        """Enrol this controller in BME (spec §3.5 Convention A, D2/Q1/Q3):
+        the private objective gradient is REPLACED by the externally
+        assembled common-objective gradient g_i^bme = g_own + H_{b,i}ᵀ·Σμ
+        (injected per step via :meth:`receive_bme_gradient`). Voltage
+        output constraints, CAIR bounds, integer handling and the DSO
+        cascade are untouched. Fail-fast: a private tie-tracking term
+        would double-steer the priced boundary (Q3)."""
+        if float(getattr(self.config, "g_q_tie", 0.0)) != 0.0:
+            raise ValueError(
+                "coordination_mode='bme' requires g_q_tie == 0 (Q3): the "
+                "price term already steers the tie boundary; a private "
+                "tie-flow tracking term would double-steer it."
+            )
+        self.bme_mode = True
+
+    def receive_bme_gradient(
+        self, grad_bus_level: NDArray[np.float64]
+    ) -> None:
+        """Inject this step's assembled BME gradient (bus-level DER
+        columns, ZoneInputSpec order — identical to this controller's
+        u-column order). Consumed exactly once by the next
+        ``_compute_objective_gradient`` call; one-shot semantics prevent
+        a stale price from leaking into a later step."""
+        if not self.bme_mode:
+            raise RuntimeError(
+                f"{self.controller_id}: receive_bme_gradient called but "
+                "the controller is not in BME mode."
+            )
+        grad = np.asarray(grad_bus_level, dtype=np.float64)
+        if grad.ndim != 1 or not np.all(np.isfinite(grad)):
+            raise ValueError(
+                f"{self.controller_id}: BME gradient must be a finite "
+                f"1-D vector, got shape {grad.shape}."
+            )
+        self._bme_grad_bus = grad
+
+    def _bme_objective_gradient(self) -> NDArray[np.float64]:
+        """Per-DER expansion of the injected bus-level BME gradient:
+        f(u_der) = Φ(E·u_der) ⇒ ∇_der = [Eᵀ·∇_bus(DER block); rest]."""
+        if self._bme_grad_bus is None:
+            raise RuntimeError(
+                f"{self.controller_id}: BME mode is active but no "
+                "gradient was injected this step — the runner must call "
+                "receive_bme_gradient before the solve (spec §5 Phase 4 "
+                "per-step sequence)."
+            )
+        g_bus = self._bme_grad_bus
+        self._bme_grad_bus = None  # one-shot
+        mapping = self._get_der_mapping()
+        if mapping is None:
+            if g_bus.shape != (self.n_controls,):
+                raise ValueError(
+                    f"{self.controller_id}: BME gradient length "
+                    f"{g_bus.shape[0]} != n_controls {self.n_controls}."
+                )
+            return g_bus
+        n_bus_der = mapping.n_unique_bus
+        g_der = np.concatenate([
+            g_bus[:n_bus_der] @ mapping.E, g_bus[n_bus_der:],
+        ])
+        if g_der.shape != (self.n_controls,):
+            raise ValueError(
+                f"{self.controller_id}: expanded BME gradient length "
+                f"{g_der.shape[0]} != n_controls {self.n_controls}."
+            )
+        return g_der
+
     def receive_tie_coordination(
         self,
         message: TieCoordinationMessage,
@@ -1769,7 +1843,17 @@ class TSOController(BaseOFOController):
 
         This is consistent with the DSO controller implementation and
         the interface of build_miqp_problem.
+
+        Under ``coordination_mode="bme"`` the private objective is
+        REPLACED by the common objective Φ (D2/Q1): the gradient is the
+        externally assembled g_i^bme injected via
+        :meth:`receive_bme_gradient` (Convention A — frozen-boundary own
+        gradient plus the H_{b,i}ᵀ·Σμ price term), expanded to per-DER
+        columns here. None of the private terms below contribute.
         """
+        if self.bme_mode:
+            return self._bme_objective_gradient()
+
         n_total = self.n_controls
         grad_f = np.zeros(n_total)
 

@@ -1000,6 +1000,53 @@ class MultiTSOConfig:
     optional).  Mirrors ``g_z_q_pcc``.  Default 0.0 = no slack-based
     bound enforcement on Q_tie."""
 
+    # ── Horizontal TSO-TSO coordination: BME (Boundary Marginal Exchange) ────
+    # Spec §4 ``coordination:`` block mapped onto flat fields (no parallel
+    # config system).  See docs/BME_SPEC.md and docs/BME_STATUS.md.
+    coordination_mode: str = "none"
+    """Horizontal TSO–TSO coordination mode: ``"none"`` (baseline,
+    byte-for-byte unchanged), ``"vref"`` (the existing two-loop ΔV_ref
+    tie coordinator — requires ``enable_tie_coordination=True``) or
+    ``"bme"`` (Boundary Marginal Exchange: common objective Φ, boundary
+    marginals μ over the CoordinationBus, Convention-A price term,
+    complex boundary coordinates per the D7 revision).
+    ``"bme"`` with ``enable_tie_coordination=True`` is contradictory and
+    fail-fasts in the runner; so does ``"bme"`` with a non-zero
+    ``g_q_tie`` (Q3) or ``tso_g_q_tie``-style tie tracking."""
+
+    bme_delay_steps: int = 1
+    """BME communication delay d in TSO control steps (DECISION D4;
+    d = 0 is the synchronous ideal used by the identity test)."""
+
+    bme_drop_probability: float = 0.0
+    """BME message-loss simulation probability ∈ [0, 1]; > 0 requires
+    ``bme_seed`` (deterministic drop patterns, spec §8)."""
+
+    bme_beta_filter: float = 0.3
+    """Receiver-side low-pass constant β ∈ (0, 1] for neighbour
+    marginals (DECISION D3); the self-marginal is never filtered."""
+
+    bme_seed: Optional[int] = None
+    """Seed for the CoordinationBus RNG (required when
+    ``bme_drop_probability > 0``)."""
+
+    bme_w_band: float = 0.0
+    """Common-objective band weight w_band (DECISION D2: magnitude is a
+    Phase 6 calibration item; 0.0 = losses-only ablation rung)."""
+
+    bme_v_soft_min_pu: float = 0.97
+    """Lower soft band edge of φ_band in pu (D2 starting point −3 %)."""
+
+    bme_v_soft_max_pu: float = 1.03
+    """Upper soft band edge of φ_band in pu (D2 starting point +3 %)."""
+
+    bme_vn_kv_min: float = 220.0
+    """Voltage-level scope of Φ (Q7, resolved 2026-07-02): only buses
+    with vn_kv ≥ this threshold carry a band penalty and only branches
+    with ALL terminals in scope contribute losses — the transmission
+    level (345 kV on IEEE 39); machine trafos and subordinate DNs are
+    excluded."""
+
     # ── Horizontal TSO-TSO coordination (two-loop ΔV_ref) ────────────────────
     enable_tie_coordination: bool = False
     """Master gate for the horizontal TSO-TSO tie coordinator

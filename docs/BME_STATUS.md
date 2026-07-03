@@ -631,18 +631,40 @@ portless zone in a multi-zone topology still raises.
   verified against FD (DER/V_gen/tap).
 - Assembler validation (zone mismatch, wrong μ length).
 
-### Remaining for Phase 4 (wiring — next session)
+### Wiring progress (2026-07-03)
 
-1. `MultiTSOConfig` fields (`coordination_mode` none|vref|bme,
-   `bme_delay_steps`, `bme_drop_probability`, `bme_beta_filter`,
-   `bme_seed`, `bme_w_band`, band edges, `bme_vn_kv_min`); mode="vref"
-   gates the existing tie coordinator; mutual exclusivity fail-fast.
-2. `TSOController` mode="bme" objective switch (D2/Q1/Q3: Φ replaces
-   g_v tracking, g_q_tie forced 0, reserve terms off; output
-   constraints unchanged) + per-DER expansion of the assembled bus-level
-   gradient (existing E matrix).
-3. Runner per-step sequence: measure → rebuild ZoneGradients at the
-   refreshed operating point → μ publish → receiver.update → g_bme →
-   MIQP; G_w/α rescaling via `gw_precondition` (risk #1).
+1. ✅ **Config** — `MultiTSOConfig` gains the spec §4 block as flat
+   fields: `coordination_mode` ("none"|"vref"|"bme", default "none"),
+   `bme_delay_steps=1`, `bme_drop_probability=0.0`, `bme_beta_filter=0.3`,
+   `bme_seed=None`, `bme_w_band=0.0`, `bme_v_soft_min_pu/max_pu`
+   (±3 %), `bme_vn_kv_min=220.0` (Q7). Documented mutual exclusions
+   ("bme" × `enable_tie_coordination`; "bme" × non-zero g_q_tie)
+   fail-fast in controller/runner, not silently reconciled.
+2. ✅ **TSOController hook** (injection pattern, minimal diff, byte-
+   identical when unused): `enable_bme_mode()` (raises on non-zero
+   `g_q_tie`, Q3), `receive_bme_gradient(g_bus_level)` (one-shot,
+   validated), `_bme_objective_gradient()` (per-DER expansion
+   ∇_der = [Eᵀ·∇_bus(DER); rest] via the existing DER mapping — WITHOUT
+   touching the H expansion cache), and a single branch at the top of
+   `_compute_objective_gradient`: under `bme_mode` the private objective
+   gradient is fully REPLACED by the injected g_i^bme (D2/Q1); output
+   constraints, CAIR, integer handling untouched. Missing injection
+   under bme mode raises (per-step sequence enforcement). Controller
+   regressions re-run green (32).
+
+### Remaining for Phase 4 (runner wiring — next session)
+
+3. Runner (`multi_tso_dso.py`): when `coordination_mode == "bme"` build
+   topology/CommonObjective/provider/bus/receivers once (validate: not
+   `enable_tie_coordination`; `local_sensitivities_tso` allowed —
+   orthogonal); per TSO tick: rebuild MarginalComputer + ZoneGradients +
+   assembler at the current shared-Jacobian operating point (or reuse
+   while the Jacobian is frozen — mirror `refresh_shared_jac_on_tso`),
+   ZoneInputSpec from each zone's `ZoneDefinition`, μ publish →
+   receiver.update → g_bme → `receive_bme_gradient` before the zone's
+   `step()`. Cold start (first d steps): inject g_own + h_bᵀμ_i only
+   (self term always available), logged. G_w/α rescaling via
+   `gw_precondition` for the bme experiment configs (risk #1).
+   `mode="vref"` = alias requiring `enable_tie_coordination=True`.
 4. Regressions: mode="none" trajectory identical to pre-BME baseline;
-   vref regression; cold-start behaviour in-loop.
+   vref regression; in-loop cold-start/delay smoke test.

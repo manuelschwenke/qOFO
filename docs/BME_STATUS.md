@@ -652,19 +652,41 @@ portless zone in a multi-zone topology still raises.
    under bme mode raises (per-step sequence enforcement). Controller
    regressions re-run green (32).
 
-### Remaining for Phase 4 (runner wiring — next session)
+3. ✅ **Runner wiring** (2026-07-03, `multi_tso_dso.py`):
+   - Setup (after the tie-coordinator block): mode validation —
+     "vref" requires `enable_tie_coordination=True` (alias for the
+     existing gated path, unchanged); "bme" fail-fasts on
+     `enable_tie_coordination`, on `numerical_h` (needs the analytic
+     shared Jacobian) and — **v1 scoping decisions, revisit later** — on
+     `local_sensitivities_*=True` (the runner freezes reduced Jacobians;
+     the Ward-loop variant stays future wiring) and on
+     `refresh_shared_jac_on_tso=False` (μ_j is defined at the measured
+     state of step k, §3.4 — v1 realises this by re-linearising
+     shared_jac each TSO tick; measurement-evaluated gradients on a
+     frozen model are noted future work). Builds BoundaryTopology (from
+     `tn_zone_map`), CommonObjective (config weights/edges/Q7 scope),
+     per-zone ZoneInputSpec from `ZoneDefinition` (bus-level DER columns
+     from the controller's DERMapping first-seen unique order; raises on
+     duplicate DER buses without a mapping), `enable_bme_mode()` per
+     zone, CoordinationBus (stacked 2|B| coordinates) + MarginalReceiver
+     per zone.
+   - Per TSO tick (inside the `run_tso` branch, after measurements,
+     before the zones solve): rebuild provider + MarginalComputer +
+     ZoneGradients + assembler at the freshly re-linearised shared_jac;
+     compute μ_i (stacked), publish (v_b_meas = stacked [vm | θ_rad]
+     snapshot), `receiver.update(tso_step_count−1)`; μ_total = μ_i +
+     neighbour sum (cold start: self term only, logged by the
+     receiver); `receive_bme_gradient(g_bme)` into each zone controller.
+   - Suites re-run green (56: output-gradient invariant, tie
+     coordinator + hooks, identity hard gate, bus).
 
-3. Runner (`multi_tso_dso.py`): when `coordination_mode == "bme"` build
-   topology/CommonObjective/provider/bus/receivers once (validate: not
-   `enable_tie_coordination`; `local_sensitivities_tso` allowed —
-   orthogonal); per TSO tick: rebuild MarginalComputer + ZoneGradients +
-   assembler at the current shared-Jacobian operating point (or reuse
-   while the Jacobian is frozen — mirror `refresh_shared_jac_on_tso`),
-   ZoneInputSpec from each zone's `ZoneDefinition`, μ publish →
-   receiver.update → g_bme → `receive_bme_gradient` before the zone's
-   `step()`. Cold start (first d steps): inject g_own + h_bᵀμ_i only
-   (self term always available), logged. G_w/α rescaling via
-   `gw_precondition` for the bme experiment configs (risk #1).
-   `mode="vref"` = alias requiring `enable_tie_coordination=True`.
-4. Regressions: mode="none" trajectory identical to pre-BME baseline;
-   vref regression; in-loop cold-start/delay smoke test.
+### Remaining for Phase 4 (before ✅)
+
+4. **End-to-end validation runs** (no pytest coverage exists for the
+   runner itself): (a) a short mode="bme" smoke on the 005-style CIGRE
+   scenario — expect the G_w/α scale mismatch (risk #1) to need
+   `gw_precondition` calibration in the experiment config before the
+   loop behaves; (b) mode="none" trajectory comparison against the
+   pre-BME baseline commit (code-inspection says byte-identical — the
+   only touched shared paths are inert branch checks — but the spec
+   demands the trajectory check); (c) vref regression run.

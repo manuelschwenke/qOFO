@@ -1060,6 +1060,134 @@ def run_multi_tso_dso(
         print(f"  [reserve] folding {len(tie_extra_gens)} equivalent/slack "
               f"gen(s) into zone headroom: {[(g, z) for g, z, _, _ in tie_extra_gens]}")
 
+    # ── BME (Boundary Marginal Exchange) — coordination_mode="bme" ──────────
+    # Spec §5 Phase 4: one horizontal round per TSO tick BEFORE the zones
+    # solve (measure → μ_i publish → receiver → g_i^bme inject).  See
+    # docs/BME_SPEC.md / docs/BME_STATUS.md.  Everything below is inert
+    # under coordination_mode="none" (byte-for-byte baseline).
+    if config.coordination_mode not in ("none", "vref", "bme"):
+        raise ValueError(
+            f"unknown coordination_mode '{config.coordination_mode}' "
+            "(expected 'none', 'vref' or 'bme')."
+        )
+    if config.coordination_mode == "vref" and not config.enable_tie_coordination:
+        raise ValueError(
+            "coordination_mode='vref' is the existing two-loop ΔV_ref tie "
+            "coordinator — set enable_tie_coordination=True (the vref path "
+            "is gated by that flag, unchanged)."
+        )
+    bme_topo = bme_obj = bme_bus = None
+    bme_specs = {}
+    bme_receivers = {}
+    if config.coordination_mode == "bme":
+        if config.enable_tie_coordination:
+            raise ValueError(
+                "coordination_mode='bme' and enable_tie_coordination=True "
+                "are mutually exclusive — the price term and the ΔV_ref "
+                "setpoint redirect would steer the same boundary."
+            )
+        if config.numerical_h:
+            raise ValueError(
+                "coordination_mode='bme' requires the analytic shared "
+                "Jacobian (numerical_h=True bypasses it)."
+            )
+        if config.local_sensitivities_tso or config.local_sensitivities_dso:
+            raise ValueError(
+                "coordination_mode='bme' v1 requires the full-network "
+                "shared Jacobian path (local_sensitivities_*=False): the "
+                "BME machinery reads H_{b,i}/J_int values from shared_jac "
+                "and the runner freezes reduced Jacobians. The Ward-loop "
+                "variant is future wiring (BME_STATUS.md Phase 4)."
+            )
+        if not config.refresh_shared_jac_on_tso:
+            raise ValueError(
+                "coordination_mode='bme' v1 requires "
+                "refresh_shared_jac_on_tso=True: μ_j is defined at the "
+                "measured state of step k (spec §3.4), which v1 realises "
+                "by re-linearising shared_jac each TSO tick. "
+                "Measurement-evaluated gradients on a frozen model are "
+                "noted future work."
+            )
+        from controller.bme_gradient import BMEGradientAssembler
+        from controller.common_objective import CommonObjective
+        from core.coordination_bus import (
+            CoordinationBus, MarginalReceiver, MarginalSignal,
+        )
+        from network.boundary_topology import BoundaryTopology
+        from sensitivity.boundary_sensitivity import (
+            RestrictedSensitivityProvider, ZoneInputSpec,
+        )
+        from sensitivity.marginal_computer import MarginalComputer
+
+        bme_topo = BoundaryTopology(
+            net, {z: list(b) for z, b in tn_zone_map.items()},
+        )
+        bme_obj = CommonObjective(
+            bme_topo,
+            w_band=config.bme_w_band,
+            v_soft_min=config.bme_v_soft_min_pu,
+            v_soft_max=config.bme_v_soft_max_pu,
+            vn_kv_min=config.bme_vn_kv_min,
+        )
+        for z, zd in zone_defs.items():
+            tso = tso_controllers[z]
+            mapping = tso._get_der_mapping()
+            if mapping is not None:
+                der_buses = tuple(int(b) for b in mapping.unique_bus_indices)
+            else:
+                der_buses = tuple(dict.fromkeys(
+                    int(b) for b in zd.tso_der_buses
+                ))
+                if len(der_buses) != len(zd.tso_der_buses):
+                    raise ValueError(
+                        f"zone {z}: duplicate DER buses without a DER "
+                        "mapping — bus-level BME gradient columns cannot "
+                        "match the controller's u."
+                    )
+            bme_specs[z] = ZoneInputSpec(
+                zone_id=z,
+                der_bus_indices=der_buses,
+                pcc_trafo_indices=tuple(int(t) for t in zd.pcc_trafo_indices),
+                gen_indices=tuple(int(g) for g in zd.gen_indices),
+                oltc_trafo_indices=tuple(
+                    int(t) for t in zd.oltc_trafo_indices
+                ),
+                shunt_bus_indices=tuple(
+                    int(b) for b in zd.shunt_bus_indices
+                ),
+                shunt_q_steps_mvar=tuple(
+                    float(q) for q in zd.shunt_q_steps_mvar
+                ),
+            )
+            tso.enable_bme_mode()
+        bme_bus = CoordinationBus(
+            sorted(zone_defs),
+            2 * len(bme_topo.registry),
+            delay_steps=config.bme_delay_steps,
+            drop_probability=config.bme_drop_probability,
+            seed=config.bme_seed,
+        )
+        bme_receivers = {
+            z: MarginalReceiver(
+                z, bme_bus, beta=config.bme_beta_filter, start_step=0,
+            )
+            for z in sorted(zone_defs)
+        }
+        # Names used inside the per-tick round below.
+        _BME = (
+            BMEGradientAssembler, MarginalComputer,
+            RestrictedSensitivityProvider, MarginalSignal,
+        )
+        if verbose >= 1:
+            print(
+                f"  [BME] mode=bme: |B|={len(bme_topo.registry)} "
+                f"(stacked coords {2 * len(bme_topo.registry)}), "
+                f"d={config.bme_delay_steps}, β={config.bme_beta_filter}, "
+                f"drop={config.bme_drop_probability}, "
+                f"w_band={config.bme_w_band}, "
+                f"vn_kv_min={config.bme_vn_kv_min}"
+            )
+
     def _compute_zone_reserve_signal(
         measurements_now: Dict[int, Measurement],
     ) -> Tuple[Dict[int, float], Dict[int, float], Dict[int, float], Dict[int, float]]:
@@ -2869,6 +2997,49 @@ def run_multi_tso_dso(
                 z: measure_zone_tso(net, zd, step)
                 for z, zd in zone_defs.items()
             }
+
+            # ── BME horizontal round (BEFORE the zones solve, §5 Phase 4):
+            # rebuild the area-local gradient machinery at the freshly
+            # re-linearised shared_jac operating point, compute and publish
+            # each zone's μ_i (stacked complex-boundary coordinates), pull
+            # the delayed/filtered neighbour sum, assemble
+            # g_i^bme = g_own + H_{b,i}ᵀ·(μ_i + Σ μ_j^filt) and inject it
+            # into the zone controller.  Cold start (first d ticks): price
+            # carries the self term only (logged by the receiver).
+            if config.coordination_mode == "bme":
+                (_Assembler, _MComputer, _RProvider, _MSignal) = _BME
+                _bme_step = tso_step_count - 1  # consecutive TSO ticks
+                _provider = _RProvider(shared_jac, bme_topo, bme_specs)
+                _assemblers = {}
+                _bme_mus = {}
+                for z in sorted(tso_controllers):
+                    _comp = _MComputer(shared_jac, bme_topo, z)
+                    _zg = bme_obj.gradients(_comp)
+                    _assemblers[z] = _Assembler(
+                        bme_specs[z], _zg, _provider.view(z),
+                    )
+                    _bme_mus[z] = _assemblers[z].mu()
+                _vb_snap = np.concatenate([
+                    [float(shared_jac.net.res_bus.at[b, "vm_pu"])
+                     for b in bme_topo.registry],
+                    [np.deg2rad(float(
+                        shared_jac.net.res_bus.at[b, "va_degree"]))
+                     for b in bme_topo.registry],
+                ])
+                for z in sorted(tso_controllers):
+                    bme_bus.publish_marginal(_MSignal(
+                        zone_id=z, step=_bme_step,
+                        mu=_bme_mus[z], v_b_meas=_vb_snap,
+                    ))
+                for z in sorted(tso_controllers):
+                    _out = bme_receivers[z].update(_bme_step)
+                    if _out.coordinated:
+                        _mu_total = _bme_mus[z] + _out.mu_neighbour_sum
+                    else:
+                        _mu_total = _bme_mus[z]
+                    tso_controllers[z].receive_bme_gradient(
+                        _assemblers[z].g_bme(_mu_total)
+                    )
 
             # Reserve-economic signal: absolute directional headroom first,
             # scarcity scalar second. Recorded also for true OFF baselines.

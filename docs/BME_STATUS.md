@@ -932,7 +932,64 @@ Readings:
 - bme_loss remains voltage-inadmissible post-ε (1.156 pu) — ε governs
   switching, not the voltage escape; only w_band does. Consistent.
 
-Remaining Phase 6 items: (3) D2 w_band/edges sweep (+ `zone_g_z_voltage`
-decision for the ablation rung), (4) oracle rung, (5) metrics completion
-(gap-to-oracle, Phulpin fairness, oscillation indicator), (6) MC campaign
-(seeds, parquet; ε-sweep per above; ledger = §3.10.2 premise data).
+### 6c — D2 (w_band × edges) sweep ✅ (2026-07-03)
+
+Nine-point sweep at the **120-min horizon** (Manuel's directive: short
+calibration horizons — covers the gen-2 trip @60′ and the load step
+@90′; last-hour metric = the post-contingency hour; reference `none`
+derived from the 360-min records' first 120 min: 60.65 MW, V ∈ [0.978,
+1.049]). Edge families: spec default (0.97, 1.03) — hinge ACTIVE at the
+~1.03 operating schedule, contrary to the "zero in normal operation"
+design intent; wide corridor (0.95, 1.05); and Manuel's
+operating-point-centred proposals (1.01, 1.05) / (1.00, 1.06).
+
+| edges, w_band | losses [MW] | Δ | V range [pu] | switches | runtime |
+|---|---|---|---|---|---|
+| (0.97, 1.03), 1e2 | 57.57 | −5.1 % | [0.994, 1.065] | 7 | 139 s |
+| (0.97, 1.03), 1e3 | 58.27 | −3.9 % | [0.992, 1.056] | 7 | 136 s |
+| (0.97, 1.03), 1e4 | 59.30 | −2.2 % | [0.977, 1.048] | 11 | 1294 s |
+| (0.95, 1.05), 1e2 | 57.23 | −5.6 % | [0.994, 1.086] | 10 | 886 s |
+| (0.95, 1.05), 1e3 | 57.37 | −5.4 % | [0.994, 1.070] | 10 | 809 s |
+| (0.95, 1.05), 1e4 | 57.58 | −5.1 % | [0.994, 1.065] | 13 | 864 s |
+| **(1.01, 1.05), 1e3** | 57.09 | −5.9 % | [0.995, 1.072] | 11 | 451 s |
+| **(1.01, 1.05), 1e4** | **57.38** | **−5.4 %** | [**1.002**, 1.062] | 10 | **410 s** |
+| (1.00, 1.06), 1e3 | 57.19 | −5.7 % | [0.994, 1.078] | 10 | 359 s |
+
+**Outcome (Manuel, 2026-07-03): edges (1.01, 1.05), w_band = 1e4** —
+his operating-point-centred corridor dominates: 2.6× the loss gain of
+the 6b pairing at nearly the same V_max, the best post-trip voltage
+support of all nine points (lower hinge lifts the dip to 1.002 pu vs
+the baseline's 0.978 — the band genuinely acts as disturbance support),
+and the healthiest bme solve times. Honest caveat recorded: no centred
+pairing strictly contains V_max at the baseline's 1.049 — only the
+tight (0.97, 1.03)×1e4 does, at −2.2 % and 9× runtime.
+
+Findings for the chapter:
+- **Soft hinges do not cap** — they slow excursions (1.05-edge families
+  reach 1.062–1.086 depending on w_band); strict containment needs
+  either a stiff tight band (costly) or the MIQP hard constraints.
+- **Solve time is a diagnostic**: pairings whose hinge fights the loss
+  gradient at the operating point (tight edges at high w_band) or whose
+  band leaves voltages roaming (weak corridor) run 6–9× slower than the
+  centred corridor.
+- **Uniform-Φ-metric fix**: `make_ladder_config` now sets the D2 band
+  definition (w_band + edges) on EVERY rung so the recorded Φ is the
+  identical functional across none/vref/bme (previously the non-bme
+  rungs recorded losses-only Φ — their 6b Φ column understated bme's
+  advantage if anything). The bme_loss CONTROL ablation necessarily
+  zeroes w_band for its gradient, so its recorded Φ differs by
+  definition — compare it on the losses column.
+- Ablation-rung backstop question (from 6b) resolved by rationale: the
+  bme_loss rung keeps NO voltage backstop — the escape IS the ablation's
+  finding; a `zone_g_z_voltage` would change what the rung demonstrates.
+
+Also in 6c: **per-zone Φ_i recording** (`bme_phi_zone_mw` in the
+records, filled via `CommonObjective.phi_zone`) — the premise data for
+the Phulpin normalised-overcost fairness metric (item 5); partition
+invariant verified live on the runner net (Σ_i Φ_i = Φ_global to 1e-6).
+
+Remaining Phase 6 items: (4) oracle rung; (5) metrics completion
+(gap-to-oracle, Phulpin fairness from `bme_phi_zone_mw`, oscillation
+indicator); (6) MC campaign (seeds, parquet; ε-sweep per 6b; ledger =
+§3.10.2 premise data). The final ladder table is regenerated at the
+D2-final pairing when rung (d) lands.

@@ -83,9 +83,17 @@ BME_GRADIENT_SCALE = 1.0e5
 BME_EPSILON_SWITCH = 5.2e3
 BME_SWITCH_COST_OLTC = 1.0e3
 BME_SWITCH_COST_SHUNT = 5.2e3
-# D2 starting band weight (±3 % edges are the config defaults); the
-# w_band sweep is a later Phase 6 item — bme_loss is the w_band=0 rung.
-BME_W_BAND = 1.0e3
+# D2 pairing (Phase 6c sweep, 2026-07-03, chosen by Manuel): band edges
+# centred on the ~1.03 pu operating schedule, (1.01, 1.05), w_band = 1e4.
+# Nine-point sweep at the 120-min horizon: this pairing gave −5.4 %
+# last-hour losses (vs −3.9 % for the spec-default (0.97, 1.03)×1e3),
+# V ∈ [1.002, 1.062] with the best post-trip voltage support (lower
+# hinge lifts the dip to 1.002 vs baseline 0.978) and the healthiest
+# solve times. Full table: docs/BME_STATUS.md §6c. bme_loss stays the
+# w_band = 0 ablation rung.
+BME_W_BAND = 1.0e4
+BME_V_SOFT_MIN = 1.01
+BME_V_SOFT_MAX = 1.05
 
 RUNGS = ("none", "vref", "bme", "bme_loss")
 
@@ -98,6 +106,14 @@ def make_ladder_config(rung: str, minutes: float):
     cfg.n_total_s = 60.0 * minutes
     cfg.verbose = 0
     cfg.record_bme_phi = True          # uniform Φ metric on every rung
+    # The Φ METRIC must be the identical functional on every rung
+    # (same D2 band definition); for non-bme rungs these fields affect
+    # recording only. The bme_loss CONTROL ablation is realised below by
+    # zeroing w_band for the bme gradient — its recorded Φ metric then
+    # differs by definition (documented; compare it on losses).
+    cfg.bme_w_band = BME_W_BAND
+    cfg.bme_v_soft_min_pu = BME_V_SOFT_MIN
+    cfg.bme_v_soft_max_pu = BME_V_SOFT_MAX
     cfg.enable_tie_coordination = False
     cfg.coordination_mode = "none"
 

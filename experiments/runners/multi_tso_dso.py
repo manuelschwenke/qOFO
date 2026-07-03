@@ -4139,6 +4139,12 @@ def run_multi_tso_dso(
         # ── BME common objective Φ (uniform Phase 6 ladder metric) ───────────
         if bme_obj is not None:
             rec.bme_phi_mw = float(bme_obj.phi_global(net))
+            # Per-zone Φ_i (D1 partition) — the Phulpin fairness premise
+            # data (spec §5 Phase 6): Σ_i Φ_i == Φ_global by invariant.
+            rec.bme_phi_zone_mw = {
+                z: float(bme_obj.phi_zone(net, z).total)
+                for z in bme_obj.topology.zone_ids
+            }
 
         # ── Slack saturation diagnostic (added 2026-05-02) ───────────────────
         # Records the slack's P/Q every step plus a flag for whether |Q| is

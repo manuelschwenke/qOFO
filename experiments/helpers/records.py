@@ -329,6 +329,12 @@ class MultiTSOIterationRecord:
     ``record_bme_phi=True`` (the uniform Φ metric for the Phase 6 ladder
     rungs none/vref/oracle); ``None`` otherwise."""
 
+    bme_phi_zone_mw: Dict[int, float] = field(default_factory=dict)
+    """Per-zone Φ_i (same scope/weights as ``bme_phi_mw``; D1 ownership,
+    50/50 tie shares — Σ_i Φ_i == Φ_global by the partition invariant).
+    Premise data for the Phulpin normalised-overcost fairness metric
+    (spec §5 Phase 6): filled alongside ``bme_phi_mw``, empty otherwise."""
+
     gen_q_headroom_mvar: Dict[int, NDArray] = field(default_factory=dict)
     """Per-zone array, parallel to ``zone_q_gen``: ``q_max(g) - |q_actual(g)|``
     for each synchronous machine in that zone (positive = remaining

@@ -116,6 +116,16 @@ class CommonObjective:
         Loss weight (D2: 1.0).
     v_soft_min, v_soft_max :
         Soft band edges in pu (D2 starting point: ±3 % around nominal).
+    vn_kv_min :
+        Voltage-level scope of Φ (Q7, resolved with Manuel 2026-07-02):
+        only buses with ``vn_kv ≥ vn_kv_min`` carry a band penalty, and
+        only branches whose EVERY terminal bus is in scope contribute
+        losses. The BME experiments set this to the transmission level
+        (345 kV in IEEE 39 → e.g. 220.0), excluding machine transformers
+        and subordinate distribution networks; the default 0.0 is the
+        spec-literal include-all reading (used by the generic invariant
+        tests). Ownership (D1) is unaffected — scope selects terms, not
+        owners.
     """
 
     def __init__(
@@ -126,6 +136,7 @@ class CommonObjective:
         w_loss: float = 1.0,
         v_soft_min: float = 0.97,
         v_soft_max: float = 1.03,
+        vn_kv_min: float = 0.0,
     ) -> None:
         if w_loss < 0.0 or w_band < 0.0:
             raise ValueError(
@@ -136,11 +147,23 @@ class CommonObjective:
                 f"v_soft_min ({v_soft_min}) must be < v_soft_max "
                 f"({v_soft_max})"
             )
+        if float(vn_kv_min) < 0.0:
+            raise ValueError(f"vn_kv_min must be ≥ 0, got {vn_kv_min}")
         self.topology = topology
         self.w_loss = float(w_loss)
         self.w_band = float(w_band)
         self.v_soft_min = float(v_soft_min)
         self.v_soft_max = float(v_soft_max)
+        self.vn_kv_min = float(vn_kv_min)
+
+    def bus_in_scope(self, net: pp.pandapowerNet, bus: int) -> bool:
+        """Q7 voltage-level scope: does this bus count for Φ?"""
+        return float(net.bus.at[int(bus), "vn_kv"]) >= self.vn_kv_min
+
+    def _branch_in_scope(
+        self, net: pp.pandapowerNet, terminal_buses
+    ) -> bool:
+        return all(self.bus_in_scope(net, b) for b in terminal_buses)
 
     # ------------------------------------------------------------------
     #  φ_band hinge (§3.3)
@@ -199,8 +222,12 @@ class CommonObjective:
         for li in net.line.index:
             if not bool(net.line.at[li, "in_service"]):
                 continue
-            zf = topo.bus_owner(int(net.line.at[li, "from_bus"]))
-            zt = topo.bus_owner(int(net.line.at[li, "to_bus"]))
+            fb = int(net.line.at[li, "from_bus"])
+            tb = int(net.line.at[li, "to_bus"])
+            if not self._branch_in_scope(net, (fb, tb)):
+                continue
+            zf = topo.bus_owner(fb)
+            zt = topo.bus_owner(tb)
             if zf == zt:
                 w = 1.0 if zf == zone else 0.0
             else:
@@ -231,6 +258,8 @@ class CommonObjective:
                 )
             if not bool(net.bus.at[b, "in_service"]):
                 continue
+            if not self.bus_in_scope(net, b):
+                continue
             vm = float(net.res_bus.at[b, "vm_pu"])
             if not np.isfinite(vm):
                 raise ValueError(
@@ -253,16 +282,18 @@ class CommonObjective:
         for t in net.trafo.index:
             if not bool(net.trafo.at[t, "in_service"]):
                 continue
-            owners = {
-                topo.bus_owner(int(net.trafo.at[t, c]))
-                for c in ("hv_bus", "lv_bus")
-            }
+            terminals = [
+                int(net.trafo.at[t, c]) for c in ("hv_bus", "lv_bus")
+            ]
+            owners = {topo.bus_owner(b) for b in terminals}
             if len(owners) > 1:
                 raise ValueError(
                     f"trafo {t} spans zones {sorted(owners)} — separator "
                     "assumption violated (spec §3.2)."
                 )
             if owners != {zone}:
+                continue
+            if not self._branch_in_scope(net, terminals):
                 continue
             pl = float(net.res_trafo.at[t, "pl_mw"])
             if not np.isfinite(pl):
@@ -275,16 +306,19 @@ class CommonObjective:
             for t in net.trafo3w.index:
                 if not bool(net.trafo3w.at[t, "in_service"]):
                     continue
-                owners = {
-                    topo.bus_owner(int(net.trafo3w.at[t, c]))
+                terminals = [
+                    int(net.trafo3w.at[t, c])
                     for c in ("hv_bus", "mv_bus", "lv_bus")
-                }
+                ]
+                owners = {topo.bus_owner(b) for b in terminals}
                 if len(owners) > 1:
                     raise ValueError(
                         f"trafo3w {t} spans zones {sorted(owners)} — "
                         "separator assumption violated (spec §3.2)."
                     )
                 if owners != {zone}:
+                    continue
+                if not self._branch_in_scope(net, terminals):
                     continue
                 pl = float(net.res_trafo3w.at[t, "pl_mw"])
                 if not np.isfinite(pl):
@@ -301,10 +335,10 @@ class CommonObjective:
         test, not an assumption."""
         self._require_results(net)
         loss = 0.0
-        for tab, res in (
-            ("line", "res_line"),
-            ("trafo", "res_trafo"),
-            ("trafo3w", "res_trafo3w"),
+        for tab, res, terminal_cols in (
+            ("line", "res_line", ("from_bus", "to_bus")),
+            ("trafo", "res_trafo", ("hv_bus", "lv_bus")),
+            ("trafo3w", "res_trafo3w", ("hv_bus", "mv_bus", "lv_bus")),
         ):
             if not hasattr(net, tab) or not len(getattr(net, tab)):
                 continue
@@ -312,6 +346,9 @@ class CommonObjective:
             res_table = getattr(net, res)
             for i in table.index:
                 if not bool(table.at[i, "in_service"]):
+                    continue
+                terminals = [int(table.at[i, c]) for c in terminal_cols]
+                if not self._branch_in_scope(net, terminals):
                     continue
                 pl = float(res_table.at[i, "pl_mw"])
                 if not np.isfinite(pl):
@@ -324,6 +361,8 @@ class CommonObjective:
         band = 0.0
         for b in net.bus.index:
             if not bool(net.bus.at[b, "in_service"]):
+                continue
+            if not self.bus_in_scope(net, b):
                 continue
             vm = float(net.res_bus.at[b, "vm_pu"])
             if not np.isfinite(vm):
@@ -389,6 +428,7 @@ class ZoneGradients:
         status = np.real(br[:, 10]).astype(float)
 
         w = self._branch_weights(int(br.shape[0])) * status
+        self._w_branch = w
 
         If = Yf @ V
         It = Yt @ V
@@ -416,14 +456,18 @@ class ZoneGradients:
         for li in net.line.index:
             if not bool(net.line.at[li, "in_service"]):
                 continue
+            fb = int(net.line.at[li, "from_bus"])
+            tb = int(net.line.at[li, "to_bus"])
+            if not self._obj._branch_in_scope(net, (fb, tb)):
+                continue
             ppc = get_ppc_line_index(net, li)
             if ppc is None:
                 raise ValueError(
                     f"line {li}: no ppc branch index — internal lookup "
                     "inconsistent with the cached power flow."
                 )
-            zf = topo.bus_owner(int(net.line.at[li, "from_bus"]))
-            zt = topo.bus_owner(int(net.line.at[li, "to_bus"]))
+            zf = topo.bus_owner(fb)
+            zt = topo.bus_owner(tb)
             if zf == zt:
                 w[ppc] = 1.0 if zf == zone else 0.0
             else:
@@ -437,16 +481,18 @@ class ZoneGradients:
         for t in net.trafo.index:
             if not bool(net.trafo.at[t, "in_service"]):
                 continue
-            owners = {
-                topo.bus_owner(int(net.trafo.at[t, c]))
-                for c in ("hv_bus", "lv_bus")
-            }
+            terminals = [
+                int(net.trafo.at[t, c]) for c in ("hv_bus", "lv_bus")
+            ]
+            owners = {topo.bus_owner(b) for b in terminals}
             if len(owners) > 1:
                 raise ValueError(
                     f"trafo {t} spans zones {sorted(owners)} — separator "
                     "assumption violated (spec §3.2)."
                 )
-            if owners == {zone}:
+            if owners == {zone} and self._obj._branch_in_scope(
+                net, terminals
+            ):
                 ppc = get_ppc_trafo_index(net, t)
                 if ppc is None:
                     raise ValueError(
@@ -459,16 +505,19 @@ class ZoneGradients:
             for t in net.trafo3w.index:
                 if not bool(net.trafo3w.at[t, "in_service"]):
                     continue
-                owners = {
-                    topo.bus_owner(int(net.trafo3w.at[t, c]))
+                terminals = [
+                    int(net.trafo3w.at[t, c])
                     for c in ("hv_bus", "mv_bus", "lv_bus")
-                }
+                ]
+                owners = {topo.bus_owner(b) for b in terminals}
                 if len(owners) > 1:
                     raise ValueError(
                         f"trafo3w {t} spans zones {sorted(owners)} — "
                         "separator assumption violated (spec §3.2)."
                     )
-                if owners == {zone}:
+                if owners == {zone} and self._obj._branch_in_scope(
+                    net, terminals
+                ):
                     hv_br, mv_br, lv_br, _ = (
                         get_ppc_trafo3w_branch_indices(net, int(t))
                     )
@@ -492,11 +541,10 @@ class ZoneGradients:
                 ]
             elif kind == "v":
                 ppc_b = pp_bus_to_ppc_bus(net, int(ident))
-                vm = float(net.res_bus.at[int(ident), "vm_pu"])
-                grad[i] = (
-                    obj.w_loss * self._gVm[ppc_b]
-                    + obj.phi_band_grad(vm)
-                )
+                grad[i] = obj.w_loss * self._gVm[ppc_b]
+                if obj.bus_in_scope(net, int(ident)):
+                    vm = float(net.res_bus.at[int(ident), "vm_pu"])
+                    grad[i] += obj.phi_band_grad(vm)
             elif kind == "theta_aux":
                 # 3W star states carry a ppc index directly; no band
                 # penalty on auxiliary (non-physical) buses.
@@ -507,23 +555,38 @@ class ZoneGradients:
                 raise ValueError(f"unknown state label kind '{kind}'")
         self._grad_x = grad
 
-        # Direct terms ∂Φ_i/∂v_b (§3.4): explicit dependence of owned
-        # branch losses on adjacent boundary magnitudes; band penalty
-        # only at the zone's OWN boundary buses (D1 — the far endpoint's
-        # band belongs to its owner).
+        # Direct terms ∂Φ_i/∂v_b and ∂Φ_i/∂θ_b (§3.4, D7 revised —
+        # complex boundary): explicit dependence of owned branch losses
+        # on adjacent boundary coordinates; band penalty only at the
+        # zone's OWN boundary buses (D1 — the far endpoint's band
+        # belongs to its owner) and only in the magnitude channel
+        # (φ_band has no angle dependence).
         own_ports = set(self._comp.ports)
         direct: Dict[int, float] = {}
+        direct_th: Dict[int, float] = {}
         for b in self._comp.adjacent:
-            val = obj.w_loss * self._gVm[pp_bus_to_ppc_bus(net, int(b))]
-            if b in own_ports:
+            ppc_b = pp_bus_to_ppc_bus(net, int(b))
+            val = obj.w_loss * self._gVm[ppc_b]
+            if b in own_ports and obj.bus_in_scope(net, int(b)):
                 vm = float(net.res_bus.at[int(b), "vm_pu"])
                 val += obj.phi_band_grad(vm)
             direct[int(b)] = float(val)
+            direct_th[int(b)] = float(obj.w_loss * self._gVa[ppc_b])
         self._mu_direct = direct
+        self._mu_direct_theta = direct_th
 
     # ------------------------------------------------------------------
     #  Public API
     # ------------------------------------------------------------------
+
+    @property
+    def zone_id(self) -> int:
+        return self._zone
+
+    @property
+    def net(self):
+        """The cached sensitivity net (operating point of this bundle)."""
+        return self._net
 
     @property
     def grad_x_int(self) -> NDArray[np.float64]:
@@ -537,9 +600,20 @@ class ZoneGradients:
         return dict(self._mu_direct)
 
     def mu(self) -> NDArray[np.float64]:
-        """μ_zone = dΦ_zone/dv_b ∈ R^{|B|} (§3.4), registry order,
-        exactly zero outside the zone's adjacent boundary set."""
+        """μ_zone magnitude channel dΦ_zone/dVm_b ∈ R^{|B|} (§3.4),
+        registry order, exactly zero outside the zone's adjacent
+        boundary set. Diagnostics / test-oracle view — the EXCHANGED
+        signal is :meth:`mu_stacked`."""
         return self._comp.mu_x(self._grad_x, self._mu_direct)
+
+    def mu_stacked(self) -> NDArray[np.float64]:
+        """Complex-boundary marginal ∈ R^{2|B|}, stacked
+        ``[dΦ/dVm_b | dΦ/dθ_b]`` in registry order (D7 revised) — the
+        signal published on the CoordinationBus and priced through
+        ``h_b_stacked``."""
+        return self._comp.mu_x_stacked(
+            self._grad_x, self._mu_direct, self._mu_direct_theta,
+        )
 
     def d_q_injection(self, bus: int) -> float:
         """∂Φ_zone/∂Q |_{v_b fixed} for a reactive injection at a
@@ -564,11 +638,12 @@ class ZoneGradients:
             raise ValueError(f"gen {gen_idx} not in net.gen")
         term_bus = int(net.gen.at[gen_idx, "bus"])
         resp = self._comp.response_to_vgen(term_bus)
-        vm = float(net.res_bus.at[term_bus, "vm_pu"])
         direct = (
             self._obj.w_loss * self._gVm[pp_bus_to_ppc_bus(net, term_bus)]
-            + self._obj.phi_band_grad(vm)
         )
+        if self._obj.bus_in_scope(net, term_bus):
+            vm = float(net.res_bus.at[term_bus, "vm_pu"])
+            direct += self._obj.phi_band_grad(vm)
         return float(self._grad_x @ resp) + float(direct)
 
     def d_tap_2w(self, trafo_idx: int) -> float:
@@ -577,9 +652,19 @@ class ZoneGradients:
         ∂P^loss_ℓ/∂τ term of the transformer's own branch."""
         resp = self._comp.response_to_tap_2w(int(trafo_idx))
         indirect = float(self._grad_x @ resp)
-        direct = (
-            self._obj.w_loss * self._dploss_dtau_step(int(trafo_idx))
-        )
+        # The explicit term carries the transformer's OWN ownership/scope
+        # weight (0 for an out-of-scope machine trafo under Q7 — the tap
+        # remains an actuator, only its own loss is outside Φ).
+        ppc_br = get_ppc_trafo_index(self._net, int(trafo_idx))
+        if ppc_br is None:
+            raise ValueError(f"trafo {trafo_idx}: no ppc branch index.")
+        weight = float(self._w_branch[ppc_br])
+        direct = 0.0
+        if weight != 0.0:
+            direct = (
+                weight * self._obj.w_loss
+                * self._dploss_dtau_step(int(trafo_idx))
+            )
         return indirect + direct
 
     def d_shunt(self, bus: int, q_step_mvar: float) -> float:

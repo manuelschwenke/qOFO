@@ -212,9 +212,10 @@ def test_access_restriction_raises(case):
     assert view.zone_id == 1
     H_b = view.h_b()
     assert H_b.shape[0] == 9
-    # The view exposes no other read surface.
+    # The view exposes no other read surface (h_b_stacked is the
+    # D7-revised complex-boundary read — same informational scope).
     public = [a for a in dir(view) if not a.startswith("_")]
-    assert set(public) == {"h_b", "zone_id"}
+    assert set(public) == {"h_b", "h_b_stacked", "zone_id"}
 
 
 def test_h_b_returns_copy(case):
@@ -224,3 +225,21 @@ def test_h_b_returns_copy(case):
     a[:] = 123.0
     b = provider.h_b(1)
     assert not np.any(b == 123.0)
+
+
+def test_h_b_stacked_consistent_with_h_b(case):
+    """D7 revision cross-check: the stacked assembly (generic full
+    state-response path) must reproduce the magnitude rows of the
+    legacy helper-based h_b to numerical identity, for every zone and
+    every column class."""
+    _, topo, provider, _, _, _ = case
+    n_b = len(topo.registry)
+    for z in topo.zone_ids:
+        stacked = provider.h_b_stacked(z)
+        legacy = provider.h_b(z)
+        assert stacked.shape == (2 * n_b, legacy.shape[1])
+        np.testing.assert_allclose(
+            stacked[:n_b, :], legacy, rtol=1e-9, atol=1e-12,
+        )
+        # The angle block must be non-trivial (losses depend on it).
+        assert np.max(np.abs(stacked[n_b:, :])) > 0.0

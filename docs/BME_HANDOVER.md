@@ -1,4 +1,4 @@
-# BME — Session handover (updated 2026-07-02, end of Phase 3)
+# BME — Session handover (updated 2026-07-02, Phase 4 core done)
 
 For the next Claude Code session continuing the BME build. Read in this order:
 
@@ -15,8 +15,19 @@ For the next Claude Code session continuing the BME build. Read in this order:
 | 0 — Reconnaissance + audits + decisions | ✅ | `426293e` |
 | 1 — BoundaryTopology / RestrictedSensitivityProvider / MarginalComputer | ✅ 26 tests green | `d2d7f1c` |
 | 2 — CommonObjective (+ Convention-A g_own primitives) | ✅ 24 tests green | `1a0881e` |
-| 3 — CoordinationBus + signals | ✅ 15 tests green | see git log 2026-07-02 |
-| 4 — Controller integration (the core) | ❌ next | — |
+| 3 — CoordinationBus + signals | ✅ 15 tests green | `dc8cf9b` |
+| 4a — Q7 scope + BMEGradientAssembler + HARD GATE identity ✅ (D7 REVISED → complex boundary) | ✅ 15 tests green (BME suite 86) | see git log 2026-07-02 |
+| 4b — config / TSOController / runner wiring + trajectory regressions | ❌ next | — |
+
+**READ FIRST for 4b:** `BME_STATUS.md` Phase 4 section — Q7 outcome
+(TS-level scope, `vn_kv_min`), the D7 REVISION (boundary coordinates are
+now STACKED ``[Vm_b | θ_b]`` ∈ R^{2|B|}: `mu_stacked()`,
+`h_b_stacked()`, bus `n_boundary = 2|B|` — forced by the money test,
+diagnostic recorded), and the "Remaining for Phase 4" wiring list.
+`controller/bme_gradient.py::BMEGradientAssembler` is the per-zone
+object the controller wires in; `tests/test_bme_gradient_identity.py`
+shows the complete per-step chain (machinery build → μ publish →
+receiver → g_bme) in `_distributed_gradients()`.
 
 All spec DECISIONS are resolved with Manuel (2026-07-02) — do NOT re-ask;
 read `BME_STATUS.md` §0.7. The ones that shape all remaining code:

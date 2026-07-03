@@ -52,7 +52,10 @@ from numpy.typing import NDArray
 
 from network.boundary_topology import BoundaryTopology
 from sensitivity.jacobian import JacobianSensitivities
-from sensitivity.index_helper import get_jacobian_indices
+from sensitivity.index_helper import (
+    get_jacobian_indices,
+    pp_bus_to_ppc_bus,
+)
 
 
 @dataclass(frozen=True)
@@ -114,8 +117,15 @@ class ZoneBoundaryView:
         return self._zone_id
 
     def h_b(self) -> NDArray[np.float64]:
-        """H_{b,zone} — rows(B) × cols(u_zone). The only permitted read."""
+        """H_{b,zone} — rows(B) × cols(u_zone) (magnitude channel)."""
         return self._provider.h_b(self._zone_id)
+
+    def h_b_stacked(self) -> NDArray[np.float64]:
+        """Complex-boundary H_{b,zone} — rows ``[∂Vm_b/∂u | ∂θ_b/∂u]``
+        (2|B| × cols(u_zone)), the D7-revised exchange coordinates. The
+        informational scope is unchanged: the zone's OWN actuator
+        columns at the jointly observable boundary buses (§3.9)."""
+        return self._provider.h_b_stacked(self._zone_id)
 
 
 class RestrictedSensitivityProvider:
@@ -150,6 +160,7 @@ class RestrictedSensitivityProvider:
         self._topo = topology
         self._specs = dict(zone_specs)
         self._cache: Dict[int, NDArray[np.float64]] = {}
+        self._cache_stacked: Dict[int, NDArray[np.float64]] = {}
 
         # Split the registry into buses with a V state (PQ) and pinned
         # buses (slack / PV): the latter get exactly-zero rows.
@@ -190,9 +201,23 @@ class RestrictedSensitivityProvider:
             self._cache[zone_id] = self._assemble(zone_id)
         return self._cache[zone_id].copy()
 
+    def h_b_stacked(self, zone_id: int) -> NDArray[np.float64]:
+        """Complex-boundary H_{b,i}: rows ``[∂Vm_b/∂u | ∂θ_b/∂u]`` in
+        registry order (2|B| × n_i) — D7 REVISED 2026-07-02 (the Phase 4
+        identity test showed the loss objective needs the boundary-angle
+        channel; complex boundary coordinates were Manuel's
+        pre-authorised fallback). Assembled from full state responses;
+        the magnitude rows are cross-checked against :meth:`h_b` by the
+        tests."""
+        self._require_zone(zone_id)
+        if zone_id not in self._cache_stacked:
+            self._cache_stacked[zone_id] = self._assemble_stacked(zone_id)
+        return self._cache_stacked[zone_id].copy()
+
     def invalidate_cache(self) -> None:
         """Drop cached H_{b,i} (call after a Jacobian refresh)."""
         self._cache.clear()
+        self._cache_stacked.clear()
 
     def _require_zone(self, zone_id: int) -> None:
         if zone_id not in self._specs:
@@ -235,6 +260,81 @@ class RestrictedSensitivityProvider:
 
     def _row_of(self, bus: int) -> int:
         return self._topo.registry_pos[bus]
+
+    # -- complex-boundary assembly (generic state-response path) --------
+
+    def _state_response_q_injection(self, bus: int, *, what: str
+                                    ) -> NDArray[np.float64]:
+        """Full state response Δx per Mvar injected at ``bus``
+        (generator convention)."""
+        sens = self._sens
+        _, v_idx = get_jacobian_indices(sens.net, int(bus))
+        if v_idx is None:
+            raise ValueError(
+                f"{what} bus {bus} has no voltage state in the Jacobian "
+                "(PV/slack bus?) — cannot build H_{b,i} columns."
+            )
+        return sens.J_inv[:, sens.n_theta + v_idx] / float(sens.net.sn_mva)
+
+    def _assemble_stacked(self, zone_id: int) -> NDArray[np.float64]:
+        spec = self._specs[zone_id]
+        sens = self._sens
+        net = sens.net
+        registry = self._topo.registry
+        n_b = len(registry)
+        if spec.n_columns == 0:
+            raise ValueError(
+                f"zone {zone_id}: ZoneInputSpec has no columns — a zone "
+                "without inputs cannot participate in BME."
+            )
+        H = np.zeros((2 * n_b, spec.n_columns), dtype=np.float64)
+
+        row_idx = {
+            b: get_jacobian_indices(net, int(b)) for b in registry
+        }
+
+        def put(col: int, dx: NDArray[np.float64]) -> None:
+            for i, b in enumerate(registry):
+                theta_idx, v_idx = row_idx[b]
+                if v_idx is not None:
+                    H[i, col] = dx[sens.n_theta + v_idx]
+                # pinned magnitude → exactly-zero row (mirrors h_b)
+                if theta_idx is not None:
+                    H[n_b + i, col] = dx[theta_idx]
+                # reference-bus angle row stays exactly zero
+
+        col = 0
+        for bus in spec.der_bus_indices:
+            put(col, self._state_response_q_injection(int(bus), what="DER"))
+            col += 1
+        for hv_bus in self._pcc_hv_buses(spec):
+            put(col, -self._state_response_q_injection(
+                int(hv_bus), what="Q_PCC_set (load convention)",
+            ))
+            col += 1
+        for g in spec.gen_indices:
+            if g not in net.gen.index:
+                raise ValueError(
+                    f"zone {zone_id}: gen index {g} not in net.gen"
+                )
+            term_bus = int(net.gen.at[g, "bus"])
+            ppc_bus = pp_bus_to_ppc_bus(net, term_bus)
+            dg = sens._compute_dg_dVgen(ppc_bus)
+            put(col, -sens.J_inv @ dg)
+            col += 1
+        for t in spec.oltc_trafo_indices:
+            dg, delta_tau, _ = sens._compute_dg_dtau_2w(int(t))
+            put(col, -(sens.J_inv @ dg) * delta_tau)
+            col += 1
+        for bus, q_step in zip(
+            spec.shunt_bus_indices, spec.shunt_q_steps_mvar
+        ):
+            v_pu = float(net.res_bus.at[int(bus), "vm_pu"])
+            put(col, -float(q_step) * v_pu * v_pu
+                * self._state_response_q_injection(int(bus), what="shunt"))
+            col += 1
+        assert col == spec.n_columns  # internal invariant
+        return H
 
     def _fill_q_injection_columns(
         self,

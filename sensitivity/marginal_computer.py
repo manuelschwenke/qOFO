@@ -103,10 +103,16 @@ class MarginalComputer:
         self.zone_id = int(zone_id)
 
         self.ports: List[int] = topology.own_boundary(zone_id)
-        if not self.ports:
+        if not self.ports and topology.registry:
+            # A portless zone in a MULTI-zone topology is an isolated
+            # area — an error. The single-area case (empty registry) is
+            # the legitimate degenerate mode: nothing is frozen, the
+            # "port-frozen" operators become TOTAL-response operators and
+            # μ is the empty vector (spec §3.5 single-area identity).
             raise ValueError(
-                f"zone {zone_id} has no boundary ports — it cannot "
-                "participate in boundary-marginal exchange."
+                f"zone {zone_id} has no boundary ports although the "
+                "topology has boundary buses — it cannot participate in "
+                "boundary-marginal exchange."
             )
         self.adjacent: List[int] = topology.adjacent_boundary(zone_id)
 
@@ -190,8 +196,15 @@ class MarginalComputer:
         cols = np.asarray(cols_int, dtype=np.int64)
         J_int = J[np.ix_(rows, cols)]
 
-        # Port columns: ∂g_int/∂V_port, one column per own boundary bus.
+        # Port columns: ∂g_int/∂V_port and ∂g_int/∂θ_port, one column per
+        # own boundary bus and coordinate (complex boundary — D7 REVISED
+        # 2026-07-02: the Phase 4 identity test demonstrated that the
+        # magnitude-only channel misses the boundary-angle term of the
+        # loss objective; Manuel's pre-authorised fallback applies).
         port_cols = np.zeros((len(rows), len(self.ports)), dtype=np.float64)
+        port_cols_th = np.zeros(
+            (len(rows), len(self.ports)), dtype=np.float64
+        )
         for k, p in enumerate(self.ports):
             theta_idx, v_idx = get_jacobian_indices(net, int(p))
             if v_idx is not None:
@@ -203,9 +216,19 @@ class MarginalComputer:
                 ppc_idx = pp_bus_to_ppc_bus(net, int(p))
                 dg = self._sens._compute_dg_dVgen(ppc_idx)
                 port_cols[:, k] = dg[rows]
+            if theta_idx is not None:
+                port_cols_th[:, k] = J[rows, theta_idx]
+            else:
+                raise ValueError(
+                    f"zone {self.zone_id}: boundary port {p} is the "
+                    "reference bus — its angle has no mismatch "
+                    "derivative column; extend the port machinery "
+                    "before using such a partition."
+                )
 
         try:
             self._R = -np.linalg.solve(J_int, port_cols)
+            self._R_th = -np.linalg.solve(J_int, port_cols_th)
         except np.linalg.LinAlgError as e:
             raise ValueError(
                 f"zone {self.zone_id}: interior Jacobian block is singular "
@@ -333,17 +356,43 @@ class MarginalComputer:
             μ_zone with exactly-zero entries outside :attr:`adjacent`
             (sparsity, §3.4).
         """
+        return self._chain_ports(self._R, grad_x_int, grad_direct)
+
+    def mu_x_stacked(
+        self,
+        grad_x_int: NDArray[np.float64],
+        grad_direct_v: Optional[Dict[int, float]] = None,
+        grad_direct_theta: Optional[Dict[int, float]] = None,
+    ) -> NDArray[np.float64]:
+        """Complex-boundary marginal μ_zone ∈ R^{2|B|} in the stacked
+        coordinate order ``[dΦ/dVm_b (registry) | dΦ/dθ_b (registry)]``
+        (D7 revision: the exchanged signal carries BOTH channels; the
+        magnitude-only :meth:`mu_x` remains for diagnostics and the
+        Phase 1/2 test oracles).
+        """
+        v_part = self._chain_ports(self._R, grad_x_int, grad_direct_v)
+        th_part = self._chain_ports(
+            self._R_th, grad_x_int, grad_direct_theta
+        )
+        return np.concatenate([v_part, th_part])
+
+    def _chain_ports(
+        self,
+        R_block: NDArray[np.float64],
+        grad_x_int: NDArray[np.float64],
+        grad_direct: Optional[Dict[int, float]],
+    ) -> NDArray[np.float64]:
         grad_x_int = np.asarray(grad_x_int, dtype=np.float64)
-        if grad_x_int.shape != (self._R.shape[0],):
+        if grad_x_int.shape != (R_block.shape[0],):
             raise ValueError(
                 f"grad_x_int has shape {grad_x_int.shape}; expected "
-                f"({self._R.shape[0]},) aligned with the state labels of "
+                f"({R_block.shape[0]},) aligned with the state labels of "
                 "response_full()."
             )
         out = np.zeros(len(self._topo.registry), dtype=np.float64)
         for k, p in enumerate(self.ports):
             out[self._topo.registry_pos[p]] = float(
-                self._R[:, k] @ grad_x_int
+                R_block[:, k] @ grad_x_int
             )
         if grad_direct:
             adjacent = set(self.adjacent)

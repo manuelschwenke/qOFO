@@ -14,7 +14,7 @@ here with dates.
 | 1 | Boundary topology and sensitivities | ✅ 2026-07-02 (26 tests green; see Phase 1 section) |
 | 2 | Common objective | ✅ 2026-07-02 (24 tests green; see Phase 2 section) |
 | 3 | Coordination bus and signals | ✅ 2026-07-02 (15 tests green; see Phase 3 section) |
-| 4 | Controller integration | ❌ not started |
+| 4 | Controller integration | 🚧 2026-07-02 — CORE DONE: hard-gate identity test PASSED (15 tests; Q7 resolved, D7 REVISED to complex boundary — see Phase 4 section); config/controller/runner wiring pending |
 | 5 | Discrete hygiene | ❌ not started |
 | 6 | Evaluation ladder + Monte Carlo | ❌ not started |
 | 7 | Analysis artefacts | ❌ not started |
@@ -548,3 +548,101 @@ Design notes recorded:
   and the plant only; Phase 4 wires `publish → receiver.update` into the
   per-step sequence and maps the spec §4 `coordination:` block onto
   `MultiTSOConfig` fields.
+
+---
+
+## Phase 4 — Controller integration 🚧 (2026-07-02: core done, wiring pending)
+
+### Q7 resolved (Manuel, 2026-07-02): Φ scope = transmission level
+
+Φ (band AND losses) covers only the transmission system level, not the
+subordinate distribution networks. Implemented as an explicit
+`CommonObjective(vn_kv_min=...)` scope: buses with vn_kv ≥ threshold
+carry the band; a branch contributes losses only if EVERY terminal bus
+is in scope. For IEEE 39 with vn_kv_min = 220: the 345 kV lines plus the
+two 345/345 kV interconnectors; machine trafos (345/10.5), generator
+terminal buses and (on runner nets) everything below the PCC couplers
+are excluded. Ownership (D1) unaffected — scope selects terms, not
+owners. Gradient side is weight-driven (the excluded machine trafo's tap
+remains an actuator whose only Φ effect is the indirect 345 kV response;
+its explicit ∂P_ℓ/∂τ term carries weight 0). Default 0.0 = spec-literal
+include-all (kept for the generic invariant tests); the BME experiment
+configs set the TS threshold. Tests: TS-scope partition invariant, μ FD,
+V_gen/tap FD, manual value semantics (`test_common_objective.py`, 29
+green).
+
+### D7 REVISED (2026-07-02, forced by the hard-gate test): complex boundary
+
+**Finding.** The first run of §3.5 test 2 FAILED (zone-1 DER at bus 24:
+g_bme −2.87e-3 vs FD −3.46e-3 MW/Mvar, 17 %). Diagnostic by elimination
+(scratch, recorded numbers): the single-area TOTAL analytic gradient
+matches FD to 0.001 % — every Phase 2 gradient piece is exact — while
+the magnitude-only identity misses by exactly the boundary-ANGLE
+channel (dθ_b/dQ ≈ 1e-5 rad/Mvar at nearby boundary buses × loss angle
+sensitivity O(10–100 MW/rad)). A loss objective is strongly
+angle-coupled; the D7 magnitudes-only design cannot satisfy the exact
+identity `dΦ/du_i = ∂Φ_i/∂u_i|_{v_b} + H_{b,i}ᵀ·Σ μ_j`.
+
+**Resolution — D7's pre-authorised fallback applies** ("complex voltages
+… admissible architectural fallback if the design ever requires it",
+Manuel, §0.7): boundary coordinates are now STACKED
+``[Vm_b (registry) | θ_b (registry)]`` ∈ R^{2|B|} everywhere in the
+exchange path:
+
+| Component | Extension |
+|---|---|
+| `MarginalComputer` | θ-port columns ∂g_int/∂θ_port beside the V columns (a port at the reference bus raises); `mu_x_stacked()` → μ ∈ R^{2|B|}. The V-only `mu()`/`mu_x()` remain (Phase 1/2 semantics + oracles unchanged) |
+| `RestrictedSensitivityProvider` | `h_b_stacked(zone)` (2|B| × n_i) assembled from full state responses per column class; magnitude rows cross-checked ≡ the legacy helper-based `h_b` to 1e-9 (test); angle rows non-trivial. `ZoneBoundaryView.h_b_stacked()` is the second permitted read — the §3.9 informational scope is UNCHANGED (still the zone's own columns at jointly observable boundary buses, now both coordinates) |
+| `ZoneGradients` | `mu_stacked()`; θ direct terms = w_loss·(loss angle-gradient) at adjacent buses (φ_band has no θ channel) |
+| `CoordinationBus` usage | `n_boundary = 2|B|`; `MarginalSignal.v_b_meas` carries the same stacking (no signal-class change) |
+
+Realism note for the chapter: the θ_b rows/entries presume boundary
+angle observability (PMU at boundary substations) — strictly MORE
+defensible than internal observability, but stronger than the pure
+V-measurement story; tie-in with the existing PMU stub of the loss
+objective work. Record as an explicit assumption.
+
+### New: `controller/bme_gradient.py`
+
+`BMEGradientAssembler` (per zone): `g_own()` over the ZoneInputSpec
+columns `[Q_DER | Q_PCC_set | V_gen | s_OLTC | s_shunt]` from the
+Phase 2 primitives (bus-level DER; per-DER expansion stays
+controller-side), `mu()` = stacked μ_i, `g_bme(mu_total)` = g_own +
+h_b_stackedᵀ·μ_total with μ_total = μ_i (local, undelayed, unfiltered)
++ receiver neighbour sum. `pcc_hv_buses()` helper mirrors the
+provider/controller PCC resolution. Single-area degenerate mode:
+`MarginalComputer` now allows a portless zone IFF the topology has no
+boundary (nothing frozen → total-response operators, μ empty); a
+portless zone in a multi-zone topology still raises.
+
+### Hard-gate identity tests ✅ — `tests/test_bme_gradient_identity.py` (15 green)
+
+- **§3.5 test 2 (the money test)**: stacked distributed gradients ==
+  FD of global Φ w.r.t. stacked u, with the neighbour μ routed through
+  the REAL CoordinationBus/MarginalReceiver (d = 0, β = 1) and the self
+  term added locally. Full column coverage (DER, PCC stand-in
+  345/345 kV trafo, V_gen, OLTCs incl. the port-hv trafo 0, 20 Mvar
+  shunt) at the base point + 2 randomised OPs; plus 10 further
+  randomised OPs (reduced columns). Continuous ≤5 %, whole-step
+  discrete ≤15 % (secant vs tangent), objective = Q7 TS scope with
+  active tight band.
+- **§3.5 test 1 (single-area identity)**: one-zone partition → no
+  boundary, μ = ∅, price = 0, the "port-frozen" own gradient IS dΦ/du —
+  verified against FD (DER/V_gen/tap).
+- Assembler validation (zone mismatch, wrong μ length).
+
+### Remaining for Phase 4 (wiring — next session)
+
+1. `MultiTSOConfig` fields (`coordination_mode` none|vref|bme,
+   `bme_delay_steps`, `bme_drop_probability`, `bme_beta_filter`,
+   `bme_seed`, `bme_w_band`, band edges, `bme_vn_kv_min`); mode="vref"
+   gates the existing tie coordinator; mutual exclusivity fail-fast.
+2. `TSOController` mode="bme" objective switch (D2/Q1/Q3: Φ replaces
+   g_v tracking, g_q_tie forced 0, reserve terms off; output
+   constraints unchanged) + per-DER expansion of the assembled bus-level
+   gradient (existing E matrix).
+3. Runner per-step sequence: measure → rebuild ZoneGradients at the
+   refreshed operating point → μ publish → receiver.update → g_bme →
+   MIQP; G_w/α rescaling via `gw_precondition` (risk #1).
+4. Regressions: mode="none" trajectory identical to pre-BME baseline;
+   vref regression; cold-start behaviour in-loop.

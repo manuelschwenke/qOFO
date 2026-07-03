@@ -50,13 +50,19 @@ def case():
 
 @pytest.fixture(scope="module")
 def objectives(case):
-    """Two rungs: losses-only (w_band = 0 ablation, D2) and a tight,
-    heavily weighted band that is active at the operating point."""
+    """Three rungs: losses-only (w_band = 0 ablation, D2), a tight
+    heavily weighted band that is active at the operating point, and the
+    TS-level scope of Q7 (vn_kv ≥ 220 → 345 kV network only; machine
+    trafos and generator terminal buses excluded)."""
     _, topo, _, _ = case
     return {
         "loss_only": CommonObjective(topo, w_band=0.0),
         "tight_band": CommonObjective(
             topo, w_band=100.0, v_soft_min=0.99, v_soft_max=1.01,
+        ),
+        "ts_only": CommonObjective(
+            topo, w_band=100.0, v_soft_min=0.99, v_soft_max=1.01,
+            vn_kv_min=220.0,
         ),
     }
 
@@ -138,7 +144,7 @@ def test_constructor_validation(case):
 #  Partition invariant (§3.3, the Phase 2 correctness invariant)
 # ======================================================================
 
-@pytest.mark.parametrize("which", ["loss_only", "tight_band"])
+@pytest.mark.parametrize("which", ["loss_only", "tight_band", "ts_only"])
 def test_partition_invariant_randomised(case, objectives, which):
     """Σ_i Φ_i == Φ_global at the base point and 20 randomised operating
     points (loads ±10 %, generator setpoints ±0.01 pu, fixed seed)."""
@@ -211,7 +217,7 @@ def test_phi_zone_without_powerflow_raises(case, objectives):
 #  μ = dΦ/dv_b against the port finite difference (§3.4)
 # ======================================================================
 
-@pytest.mark.parametrize("which", ["loss_only", "tight_band"])
+@pytest.mark.parametrize("which", ["loss_only", "tight_band", "ts_only"])
 def test_mu_matches_adjacent_fd(case, objectives, which):
     """Money test of Phase 2: μ from the area-local machinery equals the
     finite difference dΦ_i/dv_b at EVERY adjacent boundary bus. Own
@@ -294,7 +300,7 @@ def test_grad_q_injection_fd(case, objectives, which):
             )
 
 
-@pytest.mark.parametrize("which", ["loss_only", "tight_band"])
+@pytest.mark.parametrize("which", ["loss_only", "tight_band", "ts_only"])
 def test_grad_vgen_fd(case, objectives, which):
     """∂Φ_i/∂V_gen |_{v_b fixed}: perturb one non-slack generator
     setpoint per zone by ±0.002 pu in the pinned sub-network."""
@@ -382,6 +388,62 @@ def test_grad_shunt_fd(case, objectives):
             f"zone {zone}, bus {bus}: d_shunt={tangent:.6e} "
             f"vs secant={secant:.6e}"
         )
+
+
+def test_grad_tap_fd_ts_scope(case, objectives):
+    """Q7: for a machine trafo (345/10.5 kV, outside the TS scope) the
+    explicit ∂P_ℓ/∂τ term is weighted to zero — the tap stays an
+    actuator whose only Φ effect is the indirect response of the 345 kV
+    network. FD must still match."""
+    net, topo, _, computers = case
+    obj = objectives["ts_only"]
+    zone, trafo = 1, 9
+    comp = computers[zone]
+    grads = obj.gradients(comp)
+    sub0 = _build_adjacent_subnet(net, topo, zone)
+    tangent = grads.d_tap_2w(trafo)
+    fd = []
+    for sign in (+1, -1):
+        def bump(sub, t=trafo, sign=sign):
+            sub.trafo.at[t, "tap_pos"] = (
+                float(sub.trafo.at[t, "tap_pos"]) + sign
+            )
+        fd.append(_phi_of_perturbed(sub0, bump, obj, zone))
+    secant = (fd[0] - fd[1]) / 2.0
+    scale = max(abs(secant), abs(tangent), 1e-9)
+    assert abs(secant - tangent) <= 0.15 * scale + 1e-5, (
+        f"d_tap={tangent:.6e} vs secant={secant:.6e}"
+    )
+
+
+def test_ts_scope_manual_values(case, objectives):
+    """Q7 value semantics on IEEE 39: with vn_kv_min = 220 the loss term
+    is the 345 kV network only (all lines plus the two 345/345 kV
+    interconnecting trafos), and the band covers only 345 kV buses."""
+    net, _, _, _ = case
+    obj = objectives["ts_only"]
+
+    in_scope_trafos = [
+        t for t in net.trafo.index
+        if float(net.trafo.at[t, "vn_lv_kv"]) >= 220.0
+    ]
+    assert in_scope_trafos, "expected 345/345 kV trafos in IEEE 39"
+    expected_loss = float(net.res_line.pl_mw.sum()) + float(
+        sum(net.res_trafo.at[t, "pl_mw"] for t in in_scope_trafos)
+    )
+    expected_band = sum(
+        obj.phi_band(float(net.res_bus.at[b, "vm_pu"]))
+        for b in net.bus.index
+        if bool(net.bus.at[b, "in_service"])
+        and float(net.bus.at[b, "vn_kv"]) >= 220.0
+    )
+    assert obj.phi_global(net) == pytest.approx(
+        obj.w_loss * expected_loss + expected_band, rel=1e-12,
+    )
+    # And the scope genuinely excludes something: the include-all rung
+    # counts the machine-trafo losses on top.
+    full = objectives["tight_band"].phi_global(net)
+    assert full > obj.phi_global(net)
 
 
 # ======================================================================

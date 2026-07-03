@@ -692,6 +692,119 @@ class TSOController(BaseOFOController):
             )
         self.bme_mode = True
 
+    # -- Discrete hygiene (spec §3.8; Phase 5) ---------------------------
+    _bme_hygiene = None      # dict(zone, ledger, epsilon, cost_oltc, cost_shunt)
+    _bme_slot_ctx = None     # (tick, slot_owner, may_commit) — one-shot
+    bme_ledger_indices_this_step = ()  # ledger rows written by the last gate
+
+    def configure_bme_hygiene(
+        self,
+        *,
+        zone_id: int,
+        ledger,
+        epsilon_switch: float,
+        switch_cost_oltc: float,
+        switch_cost_shunt: float,
+    ) -> None:
+        """Arm the §3.8 discrete-hygiene gate (requires BME mode):
+        round-robin slotting context is injected per tick via
+        :meth:`set_bme_slot`; ε-acceptance compares the MIQP against the
+        frozen-integer QP; every decision lands in the shared ledger."""
+        if not self.bme_mode:
+            raise RuntimeError(
+                f"{self.controller_id}: configure_bme_hygiene requires "
+                "BME mode (call enable_bme_mode first)."
+            )
+        if epsilon_switch < 0 or switch_cost_oltc < 0 or switch_cost_shunt < 0:
+            raise ValueError(
+                "epsilon_switch and switch costs must be ≥ 0."
+            )
+        self._bme_hygiene = {
+            "zone": int(zone_id),
+            "ledger": ledger,
+            "epsilon": float(epsilon_switch),
+            "cost_oltc": float(switch_cost_oltc),
+            "cost_shunt": float(switch_cost_shunt),
+        }
+
+    def set_bme_slot(
+        self, *, tick: int, slot_owner: int, may_commit: bool
+    ) -> None:
+        """Inject this tick's slotting context (one-shot, runner-fed)."""
+        if self._bme_hygiene is None:
+            raise RuntimeError(
+                f"{self.controller_id}: set_bme_slot called without "
+                "configured hygiene."
+            )
+        self._bme_slot_ctx = (int(tick), int(slot_owner), bool(may_commit))
+
+    def _post_solve_gate(self, result, solve_frozen):
+        """§3.8 gate: slotting (D5) then ε-acceptance (§3.8.3, Q5 scope:
+        MIQP integers only). Inactive (byte-identical) unless BME
+        hygiene is configured."""
+        self.bme_ledger_indices_this_step = ()
+        if not self.bme_mode or self._bme_hygiene is None:
+            return result
+        int_idx = self._int_idx_arr
+        if int_idx.size == 0:
+            return result
+        w_int = np.round(np.asarray(result.w_integer, dtype=np.float64))
+        moved = np.flatnonzero(w_int != 0)
+        if moved.size == 0:
+            return result
+
+        if self._bme_slot_ctx is None:
+            raise RuntimeError(
+                f"{self.controller_id}: discrete hygiene is armed but no "
+                "slot context was injected this tick — the runner must "
+                "call set_bme_slot before step() (spec §3.8.2)."
+            )
+        tick, slot_owner, may_commit = self._bme_slot_ctx
+        self._bme_slot_ctx = None  # one-shot
+
+        from controller.discrete_hygiene import LedgerEntry, epsilon_accepts
+        hyg = self._bme_hygiene
+        devices = []
+        deltas = []
+        costs = []
+        for j in moved:
+            u_idx = int(int_idx[j])
+            cls = "oltc" if u_idx in self._oltc_int_indices else "shunt"
+            devices.append(f"{cls}:{u_idx}")
+            deltas.append(int(w_int[j]))
+            costs.append(
+                hyg["cost_oltc"] if cls == "oltc" else hyg["cost_shunt"]
+            )
+
+        frozen = solve_frozen()
+        accepted, pred_dphi, total_cost = epsilon_accepts(
+            obj_miqp=result.objective_value,
+            obj_frozen=frozen.objective_value,
+            delta_int_abs=np.abs(np.asarray(deltas, dtype=np.float64)),
+            switch_costs=np.asarray(costs, dtype=np.float64),
+            epsilon_switch=hyg["epsilon"],
+        )
+        if not may_commit:
+            reason = "slot_blocked"
+            accepted = False
+        else:
+            reason = "accepted" if accepted else "epsilon_reject"
+
+        entry_idx = hyg["ledger"].append(LedgerEntry(
+            step=tick,
+            zone=hyg["zone"],
+            devices=tuple(devices),
+            delta_int=tuple(deltas),
+            predicted_dphi=pred_dphi,
+            accepted=accepted,
+            reason=reason,
+            slot_owner=slot_owner,
+            epsilon_switch=hyg["epsilon"],
+            switch_cost=total_cost,
+        ))
+        self.bme_ledger_indices_this_step = (entry_idx,)
+        return result if accepted else frozen
+
     def receive_bme_gradient(
         self, grad_bus_level: NDArray[np.float64]
     ) -> None:

@@ -1047,6 +1047,26 @@ class MultiTSOConfig:
     level (345 kV on IEEE 39); machine trafos and subordinate DNs are
     excluded."""
 
+    bme_slotting: bool = True
+    """§3.8.2 round-robin discrete slotting (DECISION D5): a zone may
+    COMMIT discrete moves only in its own slot. False = every zone may
+    commit every tick (identity/oracle configurations)."""
+
+    bme_slot_length: int = 1
+    """Slot length in TSO steps (D5 default 1)."""
+
+    bme_epsilon_switch: float = 0.0
+    """§3.8.3 ε-improvement threshold on the local quadratic model
+    (DECISION D6 — magnitude calibrated in Phase 6; 0.0 = the pure
+    improvement sign test, since the frozen-integer QP optimum can
+    never beat the MIQP optimum)."""
+
+    bme_switch_cost_oltc: float = 0.0
+    """Per-tap-step switching cost c_switch for OLTCs (D6, Phase 6)."""
+
+    bme_switch_cost_shunt: float = 0.0
+    """Per-step switching cost c_switch for MSC/MSR banks (D6)."""
+
     # ── Horizontal TSO-TSO coordination (two-loop ΔV_ref) ────────────────────
     enable_tie_coordination: bool = False
     """Master gate for the horizontal TSO-TSO tie coordinator

@@ -1077,6 +1077,7 @@ def run_multi_tso_dso(
             "is gated by that flag, unchanged)."
         )
     bme_topo = bme_obj = bme_bus = None
+    bme_ledger = bme_schedule = None
     bme_specs = {}
     bme_receivers = {}
     if config.coordination_mode == "bme":
@@ -1107,6 +1108,15 @@ def run_multi_tso_dso(
                 "by re-linearising shared_jac each TSO tick. "
                 "Measurement-evaluated gradients on a frozen model are "
                 "noted future work."
+            )
+        if config.shunt_dispatch == "integrator":
+            raise ValueError(
+                "coordination_mode='bme' with shunt_dispatch='integrator' "
+                "is not yet wired: Q5 requires integrator-bank commits to "
+                "emit switch notices and ledger entries, which the "
+                "integrator commit path does not do yet (Phase 5 "
+                "carve-out, see BME_STATUS.md). Use the MIQP shunt path "
+                "or shunt_dispatch='off'."
             )
         from controller.bme_gradient import BMEGradientAssembler
         from controller.common_objective import CommonObjective
@@ -1173,10 +1183,40 @@ def run_multi_tso_dso(
             )
             for z in sorted(zone_defs)
         }
+        # ── Discrete hygiene (§3.8, Phase 5): slotting + ε-acceptance
+        # gate on every zone controller, one shared append-only ledger.
+        from core.coordination_bus import SwitchNotice
+        from controller.discrete_hygiene import (
+            SlottingSchedule, SwitchingLedger,
+        )
+        bme_ledger = SwitchingLedger()
+        bme_schedule = (
+            SlottingSchedule(sorted(zone_defs), config.bme_slot_length)
+            if config.bme_slotting else None
+        )
+        for z in zone_defs:
+            tso_controllers[z].configure_bme_hygiene(
+                zone_id=z,
+                ledger=bme_ledger,
+                epsilon_switch=config.bme_epsilon_switch,
+                switch_cost_oltc=config.bme_switch_cost_oltc,
+                switch_cost_shunt=config.bme_switch_cost_shunt,
+            )
+        bme_phi_prev = None  # Φ_global at the previous round (ledger fill)
+
+        def bme_notice_mask_hook(zone: int, notices) -> None:
+            """§3.8.1(b) estimator-masking hook. v1: NO online
+            sensitivity estimator is active and v1 re-linearises
+            shared_jac each tick, so there is nothing to mask or
+            correct — the hook exists (spec §5 Phase 5) and receives
+            every delivered notice; the online-estimation tie-in
+            (§3.9 realism story) plugs in here."""
+            return None
+
         # Names used inside the per-tick round below.
         _BME = (
             BMEGradientAssembler, MarginalComputer,
-            RestrictedSensitivityProvider, MarginalSignal,
+            RestrictedSensitivityProvider, MarginalSignal, SwitchNotice,
         )
         if verbose >= 1:
             print(
@@ -2604,6 +2644,12 @@ def run_multi_tso_dso(
             "zone_defs": zone_defs,
             "coordinator": coordinator,
             "config": config,
+            # BME internals (None / empty unless coordination_mode="bme")
+            "bme_topology": bme_topo,
+            "bme_objective": bme_obj,
+            "bme_bus": bme_bus,
+            "bme_ledger": bme_ledger,
+            "bme_schedule": bme_schedule,
         }
         _hook_result = pre_loop_hook(_hook_state)
         if _hook_result:
@@ -3007,8 +3053,30 @@ def run_multi_tso_dso(
             # into the zone controller.  Cold start (first d ticks): price
             # carries the self term only (logged by the receiver).
             if config.coordination_mode == "bme":
-                (_Assembler, _MComputer, _RProvider, _MSignal) = _BME
+                (_Assembler, _MComputer, _RProvider, _MSignal,
+                 _SNotice) = _BME
                 _bme_step = tso_step_count - 1  # consecutive TSO ticks
+
+                # §3.8.3 deferred ledger fill: realised ΔΦ of the moves
+                # committed at the PREVIOUS tick, evaluated from the
+                # current plant state (simulation-oracle privilege).
+                _phi_now = bme_obj.phi_global(net)
+                if bme_phi_prev is not None:
+                    for _z in sorted(tso_controllers):
+                        for _li in tso_controllers[_z].bme_ledger_indices_this_step:
+                            bme_ledger.fill_realised(
+                                _li, _phi_now - bme_phi_prev,
+                            )
+                bme_phi_prev = _phi_now
+
+                # §3.8.1 notice consumption (delay d, drops apply): v1
+                # feeds the estimator-masking hook (documented no-op —
+                # shared_jac is re-linearised every tick).
+                for _z in sorted(tso_controllers):
+                    _vis = bme_bus.notices_visible(_z, _bme_step)
+                    if _vis:
+                        bme_notice_mask_hook(_z, _vis)
+
                 _provider = _RProvider(shared_jac, bme_topo, bme_specs)
                 _assemblers = {}
                 _bme_mus = {}
@@ -3031,6 +3099,7 @@ def run_multi_tso_dso(
                         zone_id=z, step=_bme_step,
                         mu=_bme_mus[z], v_b_meas=_vb_snap,
                     ))
+                _bme_hb_int = {}
                 for z in sorted(tso_controllers):
                     _out = bme_receivers[z].update(_bme_step)
                     if _out.coordinated:
@@ -3040,6 +3109,29 @@ def run_multi_tso_dso(
                     tso_controllers[z].receive_bme_gradient(
                         _assemblers[z].g_bme(_mu_total)
                     )
+                    # §3.8.2 slotting context (one-shot, consumed by the
+                    # controller's post-solve gate this tick).
+                    if bme_schedule is not None:
+                        _owner = bme_schedule.slot_owner(_bme_step)
+                        tso_controllers[z].set_bme_slot(
+                            tick=_bme_step, slot_owner=_owner,
+                            may_commit=(z == _owner),
+                        )
+                    else:
+                        tso_controllers[z].set_bme_slot(
+                            tick=_bme_step, slot_owner=-1,
+                            may_commit=True,
+                        )
+                    # Integer columns of the stacked H_{b,i} — kept for
+                    # the §3.8.1 notice emission after the solves.
+                    _n_int_z = (
+                        len(zone_defs[z].oltc_trafo_indices)
+                        + len(zone_defs[z].shunt_bus_indices)
+                    )
+                    if _n_int_z > 0:
+                        _bme_hb_int[z] = _provider.view(z).h_b_stacked()[
+                            :, -_n_int_z:
+                        ]
 
             # Reserve-economic signal: absolute directional headroom first,
             # scarcity scalar second. Recorded also for true OFF baselines.
@@ -3146,6 +3238,36 @@ def run_multi_tso_dso(
                 recompute_cross_sensitivities=refresh_H,
                 sim_time_s=time_s,
             )
+
+            # ── BME §3.8.1: publish switch notices for COMMITTED discrete
+            # moves (post-gate): dv_b^pred = H_{b,i}^d · Δu_i_d in stacked
+            # boundary coordinates; visible to neighbours at k + d.
+            if config.coordination_mode == "bme":
+                for z, tso_out in tso_outputs.items():
+                    zd_z = zone_defs[z]
+                    _n_int_z = (
+                        len(zd_z.oltc_trafo_indices)
+                        + len(zd_z.shunt_bus_indices)
+                    )
+                    if _n_int_z == 0:
+                        continue
+                    _d_int = np.round(
+                        tso_out.sigma[-_n_int_z:]
+                    ).astype(int)
+                    if not np.any(_d_int != 0):
+                        continue
+                    _dev_labels = (
+                        [f"oltc:{t}" for t in zd_z.oltc_trafo_indices]
+                        + [f"shunt:{b}" for b in zd_z.shunt_bus_indices]
+                    )
+                    _moved = tuple(
+                        lbl for lbl, d in zip(_dev_labels, _d_int) if d
+                    )
+                    bme_bus.publish_notice(_SNotice(
+                        zone_id=z, step=_bme_step,
+                        dv_b_pred=_bme_hb_int[z] @ _d_int.astype(float),
+                        devices=_moved,
+                    ))
 
             # ── Q_PCC,set command diagnostic ───────────────────────────
             # For each PCC trafo: print previous command, new command,

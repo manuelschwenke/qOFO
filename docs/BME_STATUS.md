@@ -15,7 +15,7 @@ here with dates.
 | 2 | Common objective | ✅ 2026-07-02 (24 tests green; see Phase 2 section) |
 | 3 | Coordination bus and signals | ✅ 2026-07-02 (15 tests green; see Phase 3 section) |
 | 4 | Controller integration | ✅ 2026-07-03 — hard gate PASSED (incl. slack columns); runner wired; mode="none" and vref BITWISE identical to the pre-BME baseline; bme end-to-end smoke runs (see Phase 4 section) |
-| 5 | Discrete hygiene | ❌ not started |
+| 5 | Discrete hygiene | ✅ 2026-07-03 (14 tests green; slotting + ε-acceptance + ledger + notices wired; two documented carve-outs — see Phase 5 section) |
 | 6 | Evaluation ladder + Monte Carlo | ❌ not started |
 | 7 | Analysis artefacts | ❌ not started |
 
@@ -707,6 +707,8 @@ steps, 10 TSO ticks), headless.
   plus `refresh_shared_jac_on_tso=True` (v1 validation raises
   otherwise, as designed).
 
+*(Phase 5 section follows after the Phase 4 correction note below.)*
+
 **Phase 1 finding CORRECTED (via the smoke run): the slack machine IS a
 zone actuator.** The runner's `ZoneDefinition` carries the slack
 machine's AVR setpoint (gen at the reference bus) and its machine trafo
@@ -721,3 +723,51 @@ responses and the stacked H_b rows. The identity hard-gate test now
 covers BOTH new column types (zone 1 full spec: slack V_gen + trafo 12)
 — FD-confirmed. The Phase 2 `test_slack_machine_not_an_actuator` was
 revised accordingly (`test_slack_machine_vgen_supported`).
+
+---
+
+## Phase 5 — Discrete hygiene ✅ (2026-07-03)
+
+New module `controller/discrete_hygiene.py` (§3-symbol header, fail-fast)
+plus a minimal solve-path hook:
+
+| Component | Content |
+|---|---|
+| `SlottingSchedule` | §3.8.2 / D5 round robin (ascending zone ids, slot length in TSO steps, default 1): `slot_owner(tick)` / `may_commit(zone, tick)` — exactly one committer per tick, deterministic |
+| `epsilon_accepts()` | §3.8.3 / D6 rule: accept the discrete part iff Φ̂(MIQP) − Φ̂(QP_frozen) ≤ −(ε_switch + c_switchᵀ·\|Δu_d\|), with Φ̂ = the per-step MIQP/QP objective values (the local quadratic model). ε = 0 default = pure improvement sign test (the frozen QP optimum can never beat the MIQP optimum, so ε = 0 ≈ always-accept while still ledgering) |
+| `SwitchingLedger` / `LedgerEntry` | Append-only §3.8.3 ledger: step, zone, device labels (`oltc:`/`shunt:` + u-index), Δu_d, predicted ΔΦ̂, one-time deferred realised ΔΦ, accepted flag, reason (`accepted` \| `epsilon_reject` \| `slot_blocked` \| `integrator_commit`), slot owner, ε, cost. `to_records()`/`from_records()` round-trip (Phase 6 parquet surface) |
+| `BaseOFOController` hook | Step 7b: `result = self._post_solve_gate(result, solve_frozen=...)` — default no-op (byte-identical; mode="none" BITWISE regression RE-VERIFIED after this change). `_solve_with_frozen_integers()` re-solves the identical per-step problem with every integer pinned at its current value (raises if infeasible — the incumbent point must be feasible) |
+| `TSOController` gate | Overrides `_post_solve_gate` under armed hygiene: no integer move → pass-through (frozen solve not even called); slot context (one-shot, runner-fed via `set_bme_slot`; missing context raises) → `slot_blocked` returns the frozen result; else ε-acceptance → accept (MIQP result) or `epsilon_reject` (frozen result); every decision appended to the shared ledger; `bme_ledger_indices_this_step` exposes the rows for the deferred realised-ΔΦ fill. Armed via `configure_bme_hygiene()` (requires BME mode) |
+| Config | `bme_slotting` (True), `bme_slot_length` (1), `bme_epsilon_switch` (0.0), `bme_switch_cost_oltc/shunt` (0.0) — magnitudes are the D6 Phase 6 calibration |
+| Runner wiring | Setup: shared ledger + schedule, `configure_bme_hygiene` per zone. Per tick: (i) deferred ledger fill — realised ΔΦ = Φ_global(now) − Φ_global(previous round) for last tick's entries (simulation-oracle privilege, §3.10.2 premise data); (ii) notice consumption at k (delay d, drops apply) feeding `bme_notice_mask_hook` — the §3.8.1(b) estimator-masking hook, a DOCUMENTED no-op in v1 (no online estimator; shared_jac re-linearised each tick, so there is no innovation to correct); (iii) slot context injection per zone; (iv) after the zone solves: `SwitchNotice(dv_b_pred = H_{b,i}^d·Δu_d` in stacked coordinates`)` published for committed discrete moves. BME internals (`bme_ledger`, `bme_bus`, …) exposed through the `pre_loop_hook` state dict |
+
+Tests — `tests/test_discrete_hygiene.py`: **14 passed** (full regression
+sweep 139; mode="none" bitwise regression re-verified; bme smoke with
+hygiene armed reproduces the exact pre-hygiene trajectory — no integer
+moves at the uncalibrated Φ scale, gate inert as expected).
+
+Spec §5 Phase 5 test mapping:
+
+- ✅ ε-acceptance rejects a constructed marginal-benefit switch and
+  accepts a constructed clear-benefit switch (+ slot-blocked overrides a
+  clear benefit; no-move short-circuit; missing-context raise).
+- ✅ Ledger schema round-trips; append-only semantics enforced.
+- ✅/🔶 Two-area counter-switch scenario: implemented at the GATE level
+  (both zones propose discrete moves on the same tick: without slotting
+  both commit, with slotting exactly the slot owner — deterministic).
+  The CLOSED-LOOP plant variant (a scenario engineered so the plant
+  actually counter-switches) belongs to the Phase 6 scenario work.
+- 🔶 "Notice correction changes the neighbour's innovation as
+  predicted": structurally DEFERRED — v1 has no innovation to correct
+  (no online estimator; per-tick re-linearisation). The hook exists and
+  receives every delivered notice (spec's own "no-op if no online
+  estimator active" clause); transport semantics are pinned by the
+  Phase 3 bus tests. Revisit with the online-estimation tie-in.
+
+Carve-out (fail-fast, not silent): `coordination_mode="bme"` with
+`shunt_dispatch="integrator"` RAISES — Q5 requires integrator-bank
+commits to emit notices + ledger entries (`integrator_commit` reason is
+reserved), and that emission is not wired into the integrator commit
+path yet (sign-sensitive, currently untestable — the bme rung runs the
+MIQP shunt path). To be wired when a bme rung first enables integrator
+banks.

@@ -421,14 +421,46 @@ class ZoneGradients:
         n_bus = Yf.shape[1]
 
         bus = net._ppc["bus"]
+        if bus.shape[0] < n_bus:
+            raise ValueError(
+                "_ppc bus table shorter than the Ybus dimension — "
+                "unexpected internal (ppci) bus renumbering; the "
+                "repo-wide 'dropped buses sit at the table end' "
+                "assumption is violated."
+            )
         V = bus[:n_bus, 7] * np.exp(1j * np.deg2rad(bus[:n_bus, 8]))
         br = net._ppc["branch"]
-        f = np.real(br[:, 0]).astype(int)
-        t = np.real(br[:, 1]).astype(int)
-        status = np.real(br[:, 10]).astype(float)
 
-        w = self._branch_weights(int(br.shape[0])) * status
-        self._w_branch = w
+        # Yf/Yt rows cover the INTERNAL (ppci) branch set: the ppc
+        # branch table filtered by ``branch_is`` (out-of-service
+        # elements — e.g. a machine trafo dropped by the runner's OOS
+        # promotion — keep their ppc row but lose their Yf row).
+        branch_is = np.asarray(
+            internal["branch_is"], dtype=bool
+        ).ravel()
+        if branch_is.shape[0] != br.shape[0]:
+            raise ValueError(
+                f"branch_is length {branch_is.shape[0]} != ppc branch "
+                f"table {br.shape[0]} — internal layout changed."
+            )
+        f = np.real(br[branch_is, 0]).astype(int)
+        t = np.real(br[branch_is, 1]).astype(int)
+        if f.shape[0] != Yf.shape[0]:
+            raise ValueError(
+                f"in-service branch count {f.shape[0]} != Yf rows "
+                f"{Yf.shape[0]} — ppc/ppci branch alignment broken."
+            )
+        if (f.size and int(max(f.max(), t.max())) >= n_bus):
+            raise ValueError(
+                "in-service branch endpoints exceed the Ybus dimension "
+                "— unexpected internal bus renumbering."
+            )
+
+        # Ownership weights over the FULL ppc branch table (element →
+        # ppc index mapping), then masked to the internal branch set.
+        w_full = self._branch_weights(int(br.shape[0]))
+        self._w_branch = w_full  # ppc-indexed (used by the tap term)
+        w = w_full[branch_is]
 
         If = Yf @ V
         It = Yt @ V

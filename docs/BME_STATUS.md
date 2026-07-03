@@ -771,3 +771,95 @@ reserved), and that emission is not wired into the integrator commit
 path yet (sign-sensitive, currently untestable — the bme rung runs the
 MIQP shunt path). To be wired when a bme rung first enables integrator
 banks.
+
+---
+
+## Phase 6 — Evaluation ladder + Monte Carlo 🚧 (started 2026-07-03)
+
+Work items (handover list): (1) w_Φ calibration ✅ §6a; (2) D6 ε/c_switch
+calibration; (3) w_band + soft-edge sweep incl. w_band = 0 ablation;
+(4) oracle rung (d); (5) metrics module completion (gap-to-oracle,
+Phulpin fairness, oscillation indicator); (6) MC campaign. Ladder script:
+`experiments/011_BME_LADDER.py` (rungs none / vref / bme / bme_loss;
+shared 005 scenario; uniform Φ metric via `record_bme_phi`).
+
+### 6a — w_Φ calibration (`bme_gradient_scale`) ✅ (2026-07-03)
+
+**Mechanism decision (supersedes the "gw_precondition rescaling" phrasing
+of the earlier plan):** risk #1 is closed by a single scalar
+`MultiTSOConfig.bme_gradient_scale` (w_Φ) applied to the ENTIRE injected
+BME gradient (g_own and price term alike). This is algebraically a units
+choice Φ′ = w_Φ·Φ — exchange-rate-free (one common objective, D2/Phulpin
+distinction intact), it leaves G_w identical across ladder rungs (clean
+comparison; no per-actuator trust-region reshaping), and the identity
+tests are invariant. Consequence recorded in the config docstring:
+ledgered ΔΦ̂ predictions are in the SCALED units — the D6 ε/c calibration
+(item 2) must be performed in those units.
+
+**Robustness fixes required to run the calibration** (the 60-min CIGRE
+scenario trips gen 2 at minute 60; the bme rung — `refresh_shared_jac_on_
+tso=True` — is the first configuration whose Jacobian ever SEES a machine
+outage; three layers fixed, daily log
+`2026-07-03_bme_phase6a_calibration_oos_fixes.md`):
+1. loss-gradient ppc/ppci branch alignment via `branch_is` masking
+   (`controller/common_objective.py`, previous session);
+2. `actuator_active()` OOS masking — disconnected actuators keep their
+   u-column but contribute exactly-zero H_{b,i} columns / g_own entries
+   (`sensitivity/boundary_sensitivity.py`, `controller/bme_gradient.py`,
+   previous session, verified here);
+3. **pre-existing latent bug** (this session): the Q_gen row block of
+   `TSOController._build_sensitivity_matrix` passes the UNFILTERED
+   generator list to the `compute_dQgen_*matrix` primitives, which
+   indexed a pruned terminal bus straight into the internal arrays.
+   Fixed in `sensitivity/jacobian.py`: `_ppc_bus_is_internal()` guard in
+   all four matrix functions (+ NaN guard in the shunt variant) —
+   disconnected machine ⇒ physically exact zero row/column. Bitwise-safe
+   for `mode="none"`/`vref`: their frozen time-0 Jacobian never contains
+   pruned buses (the pre-fix `none` reference completed the identical
+   scenario); regression suite re-run green.
+
+**Calibration sweep** (60-min CIGRE incl. the gen-2 trip; losses-only Φ,
+w_band = 0, d = 1, slotting on; metric = sustained total losses
+(mean last 10 steps) + run V extremes as stability proxy):
+
+| w_Φ | losses first/last/mean₁₀ [MW] | V range [pu] | verdict |
+|---|---|---|---|
+| none (ref) | 29.58 / 52.61 / 32.92 | [0.978, 1.049] | reference |
+| 1e4 | 29.65 / 54.19 / 33.49 | [0.968, 1.044] | inert-to-noise (worse than ref) |
+| **1e5** | 29.62 / 50.03 / **31.00** | [0.986, 1.059] | **chosen**: −5.8 % sustained, V contained |
+| 1e6 | 29.29 / 46.93 / 30.16 | [0.991, 1.140] | −8.4 % but V escapes the band |
+| 1e7 | 28.71 / 46.75 / 30.36 | [1.002, 1.179] | over-driven; 3.7× runtime (solver stress) |
+
+**Outcome: w_Φ = 1e5** (filled into `011_BME_LADDER.py::
+BME_GRADIENT_SCALE`) — the largest swept scale whose voltage envelope
+stays contained *without* the band hinge; delegated calibration call,
+open to Manuel's veto.
+
+**Two findings for the record:**
+- The 1e6/1e7 voltage escape is the empirical confirmation of D2's
+  design argument: a losses-only common objective drives voltages up,
+  and the repo default `g_z_voltage = 1e-12` is the known inert
+  placeholder that relied on g_v tracking (same trap as the 2026-07-01
+  heterogeneous-strategies corridor bug). The `bme_loss` (w_band = 0)
+  ablation rung must therefore be read with this caveat — or given a
+  binding `zone_g_z_voltage` (config decision for the D2 sweep, not
+  made silently here).
+- The w_Φ = 1e7 rung located the over-drive edge (the v1-price failure
+  mode) at ~100× the chosen scale — useful margin knowledge for the MC
+  sensitivity sweep.
+
+**Validation of the real bme rung** (w_band = 1e3, w_Φ = 1e5, 60 min incl.
+the gen-2 trip; `011_BME_LADDER.py --rung bme --minutes 60`):
+- V ∈ [0.982, 1.045] — the band hinge pulls the envelope back INSIDE the
+  uncoordinated reference's own range ([0.978, 1.049]); compare the
+  losses-only rung's [0.986, 1.059] at the same w_Φ.
+- Sustained losses 31.92 MW (mean last 10) vs none 32.92 (−3.0 %); the
+  losses-only ablation reaches −5.8 % — the gap is the (measured) price
+  of the voltage-security margin. Φ mean(last 10) = 22.82 MW.
+- **Discrete hygiene is exercised at this scale for the first time**:
+  16 ledger entries — 6 accepted, 10 slot-blocked, 0 ε-rejects (ε = 0);
+  5 OLTC switches; runtime 129 s / 180 steps (no solver stress).
+- Metric caveat: `band_violation_frac = 1.0` against the ladder's
+  0.97–1.03 proxy band — the CIGRE schedules themselves sit at ~1.03+,
+  so the reference rungs will show the same; interpret this metric only
+  ACROSS rungs once the full ladder runs.

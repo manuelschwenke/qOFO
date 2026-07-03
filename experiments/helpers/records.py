@@ -322,6 +322,13 @@ class MultiTSOIterationRecord:
     """Sum of res_line.pl_mw + res_trafo.pl_mw + res_trafo3w.pl_mw across the
     whole combined network.  Filled at every step from the converged PF."""
 
+    bme_phi_mw: Optional[float] = None
+    """BME common objective Φ_global (Q7 TS-level scope: w_loss·P_loss +
+    φ_band over in-scope buses), evaluated on the converged plant PF.
+    Filled every step when ``coordination_mode="bme"`` OR when
+    ``record_bme_phi=True`` (the uniform Φ metric for the Phase 6 ladder
+    rungs none/vref/oracle); ``None`` otherwise."""
+
     gen_q_headroom_mvar: Dict[int, NDArray] = field(default_factory=dict)
     """Per-zone array, parallel to ``zone_q_gen``: ``q_max(g) - |q_actual(g)|``
     for each synchronous machine in that zone (positive = remaining

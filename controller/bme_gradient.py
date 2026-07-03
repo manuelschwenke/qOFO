@@ -55,7 +55,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from controller.common_objective import ZoneGradients
-from sensitivity.boundary_sensitivity import ZoneBoundaryView, ZoneInputSpec
+from sensitivity.boundary_sensitivity import (
+    ZoneBoundaryView,
+    ZoneInputSpec,
+    actuator_active,
+)
 
 
 def pcc_hv_buses(net, spec: ZoneInputSpec) -> List[int]:
@@ -127,22 +131,43 @@ class BMEGradientAssembler:
         return self._grads.mu_stacked()
 
     def g_own(self) -> NDArray[np.float64]:
-        """g_i^own over the ZoneInputSpec columns (bus-level DER)."""
+        """g_i^own over the ZoneInputSpec columns (bus-level DER).
+
+        Out-of-service / isolated actuators (e.g. a tripped machine and
+        its trafo) keep their column but contribute exactly zero —
+        mirroring the controller's OOS column masking and the zero
+        columns of ``h_b_stacked`` (see
+        :func:`sensitivity.boundary_sensitivity.actuator_active`)."""
         spec = self._spec
         net = self._grads.net
         cols: List[float] = []
         for bus in spec.der_bus_indices:
-            cols.append(self._grads.d_q_injection(int(bus)))
+            cols.append(
+                self._grads.d_q_injection(int(bus))
+                if actuator_active(net, "der", int(bus)) else 0.0
+            )
         for hv_bus in pcc_hv_buses(net, spec):
-            cols.append(self._grads.d_pcc_set(int(hv_bus)))
+            cols.append(
+                self._grads.d_pcc_set(int(hv_bus))
+                if actuator_active(net, "pcc", int(hv_bus)) else 0.0
+            )
         for gen_idx in spec.gen_indices:
-            cols.append(self._grads.d_vgen(int(gen_idx)))
+            cols.append(
+                self._grads.d_vgen(int(gen_idx))
+                if actuator_active(net, "vgen", int(gen_idx)) else 0.0
+            )
         for trafo_idx in spec.oltc_trafo_indices:
-            cols.append(self._grads.d_tap_2w(int(trafo_idx)))
+            cols.append(
+                self._grads.d_tap_2w(int(trafo_idx))
+                if actuator_active(net, "oltc", int(trafo_idx)) else 0.0
+            )
         for bus, q_step in zip(
             spec.shunt_bus_indices, spec.shunt_q_steps_mvar
         ):
-            cols.append(self._grads.d_shunt(int(bus), float(q_step)))
+            cols.append(
+                self._grads.d_shunt(int(bus), float(q_step))
+                if actuator_active(net, "shunt", int(bus)) else 0.0
+            )
         out = np.asarray(cols, dtype=np.float64)
         assert out.shape == (spec.n_columns,)  # internal invariant
         return out

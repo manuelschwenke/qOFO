@@ -103,6 +103,54 @@ class ZoneInputSpec:
         return labels
 
 
+def actuator_active(net, kind: str, ident: int) -> bool:
+    """Is this actuator currently able to move the network? (BME OOS
+    masking — mirrors the controller's out-of-service column handling:
+    a frozen/disconnected actuator gets an exactly-zero gradient and
+    H_{b,i} column rather than a crash on its vanished Jacobian data.)
+
+    Criteria (fail-fast on unknown kinds):
+    * ``der`` / ``shunt`` / ``pcc-hv-bus``: the bus is energised (finite
+      ``res_bus.vm_pu`` — covers both out-of-service and isolated buses,
+      e.g. behind an out-of-service machine trafo).
+    * ``vgen``: the gen is in service AND its terminal bus is energised.
+    * ``oltc``: the trafo is in service AND both terminals are energised.
+    """
+    import numpy as _np
+
+    def _bus_live(b: int) -> bool:
+        b = int(b)
+        if b not in net.bus.index or not bool(net.bus.at[b, "in_service"]):
+            return False
+        try:
+            return bool(_np.isfinite(float(net.res_bus.at[b, "vm_pu"])))
+        except KeyError:
+            return False
+
+    if kind in ("der", "shunt"):
+        return _bus_live(int(ident))
+    if kind == "vgen":
+        g = int(ident)
+        if g not in net.gen.index or not bool(net.gen.at[g, "in_service"]):
+            return False
+        return _bus_live(int(net.gen.at[g, "bus"]))
+    if kind == "oltc":
+        t = int(ident)
+        if t not in net.trafo.index or not bool(
+            net.trafo.at[t, "in_service"]
+        ):
+            return False
+        return (
+            _bus_live(int(net.trafo.at[t, "hv_bus"]))
+            and _bus_live(int(net.trafo.at[t, "lv_bus"]))
+        )
+    if kind == "pcc":
+        # ident is the resolved HV port bus (the coupler itself is
+        # checked by the hv-bus resolution).
+        return _bus_live(int(ident))
+    raise ValueError(f"unknown actuator kind '{kind}'")
+
+
 class ZoneBoundaryView:
     """Zone-bound access handle: exposes ONLY this zone's H_{b,i}."""
 
@@ -303,36 +351,48 @@ class RestrictedSensitivityProvider:
                     H[n_b + i, col] = dx[theta_idx]
                 # reference-bus angle row stays exactly zero
 
+        # OOS masking: a frozen/disconnected actuator keeps its column
+        # (u alignment with the controller) but the column is exactly
+        # zero — see :func:`actuator_active`.
         col = 0
         for bus in spec.der_bus_indices:
-            put(col, self._state_response_q_injection(int(bus), what="DER"))
+            if actuator_active(net, "der", int(bus)):
+                put(col, self._state_response_q_injection(
+                    int(bus), what="DER"))
             col += 1
         for hv_bus in self._pcc_hv_buses(spec):
-            put(col, -self._state_response_q_injection(
-                int(hv_bus), what="Q_PCC_set (load convention)",
-            ))
+            if actuator_active(net, "pcc", int(hv_bus)):
+                put(col, -self._state_response_q_injection(
+                    int(hv_bus), what="Q_PCC_set (load convention)",
+                ))
             col += 1
         for g in spec.gen_indices:
             if g not in net.gen.index:
                 raise ValueError(
                     f"zone {zone_id}: gen index {g} not in net.gen"
                 )
-            term_bus = int(net.gen.at[g, "bus"])
-            ppc_bus = pp_bus_to_ppc_bus(net, term_bus)
-            dg = sens._compute_dg_dVgen(ppc_bus)
-            put(col, -sens.J_inv @ dg)
+            if actuator_active(net, "vgen", int(g)):
+                term_bus = int(net.gen.at[g, "bus"])
+                ppc_bus = pp_bus_to_ppc_bus(net, term_bus)
+                dg = sens._compute_dg_dVgen(ppc_bus)
+                put(col, -sens.J_inv @ dg)
             col += 1
         for t in spec.oltc_trafo_indices:
-            from sensitivity.marginal_computer import dg_dtau_2w_tolerant
-            dg, delta_tau = dg_dtau_2w_tolerant(sens, int(t))
-            put(col, -(sens.J_inv @ dg) * delta_tau)
+            if actuator_active(net, "oltc", int(t)):
+                from sensitivity.marginal_computer import (
+                    dg_dtau_2w_tolerant,
+                )
+                dg, delta_tau = dg_dtau_2w_tolerant(sens, int(t))
+                put(col, -(sens.J_inv @ dg) * delta_tau)
             col += 1
         for bus, q_step in zip(
             spec.shunt_bus_indices, spec.shunt_q_steps_mvar
         ):
-            v_pu = float(net.res_bus.at[int(bus), "vm_pu"])
-            put(col, -float(q_step) * v_pu * v_pu
-                * self._state_response_q_injection(int(bus), what="shunt"))
+            if actuator_active(net, "shunt", int(bus)):
+                v_pu = float(net.res_bus.at[int(bus), "vm_pu"])
+                put(col, -float(q_step) * v_pu * v_pu
+                    * self._state_response_q_injection(
+                        int(bus), what="shunt"))
             col += 1
         assert col == spec.n_columns  # internal invariant
         return H

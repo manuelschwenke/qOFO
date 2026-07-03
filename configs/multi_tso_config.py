@@ -1047,6 +1047,24 @@ class MultiTSOConfig:
     level (345 kV on IEEE 39); machine trafos and subordinate DNs are
     excluded."""
 
+    record_bme_phi: bool = False
+    """Record the BME common objective Φ_global into
+    ``MultiTSOIterationRecord.bme_phi_mw`` at every step even when
+    ``coordination_mode != "bme"`` — the uniform Φ metric across the
+    Phase 6 ladder rungs (none/vref/oracle). Uses the ``bme_w_band`` /
+    band-edge / ``bme_vn_kv_min`` fields for the evaluation; automatic
+    (no flag needed) under ``coordination_mode="bme"``."""
+
+    bme_gradient_scale: float = 1.0
+    """Scalar weight w_Φ applied to the ENTIRE injected BME gradient
+    (g_own and the price term alike — they share Φ's units, so the
+    scaling is exchange-rate-free). This is the risk-#1 calibration
+    knob: Φ is MW-scale while the G_w weights are tuned for the
+    g_v = 1e7-scale private objective, so the default 1.0 makes
+    near-zero moves. The bme experiment rungs MUST set the calibrated
+    value (see the Phase 6 calibration in docs/BME_STATUS.md);
+    ledgered ΔΦ̂ predictions are in the SCALED units."""
+
     bme_slotting: bool = True
     """§3.8.2 round-robin discrete slotting (DECISION D5): a zone may
     COMMIT discrete moves only in its own slot. False = every zone may

@@ -20,25 +20,36 @@ For the next Claude Code session continuing the BME build. Read in this order:
 | 4b — config / TSOController / runner wiring | ✅ | `81d3e23`, `d71d030` |
 | 4c — validation runs: mode="none"/vref BITWISE == pre-BME baseline; bme smoke runs end-to-end; slack-actuator correction | ✅ | see git log 2026-07-03 |
 | 5 — Discrete hygiene (notices, slotting, ε-acceptance, ledger) | ✅ 14 tests (sweep 139; bitwise re-verified) | see git log 2026-07-03 |
-| 6 — Evaluation ladder + Monte Carlo | ❌ next | — |
+| 6 — Evaluation ladder + Monte Carlo | 🚧 6a ✅ (w_Φ = 1e5 calibrated 2026-07-03) | see BME_STATUS.md Phase 6 |
 
-**READ FIRST for Phase 6:** `BME_STATUS.md` Phase 5 section (gate design,
-carve-outs) + spec §5 Phase 6 / §6. The ladder rungs (a) none (b) vref
-(c) bme (d) oracle share ONE scenario definition, only the coordination
-config differs. Known Phase 6 work items: (1) **gw_precondition
-calibration of the bme rung** (risk #1 — Φ-scale gradient vs g_v-tuned
-G_w; `controller/gw_precondition.py`); (2) D6 calibration (ε_switch ≈ 5×
-median per-step |ΔΦ̂| from a baseline run; c_switch per device class);
-(3) w_band + soft-edge sweep (D2) incl. the w_band=0 ablation rung;
-(4) oracle rung (d) from the V5/central controller machinery with Φ as
-objective (D8); (5) metrics module (Φ trajectory, switch counts, gap to
-oracle, Phulpin fairness, band-violation time, oscillation indicator);
-(6) MC campaign (load scenarios × d ∈ {0,1,2,5} × H error × β ×
-ε_switch, parquet + summary md; ledger is the §3.10.2 premise data —
-reachable via the `pre_loop_hook` state dict). Closed-loop counter-switch
-scenario (Phase 5 deferral) belongs here. bme rung config MUST set:
+**READ FIRST for Phase 6:** `BME_STATUS.md` Phase 6 §6a (w_Φ calibration
+outcome + the three OOS robustness fixes) and Phase 5 section (gate
+design, carve-outs) + spec §5 Phase 6 / §6. The ladder rungs (a) none
+(b) vref (c) bme (+ bme_loss ablation) (d) oracle share ONE scenario
+definition (`experiments/011_BME_LADDER.py`), only the coordination
+config differs. Work items: (1) **w_Φ calibration ✅** — resolved via the
+`bme_gradient_scale` scalar (NOT gw_precondition reshaping; see §6a for
+the rationale), chosen 1e5, filled into `011_BME_LADDER.py`; over-drive
+edge at ~1e7 (V escape + solver stress). (2) D6 calibration (ε_switch ≈
+5× median per-step |ΔΦ̂| from a baseline run — in the w_Φ-SCALED units;
+c_switch per device class); (3) w_band + soft-edge sweep (D2) incl. the
+w_band=0 ablation rung — CAVEAT: with w_band=0 the default
+`g_z_voltage=1e-12` is inert and voltages escape at hot w_Φ (measured);
+decide `zone_g_z_voltage` for the ablation rung with Manuel; consider the
+(w_Φ × w_band) pairing jointly; (4) oracle rung (d) from the V5/central
+controller machinery with Φ as objective (D8); (5) metrics module (gap
+to oracle, Phulpin fairness, oscillation indicator — Φ trajectory,
+switch counts, band-violation already in `011_BME_LADDER.py`); (6) MC
+campaign (load scenarios × d ∈ {0,1,2,5} × H error × β × ε_switch,
+parquet + summary md; ledger is the §3.10.2 premise data — reachable via
+the `pre_loop_hook` state dict). Closed-loop counter-switch scenario
+(Phase 5 deferral) belongs here. bme rung config MUST set:
 `local_sensitivities_*=False`, `refresh_shared_jac_on_tso=True`,
 `tso_g_q_tie=0`, `shunt_dispatch != "integrator"` (carve-out raises).
+OOS robustness note: machine outages + refreshed Jacobians are handled
+now (`actuator_active` masking; `_ppc_bus_is_internal` guards in
+`jacobian.py` compute_dQgen_*) — disconnected actuators contribute
+exactly-zero columns/rows, u-alignment preserved.
 
 **READ FIRST for Phase 5:** `BME_STATUS.md` Phase 4 sections (esp. the
 slack-actuator correction and the smoke-config requirements) + spec §3.8

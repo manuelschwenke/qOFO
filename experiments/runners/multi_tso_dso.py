@@ -1228,6 +1228,22 @@ def run_multi_tso_dso(
                 f"vn_kv_min={config.bme_vn_kv_min}"
             )
 
+    if bme_obj is None and config.record_bme_phi:
+        # Uniform Φ metric for non-bme ladder rungs: build ONLY the
+        # topology + objective (no bus, no hygiene, no gradient path).
+        from controller.common_objective import CommonObjective
+        from network.boundary_topology import BoundaryTopology
+        bme_topo = BoundaryTopology(
+            net, {z: list(b) for z, b in tn_zone_map.items()},
+        )
+        bme_obj = CommonObjective(
+            bme_topo,
+            w_band=config.bme_w_band,
+            v_soft_min=config.bme_v_soft_min_pu,
+            v_soft_max=config.bme_v_soft_max_pu,
+            vn_kv_min=config.bme_vn_kv_min,
+        )
+
     def _compute_zone_reserve_signal(
         measurements_now: Dict[int, Measurement],
     ) -> Tuple[Dict[int, float], Dict[int, float], Dict[int, float], Dict[int, float]]:
@@ -3107,7 +3123,8 @@ def run_multi_tso_dso(
                     else:
                         _mu_total = _bme_mus[z]
                     tso_controllers[z].receive_bme_gradient(
-                        _assemblers[z].g_bme(_mu_total)
+                        config.bme_gradient_scale
+                        * _assemblers[z].g_bme(_mu_total)
                     )
                     # §3.8.2 slotting context (one-shot, consumed by the
                     # controller's post-solve gate this tick).
@@ -4118,6 +4135,10 @@ def run_multi_tso_dso(
             + float(net.res_trafo["pl_mw"].sum())
             + float(net.res_trafo3w["pl_mw"].sum())
         )
+
+        # ── BME common objective Φ (uniform Phase 6 ladder metric) ───────────
+        if bme_obj is not None:
+            rec.bme_phi_mw = float(bme_obj.phi_global(net))
 
         # ── Slack saturation diagnostic (added 2026-05-02) ───────────────────
         # Records the slack's P/Q every step plus a flag for whether |Q| is

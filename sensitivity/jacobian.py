@@ -2675,6 +2675,22 @@ class JacobianSensitivities:
         dQ_direct = {int(hv_bus): float(dQi_dtau), int(lv_bus): float(dQj_dtau)}
         return dg_dtau, float(delta_tau), dQ_direct
 
+    def _ppc_bus_is_internal(self, ppc_bus_idx: int) -> bool:
+        """True iff the ppc bus row participates in the solved internal
+        (ppci) system, i.e. its row exists in the internal Ybus.
+
+        Out-of-service / isolated buses (e.g. a generator terminal behind
+        a tripped machine transformer) keep a ppc lookup entry but are
+        appended AFTER the internal bus set by the pandapower ppc→ppci
+        conversion ("dropped buses sit at the table end"), so a dimension
+        check identifies them. A disconnected machine injects nothing and
+        responds to nothing — its sensitivity rows/columns are exactly
+        zero, which is what the ``compute_dQgen_*`` matrix functions
+        substitute instead of indexing past the internal arrays.
+        """
+        n_internal = int(self.net._ppc["internal"]["Ybus"].shape[0])
+        return 0 <= int(ppc_bus_idx) < n_internal
+
     def compute_dQgen_dQder_matrix(
         self,
         gen_bus_indices_pp: List[int],
@@ -2694,10 +2710,13 @@ class JacobianSensitivities:
         if n_gen == 0 or n_der == 0:
             return np.zeros((n_gen, n_der)), list(gen_bus_indices_pp), list(der_bus_indices)
 
-        # Cache dQ_gen,k/dx for each generator bus
+        # Cache dQ_gen,k/dx for each generator bus. Disconnected machines
+        # (bus pruned from the internal system) keep an exactly-zero row.
         dQgen_dx_cache = np.zeros((n_gen, self.x_size))
         for i, gen_bus_pp in enumerate(gen_bus_indices_pp):
             gen_bus_ppc = pp_bus_to_ppc_bus(self.net, gen_bus_pp)
+            if not self._ppc_bus_is_internal(gen_bus_ppc):
+                continue
             dQgen_dx_cache[i, :] = self._compute_dQgen_dx(gen_bus_ppc)
 
         # For each DER bus (PQ), dx/dQ_der = +J_inv[:, n_theta + v_der_jac]
@@ -2738,17 +2757,23 @@ class JacobianSensitivities:
         if n_meas == 0 or n_chg == 0:
             return np.zeros((n_meas, n_chg)), list(gen_bus_indices_pp_meas), list(gen_bus_indices_pp_chg)
 
-        # Cache dQ_gen,meas/dx for each measurement generator
+        # Cache dQ_gen,meas/dx for each measurement generator.
+        # Disconnected machines (bus pruned from the internal system)
+        # keep an exactly-zero row / column.
         meas_ppc = [
             pp_bus_to_ppc_bus(self.net, gb) for gb in gen_bus_indices_pp_meas
         ]
         dQgen_dx_cache = np.zeros((n_meas, self.x_size))
         for i, ppc in enumerate(meas_ppc):
+            if not self._ppc_bus_is_internal(ppc):
+                continue
             dQgen_dx_cache[i, :] = self._compute_dQgen_dx(ppc)
 
         matrix = np.zeros((n_meas, n_chg))
         for j, chg_bus_pp in enumerate(gen_bus_indices_pp_chg):
             chg_ppc = pp_bus_to_ppc_bus(self.net, chg_bus_pp)
+            if not self._ppc_bus_is_internal(chg_ppc):
+                continue
             dg_dVl, dQl_dVl = self._compute_dg_dVk(chg_ppc)
             dx_dVl = -self.J_inv @ dg_dVl
             # Indirect contribution for all measurement gens
@@ -2783,6 +2808,8 @@ class JacobianSensitivities:
         dQgen_dx_cache = np.zeros((n_gen, self.x_size))
         for i, gb in enumerate(gen_bus_indices_pp):
             ppc = pp_bus_to_ppc_bus(self.net, gb)
+            if not self._ppc_bus_is_internal(ppc):
+                continue  # disconnected machine: zero row
             dQgen_dx_cache[i, :] = self._compute_dQgen_dx(ppc)
 
         matrix = np.zeros((n_gen, n_oltc))
@@ -2825,6 +2852,8 @@ class JacobianSensitivities:
         dQgen_dx_cache = np.zeros((n_gen, self.x_size))
         for i, gb in enumerate(gen_bus_indices_pp):
             ppc = pp_bus_to_ppc_bus(self.net, gb)
+            if not self._ppc_bus_is_internal(ppc):
+                continue  # disconnected machine: zero row
             dQgen_dx_cache[i, :] = self._compute_dQgen_dx(ppc)
 
         matrix = np.zeros((n_gen, n_oltc3w))
@@ -2874,7 +2903,9 @@ class JacobianSensitivities:
         )
         matrix = np.zeros_like(base_matrix)
         for j, shunt_bus in enumerate(shunt_bus_indices):
-            V_pu = self.net.res_bus.at[shunt_bus, 'vm_pu']
+            V_pu = float(self.net.res_bus.at[shunt_bus, 'vm_pu'])
+            if not np.isfinite(V_pu):
+                continue  # de-energised shunt bus: zero column, not NaN
             # Shunt Q is load-convention: negate for injection sign.
             matrix[:, j] = -base_matrix[:, j] * shunt_q_steps_mvar[j] * V_pu**2
 

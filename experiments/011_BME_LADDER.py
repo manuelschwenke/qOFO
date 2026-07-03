@@ -70,6 +70,19 @@ RESULT_DIR = REPO / "results" / "011_BME_LADDER"
 # (w_Φ × w_band) pairing jointly; 1e6 is only admissible with a binding
 # band mechanism.
 BME_GRADIENT_SCALE = 1.0e5
+
+# D6 (Phase 6b, 2026-07-03): calibrated from the 360-min bme rung's
+# 57-entry switching ledger (spans gen trip/restore, load step, tie-line
+# trip), in the w_Φ-SCALED Φ̂ units the gate uses:
+#   anchor (b) = median per-step |ΔΦ| on no-commit steps = 1039 scaled
+#                (0.0104 MW);
+#   ε = 5×(b) = 5193 ≈ the independent sanity cap 0.5×median|ΔΦ̂_prop|
+#                = 5256 — the two derivations agree;
+#   c_oltc = 1×(b); c_shunt = 5×(b) (breaker wear vs tap wear, mirrors
+#                the integrator's stricter treatment of bulk shunts).
+BME_EPSILON_SWITCH = 5.2e3
+BME_SWITCH_COST_OLTC = 1.0e3
+BME_SWITCH_COST_SHUNT = 5.2e3
 # D2 starting band weight (±3 % edges are the config defaults); the
 # w_band sweep is a later Phase 6 item — bme_loss is the w_band=0 rung.
 BME_W_BAND = 1.0e3
@@ -106,6 +119,11 @@ def make_ladder_config(rung: str, minutes: float):
         cfg.local_sensitivities_dso = False
         cfg.bme_gradient_scale = float(BME_GRADIENT_SCALE)
         cfg.bme_w_band = BME_W_BAND if rung == "bme" else 0.0
+        # D6 hygiene calibration — identical on both bme rungs (the
+        # ablation isolates w_band only).
+        cfg.bme_epsilon_switch = float(BME_EPSILON_SWITCH)
+        cfg.bme_switch_cost_oltc = float(BME_SWITCH_COST_OLTC)
+        cfg.bme_switch_cost_shunt = float(BME_SWITCH_COST_SHUNT)
     else:
         raise ValueError(f"unknown rung '{rung}' (choose from {RUNGS})")
     return cfg

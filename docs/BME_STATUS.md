@@ -863,3 +863,76 @@ the gen-2 trip; `011_BME_LADDER.py --rung bme --minutes 60`):
   0.97–1.03 proxy band — the CIGRE schedules themselves sit at ~1.03+,
   so the reference rungs will show the same; interpret this metric only
   ACROSS rungs once the full ladder runs.
+
+### 6b — First full ladder (360 min) + D6 calibration ✅ (2026-07-03)
+
+**Ladder results** (`011_BME_LADDER.py --rung all --minutes 360`; the full
+005 case-study horizon incl. gen-2 trip @60′/restore @180′, 200 MW +
+100 Mvar load step @90′–360′, tie-line-25 trip @260′/restore @360′;
+last-hour means; hygiene at ε = 0, i.e. pre-D6):
+
+| rung | Φ [MW] | losses [MW] | Δlosses vs none | OLTC switches | V range [pu] | ledger acc/ε-rej/slot |
+|---|---|---|---|---|---|---|
+| none | 37.47 | 47.10 | — | 5 | [0.978, 1.055] | — |
+| vref | 37.48 | 46.99 | −0.2 % | 4 | [0.981, 1.054] | — |
+| bme | 36.42 | 45.64 | **−3.1 %** | 26 | [0.982, 1.063] | 24/0/33 |
+| bme_loss | 30.98 | 40.80 | (−13.4 %) | 33 | [0.986, **1.170**] | 30/0/57 |
+
+Readings:
+- **vref is neutral** on this uniform-schedule scenario (−0.2 %) — exactly
+  its documented behaviour (nothing to decouple); whatever the bme rungs
+  deliver is attributable to the common-objective mechanism.
+- **bme (with band): −3.1 % sustained losses with the voltage envelope
+  essentially held** (1.063 vs the baseline's own 1.055 — slight excess,
+  input to the D2 w_band sweep).
+- **bme_loss's −13.4 % is INADMISSIBLE**: V reaches 1.170 pu over the long
+  horizon (the 60-min calibration's 1.059 was deceptive — rising load +
+  6 h of accumulation). This is the strongest empirical vindication of
+  the D2 band-hinge design so far, and the ablation rung's story for the
+  chapter: losses-only common objectives buy loss reduction with voltage
+  security. (The default `g_z_voltage = 1e-12` backstop is inert — the
+  open D2-sweep decision on `zone_g_z_voltage` stands.)
+- Switch counts 26–33 vs baseline 5 at ε = 0 — the D6 calibration below
+  exists precisely to close this gap (spec headline claim 4).
+
+**D6 calibration** (from the bme rung's 57-entry ledger, scaled Φ̂ units):
+- anchor (b) = median per-step |ΔΦ| on no-commit steps = 1039 scaled
+  (0.0104 MW);
+- **ε_switch = 5×(b) = 5193 ≈ 5.2e3** — the independent sanity cap
+  0.5 × median |ΔΦ̂_proposal| = 5256 lands on the same value (two
+  derivations agree);
+- **c_oltc = 1.0e3 (1×(b)); c_shunt = 5.2e3 (5×(b))** — breaker vs tap
+  wear, mirroring the shunt integrator's stricter dwell/budget treatment
+  of bulk devices.
+- Premise data (§3.10.2): predicted-vs-realised sign agreement 0.78 over
+  23 filled accepted switches on a window containing four contingency
+  events (1.00 on the clean 60-min run); realised magnitude ≈ 60 % of
+  predicted on the clean window. Recorded honestly — the MC campaign
+  extends this distribution.
+- Constants wired into `011_BME_LADDER.py` (both bme rungs — the
+  ablation isolates w_band only). Ledger ΔΦ̂ units are w_Φ-scaled, as
+  required.
+
+**Post-ε re-run** (identical scenario, hygiene at the calibrated
+ε = 5.2e3, c_oltc = 1.0e3, c_shunt = 5.2e3; last-hour means):
+
+| rung | Φ [MW] | losses [MW] | Δ vs none | OLTC switches | ledger acc/ε-rej/slot | V range [pu] |
+|---|---|---|---|---|---|---|
+| bme | 36.48 | 46.13 | −2.1 % | **19** (was 26) | 17/**15**/52 | [0.982, 1.063] |
+| bme_loss | 31.45 | 41.62 | (−11.6 %) | 23 (was 33) | 19/**36**/106 | [0.986, 1.156] |
+
+Readings:
+- The ε-gate does its designed job: 15/36 marginal proposals rejected,
+  switching −27 % (bme) / −30 % (bme_loss) for ≈1–2 pp of the loss gain.
+- Spec headline claim 4 ("switch counts at or below the baseline") is
+  NOT yet met at this ε (19 vs the baseline's 5) — deliberately not
+  over-tuned on a single scenario; the MC ε-sweep is the instrument for
+  mapping the ε ↔ (switching, Φ) trade-off, and this pair of runs is its
+  first two points.
+- bme_loss remains voltage-inadmissible post-ε (1.156 pu) — ε governs
+  switching, not the voltage escape; only w_band does. Consistent.
+
+Remaining Phase 6 items: (3) D2 w_band/edges sweep (+ `zone_g_z_voltage`
+decision for the ablation rung), (4) oracle rung, (5) metrics completion
+(gap-to-oracle, Phulpin fairness, oscillation indicator), (6) MC campaign
+(seeds, parquet; ε-sweep per above; ledger = §3.10.2 premise data).

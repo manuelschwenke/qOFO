@@ -1034,6 +1034,14 @@ class MultiTSOConfig:
     """Common-objective band weight w_band (DECISION D2: magnitude is a
     Phase 6 calibration item; 0.0 = losses-only ablation rung)."""
 
+    bme_metric_w_band: Optional[float] = None
+    """w_band of the RECORDED Φ metric (``bme_phi_mw`` /
+    ``bme_phi_zone_mw``) when it must differ from the CONTROL-layer
+    ``bme_w_band`` — e.g. the losses-only ablation rung, whose control
+    gradient drops the band term but whose recorded metric must stay the
+    identical functional as every other ladder rung (spec §6: uniform
+    metrics). ``None`` (default) = use ``bme_w_band`` for both."""
+
     bme_v_soft_min_pu: float = 0.97
     """Lower soft band edge of φ_band in pu (D2 starting point −3 %)."""
 

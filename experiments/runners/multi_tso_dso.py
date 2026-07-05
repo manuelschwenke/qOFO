@@ -1291,6 +1291,43 @@ def run_multi_tso_dso(
             vn_kv_min=config.bme_vn_kv_min,
         )
 
+    # METRIC Φ objective: the RECORDED Φ/Φ_i (and the boundary-voltage
+    # oscillation signal) must be the IDENTICAL functional on the
+    # IDENTICAL 3-area partition on EVERY rung (spec §6: uniform
+    # metrics) — the single-zone (oracle) flag collapses the CONTROL
+    # partition only, and the losses-only ablation rung zeroes the
+    # CONTROL w_band only (bme_metric_w_band overrides the recorded
+    # one). Same lesson as dispatch_zone_map above: metric/scenario
+    # objects must not inherit control-layer settings. Φ_global is
+    # partition-invariant, so the partition split alone never changes
+    # bme_phi_mw.
+    bme_metric_obj = bme_obj
+    _metric_w_band = (
+        config.bme_w_band if config.bme_metric_w_band is None
+        else float(config.bme_metric_w_band)
+    )
+    if bme_obj is not None and (
+        config.single_zone_partition
+        or _metric_w_band != config.bme_w_band
+    ):
+        from controller.common_objective import CommonObjective
+        from network.boundary_topology import BoundaryTopology
+        if config.single_zone_partition:
+            _zm_metric, _ = fixed_zone_partition_ieee39(net, verbose=False)
+            _metric_map = {
+                z: [b for b in buses if b in net.bus.index]
+                for z, buses in _zm_metric.items()
+            }
+        else:
+            _metric_map = {z: list(b) for z, b in tn_zone_map.items()}
+        bme_metric_obj = CommonObjective(
+            BoundaryTopology(net, _metric_map),
+            w_band=_metric_w_band,
+            v_soft_min=config.bme_v_soft_min_pu,
+            v_soft_max=config.bme_v_soft_max_pu,
+            vn_kv_min=config.bme_vn_kv_min,
+        )
+
     def _compute_zone_reserve_signal(
         measurements_now: Dict[int, Measurement],
     ) -> Tuple[Dict[int, float], Dict[int, float], Dict[int, float], Dict[int, float]]:
@@ -4193,13 +4230,22 @@ def run_multi_tso_dso(
         )
 
         # ── BME common objective Φ (uniform Phase 6 ladder metric) ───────────
-        if bme_obj is not None:
-            rec.bme_phi_mw = float(bme_obj.phi_global(net))
+        # Recorded from the METRIC-partition objective (fixed 3-area even
+        # on the single-zone oracle rung); the control-layer bme_obj is
+        # untouched (gradients, hygiene gate).
+        if bme_metric_obj is not None:
+            rec.bme_phi_mw = float(bme_metric_obj.phi_global(net))
             # Per-zone Φ_i (D1 partition) — the Phulpin fairness premise
             # data (spec §5 Phase 6): Σ_i Φ_i == Φ_global by invariant.
             rec.bme_phi_zone_mw = {
-                z: float(bme_obj.phi_zone(net, z).total)
-                for z in bme_obj.topology.zone_ids
+                z: float(bme_metric_obj.phi_zone(net, z).total)
+                for z in bme_metric_obj.topology.zone_ids
+            }
+            # Boundary-voltage signal for the §5 Phase 6 oscillation
+            # indicator: vm at the fixed 3-area registry B, every step.
+            rec.bme_v_boundary = {
+                int(b): float(net.res_bus.at[b, "vm_pu"])
+                for b in bme_metric_obj.topology.registry
             }
 
         # ── Slack saturation diagnostic (added 2026-05-02) ───────────────────

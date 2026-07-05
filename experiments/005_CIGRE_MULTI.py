@@ -151,7 +151,7 @@ def make_cigre_config() -> MultiTSOConfig:
         tso_shunt_msr_q_step_mvar=25.0,  # Mvar per MSR step
         # tie coordination
         enable_tie_coordination=True,
-        zone_v_setpoints_pu={1: 1.04, 2: 1.02, 3: 1.00},
+        zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},
         tie_grad_step=0.1, tie_anchor=0.5,
         tie_grad_eps=1E-4,
         # integrator tuning

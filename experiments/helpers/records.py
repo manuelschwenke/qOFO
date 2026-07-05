@@ -335,6 +335,14 @@ class MultiTSOIterationRecord:
     Premise data for the Phulpin normalised-overcost fairness metric
     (spec §5 Phase 6): filled alongside ``bme_phi_mw``, empty otherwise."""
 
+    bme_v_boundary: Dict[int, float] = field(default_factory=dict)
+    """Voltage magnitude [pu] at the FIXED 3-area boundary registry buses
+    (tie endpoints), recorded per step alongside ``bme_phi_mw`` on every
+    ladder rung — including the single-zone oracle, whose CONTROL
+    registry is empty but whose physical boundary buses are the same.
+    Input to the spec §5 Phase 6 oscillation indicator (dominant AR pole
+    of the boundary-voltage series)."""
+
     gen_q_headroom_mvar: Dict[int, NDArray] = field(default_factory=dict)
     """Per-zone array, parallel to ``zone_q_gen``: ``q_max(g) - |q_actual(g)|``
     for each synchronous machine in that zone (positive = remaining

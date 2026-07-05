@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-experiments/009_TSO_LOSS_TIE_SWEEP.py
-=====================================
+experiments/009_TSO_LOSS_VREF_SWEEP.py
+======================================
 Simple comparison of the TSO transmission-loss objective (``tso_g_loss``,
 form B — current-magnitude) across a small weight sweep, crossed with the
-horizontal TSO-TSO tie coordinator OFF / ON.
+horizontal TSO-TSO **vref** tie coordinator OFF / ON (renamed from
+``009_TSO_LOSS_TIE_SWEEP.py`` on 2026-07-03 to mark the coordination
+scheme; results stay under ``results/009_loss_tie_sweep/``).
 
 Design (2 factors)
 ------------------

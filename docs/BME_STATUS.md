@@ -1048,9 +1048,84 @@ blocks (same step logic per D8 — it is the *decomposition* bound, not a
 retuned central controller nor an OPF bound); the MC campaign (item 6)
 tests whether the ≈100 % closure survives delay/drop/H-error sweeps.
 
-Remaining Phase 6 items: (5) metrics completion (gap-to-oracle wiring in
-the summary — data now exists; Phulpin fairness from `bme_phi_zone_mw`;
-oscillation indicator); (6) MC campaign (seeds, parquet; ε-sweep per 6b;
-ledger = §3.10.2 premise data). Final ladder table at the D2-final
-pairing = ladder `--rung all` once (5) lands; V5-Φ oracle = optional
-extra bound thereafter.
+### 6e — Metrics completion (item 5) ✅ (2026-07-05)
+
+Spec §6's three outstanding metrics implemented + the recording
+infrastructure they need; full consistent 120-min ladder re-run (all
+five rungs, final calibration). Daily log:
+`docs/daily_log/2026-07-05_bme_metrics_completion.md`.
+
+**METRIC-objective split (runner).** The recorded Φ/Φ_i came from the
+CONTROL-layer objective, so the oracle recorded single-zone Φ_i
+(useless for fairness) and bme_loss recorded a w_band=0 metric (a
+different functional). Third instance of the control-layer-leaks-into-
+metric failure class (after 6c Φ-definition, 6d dispatch partition) —
+now guarded like the others: a dedicated `bme_metric_obj` records on
+the FIXED 3-area partition with a pinned band weight
+(`bme_metric_w_band` config field, default = `bme_w_band`), on every
+rung. Φ_global is partition-invariant ⇒ `bme_phi_mw` unchanged;
+verified: the re-run oracle's losses are BITWISE identical to 6d
+(57.379570332617654 MW). New per-step signal `rec.bme_v_boundary`
+(vm_pu at the 9-bus registry, every rung) for the oscillation
+indicator.
+
+**Derived metrics** (`metrics_derived.csv`, recomputed with the
+figures from pickles only): gap-to-oracle (terminal + integral,
+signed; closure % emitted only when the oracle improves on none — see
+finding below), Phulpin normalised overcost per zone
+(100·(Φ_i−Φ_i^none)/|Φ_i^none|, last-hour means; + second fig5
+panel), oscillation indicator = dominant AR(2) pole per boundary-
+voltage series (least-squares covariance method after mean removal +
+linear detrend — Yule-Walker's biased autocovariances were off by
+~15 % on 60-sample windows; tie-Q proxy fallback for old pickles).
+Also fixed: `_band_violation_fraction` still used the obsolete
+(0.97, 1.03) band (every rung reported 1.0); now D2 edges. Tests:
+`tests/test_bme_ladder_metrics.py` (8 green);
+`tests/diag_metric_partition.py` smoke (3-zone Φ_i on oracle,
+Σ_i Φ_i == Φ_global < 1e-6 every step, metric band kept under
+control-side ablation). `fig0_concepts` added: per-rung schematic of
+what crosses the zone boundary + which objective each zone descends.
+
+**120-min ladder results (final calibration, one seed):**
+
+| rung | losses last-h [MW] | Δloss vs none | Φ last-h [MW] | overcost_max | AR pole | taps |
+|---|---|---|---|---|---|---|
+| none | 59.085 | — | 51.591 | — | 0.968 (real) | 2 |
+| vref | 59.096 | −0.02 % | 51.619 | +0.25 % | 0.967 (real) | 1 |
+| bme | 57.339 | **+2.95 %** | 51.992 | +3.96 % (z2) | 0.951 (real) | 10 |
+| bme_loss | 57.155 | +3.27 % | 86.728 | +181 % (z3) | 0.959 (real) | 11 |
+| oracle | 57.337 | +2.96 % | 52.568 | +9.15 % (z2) | 0.905 (real) | 23 |
+
+Established facts: (i) on LOSSES, bme ≈ oracle to 2 kW — the loss-gap
+closure result of 6d reproduced on the uniform recording; vref ≈ none.
+(ii) On the RECORDED Φ (uniform D2 band), the last-hour ranking
+INVERTS: none < vref < bme < oracle — the coordinated rungs ride the
+upper band edge to harvest losses and the realised hinge cost exceeds
+the in-scope loss gain in the settled window; even the exact-gradient
+oracle shows it, so it is a property of per-step greedy Φ descent
+under this calibration, not of the decomposition. (iii) bme_loss:
++0.19 MW extra loss gain costs ≈ +35 MW realised band penalty — the
+ablation's story in one number, now visible BECAUSE the metric is
+uniform. (iv) Fairness: zone 2 is a mild net loser under bme
+(+3.96 % Φ_i) and a larger one under the CENTRAL optimum (+9.15 %) —
+burden redistribution is a property of the common objective itself,
+not of decentralisation. (v) No complex AR pair on any rung's
+boundary voltages in the settled window (no sustained oscillation this
+scenario); dominant real pole decreases none → bme → oracle
+(persistence falls with coordination strength).
+
+Interpretation caveats (open, for the chapter / MC): the none rung
+tracks the flat 1.03 schedule = the band centre, so φ_band privileges
+the baseline by construction (the D2 edges were chosen AROUND that
+schedule in 6c); the Φ loss term is EHV-scope while the loss headline
+is whole-net; the last hour includes the ramp. Whether to (a) present
+the Φ-vs-losses divergence as a finding about band-edge-riding OFO, or
+(b) revisit the (w_Φ × w_band) pairing / add an edge margin, is a
+calibration-philosophy decision for Manuel — NOT silently retuned.
+
+Remaining Phase 6 items: (6) MC campaign (seeds, parquet; ε-sweep per
+6b; d ∈ {0,1,2,5} × H-error × β; ledger = §3.10.2 premise data;
+counter-switch scenario; candidate extra ablation from the 2026-07-05
+discussion: selfish-Φ_i rung via `bme_drop_probability=1.0` — price
+term suppressed, isolates the μ-exchange contribution). V5-Φ oracle =
+optional extra bound thereafter.

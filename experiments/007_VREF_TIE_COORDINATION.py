@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-experiments/007_TIE_COORDINATION.py
-===================================
-Horizontal TSO-TSO coordination — divergence-scenario case study.
+experiments/007_VREF_TIE_COORDINATION.py
+========================================
+Horizontal TSO-TSO coordination — divergence-scenario case study
+(**vref scheme**: the two-loop ΔV_ref tie coordinator.  Renamed from
+``007_TIE_COORDINATION.py`` on 2026-07-03 to mark the coordination
+scheme; the BME successor scheme is evaluated in ``011_BME_LADDER.py``).
 
 Demonstrates the two-loop ΔV_ref coordinator
 (:class:`controller.tie_coordinator.HorizontalTieCoordinator`) on the IEEE 39-bus
@@ -22,8 +25,8 @@ correctly resists.
 
 Usage (from project root)::
 
-    python experiments/007_TIE_COORDINATION.py            # headless, saves PNG
-    python experiments/007_TIE_COORDINATION.py --live     # live plots, COORD only
+    python experiments/007_VREF_TIE_COORDINATION.py           # headless, saves PNG
+    python experiments/007_VREF_TIE_COORDINATION.py --live    # live plots, COORD only
 
 Author: Manuel Schwenke / Claude Code
 Date: 2026-06-25

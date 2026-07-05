@@ -374,7 +374,19 @@ def run_multi_tso_dso(
     # =========================================================================
     # STEP 2: Zone partitioning
     # =========================================================================
-    if config.use_fixed_zones:
+    if config.single_zone_partition:
+        # Oracle rung (d): ONE zone = union of the fixed 3-area TN bus
+        # sets (identical bus/actuator universe as the distributed
+        # rungs); no ties, empty boundary registry — the BME machinery's
+        # single-area degenerate mode makes g_bme = dΦ/du exactly.
+        if verbose >= 1:
+            print()
+            print("[2] SINGLE-ZONE partition (oracle rung d) ...")
+        _zm3, _ = fixed_zone_partition_ieee39(net, verbose=False)
+        _all_tn = sorted(b for buses in _zm3.values() for b in buses)
+        zone_map = {1: _all_tn}
+        bus_zone = {b: 1 for b in _all_tn}
+    elif config.use_fixed_zones:
         if verbose >= 1:
             print()
             print("[2] Fixed 3-area zone partition (literature) ...")
@@ -588,9 +600,15 @@ def run_multi_tso_dso(
     }
 
     # ── Group HV sub-networks by zone ────────────────────────────────────────
+    # HVNetworkInfo carries its home zone from the 3-area constants; under
+    # the single-zone (oracle) partition every sub-network belongs to the
+    # one zone.
+    def _hv_zone(hv) -> int:
+        return 1 if config.single_zone_partition else int(hv.zone)
+
     zone_hv_networks: Dict[int, List[HVNetworkInfo]] = {z: [] for z in zone_map}
     for hv in meta.hv_networks:
-        zone_hv_networks[hv.zone].append(hv)
+        zone_hv_networks[_hv_zone(hv)].append(hv)
 
     # All DSO IDs (one per HV sub-network)
     dso_ids: List[str] = [hv.net_id for hv in meta.hv_networks]
@@ -600,8 +618,8 @@ def run_multi_tso_dso(
     zone_pcc_dso_ids: Dict[int, List[str]] = {z: [] for z in zone_map}
     for hv in meta.hv_networks:
         for trafo_idx in hv.coupling_trafo_indices:
-            zone_pcc_trafos[hv.zone].append(trafo_idx)
-            zone_pcc_dso_ids[hv.zone].append(hv.net_id)
+            zone_pcc_trafos[_hv_zone(hv)].append(trafo_idx)
+            zone_pcc_dso_ids[_hv_zone(hv)].append(hv.net_id)
 
     # Save original TN-only zone map for TSO monitoring (before HV extension).
     # The TSO monitors TN-level voltages and line currents only; HV elements
@@ -613,7 +631,8 @@ def run_multi_tso_dso(
 
     # Extend zone bus indices to include HV sub-network buses (for dispatch / ownership)
     for hv in meta.hv_networks:
-        zone_map[hv.zone] = sorted(set(zone_map[hv.zone]) | set(hv.bus_indices))
+        _z_hv = _hv_zone(hv)
+        zone_map[_z_hv] = sorted(set(zone_map[_z_hv]) | set(hv.bus_indices))
 
     # Extend zone map with machine transformer LV buses so that
     # compute_zonal_gen_dispatch() can assign generators on LV terminal
@@ -669,6 +688,10 @@ def run_multi_tso_dso(
             meta.tso_tertiary_shunt_q_steps_mvar,
             meta.tso_tertiary_shunt_zones,
         ):
+            # Under the single-zone (oracle) partition every bank belongs
+            # to the one zone — without the remap they would silently
+            # vanish from the control vector.
+            sz = 1 if config.single_zone_partition else sz
             if sz in zone_shunt_buses:
                 zone_shunt_buses[sz].append(int(sb))
                 zone_shunt_qsteps[sz].append(float(q_step))
@@ -1170,19 +1193,26 @@ def run_multi_tso_dso(
                 ),
             )
             tso.enable_bme_mode()
-        bme_bus = CoordinationBus(
-            sorted(zone_defs),
-            2 * len(bme_topo.registry),
-            delay_steps=config.bme_delay_steps,
-            drop_probability=config.bme_drop_probability,
-            seed=config.bme_seed,
-        )
-        bme_receivers = {
-            z: MarginalReceiver(
-                z, bme_bus, beta=config.bme_beta_filter, start_step=0,
+        if len(zone_defs) >= 2:
+            bme_bus = CoordinationBus(
+                sorted(zone_defs),
+                2 * len(bme_topo.registry),
+                delay_steps=config.bme_delay_steps,
+                drop_probability=config.bme_drop_probability,
+                seed=config.bme_seed,
             )
-            for z in sorted(zone_defs)
-        }
+            bme_receivers = {
+                z: MarginalReceiver(
+                    z, bme_bus, beta=config.bme_beta_filter, start_step=0,
+                )
+                for z in sorted(zone_defs)
+            }
+        else:
+            # Single-zone (oracle) degenerate mode: nothing crosses a
+            # border — no bus, no receivers, empty registry; g_bme
+            # reduces to the exact global dΦ/du (single-area identity).
+            bme_bus = None
+            bme_receivers = {}
         # ── Discrete hygiene (§3.8, Phase 5): slotting + ε-acceptance
         # gate on every zone controller, one shared append-only ledger.
         from core.coordination_bus import SwitchNotice
@@ -1440,7 +1470,7 @@ def run_multi_tso_dso(
     # Map each DSO controller ID to the ID of its supervising TSO controller.
     # TSO controller IDs follow the pattern "tso_zone_{z}" (see TSOController init above).
     dso_to_tso_id: Dict[str, str] = {
-        hv.net_id: f"tso_zone_{hv.zone}"
+        hv.net_id: f"tso_zone_{_hv_zone(hv)}"
         for hv in meta.hv_networks
     }
 
@@ -3087,11 +3117,13 @@ def run_multi_tso_dso(
 
                 # §3.8.1 notice consumption (delay d, drops apply): v1
                 # feeds the estimator-masking hook (documented no-op —
-                # shared_jac is re-linearised every tick).
-                for _z in sorted(tso_controllers):
-                    _vis = bme_bus.notices_visible(_z, _bme_step)
-                    if _vis:
-                        bme_notice_mask_hook(_z, _vis)
+                # shared_jac is re-linearised every tick). No bus in the
+                # single-zone (oracle) degenerate mode.
+                if bme_bus is not None:
+                    for _z in sorted(tso_controllers):
+                        _vis = bme_bus.notices_visible(_z, _bme_step)
+                        if _vis:
+                            bme_notice_mask_hook(_z, _vis)
 
                 _provider = _RProvider(shared_jac, bme_topo, bme_specs)
                 _assemblers = {}
@@ -3110,17 +3142,23 @@ def run_multi_tso_dso(
                         shared_jac.net.res_bus.at[b, "va_degree"]))
                      for b in bme_topo.registry],
                 ])
-                for z in sorted(tso_controllers):
-                    bme_bus.publish_marginal(_MSignal(
-                        zone_id=z, step=_bme_step,
-                        mu=_bme_mus[z], v_b_meas=_vb_snap,
-                    ))
+                if bme_bus is not None:
+                    for z in sorted(tso_controllers):
+                        bme_bus.publish_marginal(_MSignal(
+                            zone_id=z, step=_bme_step,
+                            mu=_bme_mus[z], v_b_meas=_vb_snap,
+                        ))
                 _bme_hb_int = {}
                 for z in sorted(tso_controllers):
-                    _out = bme_receivers[z].update(_bme_step)
-                    if _out.coordinated:
-                        _mu_total = _bme_mus[z] + _out.mu_neighbour_sum
+                    if bme_bus is not None:
+                        _out = bme_receivers[z].update(_bme_step)
+                        _mu_total = (
+                            _bme_mus[z] + _out.mu_neighbour_sum
+                            if _out.coordinated else _bme_mus[z]
+                        )
                     else:
+                        # Single-zone oracle: no neighbours; the (empty)
+                        # self-marginal makes g_bme = g_own = dΦ/du.
                         _mu_total = _bme_mus[z]
                     tso_controllers[z].receive_bme_gradient(
                         config.bme_gradient_scale
@@ -3280,11 +3318,12 @@ def run_multi_tso_dso(
                     _moved = tuple(
                         lbl for lbl, d in zip(_dev_labels, _d_int) if d
                     )
-                    bme_bus.publish_notice(_SNotice(
-                        zone_id=z, step=_bme_step,
-                        dv_b_pred=_bme_hb_int[z] @ _d_int.astype(float),
-                        devices=_moved,
-                    ))
+                    if bme_bus is not None:
+                        bme_bus.publish_notice(_SNotice(
+                            zone_id=z, step=_bme_step,
+                            dv_b_pred=_bme_hb_int[z] @ _d_int.astype(float),
+                            devices=_moved,
+                        ))
 
             # ── Q_PCC,set command diagnostic ───────────────────────────
             # For each PCC trafo: print previous command, new command,

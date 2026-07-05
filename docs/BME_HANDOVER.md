@@ -20,7 +20,7 @@ For the next Claude Code session continuing the BME build. Read in this order:
 | 4b — config / TSOController / runner wiring | ✅ | `81d3e23`, `d71d030` |
 | 4c — validation runs: mode="none"/vref BITWISE == pre-BME baseline; bme smoke runs end-to-end; slack-actuator correction | ✅ | see git log 2026-07-03 |
 | 5 — Discrete hygiene (notices, slotting, ε-acceptance, ledger) | ✅ 14 tests (sweep 139; bitwise re-verified) | see git log 2026-07-03 |
-| 6 — Evaluation ladder + Monte Carlo | 🚧 6a ✅ (w_Φ = 1e5) + 6b ✅ (D6: ε = 5.2e3, c = 1.0e3/5.2e3) + 6c ✅ (D2: edges (1.01, 1.05), w_band = 1e4 — Manuel's centred corridor; uniform-Φ-metric fix; per-zone Φ_i recorded) — next: oracle rung (d), metrics, MC. Calibration sweeps: 120-min horizon (Manuel) | see BME_STATUS.md Phase 6 |
+| 6 — Evaluation ladder + Monte Carlo | 🚧 6a ✅ (w_Φ = 1e5) + 6b ✅ (D6: ε = 5.2e3, c = 1.0e3/5.2e3) + 6c ✅ (D2: edges (1.01, 1.05), w_band = 1e4) + 6d ✅ (oracle rung = SINGLE-ZONE BME oracle via `single_zone_partition=True`, D8 "both" — V5-Φ full-set oracle deferred as optional bound; correctness = the single-area identity) — next: (5) metrics completion (gap-to-oracle, Phulpin fairness, oscillation indicator), (6) MC campaign. Calibration sweeps: 120-min horizon (Manuel) | see BME_STATUS.md Phase 6 |
 
 **READ FIRST for Phase 6:** `BME_STATUS.md` Phase 6 §6a (w_Φ calibration
 outcome + the three OOS robustness fixes) and Phase 5 section (gate

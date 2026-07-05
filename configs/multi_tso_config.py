@@ -1065,6 +1065,20 @@ class MultiTSOConfig:
     value (see the Phase 6 calibration in docs/BME_STATUS.md);
     ledgered ΔΦ̂ predictions are in the SCALED units."""
 
+    single_zone_partition: bool = False
+    """Collapse the zone partition to ONE zone spanning the union of the
+    fixed 3-area TN bus sets — the Phase 6 oracle rung (d), D8 (chosen
+    interpretation 2026-07-03: single-zone BME oracle). Combined with
+    ``coordination_mode="bme"`` this yields the centralised per-step
+    OFO-MIQP with global Φ: no ties, empty boundary registry, the
+    port-frozen operators degenerate to total-response operators and
+    g_bme = dΦ/du exactly (single-area identity, spec §3.5 test 1). The
+    union of the 3-area lists (not a fresh partition) guarantees the
+    identical bus/actuator universe as the distributed rungs; the DSO
+    cascade below is unchanged. The V5-style full-set Φ oracle (DSO DERs
+    + 3W taps, no cascade) is the separate optional bound noted in
+    docs/BME_STATUS.md."""
+
     bme_slotting: bool = True
     """§3.8.2 round-robin discrete slotting (DECISION D5): a zone may
     COMMIT discrete moves only in its own slot. False = every zone may

@@ -988,8 +988,41 @@ records, filled via `CommonObjective.phi_zone`) — the premise data for
 the Phulpin normalised-overcost fairness metric (item 5); partition
 invariant verified live on the runner net (Σ_i Φ_i = Φ_global to 1e-6).
 
-Remaining Phase 6 items: (4) oracle rung; (5) metrics completion
-(gap-to-oracle, Phulpin fairness from `bme_phi_zone_mw`, oscillation
-indicator); (6) MC campaign (seeds, parquet; ε-sweep per 6b; ledger =
-§3.10.2 premise data). The final ladder table is regenerated at the
-D2-final pairing when rung (d) lands.
+### 6d — Oracle rung (d): single-zone BME oracle ✅ (2026-07-05)
+
+**D8 interpretation (Manuel, 2026-07-03: "both"):** rung (d) is the
+**single-zone BME oracle** now; the V5-style full-set Φ oracle (DSO DERs
++ 3W coupler taps in the solve, no DSO cascade) stays the optional
+additional bound for after the MC campaign.
+
+**Design.** `MultiTSOConfig.single_zone_partition = True` collapses the
+partition to ONE zone = the union of the fixed 3-area TN bus sets (the
+identical bus/actuator universe as the distributed rungs), combined with
+`coordination_mode="bme"`. Then there are no ties, the boundary registry
+is empty, the port-frozen operators degenerate to total-response
+operators and **g_bme = dΦ/du exactly** — the single-area identity (spec
+§3.5 test 1, pinned by `test_bme_gradient_identity.py`) *is* the
+oracle's correctness proof. One MIQP per step over all TSO-layer inputs
+(incl. every PCC setpoint), global Φ, no communication, DSO cascade
+unchanged below, same solver/step logic and the same D6 hygiene
+(slotting degenerates to a single always-committing owner). Rung wired
+as `011_BME_LADDER.py --rung oracle`.
+
+**Changes.** Config field `single_zone_partition`; runner: partition
+branch, HV-network/tertiary-shunt/DSO-map zone remaps (`_hv_zone`),
+degenerate BME path (no bus/receivers when |zones| = 1 — the
+CoordinationBus's two-zone fail-fast stands for real multi-zone runs);
+`RestrictedSensitivityProvider` now accepts an EMPTY registry (zero-row
+H_{b,i}; the all-pinned fail-fast for non-empty registries stands).
+Regression: 37 tests green (boundary sensitivity, gradient identity,
+discrete hygiene); the ladder figures pick the oracle up automatically.
+
+**Result (120-min horizon, vs the §6c table's baselines):** recorded
+below on completion of the run.
+
+Remaining Phase 6 items: (5) metrics completion (gap-to-oracle wiring in
+the summary — data now exists; Phulpin fairness from `bme_phi_zone_mw`;
+oscillation indicator); (6) MC campaign (seeds, parquet; ε-sweep per 6b;
+ledger = §3.10.2 premise data). Final ladder table at the D2-final
+pairing = ladder `--rung all` once (5) lands; V5-Φ oracle = optional
+extra bound thereafter.

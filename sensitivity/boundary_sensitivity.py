@@ -221,7 +221,13 @@ class RestrictedSensitivityProvider:
                 self.pinned_boundary_buses.append(b)
             else:
                 self._b_pq.append(b)
-        if not self._b_pq:
+        # An EMPTY registry is the legitimate single-area degenerate mode
+        # (spec §3.5 test 1 / the Phase 6 oracle rung): H_{b,i} then has
+        # zero rows and the price term vanishes. A NON-empty registry in
+        # which no bus carries a voltage state, however, means every
+        # boundary bus is pinned — that would silence the exchange and
+        # stays a hard error.
+        if topology.registry and not self._b_pq:
             raise ValueError(
                 "No boundary bus has a voltage state in the Jacobian — "
                 "H_{b,i} would be identically zero."

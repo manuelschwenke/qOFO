@@ -1017,8 +1017,36 @@ H_{b,i}; the all-pinned fail-fast for non-empty registries stands).
 Regression: 37 tests green (boundary sensitivity, gradient identity,
 discrete hygiene); the ladder figures pick the oracle up automatically.
 
-**Result (120-min horizon, vs the §6c table's baselines):** recorded
-below on completion of the run.
+**Scenario-identity bug caught by the first 120-min run (2026-07-05):**
+the zonal generator P dispatch received the CONTROL partition, so the
+single-zone flag silently changed the *plant scenario* (one system-wide
+residual-load balance instead of three per-zone ones: Φ_first 64 vs ~21
+MW on every other rung; losses nearly doubled). Fixed: the dispatch now
+always uses the fixed 3-area partition (`dispatch_zone_map`), the
+single-zone flag affects the control layer only (spec §6 shared-scenario
+rule). Verification: post-fix Φ_first = 19.65 MW — in family. The bad
+run's artefacts were overwritten by the re-run.
+
+**Result (120-min horizon, D2-final pairing, D6 hygiene):**
+
+| rung | losses last-hr [MW] | Δ vs none | V range [pu] | switches | ledger acc/ε-rej/slot |
+|---|---|---|---|---|---|
+| none | 60.65 | — | [0.978, 1.049] | — | — |
+| bme (distributed) | 57.379 | −5.4 % | [1.002, 1.062] | 10 | — |
+| **oracle** | **57.380** | −5.4 % | [1.005, 1.065] | 23 | 10/0/0 |
+
+**Headline finding (spec claim 2): the distributed BME closes ≈100 % of
+the gap to the centralised oracle on this scenario** — sustained losses
+identical to three decimals, near-identical voltage envelopes — and with
+FEWER discrete switches (the oracle, with no slotting and no staleness,
+commits 23 tap moves vs the distributed rung's 10; its ledger shows the
+single-decision-maker signature 10 accepted / 0 slot-blocked). The runs
+differ genuinely (trajectories, ledgers, runtimes — 681 s vs 410 s);
+they converge to the same continuous optimum. Caveats, recorded
+honestly: one scenario, one seed; the oracle keeps the per-zone G_w
+blocks (same step logic per D8 — it is the *decomposition* bound, not a
+retuned central controller nor an OPF bound); the MC campaign (item 6)
+tests whether the ≈100 % closure survives delay/drop/H-error sweeps.
 
 Remaining Phase 6 items: (5) metrics completion (gap-to-oracle wiring in
 the summary — data now exists; Phulpin fairness from `bme_phi_zone_mw`;

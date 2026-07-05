@@ -629,24 +629,41 @@ def run_multi_tso_dso(
         for z, buses in zone_map.items()
     }
 
-    # Extend zone bus indices to include HV sub-network buses (for dispatch / ownership)
-    for hv in meta.hv_networks:
-        _z_hv = _hv_zone(hv)
-        zone_map[_z_hv] = sorted(set(zone_map[_z_hv]) | set(hv.bus_indices))
+    def _extend_zone_map_for_dispatch(zmap, hv_zone_of) -> None:
+        """Extend a zone map in place with HV sub-network buses and
+        machine-transformer LV terminal buses (dispatch / ownership)."""
+        for hv in meta.hv_networks:
+            _z_hv = hv_zone_of(hv)
+            zmap[_z_hv] = sorted(set(zmap[_z_hv]) | set(hv.bus_indices))
+        for tidx, gidx in zip(meta.machine_trafo_indices,
+                              meta.machine_trafo_gen_map):
+            if gidx < 0:
+                continue
+            lv_bus = int(net.trafo.at[tidx, "lv_bus"])
+            hv_bus = int(net.trafo.at[tidx, "hv_bus"])
+            for z, buses in zmap.items():
+                if hv_bus in set(buses):
+                    if lv_bus not in set(buses):
+                        zmap[z] = sorted(set(zmap[z]) | {lv_bus})
+                    break
 
-    # Extend zone map with machine transformer LV buses so that
-    # compute_zonal_gen_dispatch() can assign generators on LV terminal
-    # buses (e.g. 10.5 kV) to the correct zone via the HV (grid) bus.
-    for tidx, gidx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
-        if gidx < 0:
-            continue
-        lv_bus = int(net.trafo.at[tidx, "lv_bus"])
-        hv_bus = int(net.trafo.at[tidx, "hv_bus"])
-        for z, buses in zone_map.items():
-            if hv_bus in set(buses):
-                if lv_bus not in set(buses):
-                    zone_map[z] = sorted(set(zone_map[z]) | {lv_bus})
-                break
+    # Extend zone bus indices with HV sub-network buses and machine LV
+    # terminal buses (for dispatch / ownership).
+    _extend_zone_map_for_dispatch(zone_map, _hv_zone)
+
+    # Scenario-side zone map for the zonal P dispatch: ALWAYS the fixed
+    # 3-area partition. The single-zone (oracle) flag affects the CONTROL
+    # layer only — feeding it into compute_zonal_gen_dispatch would
+    # balance one system-wide residual instead of three per-zone ones and
+    # thereby change the PLANT scenario (measured on the first oracle
+    # attempt: losses nearly doubled). Spec §6: rungs share ONE scenario.
+    if config.single_zone_partition:
+        dispatch_zone_map, _ = fixed_zone_partition_ieee39(net, verbose=False)
+        _extend_zone_map_for_dispatch(
+            dispatch_zone_map, lambda hv: int(hv.zone),
+        )
+    else:
+        dispatch_zone_map = zone_map
 
     # HV-network lookup for DSO controller init
     hv_info_map: Dict[str, HVNetworkInfo] = {hv.net_id: hv for hv in meta.hv_networks}
@@ -1747,7 +1764,7 @@ def run_multi_tso_dso(
             }
             _t = perf_counter()
             gen_dispatch = compute_zonal_gen_dispatch(
-                net, profiles, zone_map,
+                net, profiles, dispatch_zone_map,
                 gen_p_min_mw=_gen_p_min_dict,
             )
             apply_gen_dispatch(net, gen_dispatch, start_time)

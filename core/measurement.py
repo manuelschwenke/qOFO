@@ -84,6 +84,11 @@ class Measurement:
         Measured reactive power on each tie line at the in-zone
         endpoint, in load convention: positive = Q flowing FROM the
         endpoint bus INTO the line (i.e. leaving the zone).
+    tie_line_p_mw : NDArray[np.float64]
+        Measured active power on each tie line at the same in-zone
+        endpoint and in the same load convention as ``tie_line_q_mvar``.
+        Consumed by the SBX standard-schedule computation (p_sched);
+        empty when not populated.
     """
 
     def __init__(
@@ -113,6 +118,7 @@ class Measurement:
         oltc3w_indices: NDArray[np.int64] = None,
         oltc3w_tap_positions: NDArray[np.int64] = None,
         voltage_angles_deg: NDArray[np.float64] = None,
+        tie_line_p_mw: NDArray[np.float64] = None,
     ) -> None:
         """
         Initialise a Measurement instance.
@@ -194,6 +200,16 @@ class Measurement:
         )
         self.tie_line_q_mvar = (
             tie_line_q_mvar if tie_line_q_mvar is not None
+            else np.array([], dtype=np.float64)
+        )
+        # ── SBX: tie-line active power at the same in-zone endpoint ────────
+        # Same length, ordering and load convention as ``tie_line_q_mvar``
+        # (positive = P flowing FROM the endpoint bus INTO the line, i.e.
+        # leaving the zone).  Consumed by the SBX standard-schedule
+        # computation (p_sched, STATUS_SBX.md gate G2); empty when not
+        # populated.  Additive, optional — no existing caller changes.
+        self.tie_line_p_mw = (
+            tie_line_p_mw if tie_line_p_mw is not None
             else np.array([], dtype=np.float64)
         )
         # ── Stage-2: V_ref setpoint for grid-following sgens ───────────────
@@ -436,6 +452,7 @@ def measure_zone_tso(net, zone_def, it: int) -> "Measurement":
     )
     if tie_line_indices:
         tie_q = np.zeros(len(tie_line_indices), dtype=np.float64)
+        tie_p = np.zeros(len(tie_line_indices), dtype=np.float64)
         for k, (li, endp) in enumerate(zip(tie_line_indices, tie_line_endpoint_buses)):
             if li not in net.res_line.index:
                 continue
@@ -443,8 +460,10 @@ def measure_zone_tso(net, zone_def, it: int) -> "Measurement":
             to_bus = int(net.line.at[li, "to_bus"])
             if int(endp) == from_bus:
                 tie_q[k] = float(net.res_line.at[li, "q_from_mvar"])
+                tie_p[k] = float(net.res_line.at[li, "p_from_mw"])
             elif int(endp) == to_bus:
                 tie_q[k] = float(net.res_line.at[li, "q_to_mvar"])
+                tie_p[k] = float(net.res_line.at[li, "p_to_mw"])
             else:
                 raise ValueError(
                     f"Tie-line {li} endpoint bus {endp} matches neither "
@@ -454,6 +473,7 @@ def measure_zone_tso(net, zone_def, it: int) -> "Measurement":
         tie_endp_arr = np.array(tie_line_endpoint_buses, dtype=np.int64)
     else:
         tie_q = np.array([], dtype=np.float64)
+        tie_p = np.array([], dtype=np.float64)
         tie_lines_arr = np.array([], dtype=np.int64)
         tie_endp_arr = np.array([], dtype=np.int64)
 
@@ -488,6 +508,7 @@ def measure_zone_tso(net, zone_def, it: int) -> "Measurement":
         tie_line_indices=tie_lines_arr,
         tie_line_endpoint_buses=tie_endp_arr,
         tie_line_q_mvar=tie_q,
+        tie_line_p_mw=tie_p,
         der_vm_pu_ref=der_vm_ref_zone,
     )
 

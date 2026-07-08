@@ -111,16 +111,18 @@ BME_EPSILON_SWITCH = 5.2e3
 BME_SWITCH_COST_OLTC = 1.0e3
 BME_SWITCH_COST_SHUNT = 5.2e3
 # D2 pairing (Phase 6c sweep, 2026-07-03, chosen by Manuel): band edges
-# centred on the ~1.03 pu operating schedule, (1.01, 1.05), w_band = 1e4.
-# Nine-point sweep at the 120-min horizon: this pairing gave −5.4 %
-# last-hour losses (vs −3.9 % for the spec-default (0.97, 1.03)×1e3),
-# V ∈ [1.002, 1.062] with the best post-trip voltage support (lower
-# hinge lifts the dip to 1.002 vs baseline 0.978) and the healthiest
-# solve times. Full table: docs/BME_STATUS.md §6c. bme_loss stays the
-# w_band = 0 ablation rung.
+# centred on the ~1.03 pu operating schedule, w_band = 1e4. REVISED
+# 2026-07-05 (Manuel, after the 6e finding): edges tightened
+# (1.01, 1.05) → (1.02, 1.04). Under the wide band the coordinated
+# rungs rode the upper edge for loss harvest and the realised hinge
+# cost exceeded the in-scope loss gain (last-hour Φ ranking inverted,
+# none < bme < oracle — BME_STATUS.md §6e). The ±0.01 pu band prices
+# edge-riding immediately and keeps φ_band a genuine security margin.
+# Full 6c table: docs/BME_STATUS.md §6c. bme_loss stays the w_band = 0
+# ablation rung.
 BME_W_BAND = 1.0e4
-BME_V_SOFT_MIN = 1.01
-BME_V_SOFT_MAX = 1.05
+BME_V_SOFT_MIN = 1.02
+BME_V_SOFT_MAX = 1.04
 
 RUNGS = ("none", "vref", "bme", "bme_loss", "oracle")
 

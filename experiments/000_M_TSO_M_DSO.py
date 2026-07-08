@@ -262,7 +262,8 @@ def make_config() -> MultiTSOConfig:
         dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
         # ── TSO-TSO tie coordination (gradient-exchange; see Ch.7 §7.5) ──
         enable_tie_coordination=False,
-        zone_v_setpoints_pu={1: 1.05, 2: 1.03, 3: 1.04},  # divergent per-zone schedule (win-win case)
+        coordination_mode='sbx',
+        zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},  # divergent per-zone schedule (win-win case)
         g_z_q_tie=0.0,            # OPTIONAL orthogonal guardrail: enforce Q_tie soft cap (0 = off)
         tie_q_band_mvar=100.0,     # +/- soft cap on per-tie reactive flow [Mvar] (only if g_z_q_tie>0)
         tie_grad_step=1,        # Newton-step fraction (g_v-agnostic)
@@ -272,13 +273,13 @@ def make_config() -> MultiTSOConfig:
         tie_dvref_max=0.05,       # clip on |dV_ref| [p.u.]
         tie_coord_period_s=900.0, # outer loop every 5th TSO step (5 x 180s) -- timescale separation
         # ── TSO weights (w-shift closed-loop curvature) ──
-        g_w_der=100,
+        g_w_der=50,
         g_w_gen=5e9,
         g_w_pcc=200,
-        g_w_tso_oltc=5E3, # 1E4
+        g_w_tso_oltc=5E3, #5E3, # 1E4
         # shunt
-        install_tso_tertiary_shunts=False,
-        shunt_dispatch="off", #"integrator"
+        install_tso_tertiary_shunts=True,
+        shunt_dispatch="integrator", #"integrator"
         g_w_tso_shunt=12000,
         tso_shunt_kind="msc_msr",  # one capacitor + one reactor bank per DSO
         tso_shunt_msc_n_levels=2,  # MSC steps 0..N
@@ -308,12 +309,12 @@ def make_config() -> MultiTSOConfig:
         verbose=1,
         # Live plotting on (controller + cascade); system overview off.
         live_plot_controller=True,
-        live_plot_cascade=False,
+        live_plot_cascade=True,
         live_plot_system=False,
         live_plot_tracking=False,
         live_plot_tie_coordination=False,
-        local_sensitivities_tso=True,
-        local_sensitivities_dso=True,
+        local_sensitivities_tso=False,
+        local_sensitivities_dso=False,
         # Preconditioning of g_w
         precondition_g_w = False,  # turn it on
         precondition_lambda_target = 0.5,  # target λ_max(M); 0.9 = well-damped, <2 stable

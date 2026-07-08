@@ -16,7 +16,7 @@ here with dates.
 | 3 | Coordination bus and signals | ✅ 2026-07-02 (15 tests green; see Phase 3 section) |
 | 4 | Controller integration | ✅ 2026-07-03 — hard gate PASSED (incl. slack columns); runner wired; mode="none" and vref BITWISE identical to the pre-BME baseline; bme end-to-end smoke runs (see Phase 4 section) |
 | 5 | Discrete hygiene | ✅ 2026-07-03 (14 tests green; slotting + ε-acceptance + ledger + notices wired; two documented carve-outs — see Phase 5 section) |
-| 6 | Evaluation ladder + Monte Carlo | ❌ not started |
+| 6 | Evaluation ladder + Monte Carlo | ✅ 2026-07-07 (items 1–6; MC campaign complete — §6f: oracle inverts OOD, d=0 unstable, H-error graceful) |
 | 7 | Analysis artefacts | ❌ not started |
 
 ---
@@ -1129,3 +1129,141 @@ counter-switch scenario; candidate extra ablation from the 2026-07-05
 discussion: selfish-Φ_i rung via `bme_drop_probability=1.0` — price
 term suppressed, isolates the μ-exchange contribution). V5-Φ oracle =
 optional extra bound thereafter.
+
+### 6f — MC campaign (item 6) 🚧 launched 2026-07-06
+
+Daily log: `docs/daily_log/2026-07-06_bme_phase6_mc_campaign.md`.
+(Implementation 2026-07-05, interrupted by a machine restart before
+validation; validated and launched 2026-07-06.)
+
+**§6e calibration question RESOLVED (Manuel, 2026-07-05):** D2 edges
+tightened (1.01, 1.05) → **(1.02, 1.04)** at unchanged w_band = 1e4
+(`011_BME_LADDER.py`). The wide band let the coordinated rungs ride the
+upper edge for loss harvest (the §6e Φ-ranking inversion); the
+±0.01 pu corridor prices edge-riding immediately and restores φ_band as
+a genuine security margin. w_Φ = 1e5 and the D6 constants stand; the MC
+ε-sweep maps the ε trade-off around them.
+
+**New H-error axis** (§6 "sensitivity error"): config
+`bme_h_error_rel_sigma` / `bme_h_error_seed` (σ > 0 without a seed
+fail-fasts); `PerturbedZoneBoundaryView`
+(`sensitivity/boundary_sensitivity.py`) serves
+H̃_{b,i} = H_{b,i} ∘ (1 + σ·Ξ_z) with Ξ_z drawn ONCE per run per zone
+(systematic identification error). The same wrapped view feeds the
+price projection AND the switch-notice prediction; scope deliberately
+excludes the zones' own MIQP models (004's trade-off), the μ
+computation (zone-internal) and the metric objective — the axis
+isolates the coordination channel's robustness to error in the one
+supra-local quantity (§0.5 concession row). Test:
+`tests/test_bme_h_error.py`; validation sweep incl. boundary
+sensitivity, identity hard gate, hygiene: 40 green.
+
+**Campaign design** (`experiments/012_BME_MONTECARLO.py`; Manuel
+2026-07-05: full ~75-run design, run autonomously): paired scenarios
+(seed → 006-generator start time + contingency schedule, shared across
+all arms of a scenario); Phase A = 10 accepted scenarios ×
+{none, bme nominal, oracle}, drop-and-replace; Phase B = one-factor
+sweeps around the nominal (d=1, β=0.3, drop=0, ε=5.2e3, σ_H=0) on the
+first 3 accepted seeds: d ∈ {0,2,5}, β ∈ {0.1,0.6,1.0},
+drop ∈ {0.05,0.2}, ε ∈ {0,1e3,2.6e4}, σ_H ∈ {0.05,0.15,0.3} + the
+selfish-Φ_i ablation (drop=1.0). 120-min horizon; metrics identical to
+011. Outputs: `results/012_BME_MC/` (per-run JSON/CSV/NPZ staging,
+runs/ledger parquet, `schedules.csv`, generated `MC_SUMMARY.md` incl.
+the §3.10.2 premise statistics P(realised ΔΦ ≤ −ε/2 | accepted)).
+
+**Pre-launch fixes** (both this session): (i) `summarize()` premise
+statistics crashed on last-tick ledger entries (deferred realised-ΔΦ
+never filled → empty CSV strings; now `pd.to_numeric(errors="coerce")`);
+(ii) resume-unit horizon collision — the 30-min smoke artefacts of seed
+20260705 (= BASE_SEED) would have been absorbed into the 120-min
+campaign; `_done()` is now horizon-aware and the smoke artefacts moved
+to `smoke_30min/`.
+
+**Smoke validation** (1 scenario, 30 min): all three arms converge
+(none 34 s / bme 178 s / oracle 551 s), full staging + summary
+pipeline exercised, 13 ledger entries pooled.
+
+**Campaign COMPLETE 2026-07-07** (launched 2026-07-06, `--jobs 4`,
+~19 h wall-clock). 75 converged runs: 10 accepted scenarios × 3 base
+arms (11 attempts — seed 20260710's schedule NaN'd the private MIQP
+gradient on ALL THREE arms incl. `none`, i.e. a scenario-generator
+pathology, dropped by design) + 45/45 sweep runs converged. Artefacts:
+`results/012_BME_MC/` — `MC_SUMMARY.md`, `runs.parquet`,
+`ledger.parquet` (2 011 entries), `schedules.csv`, per-run staging.
+
+**Base arms (10 paired scenarios, last-hour means):**
+
+| arm | losses [MW] | Φ [MW] | OLTC | AR pole |
+|---|---|---|---|---|
+| none | 50.80 ± 31.18 | 44.68 ± 33.46 | 0.2 | 0.985 |
+| bme | 49.60 ± 29.33 | 42.48 ± 30.14 | 12.4 | 0.968 |
+| oracle | 51.69 ± 29.44 | **132.19 ± 33.88** | 34.3 | 0.721 |
+
+paired bme loss reduction vs none: **+1.06 % ± 2.41**;
+paired bme − oracle losses: **−2.09 ± 0.65 MW** (bme better on 10/10).
+
+**Readings (established facts on this campaign):**
+
+1. **bme vs none is scenario-dependent with a clear structure**: light
+   scenarios (last-hour losses ≈15–30 MW) slightly negative
+   (−0.7…−2.0 %), heavy scenarios (≥44 MW) positive (+0.2…+5.1 %,
+   the heaviest scenario +5.05 %) — coordination pays under stress.
+   On the COMMON objective Φ (the quantity BME actually descends) bme
+   improves on 8/10 scenarios including the light ones.
+2. **The oracle finding INVERTS out-of-distribution.** The greedy
+   centralised per-step Φ-MIQP is worse than `none` on losses on
+   9/10 random scenarios and catastrophic on the uniform Φ metric
+   (132 vs 45 MW — dominated by realised hinge cost; 34.3 taps vs
+   bme's 12.4, unbraked single-decision-maker signature). The 6d/6e
+   "≈100 % gap closure" was a property of the hand-built 005 scenario;
+   across random scenarios the DISTRIBUTED controller beats its own
+   centralised greedy bound on every scenario. Interpretation
+   (hypothesis, for the chapter): delay + β-filter + slotting act as
+   STABILISERS of per-step greedy Φ descent, not merely communication
+   concessions. Caveats: the D8 oracle keeps per-zone G_w blocks
+   (decomposition bound, not a retuned central controller, not OPF);
+   the tightened (1.02, 1.04) band is violated somewhere at every step
+   on EVERY rung (band_viol_frac ≡ 1.0 on random scenarios) so the
+   hinge is permanently active — the oracle's aggressive discrete
+   commits are the visible failure channel.
+3. **Delay: a stability boundary, not monotone graceful degradation.**
+   d=1 (nominal) and d=5 stable on all three sweep seeds; **d=0
+   unstable on 2/3** (Φ 55.0/88.0 MW, 33 taps); **d=2 unstable on 1/3**
+   (86.2 MW, 35 taps). Synchronous same-step exchange is the
+   pathological case (v1-price failure family; §3.10.1 contraction).
+   §3.10.3's "degrades gracefully with d" holds for d ≥ 1 at β = 0.3,
+   with a switching-count cost at d=5 (16–17 taps).
+4. **β flat** (≤0.4 MW spread); **drops robust** to p = 0.2
+   (hold-last-filtered policy: −0.01 MW vs nominal); **selfish-Φ_i
+   ablation (p = 1.0) costs only +0.10 MW losses / +0.32 MW Φ** on the
+   three sweep seeds — but those are the three LIGHT scenarios (first
+   accepted), where coordination value is small to begin with. Sweep
+   coverage caveat recorded: the heavy-scenario regime (+3…+5 %) is
+   not probed by Phase B.
+5. **H-error graceful** (the axis this campaign introduced):
+   +0.06 / +0.13 / +0.37 MW at σ = 5/15/30 % (worst case ≤1.6 % of the
+   bme nominal) — the sensitivity-error half of §3.10.3 is supported;
+   the coordination channel tolerates substantial systematic
+   mis-identification of H_{b,i}.
+6. **ε-sweep**: clean monotone switching control — 14.0 / 11.3 / 8.3 /
+   7.0 taps at ε = 0 / 1e3 / 5.2e3 / 2.6e4 with ≤0.03 MW loss spread;
+   ε governs switching essentially for free here. Note the `none`
+   baseline commits ~0.2 taps on random scenarios (vs 5 on the 005
+   case study), so spec headline claim 4 ("at or below baseline")
+   is not meaningful on this scenario family; the ε ↔ switching curve
+   itself is the deliverable.
+7. **§3.10.2 premise statistic is WEAK as measured**: over 455 pooled
+   accepted switches, P(realised ΔΦ ≤ −ε/2 | accepted) = 0.45, sign
+   agreement 0.47. Measurement confound recorded: realised ΔΦ =
+   Φ_global(k+1) − Φ_global(k) includes exogenous drift (ramps,
+   contingencies) that dominates a single switch's effect on random
+   scenarios — the clean-window 6b value was 1.00, the
+   contingency-window value 0.78. The honest fix is a counterfactual
+   realised-ΔΦ (parallel frozen-integer step) — future work; the
+   statistic is reported as measured, not reinterpreted.
+
+Daily logs: `2026-07-06_bme_phase6_mc_campaign.md` (implementation,
+fixes, launch), `2026-07-07_bme_mc_results.md` (results). Phase 6 is
+COMPLETE with this; Phase 7 (analysis artefacts) is next, and the
+oracle-inversion + d=0 instability findings should shape its figure
+set (per-scenario paired panels; (d, β) stability map candidate).

@@ -1,0 +1,317 @@
+"""
+sbx/contract.py
+===============
+Agreed contract data per corridor (plan v2 §2.1; Phase 2).
+
+Symbol map (code ↔ plan §2.1)
+-----------------------------
+* ``v_std_a_pu`` / ``v_std_b_pu``   ↔ v_std[ℓ, end] — agreed terminal
+                                      voltage pair per tie line.  Bilateral
+                                      contract data by construction:
+                                      neither side can move it
+                                      unilaterally.  Default = converged
+                                      base-case values rounded to
+                                      ``V_STD_DECIMALS`` decimals.
+* ``q_band_mvar``                   ↔ standard-range half-width (tier 1).
+* ``dq_quant_rate_mvar_per_15min``  ↔ schedule-change quantum RATE;
+                                      per-cycle quantum
+                                      ``dq_quant_mvar`` = rate ·
+                                      (t_cycle / 15 min).
+* ``dq_contract_max_mvar``          ↔ cap on |q_sched − q_std|.
+* ``dq_min_deal_mvar``              ↔ dust threshold of Step-3 matching
+                                      (carried in the contract so both
+                                      sides match deterministically).
+* ``p_surplus_eur_per_mvarh``       ↔ fixed surplus price (tier 2).
+* ``kappa_penalty``                 ↔ tier-3 multiple.
+* ``k_sched`` / ``t_cycle_min``     ↔ t_cycle, the cycle length in OFO
+                                      iterations / minutes (Phase 0 step
+                                      semantics: 5 · 180 s = 15 min).
+* ``q_std_mvar()``                  ↔ Step 1: q_std = Σ_ℓ q_flow(v_std[ℓ,A],
+                                      v_std[ℓ,B], p_sched[ℓ]) — a pure
+                                      function both sides evaluate
+                                      identically each cycle.
+
+Contract immutability: frozen dataclass with scalar/tuple fields only —
+mutation attempts raise ``dataclasses.FrozenInstanceError`` (Phase 2
+acceptance).
+
+Author: Manuel Schwenke / Claude Code
+Date: 2026-07-07 (SBX Phase 2)
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Sequence, Tuple
+
+import pandapower as pp
+
+from sbx.config import SBXConfig
+from sbx.corridor import Corridor, corridor_q_flow
+from sbx.fail import rep1
+
+#: Decimal places of the default contract voltages.  Decision trail
+#: (STATUS_SBX.md §1.3, Manuel 2026-07-07): the plan's 1e−3 pu shifted
+#: q_std by up to 4 Mvar (|b| ≈ 40–75 pu → 4–7.5 Mvar per mpu of
+#: voltage-difference error); 1e−4 pu (tried first) failed golden test 4
+#: marginally on corridor (1,3) (−0.562 vs 0.500 Mvar tolerance); 1e−5 pu
+#: passes every corridor with ≥ 85 % margin (worst deviation 0.067 Mvar).
+V_STD_DECIMALS = 5
+
+
+@dataclass(frozen=True)
+class CorridorContract:
+    """Frozen contract data of one corridor (plan §2.1).
+
+    Per-line tuples are in the corridor's line order (ascending
+    ``line_idx``); ``line_indices`` pins that order so any misalignment
+    with a :class:`~sbx.corridor.Corridor` fails fast.
+    """
+
+    area_a: int
+    area_b: int
+    line_indices: Tuple[int, ...]
+    v_std_a_pu: Tuple[float, ...]
+    v_std_b_pu: Tuple[float, ...]
+    q_band_mvar: float
+    dq_quant_rate_mvar_per_15min: float
+    dq_contract_max_mvar: float
+    dq_min_deal_mvar: float
+    p_surplus_eur_per_mvarh: float
+    kappa_penalty: float
+    k_sched: int
+    t_cycle_min: float
+    v_std_schedule: Optional[
+        Tuple[Tuple[float, Tuple[float, ...], Tuple[float, ...]], ...]
+    ] = None
+    """Optional PLANNING-ANCHORED contract-voltage schedule (v3,
+    2026-07-08): ordered ``(t_from_s, v_std_a_pu, v_std_b_pu)``
+    intervals in scenario time. The first interval must start at 0 s
+    (total coverage), the last extends to the horizon; the constant
+    ``v_std_*_pu`` fields must equal the first interval (the t = 0
+    view). ``None`` keeps the v2 constant-snapshot semantics."""
+
+    def __post_init__(self) -> None:
+        if self.area_a >= self.area_b:
+            rep1("CorridorContract requires area_a < area_b",
+                 area_a=self.area_a, area_b=self.area_b)
+        n = len(self.line_indices)
+        if n == 0:
+            rep1("CorridorContract must cover at least one tie line",
+                 corridor=(self.area_a, self.area_b))
+        if len(self.v_std_a_pu) != n or len(self.v_std_b_pu) != n:
+            rep1("contract voltage tuples must align with line_indices",
+                 corridor=(self.area_a, self.area_b),
+                 n_lines=n, n_v_a=len(self.v_std_a_pu),
+                 n_v_b=len(self.v_std_b_pu))
+        for name, values in (("v_std_a_pu", self.v_std_a_pu),
+                             ("v_std_b_pu", self.v_std_b_pu)):
+            for v in values:
+                if not (math.isfinite(v) and v > 0.0):
+                    rep1("contract voltages must be finite and positive",
+                         corridor=(self.area_a, self.area_b),
+                         field=name, values=values)
+        for name in ("q_band_mvar", "dq_quant_rate_mvar_per_15min",
+                     "dq_contract_max_mvar", "p_surplus_eur_per_mvarh",
+                     "t_cycle_min"):
+            if getattr(self, name) <= 0.0:
+                rep1(f"contract field {name} must be positive",
+                     corridor=(self.area_a, self.area_b),
+                     **{name: getattr(self, name)})
+        if self.dq_min_deal_mvar < 0.0:
+            rep1("dq_min_deal_mvar must be non-negative",
+                 corridor=(self.area_a, self.area_b),
+                 dq_min_deal_mvar=self.dq_min_deal_mvar)
+        if self.kappa_penalty < 1.0:
+            rep1("kappa_penalty must be >= 1",
+                 corridor=(self.area_a, self.area_b),
+                 kappa_penalty=self.kappa_penalty)
+        if self.k_sched < 1:
+            rep1("k_sched must be a positive iteration count",
+                 corridor=(self.area_a, self.area_b), k_sched=self.k_sched)
+
+        if self.v_std_schedule is not None:
+            n = len(self.line_indices)
+            if len(self.v_std_schedule) == 0:
+                rep1("v_std_schedule must not be empty (use None for the "
+                     "constant-snapshot contract)",
+                     corridor=(self.area_a, self.area_b))
+            prev_t = None
+            for entry in self.v_std_schedule:
+                if len(entry) != 3:
+                    rep1("v_std_schedule entries must be "
+                         "(t_from_s, v_std_a, v_std_b)",
+                         corridor=(self.area_a, self.area_b), entry=entry)
+                t_from, va, vb = entry
+                if not math.isfinite(t_from):
+                    rep1("v_std_schedule t_from_s must be finite",
+                         corridor=(self.area_a, self.area_b), entry=entry)
+                if prev_t is None and t_from != 0.0:
+                    rep1("v_std_schedule must start at t = 0 s (total "
+                         "coverage of the scenario)",
+                         corridor=(self.area_a, self.area_b),
+                         first_t_from_s=t_from)
+                if prev_t is not None and t_from <= prev_t:
+                    rep1("v_std_schedule intervals must be strictly "
+                         "ascending", corridor=(self.area_a, self.area_b),
+                         t_from_s=t_from, previous=prev_t)
+                prev_t = t_from
+                if len(va) != n or len(vb) != n:
+                    rep1("v_std_schedule entry arity must match the "
+                         "corridor's line list",
+                         corridor=(self.area_a, self.area_b),
+                         t_from_s=t_from, n_lines=n,
+                         n_a=len(va), n_b=len(vb))
+                for v in tuple(va) + tuple(vb):
+                    if not (math.isfinite(v) and v > 0.0):
+                        rep1("v_std_schedule voltages must be finite and "
+                             "positive",
+                             corridor=(self.area_a, self.area_b),
+                             t_from_s=t_from)
+            t0, va0, vb0 = self.v_std_schedule[0]
+            if (tuple(va0) != tuple(self.v_std_a_pu)
+                    or tuple(vb0) != tuple(self.v_std_b_pu)):
+                rep1("the constant v_std fields must equal the schedule's "
+                     "first interval (the t = 0 view)",
+                     corridor=(self.area_a, self.area_b),
+                     v_std_a_pu=self.v_std_a_pu, schedule_t0_a=va0)
+
+    @property
+    def n_lines(self) -> int:
+        return len(self.line_indices)
+
+    def v_std_at(
+        self, time_s: float
+    ) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+        """Active contract-voltage pair at scenario time ``time_s`` (v3).
+
+        Piecewise-constant lookup over ``v_std_schedule``; without a
+        schedule the constant fields apply at every time.  Negative
+        times are a caller error.
+        """
+        if not math.isfinite(time_s) or time_s < 0.0:
+            rep1("v_std_at needs a finite non-negative scenario time",
+                 corridor=(self.area_a, self.area_b), time_s=time_s)
+        if self.v_std_schedule is None:
+            return self.v_std_a_pu, self.v_std_b_pu
+        active = self.v_std_schedule[0]
+        for entry in self.v_std_schedule:
+            if entry[0] <= time_s:
+                active = entry
+            else:
+                break
+        return tuple(active[1]), tuple(active[2])
+
+    @property
+    def dq_quant_mvar(self) -> float:
+        """Per-cycle schedule-change quantum [Mvar] (rate-scaled, §2.1)."""
+        return self.dq_quant_rate_mvar_per_15min * (self.t_cycle_min / 15.0)
+
+    def assert_matches(self, corridor: Corridor) -> None:
+        """Fail fast unless the contract covers exactly this corridor."""
+        if (corridor.area_a, corridor.area_b) != (self.area_a, self.area_b):
+            rep1("contract and corridor cover different area pairs",
+                 contract=(self.area_a, self.area_b),
+                 corridor=(corridor.area_a, corridor.area_b))
+        corr_lines = tuple(ln.line_idx for ln in corridor.lines)
+        if corr_lines != self.line_indices:
+            rep1("contract and corridor line lists differ",
+                 contract_lines=self.line_indices,
+                 corridor_lines=corr_lines)
+
+
+def build_default_contract(
+    corridor: Corridor,
+    net: pp.pandapowerNet,
+    config: SBXConfig,
+    *,
+    v_std_schedule: Optional[Sequence] = None,
+) -> CorridorContract:
+    """Default contract from the converged base case (plan §2.1).
+
+    ``v_std`` per tie terminal = the base-case power-flow voltages rounded
+    to :data:`V_STD_DECIMALS` decimals; all constants from ``config``.
+    ``net`` must hold a converged power flow (``net.res_bus``); a missing
+    or stale result raises.
+
+    v3: when ``v_std_schedule`` is given (the planning pre-pass output,
+    ordered ``(t_from_s, v_std_a, v_std_b)`` intervals), PLANNING
+    REPLACES MEASUREMENT — the snapshot step is skipped entirely and the
+    constant fields take the schedule's first interval.
+    """
+    if v_std_schedule is not None:
+        sched = tuple(
+            (float(t), tuple(round(float(v), V_STD_DECIMALS) for v in va),
+             tuple(round(float(v), V_STD_DECIMALS) for v in vb))
+            for t, va, vb in v_std_schedule
+        )
+        v_std_a = list(sched[0][1])
+        v_std_b = list(sched[0][2])
+    else:
+        sched = None
+        if not hasattr(net, "res_bus") or len(net.res_bus) != len(net.bus):
+            rep1("build_default_contract needs a converged power flow on "
+                 "the base-case net (net.res_bus incomplete)",
+                 corridor=(corridor.area_a, corridor.area_b),
+                 n_res_bus=len(getattr(net, "res_bus", ())),
+                 n_bus=len(net.bus))
+        v_std_a, v_std_b = [], []
+        for ln in corridor.lines:
+            v_a = float(net.res_bus.at[ln.bus_a, "vm_pu"])
+            v_b = float(net.res_bus.at[ln.bus_b, "vm_pu"])
+            if not (math.isfinite(v_a) and math.isfinite(v_b)):
+                rep1("base-case terminal voltage is non-finite",
+                     line_idx=ln.line_idx, v_a=v_a, v_b=v_b)
+            v_std_a.append(round(v_a, V_STD_DECIMALS))
+            v_std_b.append(round(v_b, V_STD_DECIMALS))
+
+    return CorridorContract(
+        v_std_schedule=sched,
+        area_a=corridor.area_a,
+        area_b=corridor.area_b,
+        line_indices=tuple(ln.line_idx for ln in corridor.lines),
+        v_std_a_pu=tuple(v_std_a),
+        v_std_b_pu=tuple(v_std_b),
+        q_band_mvar=config.q_band_mvar,
+        dq_quant_rate_mvar_per_15min=config.dq_quant_rate_mvar_per_15min,
+        dq_contract_max_mvar=config.dq_contract_max_mvar,
+        dq_min_deal_mvar=config.dq_min_deal_mvar,
+        p_surplus_eur_per_mvarh=config.p_surplus_eur_per_mvarh,
+        kappa_penalty=config.kappa_penalty,
+        k_sched=config.k_sched,
+        t_cycle_min=config.t_cycle_min,
+    )
+
+
+def q_std_mvar(
+    contract: CorridorContract,
+    corridor: Corridor,
+    p_sched_mw: Sequence[float],
+    *,
+    time_s: Optional[float] = None,
+    delta_max_rad: float = 0.6,
+) -> float:
+    """Step-1 standard flow [Mvar] at the reference end A (plan §2.2).
+
+    ``q_std = Σ_ℓ q_flow(v_std[ℓ,A], v_std[ℓ,B], p_sched[ℓ])`` — a pure
+    function of the frozen contract and the cycle's ``p_sched``; both
+    sides evaluate it identically (computed, never communicated).
+
+    v3: with a planning schedule on the contract, ``time_s`` (scenario
+    time) is REQUIRED and selects the active contract voltages; there
+    is no silent constant fallback.
+    """
+    contract.assert_matches(corridor)
+    if contract.v_std_schedule is not None and time_s is None:
+        rep1("q_std_mvar needs the scenario time for a schedule-bearing "
+             "contract (v3) — no silent constant fallback",
+             corridor=(contract.area_a, contract.area_b))
+    v_a, v_b = contract.v_std_at(time_s if time_s is not None else 0.0)
+    return corridor_q_flow(
+        corridor,
+        list(v_a),
+        list(v_b),
+        list(p_sched_mw),
+        delta_max_rad=delta_max_rad,
+    )

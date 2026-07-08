@@ -527,6 +527,27 @@ class MultiTSOConfig:
     voltages V_i / V_j with the corridor reference v_ref, and the feedforward
     drop dv_ff.  Requires ``enable_tie_coordination`` to produce data."""
 
+    sbx_v_std_schedule_path: Optional[str] = None
+    """Optional path to a planning-anchored contract-voltage schedule
+    (SBX v3, STATUS_SBX.md 2026-07-08): JSON mapping ``"i-j"`` corridor
+    keys to ordered ``[t_from_s, [v_a per line], [v_b per line]]``
+    intervals in scenario time, as written by
+    ``experiments/017_SBX_PLANNING.py``.  When set (and
+    ``coordination_mode="sbx"``), planning REPLACES the settled-state
+    snapshot as the source of the contract voltages — set
+    ``sbx_warmup_s = 0`` alongside: the warmup existed only to let the
+    snapshot see the settled closed-loop state, and with a schedule the
+    mechanism can arm at the first TSO tick."""
+
+    live_plot_sbx: bool = False
+    """Enable Figure 6 — SBX MECHANISM live plot (requires
+    ``coordination_mode="sbx"``): per corridor the measured flow against
+    the schedule staircase q_sched / standard q_std with the tier-1
+    no-remuneration band shaded, deal / unwind / scarcity markers and
+    need-flag strips; below, the surplus staircases and the cumulative
+    settlement payments per area.  See
+    :class:`visualisation.plot_sbx.SBXMechanismLivePlotter`."""
+
     live_plot_layout: str = "dual_screen"
     """Window layout for the three live figures.
     ``"thirds"``      -- three figures side-by-side, 1/3 primary screen each.
@@ -1006,13 +1027,37 @@ class MultiTSOConfig:
     coordination_mode: str = "none"
     """Horizontal TSO–TSO coordination mode: ``"none"`` (baseline,
     byte-for-byte unchanged), ``"vref"`` (the existing two-loop ΔV_ref
-    tie coordinator — requires ``enable_tie_coordination=True``) or
+    tie coordinator — requires ``enable_tie_coordination=True``),
     ``"bme"`` (Boundary Marginal Exchange: common objective Φ, boundary
     marginals μ over the CoordinationBus, Convention-A price term,
-    complex boundary coordinates per the D7 revision).
+    complex boundary coordinates per the D7 revision) or ``"sbx"``
+    (Scheduled Boundary Exchange: contract-price corridor scheduling,
+    STATUS_SBX.md — capability messages, deterministic matching, frozen
+    voltage references; no price discovery, no BME module touched).
     ``"bme"`` with ``enable_tie_coordination=True`` is contradictory and
     fail-fasts in the runner; so does ``"bme"`` with a non-zero
-    ``g_q_tie`` (Q3) or ``tso_g_q_tie``-style tie tracking."""
+    ``g_q_tie`` (Q3) or ``tso_g_q_tie``-style tie tracking.  ``"sbx"``
+    likewise excludes ``enable_tie_coordination`` (both would steer the
+    same boundary voltage references)."""
+
+    sbx_config: Optional[object] = None
+    """SBX configuration (an ``sbx.config.SBXConfig`` instance) used when
+    ``coordination_mode="sbx"``.  ``None`` (default) builds
+    ``SBXConfig(tso_period_s=tso_period_s)`` with plan-§5 defaults.  Typed
+    loosely so this config module does not import the ``sbx`` package;
+    the runner validates the instance type and that its ``tso_period_s``
+    matches this config's."""
+
+    sbx_warmup_s: float = 1800.0
+    """Warmup window [s] before the SBX contracts are frozen and the
+    protocol starts.  The contract voltages ``v_std`` snapshot the
+    SETTLED closed-loop operating point (zones tracking their voltage
+    schedules), not the pre-loop initialisation state — the Phase 5
+    smoke test showed the pre-loop snapshot pins the corridor terminals
+    ~1–3 mpu below the zones' realised schedule, which on the stiff IEEE
+    39 ties (40–75 Mvar/mpu) biases the standard by tens of Mvar and
+    distorts the SBX-vs-autonomous comparison.  Until the first TSO tick
+    at or after this time, SBX is inert (identical to "none")."""
 
     bme_delay_steps: int = 1
     """BME communication delay d in TSO control steps (DECISION D4;
@@ -1042,10 +1087,10 @@ class MultiTSOConfig:
     identical functional as every other ladder rung (spec §6: uniform
     metrics). ``None`` (default) = use ``bme_w_band`` for both."""
 
-    bme_v_soft_min_pu: float = 0.97
+    bme_v_soft_min_pu: float = 1.015
     """Lower soft band edge of φ_band in pu (D2 starting point −3 %)."""
 
-    bme_v_soft_max_pu: float = 1.03
+    bme_v_soft_max_pu: float = 1.045
     """Upper soft band edge of φ_band in pu (D2 starting point +3 %)."""
 
     bme_vn_kv_min: float = 220.0
@@ -1062,6 +1107,23 @@ class MultiTSOConfig:
     Phase 6 ladder rungs (none/vref/oracle). Uses the ``bme_w_band`` /
     band-edge / ``bme_vn_kv_min`` fields for the evaluation; automatic
     (no flag needed) under ``coordination_mode="bme"``."""
+
+    bme_h_error_rel_sigma: float = 0.0
+    """Sensitivity-error axis of the §6 MC campaign: relative std of a
+    FIXED multiplicative error field applied to each zone's boundary-
+    sensitivity slice H_{b,i} (price-term projection + switch-notice
+    prediction) — H̃ = H ∘ (1 + σ·Ξ_z), Ξ_z ~ N(0,1) drawn ONCE per run
+    per zone (systematic identification error, not white noise). Scope
+    deliberately excludes the zones' own MIQP model (that trade-off is
+    experiment 004's) and the μ computation (zone-internal model of the
+    own area): it isolates the robustness of the COORDINATION channel
+    to error in the one supra-local quantity a TSO must identify from
+    boundary measurements. 0.0 (default) = exact H, bitwise no-op."""
+
+    bme_h_error_seed: Optional[int] = None
+    """Seed for the H-error field (REQUIRED when
+    ``bme_h_error_rel_sigma > 0``; per-zone streams derived as
+    seed + zone_id). Fail-fast, mirrors ``bme_seed`` for drops."""
 
     bme_gradient_scale: float = 1.0
     """Scalar weight w_Φ applied to the ENTIRE injected BME gradient

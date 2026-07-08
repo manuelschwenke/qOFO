@@ -176,6 +176,45 @@ class ZoneBoundaryView:
         return self._provider.h_b_stacked(self._zone_id)
 
 
+class PerturbedZoneBoundaryView:
+    """H-error wrapper for the §6 MC sensitivity-error axis: serves
+    ``H̃_{b,i} = H_{b,i} ∘ field`` where ``field = 1 + σ·Ξ`` is a FIXED
+    multiplicative error field (drawn once per run per zone — a
+    systematic identification error, not per-tick noise).
+
+    Duck-typed stand-in for :class:`ZoneBoundaryView` towards
+    ``BMEGradientAssembler`` (which reads ``zone_id`` and
+    ``h_b_stacked()`` only). The magnitude-channel ``h_b()`` is
+    perturbed consistently (top |B| rows of the same field). The
+    underlying view (and provider) stay exact — the plant, the metric
+    objective and the zones' own MIQP models are OUT of scope by
+    design (see ``MultiTSOConfig.bme_h_error_rel_sigma``)."""
+
+    def __init__(
+        self, view: ZoneBoundaryView, field: NDArray[np.float64]
+    ) -> None:
+        h_shape = view.h_b_stacked().shape
+        field = np.asarray(field, dtype=np.float64)
+        if field.shape != h_shape:
+            raise ValueError(
+                f"H-error field shape {field.shape} != H_b_stacked "
+                f"shape {h_shape} (zone {view.zone_id})"
+            )
+        self._view = view
+        self._field = field
+
+    @property
+    def zone_id(self) -> int:
+        return self._view.zone_id
+
+    def h_b(self) -> NDArray[np.float64]:
+        h = self._view.h_b()
+        return h * self._field[: h.shape[0], :]
+
+    def h_b_stacked(self) -> NDArray[np.float64]:
+        return self._view.h_b_stacked() * self._field
+
+
 class RestrictedSensitivityProvider:
     """Wraps the global Jacobian; serves H_{b,i} per zone, nothing else.
 

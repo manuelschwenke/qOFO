@@ -1105,10 +1105,10 @@ def run_multi_tso_dso(
     # solve (measure → μ_i publish → receiver → g_i^bme inject).  See
     # docs/BME_SPEC.md / docs/BME_STATUS.md.  Everything below is inert
     # under coordination_mode="none" (byte-for-byte baseline).
-    if config.coordination_mode not in ("none", "vref", "bme"):
+    if config.coordination_mode not in ("none", "vref", "bme", "sbx"):
         raise ValueError(
             f"unknown coordination_mode '{config.coordination_mode}' "
-            "(expected 'none', 'vref' or 'bme')."
+            "(expected 'none', 'vref', 'bme' or 'sbx')."
         )
     if config.coordination_mode == "vref" and not config.enable_tie_coordination:
         raise ValueError(
@@ -1116,6 +1116,64 @@ def run_multi_tso_dso(
             "coordinator — set enable_tie_coordination=True (the vref path "
             "is gated by that flag, unchanged)."
         )
+    # ── SBX (Scheduled Boundary Exchange) — coordination_mode="sbx" ─────────
+    # Horizontal corridor scheduling at fixed contract prices
+    # (STATUS_SBX.md, plan v2/v2.2).  Adapter construction is deferred to
+    # the first TSO tick at/after sbx_warmup_s (contract defaults from
+    # the SETTLED closed-loop state, A7 as revised in STATUS_SBX.md
+    # Phase 5); the checks below fail fast at configuration time.
+    sbx_runtime: Dict[str, Any] = {"adapter": None, "config": None}
+    if config.coordination_mode == "sbx":
+        if config.enable_tie_coordination:
+            raise ValueError(
+                "coordination_mode='sbx' and enable_tie_coordination=True "
+                "are mutually exclusive — both steer the corridor-terminal "
+                "voltage references through v_setpoints_pu."
+            )
+        if config.single_zone_partition:
+            raise ValueError(
+                "coordination_mode='sbx' requires the multi-area partition "
+                "(single_zone_partition=True has no corridors)."
+            )
+        if config.numerical_h:
+            raise ValueError(
+                "coordination_mode='sbx' requires an analytic Jacobian "
+                "path (numerical_h=False): the relieving-sign sanity "
+                "assert reads JacobianSensitivities.compute_dV_dQ_der "
+                "from the zones' cached sensitivities."
+            )
+        # local_sensitivities_* ARE allowed (relaxed 2026-07-08 on
+        # Manuel's request): the SBX adapter reads only controller-owned
+        # cached objects — the voltage rows of the controller's own H and
+        # ``ctrl.sensitivities.compute_dV_dQ_der`` — and the per-zone
+        # local JacobianSensitivities (Ward-style reduced zone net,
+        # original bus indices retained for in-zone buses) provides the
+        # identical interface.  Local cached models are in fact the
+        # configuration most consistent with the SBX locality principle
+        # (plan §2.4 "local data only"); any missing bus/row in the
+        # reduced net fails fast inside the adapter.
+        if not (0.0 <= config.sbx_warmup_s < config.n_total_s):
+            raise ValueError(
+                f"sbx_warmup_s ({config.sbx_warmup_s}) must lie inside "
+                f"the simulation horizon [0, {config.n_total_s})."
+            )
+        from sbx.config import SBXConfig as _SBXConfig
+        _sbx_cfg = config.sbx_config
+        if _sbx_cfg is None:
+            _sbx_cfg = _SBXConfig(tso_period_s=float(config.tso_period_s))
+        if not isinstance(_sbx_cfg, _SBXConfig):
+            raise ValueError(
+                "MultiTSOConfig.sbx_config must be an sbx.config.SBXConfig "
+                f"instance (got {type(_sbx_cfg).__name__})."
+            )
+        if abs(_sbx_cfg.tso_period_s - float(config.tso_period_s)) > 1e-9:
+            raise ValueError(
+                f"SBXConfig.tso_period_s ({_sbx_cfg.tso_period_s}) must "
+                f"match MultiTSOConfig.tso_period_s ({config.tso_period_s}) "
+                "— the cycle length k_sched is defined in TSO iterations."
+            )
+        sbx_runtime["config"] = _sbx_cfg
+
     bme_topo = bme_obj = bme_bus = None
     bme_ledger = bme_schedule = None
     bme_specs = {}
@@ -1158,6 +1216,15 @@ def run_multi_tso_dso(
                 "carve-out, see BME_STATUS.md). Use the MIQP shunt path "
                 "or shunt_dispatch='off'."
             )
+        if config.bme_h_error_rel_sigma < 0.0:
+            raise ValueError("bme_h_error_rel_sigma must be >= 0")
+        if (config.bme_h_error_rel_sigma > 0.0
+                and config.bme_h_error_seed is None):
+            raise ValueError(
+                "bme_h_error_rel_sigma > 0 requires bme_h_error_seed "
+                "(fixed per-run error field, reproducible — mirrors "
+                "bme_seed for drops)."
+            )
         from controller.bme_gradient import BMEGradientAssembler
         from controller.common_objective import CommonObjective
         from core.coordination_bus import (
@@ -1165,7 +1232,8 @@ def run_multi_tso_dso(
         )
         from network.boundary_topology import BoundaryTopology
         from sensitivity.boundary_sensitivity import (
-            RestrictedSensitivityProvider, ZoneInputSpec,
+            PerturbedZoneBoundaryView, RestrictedSensitivityProvider,
+            ZoneInputSpec,
         )
         from sensitivity.marginal_computer import MarginalComputer
 
@@ -1274,6 +1342,25 @@ def run_multi_tso_dso(
                 f"w_band={config.bme_w_band}, "
                 f"vn_kv_min={config.bme_vn_kv_min}"
             )
+
+    # H-error axis (§6 MC campaign): FIXED multiplicative error field on
+    # each zone's H_{b,i}, drawn once per run per zone (systematic
+    # identification error). sigma == 0 → views pass through untouched.
+    _bme_h_err_fields: Dict[int, np.ndarray] = {}
+
+    def _bme_wrap_view(view):
+        sigma = float(config.bme_h_error_rel_sigma)
+        if sigma <= 0.0:
+            return view
+        z_v = view.zone_id
+        if z_v not in _bme_h_err_fields:
+            _rng_h = np.random.default_rng(
+                int(config.bme_h_error_seed) + z_v
+            )
+            _bme_h_err_fields[z_v] = 1.0 + sigma * _rng_h.standard_normal(
+                view.h_b_stacked().shape
+            )
+        return PerturbedZoneBoundaryView(view, _bme_h_err_fields[z_v])
 
     if bme_obj is None and config.record_bme_phi:
         # Uniform Φ metric for non-bme ladder rungs: build ONLY the
@@ -2632,6 +2719,25 @@ def run_multi_tso_dso(
             use_tex=config.live_plot_use_tex,
         )
 
+    # Figure 6 — SBX MECHANISM (gated; None when off).  Corridor keys are
+    # discovered from the first record; the adapter handle is passed per
+    # step (None until the contract-freeze tick).
+    _plotter_sbx = None
+    if config.live_plot_sbx:
+        if config.coordination_mode != "sbx":
+            raise ValueError(
+                "live_plot_sbx=True requires coordination_mode='sbx' — "
+                "the figure draws the SBX schedule/band/deal state."
+            )
+        from visualisation.plot_sbx import SBXMechanismLivePlotter
+        _plotter_sbx = SBXMechanismLivePlotter(
+            layout=config.live_plot_layout,
+            use_tex=config.live_plot_use_tex,
+        )
+        # Handle for experiments (e.g. saving the final figure) — read
+        # from the pre_loop_hook state alongside the adapter.
+        sbx_runtime["live_plotter"] = _plotter_sbx
+
     def _is_period_hit(time_s: float, period_s: float) -> bool:
         """True if time_s is a multiple of period_s (within 1 s tolerance)."""
         rem = time_s % period_s
@@ -2750,6 +2856,10 @@ def run_multi_tso_dso(
             "bme_bus": bme_bus,
             "bme_ledger": bme_ledger,
             "bme_schedule": bme_schedule,
+            # SBX internals ({"adapter": None, ...} unless
+            # coordination_mode="sbx"; the adapter is constructed at the
+            # first TSO tick after sbx_warmup_s and filled in here).
+            "sbx_runtime": sbx_runtime,
         }
         _hook_result = pre_loop_hook(_hook_state)
         if _hook_result:
@@ -3144,6 +3254,62 @@ def run_multi_tso_dso(
                 for z, zd in zone_defs.items()
             }
 
+            # ── SBX horizontal round (BEFORE the zones solve): feed the
+            # scheduler every TSO tick; at cycle boundaries the six-step
+            # protocol runs (need → capability → messages → matching →
+            # setpoints → unwind) and the frozen corridor-terminal
+            # references are written into each zone's voltage-tracking
+            # mechanism (weight g_v — STATUS_SBX.md A4/G5).  Between
+            # boundaries the references stay untouched (Step 6).
+            # The adapter is constructed at the FIRST TSO tick at/after
+            # sbx_warmup_s: contracts snapshot the SETTLED closed-loop
+            # state of this step's converged power flow (revised A7).
+            if config.coordination_mode == "sbx":
+                if (sbx_runtime["adapter"] is None
+                        and time_s >= config.sbx_warmup_s):
+                    from sbx.adapter import SBXRunnerAdapter
+                    # v3: optional planning-anchored contract-voltage
+                    # schedule (JSON from experiments/017_SBX_PLANNING).
+                    _sbx_schedules = None
+                    if config.sbx_v_std_schedule_path is not None:
+                        import json as _json
+                        with open(config.sbx_v_std_schedule_path,
+                                  encoding="utf-8") as _fh:
+                            _raw = _json.load(_fh)
+                        _sbx_schedules = {
+                            tuple(int(x) for x in k.split("-")): [
+                                (float(t), tuple(va), tuple(vb))
+                                for t, va, vb in entries
+                            ]
+                            for k, entries in _raw.items()
+                        }
+                    sbx_runtime["adapter"] = SBXRunnerAdapter(
+                        net, {z: list(b) for z, b in tn_zone_map.items()},
+                        tso_controllers, sbx_runtime["config"],
+                        v_std_schedules=_sbx_schedules,
+                        freeze_time_s=float(time_s),
+                    )
+                    if verbose >= 1:
+                        _sc = sbx_runtime["config"]
+                        _ad = sbx_runtime["adapter"]
+                        print(f"  [sbx] contracts frozen at t="
+                              f"{time_s / 60.0:.0f} min: "
+                              f"{len(_ad.registry)} corridor(s), "
+                              f"k_sched={_sc.k_sched} TSO iterations "
+                              f"({_sc.t_cycle_min:.0f} min), per-cycle "
+                              f"quantum {_sc.dq_quant_mvar:.1f} Mvar")
+                        for hit in _ad.border_actuators:
+                            print(f"  [sbx] border actuator: "
+                                  f"{hit['element']} {hit['index']} at "
+                                  f"bus {hit['bus']} — hop {hit['hop']} "
+                                  f"from terminal {hit['terminal_bus']} "
+                                  f"of corridor {hit['corridor']} "
+                                  f"(area {hit['area']})")
+                if sbx_runtime["adapter"] is not None:
+                    sbx_runtime["adapter"].on_tso_step(
+                        tso_step_count - 1, measurements, tso_controllers,
+                    )
+
             # ── BME horizontal round (BEFORE the zones solve, §5 Phase 4):
             # rebuild the area-local gradient machinery at the freshly
             # re-linearised shared_jac operating point, compute and publish
@@ -3182,11 +3348,16 @@ def run_multi_tso_dso(
                 _provider = _RProvider(shared_jac, bme_topo, bme_specs)
                 _assemblers = {}
                 _bme_mus = {}
+                _bme_views = {}
                 for z in sorted(tso_controllers):
                     _comp = _MComputer(shared_jac, bme_topo, z)
                     _zg = bme_obj.gradients(_comp)
+                    # H-error axis: identical wrapped view feeds BOTH the
+                    # price projection and the notice prediction below —
+                    # the zone's (possibly mis-identified) H is one object.
+                    _bme_views[z] = _bme_wrap_view(_provider.view(z))
                     _assemblers[z] = _Assembler(
-                        bme_specs[z], _zg, _provider.view(z),
+                        bme_specs[z], _zg, _bme_views[z],
                     )
                     _bme_mus[z] = _assemblers[z].mu()
                 _vb_snap = np.concatenate([
@@ -3238,7 +3409,7 @@ def run_multi_tso_dso(
                         + len(zone_defs[z].shunt_bus_indices)
                     )
                     if _n_int_z > 0:
-                        _bme_hb_int[z] = _provider.view(z).h_b_stacked()[
+                        _bme_hb_int[z] = _bme_views[z].h_b_stacked()[
                             :, -_n_int_z:
                         ]
 
@@ -4359,6 +4530,29 @@ def run_multi_tso_dso(
             _plotter_track.update(rec)
         if _plotter_tie is not None:
             _plotter_tie.update(rec)
+        if _plotter_sbx is not None:
+            # True reference-end corridor flow: q measured AT each tie's
+            # bus_a endpoint (q_from or q_to per line orientation).
+            # rec.zone_tie_q_mvar is NOT usable here: it negates q_from
+            # for lines oriented from the higher zone, which misstates
+            # heavily charged ties (line 14: ~107 Mvar of charging)
+            # relative to the SBX schedule convention.
+            _sbx_ad = sbx_runtime["adapter"]
+            _sbx_q = None
+            if _sbx_ad is not None:
+                _sbx_q = {}
+                for _ck, _corr in _sbx_ad.registry.items():
+                    _tot = 0.0
+                    for _ln in _corr.lines:
+                        if int(net.line.at[_ln.line_idx, "from_bus"]) \
+                                == _ln.bus_a:
+                            _tot += float(net.res_line.at[
+                                _ln.line_idx, "q_from_mvar"])
+                        else:
+                            _tot += float(net.res_line.at[
+                                _ln.line_idx, "q_to_mvar"])
+                    _sbx_q[_ck] = _tot
+            _plotter_sbx.update(rec, _sbx_ad, _sbx_q)
 
         if not _in_warmup:
             log.append(rec)

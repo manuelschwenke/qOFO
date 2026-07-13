@@ -1,116 +1,357 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-experiments/014_SBX_SINGLE_DEMO.py
-==================================
-SBX-H v6 single-run demonstration with the LIVE Figure 6
-(``config.live_plot_sbx``).
+300-minute SBX-H v6 capability demonstration.
 
-Runs ONE simulation of one 015 cell (D2 / D1 / D0 — definitions and
-timing imported from ``experiments/015_SBX_COMPARE`` so the two
-experiments cannot drift apart) and shows, live per corridor:
+This is the single thesis-oriented experiment for the horizontal
+scheduled-boundary mechanism. It runs one three-area TS/DS simulation
+with SBX-H enabled from the converged initial operating point:
 
-* the measured corridor flow against the standard-flow staircase
-  q_std with the tier-1 band shaded (v6: no deal schedule exists —
-  the band is around q_std),
-* escalation markers (the A4 re-planning indicator) and the
-  violation-indicator strips,
-* the per-cycle deviation staircase q_meas − q_std and the cumulative
-  attributed settlement payments per area.
+- minute 0: SBX-H contracts and the live mechanism plot start;
+- minute 60: a 900 Mvar reactive sink is connected in area 3;
+- minute 240: the sink is removed;
+- minute 300: experiment ends after a recovery interval.
 
-Options mirror the v6 mechanism: ``--support`` runs the
-``sbx_support`` arm (planned support agreed in advance — the
-supporters hold +2.5 mpu on their sides of the zone-3 corridors
-during the stress window); ``--schedule`` consumes a
-planning-anchored v_std/band schedule JSON from
-``experiments/017_SBX_PLANNING.py`` (contracts then anchor to the
-plan instead of the settled-state snapshot; the warmup is bypassed).
+The live figure shows, for every corridor, Q_meas, the measured-P
+baseline Q_0, the deadband, paid Q_sup, both terminal-voltage pairs,
+scheduled voltage references, hold/sag states, and cumulative payments.
 
-At the end the figure is saved to
-``results/014_SBX_DEMO/<cell>/sbx_mechanism.png`` together with the
-settlement ledger/summary.
+Default run:
+    python experiments/014_SBX_SINGLE_DEMO.py
 
-The v5 deal-era version of this script (deal markers, calibrated
-bands, ``--arm sbx_inert``) is archived in
-``_archive/sbx_h_v5/experiments/``.
+Headless verification with the same final figure:
+    python experiments/014_SBX_SINGLE_DEMO.py --no-live
 
-Run examples:
-    python experiments/014_SBX_SINGLE_DEMO.py --cell D2
-    python experiments/014_SBX_SINGLE_DEMO.py --cell D2 --support
-    python experiments/014_SBX_SINGLE_DEMO.py --cell D1 --no-live \
-        --schedule results/017_SBX_PLANNING/schedule_perfect_360min.json
+A shorter horizon may be used for smoke tests; events outside that
+horizon are omitted automatically.
 
-Author: Manuel Schwenke / Claude Code
-Date: 2026-07-13 (SBX-H v6)
+Outputs:
+    results/014_SBX_H_DEMO/sbx_h_mechanism.png
+    results/014_SBX_H_DEMO/sbx_h_settlement_ledger.csv
+    results/014_SBX_H_DEMO/sbx_h_settlement_summary.md
+    results/014_SBX_H_DEMO/experiment_summary.md
+
+Author: Manuel Schwenke / OpenAI Codex
+Date: 2026-07-13
 """
 from __future__ import annotations
 
 import argparse
 import importlib
+import os
 import sys
 import time
 from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from experiments.helpers.records import ContingencyEvent  # noqa: E402
+from sbx_h.config import SBXConfig  # noqa: E402
 from sbx_h.fail import rep1  # noqa: E402
 
-_015 = importlib.import_module("experiments.015_SBX_COMPARE")
+RESULT_DIR = REPO / "results" / "014_SBX_H_DEMO"
 
-RESULT_DIR = REPO / "results" / "014_SBX_DEMO"
+DEFAULT_MINUTES = 300.0
+SBX_START_MIN = 0.0
+STRESS_ON_MIN = 60.0
+STRESS_OFF_MIN = 240.0
+STRESS_BUS = 15
+STRESS_Q_MVAR = 900.0
+STRESSED_AREA = 3
+STRESSED_AREA_V_MIN_PU = 1.00
+
+
+def make_config(
+    *,
+    minutes: float = DEFAULT_MINUTES,
+    stress_on_min: float = STRESS_ON_MIN,
+    stress_off_min: Optional[float] = STRESS_OFF_MIN,
+    sink_mvar: float = STRESS_Q_MVAR,
+    verbose: int = 1,
+):
+    """Build the isolated SBX-H demonstration configuration."""
+    if minutes <= SBX_START_MIN:
+        rep1(
+            "experiment horizon must extend beyond the SBX-H start",
+            minutes=minutes,
+            sbx_start_min=SBX_START_MIN,
+        )
+    if not (SBX_START_MIN < stress_on_min < minutes):
+        rep1(
+            "stress onset must lie after SBX-H starts and inside the horizon",
+            sbx_start_min=SBX_START_MIN,
+            stress_on_min=stress_on_min,
+            minutes=minutes,
+        )
+    if stress_off_min is not None and stress_off_min <= stress_on_min:
+        rep1(
+            "stress removal must follow stress onset",
+            stress_on_min=stress_on_min,
+            stress_off_min=stress_off_min,
+        )
+    if sink_mvar <= 0.0:
+        rep1("reactive sink must be positive", sink_mvar=sink_mvar)
+
+    base = importlib.import_module("experiments.005_CIGRE_MULTI")
+    cfg = base.make_cigre_config()
+    cfg.n_total_s = 60.0 * minutes
+    cfg.verbose = int(verbose)
+
+    # Isolate SBX-H from the older tie-gradient mechanism.
+    cfg.enable_tie_coordination = False
+    cfg.tie_econ_gamma = 0.0
+    cfg.coordination_mode = "sbx_h"
+    cfg.sbx_config = SBXConfig(
+        tso_period_s=float(cfg.tso_period_s),
+        k_sched=2,
+        q_band_mvar=5.0,
+        p_support_eur_per_mvarh=5.0,
+        v_hold_tolerance_pu=0.0025,
+        v_sag_threshold_pu=0.005,
+        n_need=2,
+        release_threshold_pu=0.001,
+        escalation_cycles=4,
+    )
+    cfg.sbx_warmup_s = 60.0 * SBX_START_MIN
+
+    cfg.local_sensitivities_tso = True
+    cfg.local_sensitivities_dso = True
+    cfg.refresh_shared_jac_on_tso = False
+    cfg.record_bme_phi = False
+    cfg.run_stability_analysis = False
+
+    cfg.zone_v_min_pu = {STRESSED_AREA: STRESSED_AREA_V_MIN_PU}
+    events = [
+        ContingencyEvent(
+            minute=stress_on_min,
+            element_type="load",
+            bus=STRESS_BUS,
+            p_mw=0.0,
+            q_mvar=sink_mvar,
+            action="connect",
+        )
+    ]
+    if stress_off_min is not None and stress_off_min < minutes:
+        events.append(
+            ContingencyEvent(
+                minute=stress_off_min,
+                element_type="load",
+                bus=STRESS_BUS,
+                p_mw=0.0,
+                q_mvar=sink_mvar,
+                action="trip",
+            )
+        )
+    cfg.contingencies = events
+
+    # One live figure only. In headless mode the same plotter runs on
+    # the Agg backend so the saved thesis figure follows the live path.
+    cfg.live_plot_controller = False
+    cfg.live_plot_cascade = False
+    cfg.live_plot_system = False
+    cfg.live_plot_tracking = False
+    cfg.live_plot_tie_coordination = False
+    cfg.live_plot_sbx = True
+    return cfg
+
+
+def _solver_ok(records) -> bool:
+    accepted = {"optimal", "optimal_inaccurate"}
+    return all(
+        status is None or status in accepted
+        for record in records
+        for status in record.zone_tso_status.values()
+    )
+
+
+def _corridor_metrics(adapter, key: Tuple[int, int]) -> Dict[str, object]:
+    settlements = adapter.scheduler.settlements[key]
+    return {
+        "cycles": len(settlements),
+        "a_sags_b_holds": sum(
+            item.support_state == "a_sags_b_holds"
+            for item in settlements
+        ),
+        "b_sags_a_holds": sum(
+            item.support_state == "b_sags_a_holds"
+            for item in settlements
+        ),
+        "both_sag": sum(
+            item.support_state == "both_sag"
+            for item in settlements
+        ),
+        "paid": sum(item.support_eur > 0.0 for item in settlements),
+        "support_mvarh": sum(
+            item.support_mvarh for item in settlements
+        ),
+        "support_eur": sum(item.support_eur for item in settlements),
+    }
+
+
+def write_experiment_summary(
+    path: Path,
+    *,
+    adapter,
+    records,
+    minutes: float,
+    stress_on_min: float,
+    stress_off_min: Optional[float],
+    sink_mvar: float,
+    wall_s: float,
+) -> None:
+    """Write a compact thesis-facing run summary."""
+    metrics = {
+        key: _corridor_metrics(adapter, key)
+        for key in sorted(adapter.scheduler.corridors)
+    }
+    payments: Dict[int, float] = {
+        area: 0.0 for area in adapter.scheduler.area_ids
+    }
+    for engine in adapter.scheduler.settlement_engines.values():
+        for area, amount in engine.ledger.payments_eur.items():
+            payments[area] += amount
+    diagnostics = adapter.initial_schedule_diagnostics
+    initially_holding = sum(
+        bool(row["initially_holds"]) for row in diagnostics
+    )
+    worst_hold_margin_mpu = 1e3 * min(
+        (float(row["hold_margin_pu"]) for row in diagnostics),
+        default=float("nan"),
+    )
+
+    lines = [
+        "# SBX-H capability demonstration",
+        "",
+        "## Scenario",
+        "",
+        f"- Horizon: {minutes:.1f} min",
+        f"- SBX-H contract initialization: {SBX_START_MIN:.1f} min",
+        f"- Contract schedule source: {adapter.schedule_source}",
+        f"- Initial terminal hold pre-check: {initially_holding}/"
+        f"{len(diagnostics)} inside tolerance; worst margin "
+        f"{worst_hold_margin_mpu:+.2f} mpu",
+        f"- Reactive sink: {sink_mvar:.1f} Mvar at bus {STRESS_BUS}",
+        f"- Stress onset: {stress_on_min:.1f} min",
+        (
+            f"- Stress removal: {stress_off_min:.1f} min"
+            if stress_off_min is not None and stress_off_min < minutes
+            else "- Stress removal: outside simulated horizon"
+        ),
+        f"- Plant records: {len(records)}",
+        f"- Wall time: {wall_s:.1f} s",
+        f"- All TSO solves accepted: {_solver_ok(records)}",
+        "",
+        "## SBX-H outcome",
+        "",
+        "| Corridor | Settled windows | A sags / B holds | "
+        "B sags / A holds | Both sag | Paid windows | "
+        "Support [Mvar h] | Gross support value [EUR] |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for key, row in metrics.items():
+        lines.append(
+            f"| ({key[0]},{key[1]}) | {row['cycles']} | "
+            f"{row['a_sags_b_holds']} | "
+            f"{row['b_sags_a_holds']} | "
+            f"{row['both_sag']} | {row['paid']} | "
+            f"{row['support_mvarh']:.3f} | "
+            f"{row['support_eur']:.2f} |"
+        )
+    lines.extend([
+        "",
+        "Net bilateral payments: "
+        + ", ".join(
+            f"area {area}: {amount:+.2f} EUR"
+            for area, amount in sorted(payments.items())
+        ),
+        "",
+        "Escalation events: "
+        + (
+            str(adapter.scheduler.escalations)
+            if adapter.scheduler.escalations
+            else "none"
+        ),
+        "",
+        "## Interpretation",
+        "",
+        "Payment is issued only when exactly one corridor side sags, "
+        "the other side holds its scheduled terminal voltage, and "
+        "the beyond-band reactive flow points toward the sagging side.",
+        "",
+        "Q_0 is evaluated at scheduled terminal voltages and measured "
+        "active transfer. Q_sup is support beyond the deadband; it is "
+        "not a sold strength quantity.",
+        "",
+    ])
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="SBX-H v6 single-run demonstration with live "
-                    "Figure 6.")
-    ap.add_argument("--cell", type=str, default="D2",
-                    choices=sorted(_015.CELLS.keys()))
-    ap.add_argument("--minutes", type=float,
-                    default=_015.DEFAULT_MINUTES)
-    ap.add_argument("--support", action="store_true",
-                    help="run the sbx_support arm (planned support "
-                         "agreed in advance) instead of the plain "
-                         "contract arm")
-    ap.add_argument("--schedule", type=str, default=None,
-                    help="path to a planning-anchored v_std/band "
-                         "schedule JSON (from experiments/017_SBX_"
-                         "PLANNING.py); contracts then anchor to the "
-                         "plan and the snapshot warmup is bypassed")
-    ap.add_argument("--no-live", action="store_true",
-                    help="disable the live figure (still saves the "
-                         "final PNG via a headless redraw)")
-    ap.add_argument("--verbose", type=int, default=1)
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(
+        description="Run the 300-minute SBX-H capability demonstration."
+    )
+    parser.add_argument(
+        "--minutes",
+        type=float,
+        default=DEFAULT_MINUTES,
+        help="simulation horizon in minutes (default: 300)",
+    )
+    parser.add_argument(
+        "--stress-on",
+        type=float,
+        default=STRESS_ON_MIN,
+        help="reactive-sink connection minute (default: 60)",
+    )
+    parser.add_argument(
+        "--stress-off",
+        type=float,
+        default=STRESS_OFF_MIN,
+        help="reactive-sink removal minute (default: 240)",
+    )
+    parser.add_argument(
+        "--sink-mvar",
+        type=float,
+        default=STRESS_Q_MVAR,
+        help="reactive sink magnitude (default: 900 Mvar)",
+    )
+    parser.add_argument(
+        "--no-live",
+        action="store_true",
+        help="use a headless backend; the final figure is still saved",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=RESULT_DIR,
+    )
+    parser.add_argument("--verbose", type=int, default=1)
+    args = parser.parse_args()
 
     if args.no_live:
-        import os
-        os.environ.setdefault("MPLBACKEND", "Agg")
+        os.environ["MPLBACKEND"] = "Agg"
 
-    cell = args.cell
-    arm = "sbx_support" if args.support else "sbx"
-    out_dir = RESULT_DIR / cell
-    out_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cfg = make_config(
+        minutes=args.minutes,
+        stress_on_min=args.stress_on,
+        stress_off_min=args.stress_off,
+        sink_mvar=args.sink_mvar,
+        verbose=args.verbose,
+    )
 
-    spec = _015.CELLS[cell]
-    print(f"=== 014 SBX-H v6 demo: {cell} ({spec['label']}), "
-          f"arm {arm} ===")
-    print(f"    {spec['expect']}")
-    print(f"    horizon {args.minutes:.0f} min, live plot "
-          f"{'OFF' if args.no_live else 'ON'}")
-
-    cfg = _015.make_config(cell, arm, args.minutes)
-    cfg.verbose = args.verbose
-    cfg.live_plot_sbx = not args.no_live
-    if args.schedule is not None:
-        sched_path = Path(args.schedule)
-        if not sched_path.exists():
-            rep1("schedule JSON not found", path=str(sched_path))
-        cfg.sbx_v_std_schedule_path = str(sched_path)
-        # With a planning schedule the snapshot warmup is obsolete —
-        # contracts anchor to the plan from t = 0 (v3 convention).
-        cfg.sbx_warmup_s = 0.0
+    print("=== SBX-H v6 capability demonstration ===")
+    print(
+        f"  horizon={args.minutes:.0f} min, "
+        f"SBX start={SBX_START_MIN:.0f} min, "
+        f"stress={args.stress_on:.0f}-"
+        f"{min(args.stress_off, args.minutes):.0f} min"
+    )
+    print(
+        f"  reactive sink={args.sink_mvar:.0f} Mvar at bus "
+        f"{STRESS_BUS}; live plot={'OFF' if args.no_live else 'ON'}"
+    )
 
     captured: dict = {}
 
@@ -120,39 +361,60 @@ def main() -> int:
 
     from experiments.runners.multi_tso_dso import run_multi_tso_dso
 
-    t0 = time.perf_counter()
-    recs = run_multi_tso_dso(cfg, pre_loop_hook=hook)
-    wall = time.perf_counter() - t0
-    print(f"  {len(recs)} steps in {wall:.0f} s wall")
+    start = time.perf_counter()
+    records = run_multi_tso_dso(cfg, pre_loop_hook=hook)
+    wall_s = time.perf_counter() - start
 
     runtime = captured.get("sbx_runtime") or {}
     adapter = runtime.get("adapter")
+    plotter = runtime.get("live_plotter")
     if adapter is None:
-        rep1("run finished without a constructed SBX adapter — check "
-             "sbx_warmup_s vs the horizon", cell=cell)
+        rep1(
+            "run completed without an SBX-H adapter",
+            sbx_start_s=cfg.sbx_warmup_s,
+            horizon_s=cfg.n_total_s,
+        )
+    if plotter is None:
+        rep1("SBX-H live plotter was not constructed")
 
     from sbx_h.settlement import write_settlement_outputs
-    csv_path, md_path = write_settlement_outputs(
-        adapter.scheduler.settlement_engines, out_dir, f"{cell}_{arm}")
-    print(f"  settlement ledger:  {csv_path}")
-    print(f"  settlement summary: {md_path}")
 
-    plotter = runtime.get("live_plotter")
-    if plotter is not None:
-        png = out_dir / "sbx_mechanism.png"
-        plotter.save(png)
-        print(f"  figure saved:       {png}")
+    generated_csv, generated_md = write_settlement_outputs(
+        adapter.scheduler.settlement_engines,
+        output_dir,
+        "sbx_h",
+    )
+    csv_path = output_dir / "sbx_h_settlement_ledger.csv"
+    settlement_md = output_dir / "sbx_h_settlement_summary.md"
+    os.replace(generated_csv, csv_path)
+    os.replace(generated_md, settlement_md)
+    figure_path = output_dir / "sbx_h_mechanism.png"
+    plotter.save(figure_path)
+    summary_path = output_dir / "experiment_summary.md"
+    write_experiment_summary(
+        summary_path,
+        adapter=adapter,
+        records=records,
+        minutes=args.minutes,
+        stress_on_min=args.stress_on,
+        stress_off_min=args.stress_off,
+        sink_mvar=args.sink_mvar,
+        wall_s=wall_s,
+    )
 
-    # Compact terminal summary: escalations + per-corridor deviations.
-    esc = adapter.scheduler.escalations
-    print(f"  escalations: {esc if esc else 'none'}")
-    for key in sorted(adapter.scheduler.corridors):
-        rl = adapter.scheduler.records[key]
-        beyond = sum(1 for r in rl if r.beyond_band)
-        print(f"  corridor {key}: {len(rl)} cycles, "
-              f"{beyond} beyond-band")
+    paid_windows = sum(
+        item.support_eur > 0.0
+        for rows in adapter.scheduler.settlements.values()
+        for item in rows
+    )
+    print(f"  completed {len(records)} plant steps in {wall_s:.1f} s")
+    print(f"  paid support windows: {paid_windows}")
+    print(f"  figure:             {figure_path}")
+    print(f"  settlement ledger: {csv_path}")
+    print(f"  settlement report: {settlement_md}")
+    print(f"  experiment report: {summary_path}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

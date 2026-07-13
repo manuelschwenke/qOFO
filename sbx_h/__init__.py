@@ -5,19 +5,19 @@ TSO–TSO reactive-power coordination for self-contained areas, reduced
 to the mechanism the 015 evidence campaign (STATUS_SBX.md findings
 G1–G7) showed to carry the value:
 
-* **Contract layer** — agreed per-corridor boundary-voltage schedules
-  ``v_std`` (constant snapshot, hourly planning schedule, or planned
-  SUPPORT intervals where one side holds a deliberately raised
-  voltage), tracked by each area's own controller with priority
-  weight.  Implied standard flows ``q_std`` follow from the contracted
-  π-line model.
-* **Metering + attributed settlement** — per elapsed cycle: in-band
-  netting (tier 1) and beyond-band deviations attributed per line to
-  the A-side / B-side terminal state or the P-transfer (C_A/C_B/C_P
-  decomposition); the dominant voltage side pays (causer-pays).  The
-  ex-post remuneration of over-performance (architecture candidate A1,
-  ``docs/SBX_H_V6_ARCHITECTURE_CANDIDATES.md``) hooks in here once its
-  review closes.
+* **Contract layer** â€” agreed per-corridor boundary-voltage schedules
+  ``v_std`` (controller-intended terminal references by default, an
+  explicit planning schedule when supplied, and planned SUPPORT
+  intervals where one side holds a deliberately raised voltage),
+  tracked by each area's own controller with the ordinary voltage
+  weight by default. Implied standard flows ``q_std`` follow from the
+  contracted pi-line model.
+* **Metering + support-energy settlement** — per elapsed cycle the Q
+  baseline is evaluated at the active scheduled terminal voltages and
+  measured P transfer.  If exactly one side sags, the other side holds,
+  and beyond-band Q points toward the sagging side, the sagging side
+  pays the holder for delivered support energy.  Strength is reported
+  only as an optional ex-post diagnostic, not sold as a product.
 * **Escalation indicator** — persistent violations / persistent
   beyond-band exceedance are flagged for a slow re-planning loop
   (candidate A4); no runtime action is taken.

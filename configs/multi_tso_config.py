@@ -532,20 +532,16 @@ class MultiTSOConfig:
     (SBX v3, STATUS_SBX.md 2026-07-08): JSON mapping ``"i-j"`` corridor
     keys to ordered ``[t_from_s, [v_a per line], [v_b per line]]``
     intervals in scenario time, as written by
-    ``experiments/017_SBX_PLANNING.py``.  When set (and
-    ``coordination_mode="sbx"``), planning REPLACES the settled-state
-    snapshot as the source of the contract voltages — set
-    ``sbx_warmup_s = 0`` alongside: the warmup existed only to let the
-    snapshot see the settled closed-loop state, and with a schedule the
-    mechanism can arm at the first TSO tick."""
+    ``experiments/017_SBX_PLANNING.py``. When set, planning overrides
+    the default schedule assembled from each TSO controller's intended
+    terminal-voltage setpoints."""
 
     live_plot_sbx: bool = False
-    """Enable Figure 6 — SBX MECHANISM live plot (requires
-    ``coordination_mode="sbx"``): per corridor the measured flow against
-    the schedule staircase q_sched / standard q_std with the tier-1
-    no-remuneration band shaded, deal / unwind / scarcity markers and
-    need-flag strips; below, the surplus staircases and the cumulative
-    settlement payments per area.  See
+    """Enable the SBX-H live thesis figure (requires
+    ``coordination_mode="sbx_h"`` or its internal alias ``"sbx"``).
+    Per corridor it shows measured Q, the scheduled-voltage baseline Q_0,
+    the Q deadband, paid Q_sup, measured/scheduled terminal voltages,
+    hold/sag state strips, and cumulative bilateral payments. See
     :class:`visualisation.plot_sbx.SBXMechanismLivePlotter`."""
 
     live_plot_layout: str = "dual_screen"
@@ -1025,29 +1021,21 @@ class MultiTSOConfig:
     # Spec §4 ``coordination:`` block mapped onto flat fields (no parallel
     # config system).  See docs/BME_SPEC.md and docs/BME_STATUS.md.
     coordination_mode: str = "none"
-    """Coordination mode: ``"none"`` (baseline, byte-for-byte
-    unchanged), ``"vref"`` (the existing two-loop ΔV_ref tie
-    coordinator — requires ``enable_tie_coordination=True``),
-    ``"bme"`` (Boundary Marginal Exchange: common objective Φ, boundary
-    marginals μ over the CoordinationBus, Convention-A price term,
-    complex boundary coordinates per the D7 revision), ``"sbx"``
-    (Scheduled Boundary Exchange: contract-price corridor scheduling,
-    STATUS_SBX.md — capability messages, deterministic matching, frozen
-    voltage references; no price discovery, no BME module touched) or
-    ``"sbxv"`` (SBX-V, VERTICAL band-and-request TSO–DSO coordination,
-    STATUS_SBXV.md: free Normalbereich per AggregationArea, granted
-    Vorhalteleistung via the deterministic request pipeline, tier
-    prices in the TSO MIQP through a solver proxy, Leitfaden-exact
-    settlement — horizontal coordination stays off).
-    ``"bme"`` with ``enable_tie_coordination=True`` is contradictory and
-    fail-fasts in the runner; so does ``"bme"`` with a non-zero
-    ``g_q_tie`` (Q3) or ``tso_g_q_tie``-style tie tracking.  ``"sbx"``
-    likewise excludes ``enable_tie_coordination`` (both would steer the
-    same boundary voltage references)."""
+    """Coordination mode: ``"none"`` (autonomous baseline),
+    ``"vref"`` (legacy two-loop tie-voltage coordinator), ``"bme"``
+    (Boundary Marginal Exchange), ``"sbx_h"`` (horizontal Scheduled
+    Boundary Exchange: bilateral terminal-voltage schedules, hold/sag
+    support-energy settlement, and slow re-planning escalation), or
+    ``"sbx_v"`` (vertical TSO-DSO band/request coordination).
+
+    SBX-H has no runtime capability-request or matching layer and is
+    mutually exclusive with ``enable_tie_coordination=True`` because
+    both mechanisms would steer the same terminal-voltage references.
+    The runner accepts ``"sbx"`` as an internal compatibility alias."""
 
     sbx_config: Optional[object] = None
     """SBX configuration (an ``sbx_h.config.SBXConfig`` instance) used when
-    ``coordination_mode="sbx"``.  ``None`` (default) builds
+    ``coordination_mode="sbx_h"``.  ``None`` (default) builds
     ``SBXConfig(tso_period_s=tso_period_s)`` with the v6 defaults.  Typed
     loosely so this config module does not import the ``sbx_h`` package;
     the runner validates the instance type and that its ``tso_period_s``
@@ -1071,16 +1059,11 @@ class MultiTSOConfig:
     ``sbxv`` package; the runner validates the instance type and the
     ``tso_period_s`` match (STATUS_SBXV.md §0.3)."""
 
-    sbx_warmup_s: float = 1800.0
-    """Warmup window [s] before the SBX contracts are frozen and the
-    protocol starts.  The contract voltages ``v_std`` snapshot the
-    SETTLED closed-loop operating point (zones tracking their voltage
-    schedules), not the pre-loop initialisation state — the Phase 5
-    smoke test showed the pre-loop snapshot pins the corridor terminals
-    ~1–3 mpu below the zones' realised schedule, which on the stiff IEEE
-    39 ties (40–75 Mvar/mpu) biases the standard by tens of Mvar and
-    distorts the SBX-vs-autonomous comparison.  Until the first TSO tick
-    at or after this time, SBX is inert (identical to "none")."""
+    sbx_warmup_s: float = 0.0
+    """Optional activation delay [s] before SBX metering and settlement
+    start. The voltage schedule itself comes from controller intent or an
+    explicit planning schedule; it is never inferred from the plant
+    snapshot. The default therefore starts at the first TSO tick."""
 
     bme_delay_steps: int = 1
     """BME communication delay d in TSO control steps (DECISION D4;

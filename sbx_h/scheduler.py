@@ -1,8 +1,8 @@
 """
 sbx_h/scheduler.py
 ==================
-SBX-H v6 cycle scheduler: metering, schedule application, attributed
-settlement, escalation indicator.  NO runtime negotiation.
+SBX-H v6 cycle scheduler: metering, schedule application, hold/sag
+support-energy settlement, escalation indicator.  NO runtime negotiation.
 
 Per cycle boundary (every ``k_sched`` TSO iterations):
 
@@ -10,8 +10,9 @@ Per cycle boundary (every ``k_sched`` TSO iterations):
    per-line P and terminal voltages, cycle-averaged corridor flow
    ``q_meas`` at the reference end A; one
    :class:`~sbx_h.settlement.CycleObservation` per corridor into the
-   per-corridor :class:`~sbx_h.settlement.SettlementEngine`
-   (in-band netting + attributed beyond-band deviation, causer-pays).
+   per-corridor :class:`~sbx_h.settlement.SettlementEngine`.
+   Payment occurs only for correctly directed beyond-band reactive
+   support when exactly one side sags and the other holds.
 2. **Schedule application** — resolve the ACTIVE contract voltages and
    band at the boundary's scenario time (constant contract, hourly
    planning schedule, or planned-support interval — all through
@@ -35,8 +36,8 @@ on 2026-07-12 — evidence and rationale in STATUS_SBX.md (G1–G7) and
 ``docs/SBX_H_V6_ARCHITECTURE_CANDIDATES.md``; code archive in
 ``_archive/sbx_h_v5/``.
 
-Author: Manuel Schwenke / Claude Code
-Date: 2026-07-12 (SBX-H v6)
+Author: Manuel Schwenke / Claude Code / OpenAI Codex
+Date: 2026-07-13 (minimal SBX-H v6 settlement)
 """
 
 from __future__ import annotations
@@ -81,6 +82,16 @@ class CorridorCycleRecord:
     escalation: bool               # exceedance_run > escalation_cycles
     need_a: bool
     need_b: bool
+    support_state: str
+    support_direction: Optional[str]
+    a_sags: bool
+    b_sags: bool
+    a_holds: bool
+    b_holds: bool
+    support_mvar: float
+    support_eur: float
+    support_payer: Optional[int]
+    support_payee: Optional[int]
 
 
 @dataclass
@@ -211,7 +222,7 @@ class SBXScheduler:
         measured at the REFERENCE END A (export-positive), in corridor
         line order.  ``tie_v_a_pu`` / ``tie_v_b_pu`` are the measured
         terminal voltage magnitudes per line at the A / B end (the
-        settlement's attribution inputs)."""
+        scheduled-reference settlement inputs)."""
         if not self._initialised:
             rep1("record_step before initial_references()",
                  iteration=iteration)
@@ -293,43 +304,52 @@ class SBXScheduler:
                              dtype=np.float64)
             st = self._state[key]
             first_boundary = (st.p_sched_mw == ())
-            q_std_elapsed = st.q_std_mvar
             q_band_elapsed = st.q_band_act
             refs_a_elapsed = dict(st.refs_a)
             refs_b_elapsed = dict(st.refs_b)
-            p_sched_elapsed = st.p_sched_mw
             st.p_sched_mw = tuple(float(x) for x in arr.mean(axis=0))
             st.q_meas_mvar = float(np.mean(
                 self._q_samples[key][-self.config.k_sched:]
             ))
 
-            deviation = st.q_meas_mvar - q_std_elapsed
-            beyond = (not first_boundary
-                      and abs(deviation) > q_band_elapsed)
-            st.exceedance_run = st.exceedance_run + 1 if beyond else 0
-            escalation = st.exceedance_run > self.config.escalation_cycles
-
-            # ── Settle the ELAPSED cycle (nothing to settle at the
-            #    first boundary — no schedule existed yet). ─────────────
+            # Settle the ELAPSED cycle. The first boundary only creates
+            # the persistence P estimate used by the starting cycle.
+            settlement: Optional[CycleSettlement] = None
             if not first_boundary:
                 va_avg = tuple(float(x) for x in np.mean(
                     self._va_samples[key][-self.config.k_sched:], axis=0))
                 vb_avg = tuple(float(x) for x in np.mean(
                     self._vb_samples[key][-self.config.k_sched:], axis=0))
-                self.settlement_engines[key].observe(CycleObservation(
-                    cycle=cycle - 1,
-                    q_meas_mvar=st.q_meas_mvar,
-                    q_std_mvar=q_std_elapsed,
-                    v_meas_a_pu=va_avg,
-                    v_meas_b_pu=vb_avg,
-                    v_sched_a_pu=tuple(refs_a_elapsed[ln.bus_a]
-                                       for ln in corr.lines),
-                    v_sched_b_pu=tuple(refs_b_elapsed[ln.bus_b]
-                                       for ln in corr.lines),
-                    p_meas_mw=st.p_sched_mw,
-                    p_sched_mw=p_sched_elapsed,
-                    q_band_mvar=q_band_elapsed,
-                ))
+                settlement = self.settlement_engines[key].observe(
+                    CycleObservation(
+                        cycle=cycle - 1,
+                        q_meas_mvar=st.q_meas_mvar,
+                        v_meas_a_pu=va_avg,
+                        v_meas_b_pu=vb_avg,
+                        v_sched_a_pu=tuple(
+                            refs_a_elapsed[ln.bus_a]
+                            for ln in corr.lines
+                        ),
+                        v_sched_b_pu=tuple(
+                            refs_b_elapsed[ln.bus_b]
+                            for ln in corr.lines
+                        ),
+                        p_meas_mw=st.p_sched_mw,
+                        q_band_mvar=q_band_elapsed,
+                    )
+                )
+
+            deviation = (
+                settlement.deviation_mvar
+                if settlement is not None
+                else float("nan")
+            )
+            beyond = (
+                settlement is not None
+                and abs(deviation) > q_band_elapsed
+            )
+            st.exceedance_run = st.exceedance_run + 1 if beyond else 0
+            escalation = st.exceedance_run > self.config.escalation_cycles
 
             # ── Apply the ACTIVE schedule for the starting cycle. ──────
             st.v_std_a_act, st.v_std_b_act = \
@@ -354,17 +374,64 @@ class SBXScheduler:
                 iteration=iteration,
                 p_sched_mw=st.p_sched_mw,
                 q_meas_mvar=st.q_meas_mvar,
-                q_std_mvar=q_std_elapsed if not first_boundary
-                else st.q_std_mvar,
-                q_band_mvar=q_band_elapsed if not first_boundary
-                else st.q_band_act,
-                deviation_mvar=deviation if not first_boundary
-                else float("nan"),
+                q_std_mvar=(
+                    settlement.q_baseline_mvar
+                    if settlement is not None
+                    else st.q_std_mvar
+                ),
+                q_band_mvar=(
+                    q_band_elapsed
+                    if settlement is not None
+                    else st.q_band_act
+                ),
+                deviation_mvar=deviation,
                 beyond_band=beyond,
                 exceedance_run=st.exceedance_run,
                 escalation=escalation,
                 need_a=bool(need_a is not None and need_a.flag),
                 need_b=bool(need_b is not None and need_b.flag),
+                support_state=(
+                    settlement.support_state
+                    if settlement is not None
+                    else "not_settled"
+                ),
+                support_direction=(
+                    settlement.support_direction
+                    if settlement is not None
+                    else None
+                ),
+                a_sags=bool(
+                    settlement is not None and settlement.a_sags
+                ),
+                b_sags=bool(
+                    settlement is not None and settlement.b_sags
+                ),
+                a_holds=bool(
+                    settlement is not None and settlement.a_holds
+                ),
+                b_holds=bool(
+                    settlement is not None and settlement.b_holds
+                ),
+                support_mvar=(
+                    settlement.support_mvar
+                    if settlement is not None
+                    else 0.0
+                ),
+                support_eur=(
+                    settlement.support_eur
+                    if settlement is not None
+                    else 0.0
+                ),
+                support_payer=(
+                    settlement.support_payer
+                    if settlement is not None
+                    else None
+                ),
+                support_payee=(
+                    settlement.support_payee
+                    if settlement is not None
+                    else None
+                ),
             ))
 
         # Averaging buffers restart for the next cycle.

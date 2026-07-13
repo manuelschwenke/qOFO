@@ -2751,8 +2751,8 @@ def run_multi_tso_dso(
     if config.live_plot_sbx:
         if config.coordination_mode != "sbx":
             raise ValueError(
-                "live_plot_sbx=True requires coordination_mode='sbx' — "
-                "the figure draws the SBX schedule/band/deal state."
+                "live_plot_sbx=True requires coordination_mode='sbx_h' — "
+                "the figure draws scheduled-voltage hold/sag support state."
             )
         from visualisation.plot_sbx import SBXMechanismLivePlotter
         _plotter_sbx = SBXMechanismLivePlotter(
@@ -3307,15 +3307,14 @@ def run_multi_tso_dso(
             }
 
             # ── SBX horizontal round (BEFORE the zones solve): feed the
-            # scheduler every TSO tick; at cycle boundaries the six-step
-            # protocol runs (need → capability → messages → matching →
-            # setpoints → unwind) and the frozen corridor-terminal
-            # references are written into each zone's voltage-tracking
-            # mechanism (weight g_v — STATUS_SBX.md A4/G5).  Between
-            # boundaries the references stay untouched (Step 6).
+            # scheduler every TSO tick. At cycle boundaries the elapsed
+            # window is settled, the active terminal-voltage schedule is
+            # applied, and the A4 re-planning indicator is updated.
+            # Between boundaries the references remain frozen.
             # The adapter is constructed at the FIRST TSO tick at/after
-            # sbx_warmup_s: contracts snapshot the SETTLED closed-loop
-            # state of this step's converged power flow (revised A7).
+            # sbx_warmup_s: controller-intent schedules start after
+            # the optional activation delay; an explicit planning
+            # schedule may override them.
             if config.coordination_mode == "sbx":
                 if (sbx_runtime["adapter"] is None
                         and time_s >= config.sbx_warmup_s):
@@ -3361,12 +3360,29 @@ def run_multi_tso_dso(
                                   else sum(len(v) for v in
                                            config.sbx_support_intervals
                                            .values()))
-                        print(f"  [sbx] v6 contracts frozen at t="
+                        print(f"  [sbx] v6 contracts initialized at t="
                               f"{time_s / 60.0:.0f} min: "
                               f"{len(_ad.registry)} corridor(s), "
+                              f"source={_ad.schedule_source}, "
                               f"k_sched={_sc.k_sched} TSO iterations "
                               f"({_sc.t_cycle_min:.0f} min), "
                               f"{_n_sup} planned-support interval(s)")
+                        _diag = _ad.initial_schedule_diagnostics
+                        _below = [
+                            row for row in _diag
+                            if not row["initially_holds"]
+                        ]
+                        _worst = min(
+                            (float(row["hold_margin_pu"])
+                             for row in _diag),
+                            default=float("nan"),
+                        )
+                        print(
+                            f"  [sbx] initial hold pre-check: "
+                            f"{len(_diag) - len(_below)}/{len(_diag)} "
+                            f"terminals inside tolerance; "
+                            f"worst margin={1e3 * _worst:+.2f} mpu"
+                        )
                         for hit in _ad.border_actuators:
                             print(f"  [sbx] border actuator: "
                                   f"{hit['element']} {hit['index']} at "

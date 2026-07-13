@@ -31,23 +31,20 @@ from minute 60 to the horizon end):
 
 Arms per cell (identical scenario, only the mechanism differs):
 
-* ``none``        — autonomous zones, no coordination.
-* ``sbx``         — the v6 contract layer (snapshot contracts frozen at
-                    min 30, priority tracking, metering + attributed
-                    settlement, escalation indicator).
-* ``sbx_support`` — contract layer + planned support: z1 and z2 hold
-                    their sides of corridors (1,3) / (2,3) at
-                    +2.5 mpu during minutes 60–120 (agreed in advance).
+* ``none``        - autonomous zones, no coordination.
+* ``sbx``         - controller-intent terminal schedules from minute 0,
+                    ordinary-weight tracking, metering and settlement.
+* ``sbx_support`` - base SBX plus planned support: z1 and z2 hold
+                    +2.5 mpu on their zone-3 corridor terminals during
+                    minutes 60-120 (agreed in advance).
 
 Decomposition per cell (zone-3 violation exposure over the stress
-window): contract value = expo(none) − expo(sbx); planned-support
-benefit = expo(sbx) − expo(sbx_support).
+window): base-SBX effect = expo(none) - expo(sbx), expected near zero;
+planned-support benefit = expo(sbx) - expo(sbx_support).
 
-Flags V1–V6: indicator fires iff deficit; contract value > 0.1 pu·step
-in D1/D2 and net ≈ 0 in D0; planned support does not hurt (and its
-benefit is reported); the A4 escalation fires in D2 (persistent
-indicator → re-planning signal); all solves optimal; settlement
-completes (conservation asserted inside the engine).
+Flags V1-V6: indicator fires iff deficit; base SBX is control-equivalent
+to none within tolerance; planned support does not hurt; escalation and
+solver/settlement health are checked.
 
 CLI:
   --run           run the cells (arms × cells, sequential)
@@ -91,13 +88,13 @@ _005 = importlib.import_module("experiments.005_CIGRE_MULTI")
 
 RESULT_DIR = REPO / "results" / "015_SBX_COMPARE"
 
-WARMUP_MIN = 30.0        # snapshot contracts freeze at the settled state
+SBX_START_MIN = 0.0      # controller-intent contracts start immediately
 STRESS_ON_MIN = 60.0
 DEFAULT_MINUTES = 120.0  # calibration-horizon rule (Manuel 2026-07-03)
 
 #: v6 experiment knobs (defaults are Manuel's live knobs — pinned).
 SBX_KNOBS = dict(k_sched=2, n_need=2, release_threshold_pu=0.001,
-                 escalation_cycles=4)
+                 escalation_cycles=4, w_track_factor=1.0)
 
 #: Planned support (agreed in advance): the supporters' sides (end A of
 #: both zone-3 corridors) held +2.5 mpu during the stress window.
@@ -116,15 +113,13 @@ C_STRESS = "#f0efec"
 CELLS: Dict[str, dict] = {
     "D2": dict(sink_mvar=900.0,
                label="deep deficit (900 Mvar)",
-               expect="contract recovers in ~30 min; escalation fires; "
-                      "planned support accelerates the recovery"),
+               expect="base SBX matches none; planned support is explicit"),
     "D1": dict(sink_mvar=500.0,
                label="misdirected deficit (500 Mvar)",
-               expect="contract nearly clears it with A's own reserves; "
-                      "support ≈ neutral"),
+               expect="base SBX matches none; support effect is measured"),
     "D0": dict(sink_mvar=150.0,
                label="self-manageable (150 Mvar)",
-               expect="nothing fires; non-inferiority"),
+               expect="base SBX matches none; no hidden control effect"),
 }
 
 ARMS = ("none", "sbx", "sbx_support")
@@ -161,7 +156,7 @@ def make_config(cell: str, arm: str, minutes: float):
     else:
         rep1("unknown arm", arm=arm)
 
-    cfg.sbx_warmup_s = 60.0 * WARMUP_MIN
+    cfg.sbx_warmup_s = 60.0 * SBX_START_MIN
     cfg.zone_v_min_pu = {STRESSED_ZONE: Z3_V_MIN}
     cfg.contingencies = [
         ContingencyEvent(minute=STRESS_ON_MIN, element_type="load",
@@ -263,7 +258,7 @@ def tie_import_shift_z3(recs, t_lo_s: float, t_hi_s: float) -> float:
     """Mean tie-flow-proxy shift into zone 3 during the window vs the
     pre-stress mean [Mvar] (F7 caveat: proxy identical across arms —
     differences and shifts are valid, absolute levels are not)."""
-    pre_lo, pre_hi = 60.0 * WARMUP_MIN, 60.0 * STRESS_ON_MIN
+    pre_lo, pre_hi = 60.0 * SBX_START_MIN, 60.0 * STRESS_ON_MIN
 
     def mean_flow(lo: float, hi: float) -> float:
         tot, n = 0.0, 0
@@ -288,18 +283,85 @@ def solver_all_optimal(recs) -> bool:
     return True
 
 
+def voltage_tracking_rms_mpu(recs, t_lo_s: float, t_hi_s: float) -> float:
+    """Mean recorded zone RMS error to the global voltage target [mpu]."""
+    values = [
+        float(value)
+        for record in recs
+        if t_lo_s <= record.time_s <= t_hi_s
+        for value in record.zone_v_rms_err_pu.values()
+    ]
+    return 1e3 * float(np.mean(values)) if values else float("nan")
+
+
+def tso_oltc_activity(recs, t_lo_s: float,
+                      t_hi_s: float) -> Tuple[float, int]:
+    """Total tap travel and zone-event count whose new sample is in-window."""
+    travel = 0.0
+    zone_events = 0
+    for previous, current in zip(recs[:-1], recs[1:]):
+        if not (t_lo_s <= current.time_s <= t_hi_s):
+            continue
+        zones = set(previous.zone_oltc_taps) | set(current.zone_oltc_taps)
+        for zone in zones:
+            before = np.asarray(previous.zone_oltc_taps.get(zone, []),
+                                dtype=float)
+            after = np.asarray(current.zone_oltc_taps.get(zone, []),
+                               dtype=float)
+            if before.shape != after.shape or before.size == 0:
+                continue
+            delta = after - before
+            if np.any(np.abs(delta) > 0.0):
+                zone_events += 1
+                travel += float(np.sum(np.abs(delta)))
+    return travel, zone_events
+
+
+def base_control_equivalence(none_recs, sbx_recs) -> Tuple[float, float]:
+    """Maximum voltage-statistic and TSO-tap differences between arms."""
+    if len(none_recs) != len(sbx_recs):
+        return float("inf"), float("inf")
+    max_voltage = 0.0
+    max_tap = 0.0
+    for none, sbx in zip(none_recs, sbx_recs):
+        if abs(float(none.time_s) - float(sbx.time_s)) > 1e-9:
+            return float("inf"), float("inf")
+        for field in ("zone_v_min", "zone_v_max", "zone_v_mean"):
+            left = getattr(none, field)
+            right = getattr(sbx, field)
+            for zone in set(left) | set(right):
+                max_voltage = max(
+                    max_voltage,
+                    abs(float(left[zone]) - float(right[zone])),
+                )
+        for zone in set(none.zone_oltc_taps) | set(sbx.zone_oltc_taps):
+            left = np.asarray(none.zone_oltc_taps.get(zone, []), dtype=float)
+            right = np.asarray(sbx.zone_oltc_taps.get(zone, []), dtype=float)
+            if left.shape != right.shape:
+                return float("inf"), float("inf")
+            if left.size:
+                max_tap = max(
+                    max_tap, float(np.max(np.abs(left - right)))
+                )
+    return max_voltage, max_tap
+
+
 def evaluate_cell(cell: str, arm_data: Dict[str, dict]
                   ) -> Tuple[List[dict], dict]:
     spec = CELLS[cell]
     minutes = arm_data["sbx"]["minutes"]
     lo_s, hi_s = 60.0 * STRESS_ON_MIN, 60.0 * minutes
+    from_sbx_start_s = 60.0 * SBX_START_MIN
     deficit = cell != "D0"
 
     expo = {arm: violation_exposure(arm_data[arm]["recs"], STRESSED_ZONE,
                                     lo_s, hi_s, Z3_V_MIN)
             for arm in ARMS}
-    contract_value = expo["none"][0] - expo["sbx"][0]
+    base_sbx_effect = expo["none"][0] - expo["sbx"][0]
     support_benefit = expo["sbx"][0] - expo["sbx_support"][0]
+    max_base_v_diff, max_base_tap_diff = base_control_equivalence(
+        arm_data["none"]["recs"], arm_data["sbx"]["recs"]
+    )
 
     flags: Dict[str, Tuple[str, str]] = {}
 
@@ -321,14 +383,10 @@ def evaluate_cell(cell: str, arm_data: Dict[str, dict]
     else:
         flag("V1", len(needs) == 0,
              f"z3 indicator set in {len(needs)} cycle(s) (expected 0)")
-    # V2 — the contract layer's value.
-    if deficit:
-        flag("V2", contract_value > 0.10,
-             f"contract value {contract_value:+.3f} pu·step "
-             f"(none {expo['none'][0]:.3f} → sbx {expo['sbx'][0]:.3f})")
-    else:
-        flag("V2", abs(contract_value) < 0.10,
-             f"non-inferiority: contract value {contract_value:+.3f}")
+    # V2 - controller-intent base SBX must be physically neutral.
+    flag("V2", max_base_v_diff <= 1e-10 and max_base_tap_diff == 0.0,
+         f"max voltage-statistic difference {max_base_v_diff:.3e} pu; "
+         f"max TSO tap difference {max_base_tap_diff:.1f} step")
     # V3 — planned support must not hurt; its benefit is reported.
     flag("V3", support_benefit > -0.05,
          f"planned-support benefit {support_benefit:+.3f} pu·step "
@@ -355,6 +413,8 @@ def evaluate_cell(cell: str, arm_data: Dict[str, dict]
     for arm in ARMS:
         recs = arm_data[arm]["recs"]
         d, n, worst = expo[arm]
+        oltc_travel, oltc_zone_events = tso_oltc_activity(
+            recs, from_sbx_start_s, hi_s)
         row: Dict[str, object] = dict(
             cell=cell, label=spec["label"], arm=arm, minutes=minutes,
             expo_z3_pustep=round(d, 4), expo_z3_steps=n,
@@ -363,6 +423,10 @@ def evaluate_cell(cell: str, arm_data: Dict[str, dict]
                 tie_import_shift_z3(recs, lo_s, hi_s), 2),
             losses_mean_mw=round(float(np.mean(
                 [r.total_losses_mw for r in recs])), 3),
+            v_rms_from_sbx_start_mpu=round(
+                voltage_tracking_rms_mpu(recs, from_sbx_start_s, hi_s), 3),
+            tso_oltc_travel_from_sbx_start=round(oltc_travel, 1),
+            tso_oltc_zone_events_from_sbx_start=oltc_zone_events,
             solver_ok=int(solver_all_optimal(recs)),
         )
         aext = arm_data[arm]["sbx"]
@@ -383,13 +447,15 @@ def evaluate_cell(cell: str, arm_data: Dict[str, dict]
             for z in sorted(pay):
                 row[f"pay_z{z}_eur"] = round(pay[z], 2)
         if arm == "sbx":
-            row["contract_value_pustep"] = round(contract_value, 4)
+            row["base_sbx_effect_pustep"] = round(base_sbx_effect, 4)
         if arm == "sbx_support":
             row["support_benefit_pustep"] = round(support_benefit, 4)
         rows.append(row)
 
     return rows, {"flags": flags, "expo": {a: expo[a][0] for a in ARMS},
                   "needs": needs, "escalated": escalated,
+                  "max_base_v_diff_pu": max_base_v_diff,
+                  "max_base_tap_diff": max_base_tap_diff,
                   "window_s": (lo_s, hi_s)}
 
 
@@ -400,7 +466,7 @@ def evaluate_cell(cell: str, arm_data: Dict[str, dict]
 
 def _shade(ax, minutes: float) -> None:
     ax.axvspan(STRESS_ON_MIN, minutes, color=C_STRESS, zorder=0)
-    ax.axvline(WARMUP_MIN, color="0.75", lw=0.7, ls=":")
+    ax.axvline(SBX_START_MIN, color="0.75", lw=0.7, ls=":")
     ax.grid(alpha=0.25, lw=0.4)
     ax.tick_params(labelsize=8)
 
@@ -466,11 +532,11 @@ def fig_mechanism(cell: str, arm_data: Dict[str, dict],
     for ax, key in zip(axes[1:3], Z3_CORRIDORS):
         for arm in ("sbx", "sbx_support"):
             rl = arm_data[arm]["sbx"]["records"][key]
-            t = [WARMUP_MIN + r.cycle * cyc_min for r in rl]
+            t = [SBX_START_MIN + r.cycle * cyc_min for r in rl]
             ax.plot(t, [r.q_meas_mvar for r in rl], color=C_ARM[arm],
                     lw=1.1, label=f"q_meas ({arm})")
         rl = sup_ext["records"][key]
-        t = [WARMUP_MIN + r.cycle * cyc_min for r in rl]
+        t = [SBX_START_MIN + r.cycle * cyc_min for r in rl]
         band = [r.q_band_mvar for r in rl]
         ax.fill_between(t,
                         [r.q_std_mvar - b for r, b in zip(rl, band)],
@@ -489,7 +555,7 @@ def fig_mechanism(cell: str, arm_data: Dict[str, dict],
         recs = arm_data[arm]["recs"]
         pre = [sum(r.zone_tie_q_mvar[k] for k in Z3_CORRIDORS)
                for r in recs
-               if 60.0 * WARMUP_MIN <= r.time_s <= 60.0 * STRESS_ON_MIN
+               if 60.0 * SBX_START_MIN <= r.time_s <= 60.0 * STRESS_ON_MIN
                and all(k in r.zone_tie_q_mvar for k in Z3_CORRIDORS)]
         base = float(np.mean(pre)) if pre else 0.0
         t, q = [], []
@@ -531,7 +597,7 @@ def write_report(all_rows: List[dict], all_extra: Dict[str, dict],
         "",
         "## Result: zone-3 violation exposure [pu·step] (stress window)",
         "",
-        "| cell | none | sbx (contract) | sbx_support | contract value "
+        "| cell | none | sbx (base) | sbx_support | base-SBX effect "
         "| support benefit | escalations |",
         "|---|---|---|---|---|---|---|",
     ]
@@ -546,7 +612,7 @@ def write_report(all_rows: List[dict], all_extra: Dict[str, dict],
         rep.append(
             f"| {c} | {e['expo']['none']:.3f} | {e['expo']['sbx']:.3f} "
             f"| {e['expo']['sbx_support']:.3f} | "
-            f"{sbx_row['contract_value_pustep']:+.3f} | "
+            f"{sbx_row['base_sbx_effect_pustep']:+.3f} | "
             f"{sup_row['support_benefit_pustep']:+.3f} | "
             f"{len(e['escalated'])} |")
     rep.append("")

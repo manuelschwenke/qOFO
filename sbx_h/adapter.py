@@ -8,19 +8,20 @@ Measurement` and :class:`~controller.tso_controller.TSOController` —
 onto the plant-agnostic :class:`~sbx_h.scheduler.SBXScheduler`, and
 writes the schedule's corridor-terminal references into each zone's
 EXISTING voltage-tracking mechanism (``TSOControllerConfig.
-v_setpoints_pu`` via ``update_voltage_setpoints``) with the priority
-weight ``w_track_factor × g_v``.
+v_setpoints_pu`` via ``update_voltage_setpoints``) with
+weight ``w_track_factor × g_v`` (ordinary voltage weight by default).
 
 Data-flow per TSO tick (consecutive ``iteration`` = 0, 1, 2, …):
 
 1. On a cycle boundary: settle the elapsed cycle and apply the ACTIVE
-   contract schedule (constant / hourly planning / planned-support
+   contract schedule (controller intent / hourly planning /
+   planned-support
    interval) — :meth:`SBXScheduler.run_cycle`; write the returned
    references.  Iteration-0 references are written at construction.
 2. Every tick: feed :meth:`SBXScheduler.record_step` with the areas'
    monitored voltages/bounds (violation indicator) and the per-corridor
    tie P/Q/terminal-V measured at the reference end A (cycle
-   averaging + settlement attribution inputs).
+   averaging + scheduled-reference settlement inputs).
 
 v6 (2026-07-12): the capability-LP composition, the cached-Jacobian
 relieving-sign machinery and every other deal-layer input were removed
@@ -49,17 +50,61 @@ from numpy.typing import NDArray
 
 from sbx_h.config import SBXConfig
 from sbx_h.contract import build_default_contract, with_planned_support
-from sbx_h.corridor import build_corridor_registry
+from sbx_h.corridor import Corridor, build_corridor_registry
 from sbx_h.fail import rep1
 from sbx_h.scheduler import AreaStepInput, SBXScheduler
+
+
+def controller_intent_schedule(
+    corridor: Corridor,
+    tso_controllers: Mapping[int, object],
+) -> Tuple[Tuple[float, Tuple[float, ...], Tuple[float, ...]], ...]:
+    """Constant t=0 schedule from each area's intended bus setpoints.
+
+    Measured plant voltages are deliberately not consulted: a realised
+    operating point is evidence for feasibility, not a control promise.
+    """
+
+    def _intent(area: int, bus: int) -> float:
+        if area not in tso_controllers:
+            rep1("SBX area has no TSO controller", area=area,
+                 controllers=sorted(tso_controllers))
+        cfg = tso_controllers[area].config
+        if cfg.v_setpoints_pu is None:
+            rep1("SBX requires intended voltage setpoints",
+                 area=area, bus=bus)
+        buses = np.asarray(cfg.voltage_bus_indices, dtype=np.int64)
+        refs = np.asarray(cfg.v_setpoints_pu, dtype=np.float64)
+        if refs.ndim != 1 or refs.size != buses.size:
+            rep1("TSO voltage setpoints do not align with monitored buses",
+                 area=area, n_buses=int(buses.size),
+                 setpoint_shape=tuple(refs.shape))
+        hits = np.flatnonzero(buses == int(bus))
+        if hits.size != 1:
+            rep1("corridor terminal is not uniquely monitored by its TSO",
+                 area=area, bus=bus, hits=hits.tolist())
+        value = float(refs[int(hits[0])])
+        if not (math.isfinite(value) and value > 0.0):
+            rep1("intended terminal voltage must be finite and positive",
+                 area=area, bus=bus, v_ref_pu=value)
+        return value
+
+    v_a = tuple(
+        _intent(corridor.area_a, line.bus_a) for line in corridor.lines
+    )
+    v_b = tuple(
+        _intent(corridor.area_b, line.bus_b) for line in corridor.lines
+    )
+    return ((0.0, v_a, v_b),)
 
 
 class SBXRunnerAdapter:
     """Wires the v6 scheduler into the multi-TSO runner loop.
 
-    Construction requires the CONVERGED experiment base case (contract
-    defaults, unless a planning schedule replaces the snapshot) and the
-    live zone controllers; the iteration-0 references are written
+    By default the contract schedule is each TSO controller's intended
+    terminal voltage. An explicit planning schedule overrides that
+    intent. The converged plant state is used only for the initial
+    feasibility diagnostic; the iteration-0 references are written
     immediately.
     """
 
@@ -89,6 +134,9 @@ class SBXRunnerAdapter:
             rep1("freeze_time_s must be finite and non-negative",
                  freeze_time_s=freeze_time_s)
         self.registry = build_corridor_registry(net, area_map)
+        self.schedule_source = (
+            "planning" if v_std_schedules is not None else "controller_intent"
+        )
         if v_std_schedules is not None:
             missing = set(self.registry) - set(v_std_schedules)
             extra = set(v_std_schedules) - set(self.registry)
@@ -114,10 +162,13 @@ class SBXRunnerAdapter:
                      known=sorted(self.registry))
         self.contracts = {}
         for key, corr in self.registry.items():
+            schedule = (
+                v_std_schedules[key] if v_std_schedules is not None
+                else controller_intent_schedule(corr, tso_controllers)
+            )
             contract = build_default_contract(
                 corr, net, config,
-                v_std_schedule=(v_std_schedules[key]
-                                if v_std_schedules is not None else None),
+                v_std_schedule=schedule,
                 q_band_schedule=(q_band_schedules[key]
                                  if q_band_schedules is not None
                                  else None),
@@ -131,11 +182,14 @@ class SBXRunnerAdapter:
             self.contracts[key] = contract
         self.scheduler = SBXScheduler(config, self.registry,
                                       self.contracts)
+        self.initial_schedule_diagnostics = (
+            self._initial_schedule_diagnostics(net)
+        )
 
         # ── Per-area wiring checks + terminal-bus positions ────────────
         # Terminal buses must be monitored voltage buses of their zone;
         # their references are tracked through the existing g_v term
-        # with the v6 priority weight.
+        # with the configured SBX tracking weight.
         self._vpos: Dict[int, Dict[int, int]] = {}
         self._terminals: Dict[int, List[int]] = {}
         for z in self.scheduler.area_ids:
@@ -256,6 +310,46 @@ class SBXRunnerAdapter:
     # ------------------------------------------------------------------
     #  Internals
     # ------------------------------------------------------------------
+
+    def _initial_schedule_diagnostics(
+        self, net: pp.pandapowerNet,
+    ) -> List[Dict[str, object]]:
+        """Compare intended/planned promises with the converged snapshot.
+
+        This is a pre-check, not a capability certificate: it reports
+        whether each terminal is initially within the contractual hold
+        tolerance without redefining the schedule from the measurement.
+        """
+        if not hasattr(net, "res_bus") or len(net.res_bus) != len(net.bus):
+            rep1("SBX initial schedule diagnostic needs a converged plant",
+                 n_res_bus=len(getattr(net, "res_bus", ())),
+                 n_bus=len(net.bus))
+        rows: List[Dict[str, object]] = []
+        tolerance = float(self.config.v_hold_tolerance_pu)
+        for key, corridor in self.registry.items():
+            v_a, v_b = self.contracts[key].v_std_at(self.freeze_time_s)
+            for line, scheduled_a, scheduled_b in zip(
+                corridor.lines, v_a, v_b
+            ):
+                for side, area, bus, scheduled in (
+                    ("a", corridor.area_a, line.bus_a, scheduled_a),
+                    ("b", corridor.area_b, line.bus_b, scheduled_b),
+                ):
+                    measured = float(net.res_bus.at[bus, "vm_pu"])
+                    margin = measured - (float(scheduled) - tolerance)
+                    rows.append({
+                        "corridor": key,
+                        "line_idx": int(line.line_idx),
+                        "side": side,
+                        "area": int(area),
+                        "bus": int(bus),
+                        "v_meas_pu": measured,
+                        "v_sched_pu": float(scheduled),
+                        "hold_margin_pu": margin,
+                        "initially_holds": bool(margin >= 0.0),
+                        "schedule_source": self.schedule_source,
+                    })
+        return rows
 
     def _border_actuator_diagnostic(
         self, net: pp.pandapowerNet, tso_controllers: Mapping[int, object],
@@ -387,7 +481,7 @@ class SBXRunnerAdapter:
                Dict[Tuple[int, int], List[float]]]:
         """Per-corridor, per-line measured terminal voltages (A / B
         end), each side read from ITS OWN area's measurement (the
-        settlement's attribution inputs)."""
+        scheduled-reference settlement inputs)."""
 
         def _v_at(meas, bus: int) -> float:
             bus_arr = np.asarray(meas.bus_indices)

@@ -4,9 +4,9 @@ sbx_h/contract.py
 Agreed contract data per corridor (SBX-H v6).
 
 The contract is the WHOLE mechanism's normative object: agreed terminal
-voltages per tie line (constant snapshot, hourly planning schedule, or
-planned SUPPORT intervals), the implied standard flows, the tier-1 band
-and the deviation-tier prices.  v6 removed the deal-layer fields
+voltages per tie line (controller intent, an explicit planning schedule,
+or planned SUPPORT intervals), the implied standard flows, the
+reactive-flow deadband, and the hold/sag support-energy settlement terms.  v6 removed the deal-layer fields
 (quantum rate, contract cap, dust threshold — archive:
 ``_archive/sbx_h_v5/``).
 
@@ -22,9 +22,11 @@ Symbol map
 ----------
 * ``v_std_a_pu`` / ``v_std_b_pu`` ↔ agreed terminal-voltage pair per tie
   line; bilateral data, neither side moves it unilaterally.
-* ``q_band_mvar``                 ↔ tier-1 band half-width.
-* ``p_dev_eur_per_mvarh``         ↔ deviation-tier price basis.
-* ``kappa_penalty``               ↔ deviation-tier multiple.
+* ``q_band_mvar``                 ↔ support-flow deadband.
+* ``p_support_eur_per_mvarh``     ↔ delivered support-energy price.
+* ``v_hold_tolerance_pu`` /
+  ``v_sag_threshold_pu``          ↔ absolute terminal-voltage roles.
+* ``q_support_cap_mvar``          ↔ optional payment-exposure cap.
 * ``k_sched`` / ``t_cycle_min``   ↔ metering cycle length.
 * ``q_std_mvar()``                ↔ q_std = Σ_ℓ q_flow(v_std[ℓ,A],
   v_std[ℓ,B], p_sched[ℓ]) — a pure function both sides evaluate
@@ -72,8 +74,10 @@ class CorridorContract:
     v_std_a_pu: Tuple[float, ...]
     v_std_b_pu: Tuple[float, ...]
     q_band_mvar: float
-    p_dev_eur_per_mvarh: float
-    kappa_penalty: float
+    p_support_eur_per_mvarh: float
+    q_support_cap_mvar: Optional[float]
+    v_hold_tolerance_pu: float
+    v_sag_threshold_pu: float
     k_sched: int
     t_cycle_min: float
     v_std_schedule: Optional[
@@ -113,16 +117,24 @@ class CorridorContract:
                     rep1("contract voltages must be finite and positive",
                          corridor=(self.area_a, self.area_b),
                          field=name, values=values)
-        for name in ("q_band_mvar", "p_dev_eur_per_mvarh",
+        for name in ("q_band_mvar", "p_support_eur_per_mvarh",
                      "t_cycle_min"):
             if getattr(self, name) <= 0.0:
                 rep1(f"contract field {name} must be positive",
                      corridor=(self.area_a, self.area_b),
                      **{name: getattr(self, name)})
-        if self.kappa_penalty < 1.0:
-            rep1("kappa_penalty must be >= 1",
+        if self.q_support_cap_mvar is not None and \
+                self.q_support_cap_mvar <= 0.0:
+            rep1("q_support_cap_mvar must be positive when set",
                  corridor=(self.area_a, self.area_b),
-                 kappa_penalty=self.kappa_penalty)
+                 q_support_cap_mvar=self.q_support_cap_mvar)
+        if not (0.0 <= self.v_hold_tolerance_pu
+                < self.v_sag_threshold_pu):
+            rep1("contract hold/sag thresholds must satisfy "
+                 "0 <= hold < sag",
+                 corridor=(self.area_a, self.area_b),
+                 v_hold_tolerance_pu=self.v_hold_tolerance_pu,
+                 v_sag_threshold_pu=self.v_sag_threshold_pu)
         if self.k_sched < 1:
             rep1("k_sched must be a positive iteration count",
                  corridor=(self.area_a, self.area_b), k_sched=self.k_sched)
@@ -268,12 +280,12 @@ def build_default_contract(
     v_std_schedule: Optional[Sequence] = None,
     q_band_schedule: Optional[Sequence] = None,
 ) -> CorridorContract:
-    """Default contract from the converged base case (or a schedule).
+    """Low-level builder from an explicit schedule or snapshot.
 
-    ``v_std`` per tie terminal = the base-case power-flow voltages
-    rounded to :data:`V_STD_DECIMALS` decimals; constants from
-    ``config``.  ``net`` must hold a converged power flow unless a
-    planning ``v_std_schedule`` replaces the snapshot entirely.
+    The active runner adapter always supplies controller intent or an
+    explicit planning schedule. The snapshot fallback remains only for
+    isolated analytical tests and explicit low-level callers; it is not
+    the active control-reference default.
     """
     if v_std_schedule is not None:
         sched = tuple(
@@ -318,8 +330,10 @@ def build_default_contract(
         v_std_a_pu=tuple(v_std_a),
         v_std_b_pu=tuple(v_std_b),
         q_band_mvar=q_band,
-        p_dev_eur_per_mvarh=config.p_dev_eur_per_mvarh,
-        kappa_penalty=config.kappa_penalty,
+        p_support_eur_per_mvarh=config.p_support_eur_per_mvarh,
+        q_support_cap_mvar=config.q_support_cap_mvar,
+        v_hold_tolerance_pu=config.v_hold_tolerance_pu,
+        v_sag_threshold_pu=config.v_sag_threshold_pu,
         k_sched=config.k_sched,
         t_cycle_min=config.t_cycle_min,
     )

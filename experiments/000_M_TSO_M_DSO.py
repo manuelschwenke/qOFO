@@ -262,7 +262,7 @@ def make_config() -> MultiTSOConfig:
         dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
         # ── TSO-TSO tie coordination (gradient-exchange; see Ch.7 §7.5) ──
         enable_tie_coordination=False,
-        coordination_mode='sbx',
+        coordination_mode='none',
         zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},  # divergent per-zone schedule (win-win case)
         g_z_q_tie=0.0,            # OPTIONAL orthogonal guardrail: enforce Q_tie soft cap (0 = off)
         tie_q_band_mvar=100.0,     # +/- soft cap on per-tie reactive flow [Mvar] (only if g_z_q_tie>0)
@@ -313,6 +313,7 @@ def make_config() -> MultiTSOConfig:
         live_plot_system=False,
         live_plot_tracking=False,
         live_plot_tie_coordination=False,
+        live_plot_sbx=True,
         local_sensitivities_tso=False,
         local_sensitivities_dso=False,
         # Preconditioning of g_w

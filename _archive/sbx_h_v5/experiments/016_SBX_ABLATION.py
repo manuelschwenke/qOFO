@@ -60,8 +60,8 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from sbx.config import SBXConfig  # noqa: E402
-from sbx.fail import rep1  # noqa: E402
+from sbx_h.config import SBXConfig  # noqa: E402
+from sbx_h.fail import rep1  # noqa: E402
 
 _013 = importlib.import_module("experiments.013_SBX_LADDER")
 _015 = importlib.import_module("experiments.015_SBX_COMPARE")

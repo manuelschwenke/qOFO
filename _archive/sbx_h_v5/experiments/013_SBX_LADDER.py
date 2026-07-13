@@ -61,7 +61,7 @@ printed PASS/FAIL/n-a, recorded in the table, NOT process-fatal):
      the trip, references back at v_std at the end;
   M6 every TSO solve of every arm optimal / optimal_inaccurate;
   M7 settlement ran to completion (conservation is asserted inside
-     sbx.settlement — reaching the end IS the pass) and the ledger is
+     sbx_h.settlement — reaching the end IS the pass) and the ledger is
      written.
 
 Metrics table (``metrics.csv``, one row per scenario × arm):
@@ -117,8 +117,8 @@ sys.path.insert(0, str(REPO))
 
 from experiments.helpers.records import ContingencyEvent  # noqa: E402
 from experiments.runners.multi_tso_dso import run_multi_tso_dso  # noqa: E402
-from sbx.config import SBXConfig  # noqa: E402
-from sbx.fail import rep1  # noqa: E402
+from sbx_h.config import SBXConfig  # noqa: E402
+from sbx_h.fail import rep1  # noqa: E402
 
 _005 = importlib.import_module("experiments.005_CIGRE_MULTI")
 
@@ -156,9 +156,9 @@ SCENARIOS: Dict[str, dict] = {
     ),
     "asym_z1": dict(
         family="asym", stressed_zones=(1,),
-        stress=[(27, 0.0, 800.0)],
-        zone_v_min={1: 1.01}, zone_v_max={},
-        description="Zone-1 stress (border-actuator watch F5): 800 Mvar "
+        stress=[(27, 0.0, 400.0)],
+        zone_v_min={1: 1.02}, zone_v_max={},
+        description="Zone-1 stress (border-actuator watch F5): 400 Mvar "
                     "sink at bus 27, zone-1 v_min = 1.01.",
     ),
     "asym_z2": dict(
@@ -302,7 +302,7 @@ def run_arm(scenario: str, arm: str, minutes: float,
     adapter = runtime.get("adapter")
     # Settlement outputs while the engines are alive (M7).
     if arm in ("sbx", "sbx_inert") and adapter is not None:
-        from sbx.settlement import write_settlement_outputs
+        from sbx_h.settlement import write_settlement_outputs
         sdir = RESULT_DIR / scenario
         sdir.mkdir(parents=True, exist_ok=True)
         write_settlement_outputs(adapter.scheduler.settlement_engines,

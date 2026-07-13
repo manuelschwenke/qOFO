@@ -1,5 +1,5 @@
 """
-sbx/tie_line_model.py
+sbx_h/tie_line_model.py
 =====================
 Per-line π-model physics for SBX tie lines (plan v2 §3, normative).
 
@@ -47,7 +47,7 @@ import numpy as np
 import pandapower as pp
 from scipy.optimize import brentq
 
-from sbx.fail import rep1
+from sbx_h.fail import rep1
 
 #: Guard margin of the transfer-limit assertion in :func:`q_flow`
 #: (plan §3: |g·V_A² − P| ≤ (1 − margin)·V_A·V_B·√(g² + b²)).  A module

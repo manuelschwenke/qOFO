@@ -1025,15 +1025,20 @@ class MultiTSOConfig:
     # Spec §4 ``coordination:`` block mapped onto flat fields (no parallel
     # config system).  See docs/BME_SPEC.md and docs/BME_STATUS.md.
     coordination_mode: str = "none"
-    """Horizontal TSO–TSO coordination mode: ``"none"`` (baseline,
-    byte-for-byte unchanged), ``"vref"`` (the existing two-loop ΔV_ref
-    tie coordinator — requires ``enable_tie_coordination=True``),
+    """Coordination mode: ``"none"`` (baseline, byte-for-byte
+    unchanged), ``"vref"`` (the existing two-loop ΔV_ref tie
+    coordinator — requires ``enable_tie_coordination=True``),
     ``"bme"`` (Boundary Marginal Exchange: common objective Φ, boundary
     marginals μ over the CoordinationBus, Convention-A price term,
-    complex boundary coordinates per the D7 revision) or ``"sbx"``
+    complex boundary coordinates per the D7 revision), ``"sbx"``
     (Scheduled Boundary Exchange: contract-price corridor scheduling,
     STATUS_SBX.md — capability messages, deterministic matching, frozen
-    voltage references; no price discovery, no BME module touched).
+    voltage references; no price discovery, no BME module touched) or
+    ``"sbxv"`` (SBX-V, VERTICAL band-and-request TSO–DSO coordination,
+    STATUS_SBXV.md: free Normalbereich per AggregationArea, granted
+    Vorhalteleistung via the deterministic request pipeline, tier
+    prices in the TSO MIQP through a solver proxy, Leitfaden-exact
+    settlement — horizontal coordination stays off).
     ``"bme"`` with ``enable_tie_coordination=True`` is contradictory and
     fail-fasts in the runner; so does ``"bme"`` with a non-zero
     ``g_q_tie`` (Q3) or ``tso_g_q_tie``-style tie tracking.  ``"sbx"``
@@ -1041,12 +1046,30 @@ class MultiTSOConfig:
     same boundary voltage references)."""
 
     sbx_config: Optional[object] = None
-    """SBX configuration (an ``sbx.config.SBXConfig`` instance) used when
+    """SBX configuration (an ``sbx_h.config.SBXConfig`` instance) used when
     ``coordination_mode="sbx"``.  ``None`` (default) builds
-    ``SBXConfig(tso_period_s=tso_period_s)`` with plan-§5 defaults.  Typed
-    loosely so this config module does not import the ``sbx`` package;
+    ``SBXConfig(tso_period_s=tso_period_s)`` with the v6 defaults.  Typed
+    loosely so this config module does not import the ``sbx_h`` package;
     the runner validates the instance type and that its ``tso_period_s``
     matches this config's."""
+
+    sbx_support_intervals: Optional[Dict[tuple, list]] = None
+    """SBX-H v6 planned support agreed IN ADVANCE: per corridor key
+    ``(area_a, area_b)``, a list of windows ``(t_from_s, t_to_s,
+    dv_a_pu, dv_b_pu)`` during which the named side holds its corridor
+    terminals SHIFTED by dv relative to the base schedule (e.g.
+    "+0.002 pu on B's terminals from minute 60 to 120" = the neighbour
+    delivers a raised boundary voltage).  Applied to the built
+    contracts via ``sbx_h.contract.with_planned_support``; the
+    settlement automatically references the raised promise."""
+
+    sbxv_config: Optional[object] = None
+    """SBX-V configuration (an ``sbx_v.config.SBXVConfig`` instance) used
+    when ``coordination_mode="sbxv"``.  ``None`` (default) builds
+    ``SBXVConfig(tso_period_s=tso_period_s)`` with the plan-§8 v1
+    defaults.  Typed loosely so this config module does not import the
+    ``sbxv`` package; the runner validates the instance type and the
+    ``tso_period_s`` match (STATUS_SBXV.md §0.3)."""
 
     sbx_warmup_s: float = 1800.0
     """Warmup window [s] before the SBX contracts are frozen and the

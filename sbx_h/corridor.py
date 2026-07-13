@@ -1,5 +1,5 @@
 """
-sbx/corridor.py
+sbx_h/corridor.py
 ===============
 Corridor registry and corridor-level model for SBX (plan v2 §2.1, §3).
 
@@ -46,10 +46,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Mapping, Sequence, Tuple
 
 import pandapower as pp
-from scipy.optimize import brentq
 
-from sbx.fail import rep1
-from sbx.tie_line_model import TieLineParams, extract_tie_line_params, \
+from sbx_h.fail import rep1
+from sbx_h.tie_line_model import TieLineParams, extract_tie_line_params, \
     q_flow, sensitivities
 
 
@@ -232,55 +231,6 @@ def corridor_q_flow(
                delta_max_rad=delta_max_rad)
         for ln, va, vb, p in zip(corridor.lines, v_a_pu, v_b_pu, p_a_mw)
     )
-
-
-def corridor_solve_dv(
-    corridor: Corridor,
-    v_std_a_pu: Sequence[float],
-    v_std_b_pu: Sequence[float],
-    p_sched_mw: Sequence[float],
-    q_target_mvar: float,
-    acting_end: str,
-    *,
-    dv_search_range_pu: Tuple[float, float] = (-0.05, +0.05),
-    delta_max_rad: float = 0.6,
-) -> float:
-    """Step-4 scalar root find (plan §2.2): common shift ``dv`` on the
-    acting side's terminals such that q_corr(v_std ± dv) = q_target.
-
-    ``acting_end`` ∈ {"a", "b"}; the far end holds its contract voltages.
-    q_corr is always evaluated at the reference end A (see module
-    docstring).  The bracket is asserted with endpoint corridor flows in
-    the failure message.
-    """
-    if acting_end not in ("a", "b"):
-        rep1("acting_end must be 'a' or 'b'", acting_end=acting_end)
-    _check_aligned(corridor, {"v_std_a_pu": v_std_a_pu,
-                              "v_std_b_pu": v_std_b_pu,
-                              "p_sched_mw": p_sched_mw})
-    if not math.isfinite(q_target_mvar):
-        rep1("q_target_mvar must be finite", q_target_mvar=q_target_mvar)
-
-    def h(dv: float) -> float:
-        if acting_end == "a":
-            va = [float(v) + dv for v in v_std_a_pu]
-            vb = [float(v) for v in v_std_b_pu]
-        else:
-            va = [float(v) for v in v_std_a_pu]
-            vb = [float(v) + dv for v in v_std_b_pu]
-        return corridor_q_flow(corridor, va, vb, p_sched_mw,
-                               delta_max_rad=delta_max_rad) - q_target_mvar
-
-    lo, hi = dv_search_range_pu
-    h_lo, h_hi = h(lo), h(hi)
-    if h_lo * h_hi > 0.0:
-        rep1("dv search range does not bracket the corridor Q target",
-             corridor=(corridor.area_a, corridor.area_b),
-             acting_end=acting_end, q_target_mvar=q_target_mvar,
-             dv_search_range_pu=dv_search_range_pu,
-             q_corr_at_lo_mvar=h_lo + q_target_mvar,
-             q_corr_at_hi_mvar=h_hi + q_target_mvar)
-    return float(brentq(h, lo, hi, xtol=1e-12, rtol=1e-15))
 
 
 def corridor_sensitivities(

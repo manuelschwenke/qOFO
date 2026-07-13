@@ -1,5 +1,5 @@
 """
-sbx/fail.py
+sbx_h/fail.py
 ===========
 Fail-fast helper for the SBX package (plan v2 §1 hard rule 1).
 

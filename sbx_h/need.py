@@ -1,51 +1,33 @@
 """
-sbx/need.py
+sbx_h/need.py
 ===========
-Need flag for SBX (plan v2 §2.3) — deliberately simple.
+Violation indicator for SBX-H v6 (originally the plan-v2 §2.3 need flag).
+Since v6 it drives ONLY the escalation indicator and reporting; the
+request machinery it used to arm was removed with the deal layer.
 
 Per area: the flag is set iff the area's own tracked voltage constraints
 show a violation deeper than ``v_viol_threshold_pu`` persisting for at
-least ``n_need`` consecutive OFO iterations.  Direction:
-
-* undervoltage → request Q **import** (corridor-flow change towards the
-  own area),
-* overvoltage  → request Q **export**.
-
-The violation is an area-wide condition; the per-corridor request SIGN in
-corridor-flow space (positive = export from the reference end A) follows
-from the area's end of that corridor:
-
-    request_sign(corridor) = direction · (−1 if own end is A else +1)
-
-with ``direction = +1`` for import-need (undervoltage) and ``−1`` for
-export-need (overvoltage) — importing more means a more negative q_corr
-when the area is end A, a more positive q_corr when it is end B.
+least ``n_need`` consecutive OFO iterations; ``direction`` = +1 for
+undervoltage, −1 for overvoltage.  Once latched, the flag clears only
+below ``release_threshold_pu`` (hysteresis / preventive release).
 
 If both bounds are violated simultaneously (pathological), the deeper
-violation decides; an exact tie resolves to undervoltage/import
-(deterministic, documented — not silent: the decision carries both
-depths).
-
-The relieving-sign SANITY ASSERT (plan §2.3: an assert, not a condition)
-lives in :func:`assert_relieving_sign`: the local sensitivity of the
-worst-violated bus voltage to the requested corridor-flow change must
-have the relieving sign; ``rep1`` with diagnostics otherwise.  The
-scheduler computes that scalar from its cached H and the corridor row.
+violation decides; an exact tie resolves deterministically to
+undervoltage (the decision carries both depths).
 
 Author: Manuel Schwenke / Claude Code
-Date: 2026-07-07 (SBX Phase 3)
+Date: 2026-07-12 (v6 indicator; original need flag 2026-07-07)
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import numpy as np
 
-from sbx.config import SBXConfig
-from sbx.fail import rep1
+from sbx_h.config import SBXConfig
+from sbx_h.fail import rep1
 
 
 @dataclass(frozen=True)
@@ -66,20 +48,6 @@ class NeedDecision:
     worst_bus: Optional[int]
     consecutive: int
 
-    def request_sign(self, own_end: str) -> int:
-        """Per-corridor request sign in corridor-flow space (§2.3).
-
-        ``own_end`` ∈ {"a", "b"} — the area's end of the corridor.
-        Raises unless the flag is set (a sign without a need is a
-        protocol error, not a neutral value).
-        """
-        if own_end not in ("a", "b"):
-            rep1("own_end must be 'a' or 'b'", own_end=own_end)
-        if not self.flag or self.direction == 0:
-            rep1("request_sign queried without a set need flag",
-                 iteration=self.iteration, flag=self.flag,
-                 direction=self.direction)
-        return self.direction * (-1 if own_end == "a" else +1)
 
 
 class NeedTracker:
@@ -92,10 +60,17 @@ class NeedTracker:
 
     def __init__(self, config: SBXConfig, area_id: int) -> None:
         self._threshold = config.v_viol_threshold_pu
+        # v5 preventive release (hysteresis): once latched, the flag
+        # clears only when the depth falls BELOW the release threshold
+        # (≤ the set threshold; None = equal, the v4 behaviour).
+        self._release = (config.release_threshold_pu
+                         if config.release_threshold_pu is not None
+                         else config.v_viol_threshold_pu)
         self._n_need = config.n_need
         self.area_id = int(area_id)
         self._consecutive = 0
         self._direction = 0
+        self._latched = False
         self._last_iteration: Optional[int] = None
 
     def update(
@@ -135,6 +110,7 @@ class NeedTracker:
             # restart does not poison the tracker.
             self._consecutive = 0
             self._direction = 0
+            self._latched = False
         self._last_iteration = int(iteration)
 
         under = lo - v          # > 0 where undervoltage
@@ -142,16 +118,55 @@ class NeedTracker:
         depth_under = float(np.max(under))
         depth_over = float(np.max(over))
 
+        # Direction candidate against the SET threshold (v4 rule).
         if max(depth_under, depth_over) <= self._threshold:
-            direction = 0
-            worst_bus = None
+            cand = 0
         elif depth_under >= depth_over:
             # Exact tie resolves to import need (deterministic).
-            direction = +1
-            worst_bus = int(bus_indices[int(np.argmax(under))])
+            cand = +1
         else:
-            direction = -1
+            cand = -1
+
+        # v5 hysteresis: a LATCHED flag persists while the depth in the
+        # latched direction exceeds the release threshold; it clears
+        # below the release threshold.  A direction FLIP (the candidate
+        # is the opposite bound) falls through to the v4 restart.  With
+        # release == set threshold (the default) this block reproduces
+        # the v4 behaviour exactly.
+        if self._latched and cand in (0, self._direction):
+            depth_lat = depth_under if self._direction > 0 else depth_over
+            if depth_lat > self._release:
+                self._consecutive += 1
+                arr = under if self._direction > 0 else over
+                return NeedDecision(
+                    iteration=int(iteration),
+                    flag=True,
+                    direction=self._direction,
+                    depth_under_pu=max(depth_under, 0.0),
+                    depth_over_pu=max(depth_over, 0.0),
+                    worst_bus=int(bus_indices[int(np.argmax(arr))]),
+                    consecutive=self._consecutive,
+                )
+            self._latched = False
+            self._consecutive = 0
+            self._direction = 0
+            return NeedDecision(
+                iteration=int(iteration),
+                flag=False,
+                direction=0,
+                depth_under_pu=max(depth_under, 0.0),
+                depth_over_pu=max(depth_over, 0.0),
+                worst_bus=None,
+                consecutive=0,
+            )
+
+        direction = cand
+        if direction > 0:
+            worst_bus: Optional[int] = int(bus_indices[int(np.argmax(under))])
+        elif direction < 0:
             worst_bus = int(bus_indices[int(np.argmax(over))])
+        else:
+            worst_bus = None
 
         if direction != 0 and direction == self._direction:
             self._consecutive += 1
@@ -162,44 +177,14 @@ class NeedTracker:
             self._direction = 0
             self._consecutive = 0
 
+        flag = self._consecutive >= self._n_need
+        self._latched = flag
         return NeedDecision(
             iteration=int(iteration),
-            flag=(self._consecutive >= self._n_need),
+            flag=flag,
             direction=self._direction,
             depth_under_pu=max(depth_under, 0.0),
             depth_over_pu=max(depth_over, 0.0),
             worst_bus=worst_bus,
             consecutive=self._consecutive,
         )
-
-
-def assert_relieving_sign(
-    decision: NeedDecision,
-    dv_worst_per_dq_request: float,
-) -> None:
-    """Sanity assert (plan §2.3): the request must relieve the violation.
-
-    ``dv_worst_per_dq_request`` — local-model sensitivity of the worst-
-    violated bus voltage PER UNIT of the SIGNED requested corridor-flow
-    change (the scheduler computes it from its cached H and the corridor
-    row).  For an import need (undervoltage, ``direction = +1``) the
-    request must RAISE that voltage (positive sensitivity); for an export
-    need (``direction = −1``) it must LOWER it (negative sensitivity).
-    Wrong sign is a model inconsistency → ``rep1`` with diagnostics, per
-    the plan an assert and not a request condition.
-    """
-    if not decision.flag:
-        rep1("relieving-sign assert queried without a set need flag",
-             iteration=decision.iteration)
-    if not math.isfinite(dv_worst_per_dq_request):
-        rep1("relieving-sign sensitivity is non-finite",
-             iteration=decision.iteration,
-             dv_worst_per_dq_request=dv_worst_per_dq_request)
-    if decision.direction * dv_worst_per_dq_request <= 0.0:
-        rep1("local Jacobian column does not have the relieving sign for "
-             "the violated bus (plan §2.3 sanity assert)",
-             iteration=decision.iteration, direction=decision.direction,
-             worst_bus=decision.worst_bus,
-             depth_under_pu=decision.depth_under_pu,
-             depth_over_pu=decision.depth_over_pu,
-             dv_worst_per_dq_request=dv_worst_per_dq_request)

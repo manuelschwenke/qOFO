@@ -1105,10 +1105,20 @@ def run_multi_tso_dso(
     # solve (measure → μ_i publish → receiver → g_i^bme inject).  See
     # docs/BME_SPEC.md / docs/BME_STATUS.md.  Everything below is inert
     # under coordination_mode="none" (byte-for-byte baseline).
-    if config.coordination_mode not in ("none", "vref", "bme", "sbx"):
+    # 2026-07-10 package rename (sbx → sbx_h, sbxv → sbx_v): the new
+    # package names are accepted as coordination_mode aliases; the
+    # internal mode strings remain "sbx"/"sbxv" (configs, pickles and
+    # tests predate the rename).
+    if config.coordination_mode == "sbx_h":
+        config.coordination_mode = "sbx"
+    elif config.coordination_mode == "sbx_v":
+        config.coordination_mode = "sbxv"
+    if config.coordination_mode not in ("none", "vref", "bme", "sbx",
+                                        "sbxv"):
         raise ValueError(
             f"unknown coordination_mode '{config.coordination_mode}' "
-            "(expected 'none', 'vref', 'bme' or 'sbx')."
+            "(expected 'none', 'vref', 'bme', 'sbx' or 'sbxv'; "
+            "'sbx_h'/'sbx_v' are accepted aliases)."
         )
     if config.coordination_mode == "vref" and not config.enable_tie_coordination:
         raise ValueError(
@@ -1135,35 +1145,22 @@ def run_multi_tso_dso(
                 "coordination_mode='sbx' requires the multi-area partition "
                 "(single_zone_partition=True has no corridors)."
             )
-        if config.numerical_h:
-            raise ValueError(
-                "coordination_mode='sbx' requires an analytic Jacobian "
-                "path (numerical_h=False): the relieving-sign sanity "
-                "assert reads JacobianSensitivities.compute_dV_dQ_der "
-                "from the zones' cached sensitivities."
-            )
-        # local_sensitivities_* ARE allowed (relaxed 2026-07-08 on
-        # Manuel's request): the SBX adapter reads only controller-owned
-        # cached objects — the voltage rows of the controller's own H and
-        # ``ctrl.sensitivities.compute_dV_dQ_der`` — and the per-zone
-        # local JacobianSensitivities (Ward-style reduced zone net,
-        # original bus indices retained for in-zone buses) provides the
-        # identical interface.  Local cached models are in fact the
-        # configuration most consistent with the SBX locality principle
-        # (plan §2.4 "local data only"); any missing bus/row in the
-        # reduced net fails fast inside the adapter.
+        # v6 (2026-07-12): the adapter reads measurements and controller
+        # CONFIG only — no cached-Jacobian access remains, so the former
+        # numerical_h / sensitivities restrictions are gone with the
+        # deal layer.
         if not (0.0 <= config.sbx_warmup_s < config.n_total_s):
             raise ValueError(
                 f"sbx_warmup_s ({config.sbx_warmup_s}) must lie inside "
                 f"the simulation horizon [0, {config.n_total_s})."
             )
-        from sbx.config import SBXConfig as _SBXConfig
+        from sbx_h.config import SBXConfig as _SBXConfig
         _sbx_cfg = config.sbx_config
         if _sbx_cfg is None:
             _sbx_cfg = _SBXConfig(tso_period_s=float(config.tso_period_s))
         if not isinstance(_sbx_cfg, _SBXConfig):
             raise ValueError(
-                "MultiTSOConfig.sbx_config must be an sbx.config.SBXConfig "
+                "MultiTSOConfig.sbx_config must be an sbx_h.config.SBXConfig "
                 f"instance (got {type(_sbx_cfg).__name__})."
             )
         if abs(_sbx_cfg.tso_period_s - float(config.tso_period_s)) > 1e-9:
@@ -1173,6 +1170,34 @@ def run_multi_tso_dso(
                 "— the cycle length k_sched is defined in TSO iterations."
             )
         sbx_runtime["config"] = _sbx_cfg
+
+    # ── SBX-V (vertical band-and-request, TSO–DSO) — "sbxv" ─────────────
+    # STATUS_SBXV.md; plan §9 Phase 5 wiring.  The adapter installs
+    # PricingSolver proxies on the zone TSO controllers (Phase-1 seam)
+    # and is constructed BEFORE the main loop (metering starts at t=0);
+    # everything below is inert under every other coordination_mode.
+    sbxv_runtime: Dict[str, Any] = {"adapter": None, "config": None}
+    if config.coordination_mode == "sbxv":
+        from sbx_v.config import SBXVConfig as _SBXVConfig
+        _sbxv_cfg = config.sbxv_config
+        if _sbxv_cfg is None:
+            _sbxv_cfg = _SBXVConfig(
+                tso_period_s=float(config.tso_period_s))
+        if not isinstance(_sbxv_cfg, _SBXVConfig):
+            raise ValueError(
+                "MultiTSOConfig.sbxv_config must be an "
+                "sbx_v.config.SBXVConfig instance "
+                f"(got {type(_sbxv_cfg).__name__})."
+            )
+        if abs(_sbxv_cfg.tso_period_s
+               - float(config.tso_period_s)) > 1e-9:
+            raise ValueError(
+                f"SBXVConfig.tso_period_s ({_sbxv_cfg.tso_period_s}) "
+                f"must match MultiTSOConfig.tso_period_s "
+                f"({config.tso_period_s}) — the SBX-V window counter is "
+                "defined in TSO iterations (STATUS_SBXV.md §0.3)."
+            )
+        sbxv_runtime["config"] = _sbxv_cfg
 
     bme_topo = bme_obj = bme_bus = None
     bme_ledger = bme_schedule = None
@@ -2839,6 +2864,28 @@ def run_multi_tso_dso(
     )
     _oltc_limiter_active = _oltc_local_active and _oltc_limiter.active
 
+    # ── SBX-V adapter construction (before the loop: metering and the
+    # PricingSolver proxies must be in place from t = 0) ─────────────────
+    if config.coordination_mode == "sbxv":
+        from sbx_v.adapter import SBXVRunnerAdapter
+        sbxv_runtime["adapter"] = SBXVRunnerAdapter(
+            sbxv_runtime["config"], tso_controllers,
+            tso_period_s=float(config.tso_period_s),
+            net=net,
+        )
+        if verbose >= 1:
+            _sv = sbxv_runtime["config"]
+            _ad = sbxv_runtime["adapter"]
+            print(f"  [sbxv] adapter armed: {len(_ad.areas)} aggregation "
+                  f"area(s), preset '{_sv.band_preset}', window "
+                  f"{_sv.window_s:.0f} s = {_sv.k_window} TSO "
+                  f"iterations, quantum {_sv.dq_grant_mvar:.0f} Mvar")
+            for _a in sorted(_ad.bands):
+                _b = _ad.bands[_a]
+                print(f"  [sbxv]   {_a}: Normalbereich raising "
+                      f"{_b.q_raise_mvar:.1f} / lowering "
+                      f"{_b.q_lower_mvar:.1f} Mvar")
+
     if pre_loop_hook is not None:
         _hook_state = {
             "net": net,
@@ -2860,6 +2907,11 @@ def run_multi_tso_dso(
             # coordination_mode="sbx"; the adapter is constructed at the
             # first TSO tick after sbx_warmup_s and filled in here).
             "sbx_runtime": sbx_runtime,
+            # SBX-V internals ({"adapter": None, ...} unless
+            # coordination_mode="sbxv"; constructed above, before the
+            # loop — call adapter.finalise() after the run for the
+            # settlement plane).
+            "sbxv_runtime": sbxv_runtime,
         }
         _hook_result = pre_loop_hook(_hook_state)
         if _hook_result:
@@ -3267,37 +3319,54 @@ def run_multi_tso_dso(
             if config.coordination_mode == "sbx":
                 if (sbx_runtime["adapter"] is None
                         and time_s >= config.sbx_warmup_s):
-                    from sbx.adapter import SBXRunnerAdapter
+                    from sbx_h.adapter import SBXRunnerAdapter
                     # v3: optional planning-anchored contract-voltage
                     # schedule (JSON from experiments/017_SBX_PLANNING).
                     _sbx_schedules = None
+                    _sbx_bands = None
                     if config.sbx_v_std_schedule_path is not None:
                         import json as _json
                         with open(config.sbx_v_std_schedule_path,
                                   encoding="utf-8") as _fh:
                             _raw = _json.load(_fh)
-                        _sbx_schedules = {
-                            tuple(int(x) for x in k.split("-")): [
-                                (float(t), tuple(va), tuple(vb))
-                                for t, va, vb in entries
+                        # Entries: [t, v_a, v_b] or (with the planning-
+                        # derived band) [t, v_a, v_b, band].
+                        _sbx_schedules = {}
+                        _sbx_bands = {}
+                        for _k, _entries in _raw.items():
+                            _key = tuple(int(x) for x in _k.split("-"))
+                            _sbx_schedules[_key] = [
+                                (float(e[0]), tuple(e[1]), tuple(e[2]))
+                                for e in _entries
                             ]
-                            for k, entries in _raw.items()
-                        }
+                            if all(len(e) >= 4 for e in _entries):
+                                _sbx_bands[_key] = [
+                                    (float(e[0]), float(e[3]))
+                                    for e in _entries
+                                ]
+                        if not _sbx_bands:
+                            _sbx_bands = None
                     sbx_runtime["adapter"] = SBXRunnerAdapter(
                         net, {z: list(b) for z, b in tn_zone_map.items()},
                         tso_controllers, sbx_runtime["config"],
                         v_std_schedules=_sbx_schedules,
+                        q_band_schedules=_sbx_bands,
+                        support_intervals=config.sbx_support_intervals,
                         freeze_time_s=float(time_s),
                     )
                     if verbose >= 1:
                         _sc = sbx_runtime["config"]
                         _ad = sbx_runtime["adapter"]
-                        print(f"  [sbx] contracts frozen at t="
+                        _n_sup = (0 if config.sbx_support_intervals is None
+                                  else sum(len(v) for v in
+                                           config.sbx_support_intervals
+                                           .values()))
+                        print(f"  [sbx] v6 contracts frozen at t="
                               f"{time_s / 60.0:.0f} min: "
                               f"{len(_ad.registry)} corridor(s), "
                               f"k_sched={_sc.k_sched} TSO iterations "
-                              f"({_sc.t_cycle_min:.0f} min), per-cycle "
-                              f"quantum {_sc.dq_quant_mvar:.1f} Mvar")
+                              f"({_sc.t_cycle_min:.0f} min), "
+                              f"{_n_sup} planned-support interval(s)")
                         for hit in _ad.border_actuators:
                             print(f"  [sbx] border actuator: "
                                   f"{hit['element']} {hit['index']} at "
@@ -3309,6 +3378,17 @@ def run_multi_tso_dso(
                     sbx_runtime["adapter"].on_tso_step(
                         tso_step_count - 1, measurements, tso_controllers,
                     )
+
+            # ── SBX-V vertical round (BEFORE the zones solve): feed the
+            # need trackers from the zone measurements and run the
+            # request pipeline for the next window on a set flag; arm
+            # the PricingSolver spec provider for this iteration.  The
+            # priced segment structure changes only at commit instants
+            # (R3 — sbxv/commit.py).
+            if config.coordination_mode == "sbxv":
+                sbxv_runtime["adapter"].before_solve(
+                    tso_step_count - 1, measurements, tso_controllers,
+                )
 
             # ── BME horizontal round (BEFORE the zones solve, §5 Phase 4):
             # rebuild the area-local gradient machinery at the freshly
@@ -3518,6 +3598,13 @@ def run_multi_tso_dso(
                 recompute_cross_sensitivities=refresh_H,
                 sim_time_s=time_s,
             )
+
+            # ── SBX-V: capture the dispatched netted PCC-Q reference per
+            # AggregationArea (the logged Abruf) for the settlement plane.
+            if config.coordination_mode == "sbxv":
+                sbxv_runtime["adapter"].after_solve(
+                    tso_step_count - 1, tso_controllers,
+                )
 
             # ── BME §3.8.1: publish switch notices for COMMITTED discrete
             # moves (post-gate): dv_b^pred = H_{b,i}^d · Δu_i_d in stacked
@@ -4553,6 +4640,15 @@ def run_multi_tso_dso(
                                 _ln.line_idx, "q_to_mvar"])
                     _sbx_q[_ck] = _tot
             _plotter_sbx.update(rec, _sbx_ad, _sbx_q)
+
+        # ── SBX-V four-quadrant metering: record the elapsed plant
+        # interval [t − dt, t) with this step's post-power-flow boundary
+        # Q per NVP (sbxv/metering.py; [LF §5.5, §8.3]).
+        if config.coordination_mode == "sbxv" \
+                and sbxv_runtime["adapter"] is not None:
+            sbxv_runtime["adapter"].on_plant_step(
+                time_s, config.dt_s, net,
+            )
 
         if not _in_warmup:
             log.append(rec)

@@ -35,7 +35,7 @@ Outputs (``results/017_SBX_PLANNING/``):
 
 Run:
     python experiments/017_SBX_PLANNING.py --mode perfect --minutes 360
-    python experiments/014_SBX_SINGLE_DEMO.py --scenario asym_z3 \
+    python experiments/014_SBX_SINGLE_DEMO.py --cell D2 \
         --schedule results/017_SBX_PLANNING/schedule_perfect_360min.json
 
 Author: Manuel Schwenke / Claude Code
@@ -73,14 +73,19 @@ from network.ieee39.zonal_balancing import (  # noqa: E402
     compute_zonal_gen_dispatch,
 )
 from network.zone_partition import fixed_zone_partition_ieee39  # noqa: E402
-from sbx.corridor import build_corridor_registry  # noqa: E402
-from sbx.fail import rep1  # noqa: E402
+from sbx_h.corridor import build_corridor_registry, \
+    corridor_sensitivities  # noqa: E402
+from sbx_h.fail import rep1  # noqa: E402
 
-_013 = importlib.import_module("experiments.013_SBX_LADDER")
+# v6 (2026-07-13): decoupled from the archived deal-era 013 script —
+# the pre-pass only ever needed the shared 005 scenario identity.
+_005 = importlib.import_module("experiments.005_CIGRE_MULTI")
 
 RESULT_DIR = REPO / "results" / "017_SBX_PLANNING"
 
 PLAN_INTERVAL_S = 3600.0     # hourly planning intervals (DACF-style)
+DEFAULT_MINUTES = 360.0      # full case-study horizon
+BAND_FLOOR_MVAR = 5.0        # tier-1 band floor (013-era rule, kept)
 
 
 def build_planning_net(cfg):
@@ -163,6 +168,68 @@ def build_planning_net(cfg):
     return net, meta, zone_map, dispatch_map
 
 
+def plan_operating_point(net, meta, cfg) -> None:
+    """Schedule the controllable states of the planning view (F10 fix,
+    option (a)): real planning optimises taps and compensation too, so
+    the pre-pass mirrors the runner's operating-point phases per hour —
+    STATCOM Q via the temp-PV-gen trick + machine 2W OLTC at the zone
+    voltage schedule (phase 1), then coupler 3W OLTC at the DSO target
+    (phase 2).  Taps persist across hours (hourly re-scheduling from
+    the previous plan, as planners do).
+    """
+    from pandapower.control import DiscreteTapControl
+
+    v_mt = float(cfg.v_setpoint_pu)
+    v_dso = float(cfg.oltc_init_v_target_pu)
+    tol = float(cfg.dso_oltc_init_tol_pu)
+
+    # Phase 1: TN-side STATCOMs as temporary PV gens + machine OLTCs.
+    statcom_mask = (
+        net.sgen["name"].astype(str).str.contains("STATCOM")
+        & (net.sgen["subnet"].astype(str) != "DN")
+    )
+    tmp_map = {}
+    for si in net.sgen.index[statcom_mask]:
+        bus = int(net.sgen.at[si, "bus"])
+        sn = float(net.sgen.at[si, "sn_mva"])
+        net.sgen.at[si, "in_service"] = False
+        gi = pp.create_gen(
+            net, bus=bus, p_mw=float(net.sgen.at[si, "p_mw"]),
+            vm_pu=v_mt, sn_mva=sn, max_q_mvar=sn, min_q_mvar=-sn,
+            in_service=True, name="_PLAN_TEMP",
+        )
+        tmp_map[int(gi)] = int(si)
+    for tidx in meta.machine_trafo_indices:
+        DiscreteTapControl(net, element_index=tidx,
+                           vm_lower_pu=v_mt - tol, vm_upper_pu=v_mt + tol,
+                           side="hv", element="trafo")
+    pp.runpp(net, run_control=True, calculate_voltage_angles=True,
+             max_iteration=50, distributed_slack=cfg.distributed_slack,
+             enforce_q_lims=cfg.enforce_q_lims_plant)
+    for gi, si in tmp_map.items():
+        net.sgen.at[si, "q_mvar"] = float(net.res_gen.at[gi, "q_mvar"])
+        net.sgen.at[si, "in_service"] = True
+    if tmp_map:
+        net.gen.drop(index=list(tmp_map.keys()), inplace=True)
+    if hasattr(net, "controller") and len(net.controller) > 0:
+        net.controller.drop(index=list(net.controller.index),
+                            inplace=True)
+
+    # Phase 2: coupler 3W OLTCs at the DSO voltage target.
+    for hv in meta.hv_networks:
+        for t3w in hv.coupling_trafo_indices:
+            DiscreteTapControl(net, element_index=t3w,
+                               vm_lower_pu=v_dso - tol,
+                               vm_upper_pu=v_dso + tol,
+                               side="mv", element="trafo3w")
+    pp.runpp(net, run_control=True, calculate_voltage_angles=True,
+             max_iteration=100, distributed_slack=cfg.distributed_slack,
+             enforce_q_lims=cfg.enforce_q_lims_plant)
+    if hasattr(net, "controller") and len(net.controller) > 0:
+        net.controller.drop(index=list(net.controller.index),
+                            inplace=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="SBX v3 planning pre-pass (hourly v_std schedule).")
@@ -171,16 +238,38 @@ def main() -> int:
     ap.add_argument("--sigma", type=float, default=0.05,
                     help="relative injection noise (mode 'noise' only)")
     ap.add_argument("--seed", type=int, default=20260708)
-    ap.add_argument("--minutes", type=float, default=_013.DEFAULT_MINUTES)
+    ap.add_argument("--minutes", type=float, default=DEFAULT_MINUTES)
+    ap.add_argument("--no-oltc-schedule", action="store_true",
+                    help="skip the per-hour tap/compensation scheduling "
+                         "(reproduces the F10 crude-plan gap)")
+    ap.add_argument("--band-ensemble", type=int, default=8,
+                    help="forecast-error ensemble size per hour for the "
+                         "PLANNING-DERIVED tier-1 band (0 = no band "
+                         "schedule; the closed loop then keeps its "
+                         "constant band)")
+    ap.add_argument("--band-z", type=float, default=2.0,
+                    help="band = z * ensemble sigma + tracking + gap")
+    ap.add_argument("--eps-track-pu", type=float, default=1.0e-3,
+                    help="declared terminal tracking tolerance [pu] — "
+                         "converted to Mvar through the corridor "
+                         "stiffness |s_corr| (contract data)")
+    ap.add_argument("--m-gap-mvar", type=float, default=5.0,
+                    help="model-gap allowance [Mvar] per corridor "
+                         "(planning view vs closed loop; backtested)")
     args = ap.parse_args()
 
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
     tag = args.mode + (f"_s{args.sigma:g}" if args.mode == "noise" else "")
+    if args.no_oltc_schedule:
+        tag += "_crude"
     out_stem = RESULT_DIR / f"schedule_{tag}_{args.minutes:.0f}min"
 
-    # Scenario identity from the 013 family (profiles/start time/flags);
-    # contingencies and bound overrides are IRRELEVANT to the plan.
-    cfg = _013.make_config("asym_z3", "none", args.minutes)
+    # Scenario identity = the shared 005 configuration (profiles/start
+    # time/flags); contingencies and bound overrides are IRRELEVANT to
+    # the plan, so the pre-pass needs nothing from the closed-loop
+    # experiment scripts.
+    cfg = _005.make_cigre_config()
+    cfg.n_total_s = 60.0 * args.minutes
     if not cfg.use_profiles:
         rep1("the planning pre-pass needs profile-driven scenarios "
              "(use_profiles=False)")
@@ -228,20 +317,106 @@ def main() -> int:
                     frame[col] = frame[col] * (
                         1.0 + args.sigma * rng.standard_normal(len(frame))
                     )
-        pp.runpp(net, max_iteration=50, run_control=False,
-                 calculate_voltage_angles=True, init="auto",
-                 distributed_slack=cfg.distributed_slack,
-                 enforce_q_lims=cfg.enforce_q_lims_plant)
+        if args.no_oltc_schedule:
+            pp.runpp(net, max_iteration=50, run_control=False,
+                     calculate_voltage_angles=True, init="auto",
+                     distributed_slack=cfg.distributed_slack,
+                     enforce_q_lims=cfg.enforce_q_lims_plant)
+        else:
+            # F10 fix (a): the plan schedules taps and compensation too.
+            plan_operating_point(net, meta, cfg)
+
+        # Point-plan record: terminal voltages, reference-end flows and
+        # (for the band's tracking term) the corridor stiffness.
+        point: Dict[str, dict] = {}
         for key, corr in registry.items():
             va = [float(net.res_bus.at[ln.bus_a, "vm_pu"])
                   for ln in corr.lines]
             vb = [float(net.res_bus.at[ln.bus_b, "vm_pu"])
                   for ln in corr.lines]
+            q_pt, p_pt = [], []
+            for ln in corr.lines:
+                side = ("from" if int(net.line.at[ln.line_idx,
+                                                  "from_bus"]) == ln.bus_a
+                        else "to")
+                q_pt.append(float(net.res_line.at[ln.line_idx,
+                                                  f"q_{side}_mvar"]))
+                p_pt.append(float(net.res_line.at[ln.line_idx,
+                                                  f"p_{side}_mw"]))
+            point[f"{key[0]}-{key[1]}"] = {
+                "va": va, "vb": vb, "q": sum(q_pt), "p": p_pt,
+            }
+
+        # Forecast-error ensemble (band derivation): injections sampled
+        # around the SAME hour's point forecast, taps HELD at the point
+        # plan (the schedule is fixed day-ahead; the realisation varies
+        # around it) — one plain power flow per member.
+        band_sigma: Dict[str, float] = {}
+        if args.band_ensemble > 0:
+            dev: Dict[str, List[float]] = {
+                f"{k[0]}-{k[1]}": [] for k in registry
+            }
+            for _m in range(args.band_ensemble):
+                apply_profiles(net, profiles, t_plan)
+                apply_gen_dispatch(net, gen_dispatch,
+                                   t_real if args.mode != "persistence"
+                                   else t_plan)
+                for tbl, cols in (("load", ("p_mw", "q_mvar")),
+                                  ("sgen", ("p_mw", "q_mvar"))):
+                    frame = getattr(net, tbl)
+                    for col in cols:
+                        frame[col] = frame[col] * (
+                            1.0 + args.sigma
+                            * rng.standard_normal(len(frame))
+                        )
+                pp.runpp(net, max_iteration=50, run_control=False,
+                         calculate_voltage_angles=True, init="auto",
+                         distributed_slack=cfg.distributed_slack,
+                         enforce_q_lims=cfg.enforce_q_lims_plant)
+                for key, corr in registry.items():
+                    q_m = 0.0
+                    for ln in corr.lines:
+                        side = ("from" if int(net.line.at[
+                            ln.line_idx, "from_bus"]) == ln.bus_a
+                            else "to")
+                        q_m += float(net.res_line.at[ln.line_idx,
+                                                     f"q_{side}_mvar"])
+                    tag_k = f"{key[0]}-{key[1]}"
+                    dev[tag_k].append(q_m - point[tag_k]["q"])
+            for tag_k, dvals in dev.items():
+                band_sigma[tag_k] = float(np.std(dvals))
+
+        for key, corr in registry.items():
             tag_k = f"{key[0]}-{key[1]}"
-            schedule[tag_k].append([t_from_s, va, vb])
-            series[tag_k].append((t_from_s / 60.0, va, vb))
-        print(f"  hour {h:2d} (t = {t_from_s / 60.0:5.0f} min, "
-              f"plan basis {t_plan:%d.%m. %H:%M}): converged")
+            pt = point[tag_k]
+            if args.band_ensemble > 0:
+                # Tracking term: corridor stiffness (contract data) ×
+                # the declared terminal tracking tolerance.
+                _, s_corr_a, s_corr_b = corridor_sensitivities(
+                    corr, pt["va"], pt["vb"], pt["p"],
+                )
+                s_corr = max(abs(s_corr_a), abs(s_corr_b))
+                band = max(
+                    BAND_FLOOR_MVAR,
+                    float(np.ceil(
+                        args.band_z * band_sigma[tag_k]
+                        + s_corr * args.eps_track_pu
+                        + args.m_gap_mvar
+                    )),
+                )
+                schedule[tag_k].append([t_from_s, pt["va"], pt["vb"],
+                                        band])
+            else:
+                schedule[tag_k].append([t_from_s, pt["va"], pt["vb"]])
+            series[tag_k].append((t_from_s / 60.0, pt["va"], pt["vb"]))
+        if args.band_ensemble > 0:
+            bands_now = {k: schedule[k][-1][3] for k in schedule}
+            print(f"  hour {h:2d} (t = {t_from_s / 60.0:5.0f} min, "
+                  f"plan basis {t_plan:%d.%m. %H:%M}): converged; "
+                  f"bands {bands_now}")
+        else:
+            print(f"  hour {h:2d} (t = {t_from_s / 60.0:5.0f} min, "
+                  f"plan basis {t_plan:%d.%m. %H:%M}): converged")
 
     json_path = out_stem.with_suffix(".json")
     json_path.write_text(json.dumps(schedule, indent=1),

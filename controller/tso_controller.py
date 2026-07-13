@@ -138,6 +138,18 @@ class TSOControllerConfig:
     ``current_line_indices``. If ``None``, limits are not enforced."""
     v_setpoints_pu: Optional[NDArray[np.float64]] = None
     g_v: float = 1.0
+    g_v_per_bus: Optional[NDArray[np.float64]] = None
+    """Optional PER-BUS voltage-tracking weights, aligned with
+    ``voltage_bus_indices``.  When ``None`` (default) the scalar
+    ``g_v`` applies uniformly (legacy behaviour, bit-identical).  Used
+    by the SBX v4 'deliverable' amendment (2026-07-09) to give the
+    corridor-terminal contract references PRIORITY over the ordinary
+    schedule tracking (``w_track ≫ g_v``): with a uniform weight the
+    MIQP trades the contract reference off against every other
+    monitored bus and delivers only a fraction of the commanded
+    boundary shift.  Prefer
+    :meth:`TSOController.update_voltage_tracking_weights` over writing
+    this field directly."""
     gen_indices: List[int] = field(default_factory=list)
     gen_bus_indices: List[int] = field(default_factory=list)
     gen_vm_min_pu: float = 0.95
@@ -402,6 +414,18 @@ class TSOControllerConfig:
                     f"v_setpoints_pu length ({len(self.v_setpoints_pu)}) "
                     f"must match voltage_bus_indices length "
                     f"({len(self.voltage_bus_indices)})"
+                )
+        if self.g_v_per_bus is not None:
+            if len(self.g_v_per_bus) != len(self.voltage_bus_indices):
+                raise ValueError(
+                    f"g_v_per_bus length ({len(self.g_v_per_bus)}) must "
+                    f"match voltage_bus_indices length "
+                    f"({len(self.voltage_bus_indices)})"
+                )
+            if np.any(np.asarray(self.g_v_per_bus, dtype=np.float64)
+                      <= 0.0):
+                raise ValueError(
+                    "g_v_per_bus entries must be positive"
                 )
         if len(self.gen_indices) != len(self.gen_bus_indices):
             raise ValueError(
@@ -1147,6 +1171,47 @@ class TSOController(BaseOFOController):
             messages.append(msg)
         return messages
 
+    def _g_v_vector(self) -> NDArray[np.float64]:
+        """Per-bus voltage-tracking weights (SBX v4, 2026-07-09).
+
+        ``config.g_v_per_bus`` when set, else the scalar ``config.g_v``
+        replicated — bit-identical to the legacy behaviour."""
+        n_v = len(self.config.voltage_bus_indices)
+        if self.config.g_v_per_bus is not None:
+            return np.asarray(self.config.g_v_per_bus, dtype=np.float64)
+        return np.full(n_v, float(self.config.g_v), dtype=np.float64)
+
+    def update_voltage_tracking_weights(
+        self,
+        bus_indices: NDArray[np.int64],
+        weight: float,
+    ) -> None:
+        """Raise the tracking weight of selected monitored buses.
+
+        SBX v4 'deliverable' amendment: the corridor-terminal contract
+        references receive PRIORITY (``w_track ≫ g_v``) so the acting
+        side's commanded boundary shift is actually realised instead of
+        being traded off against the ordinary schedule tracking.
+        Initialises ``g_v_per_bus`` from the scalar ``g_v`` on first
+        use; unknown buses raise.
+        """
+        if weight <= 0.0:
+            raise ValueError(f"weight must be positive, got {weight}")
+        n_v = len(self.config.voltage_bus_indices)
+        if self.config.g_v_per_bus is None:
+            self.config.g_v_per_bus = np.full(
+                n_v, float(self.config.g_v), dtype=np.float64,
+            )
+        pos = {int(b): k for k, b in
+               enumerate(self.config.voltage_bus_indices)}
+        for b in bus_indices:
+            if int(b) not in pos:
+                raise ValueError(
+                    f"bus {int(b)} is not a monitored voltage bus of "
+                    f"controller '{self.controller_id}'"
+                )
+            self.config.g_v_per_bus[pos[int(b)]] = float(weight)
+
     def update_voltage_setpoints(
         self,
         v_setpoints_pu: NDArray[np.float64],
@@ -1187,7 +1252,7 @@ class TSOController(BaseOFOController):
             return None
         H = self._expand_H_to_der_level(self._build_sensitivity_matrix())
         H_v = np.ascontiguousarray(H[:n_v, :], dtype=np.float64)
-        g_v_vec = np.full(n_v, float(self.config.g_v), dtype=np.float64)
+        g_v_vec = self._g_v_vector()
         return H_v, g_v_vec
 
     # =========================================================================
@@ -1875,7 +1940,9 @@ class TSOController(BaseOFOController):
                 if len(meas_idx) == 0:
                     raise ValueError(f"Bus {bus_idx} not found in measurement")
                 v_current[j] = measurement.voltage_magnitudes_pu[meas_idx[0]]
-            grad_v = 2.0 * self.config.g_v * (v_current - self.config.v_setpoints_pu)
+            grad_v = 2.0 * self._g_v_vector() * (
+                v_current - self.config.v_setpoints_pu
+            )
 
         # --- Q_PCC tracking ------------------------------------------------
         if n_pcc > 0 and self.config.g_q_tso != 0.0:
@@ -2007,7 +2074,9 @@ class TSOController(BaseOFOController):
             dV_du = H[:n_v, :]
 
             # grad_f contribution: 2 * g_v * (V - V_set)^T * dV/du
-            grad_f += 2.0 * self.config.g_v * (v_error @ dV_du)
+            # (g_v per bus — SBX v4 corridor-terminal priority; the
+            # scalar case is bit-identical to the legacy expression).
+            grad_f += 2.0 * ((self._g_v_vector() * v_error) @ dV_du)
 
         # --- Component 3: Q_PCC tracking (Strategy D) ---
         # When the Q_PCC output rows are re-enabled (always, in this

@@ -12,7 +12,7 @@ Per cycle boundary (every ``k_sched`` TSO iterations):
    :class:`~sbx_h.settlement.CycleObservation` per corridor into the
    per-corridor :class:`~sbx_h.settlement.SettlementEngine`.
    Payment occurs only for correctly directed beyond-band reactive
-   support when exactly one side sags and the other holds.
+   support when exactly one side violates and the other holds.
 2. **Schedule application** — resolve the ACTIVE contract voltages and
    band at the boundary's scenario time (constant contract, hourly
    planning schedule, or planned-support interval — all through
@@ -86,6 +86,8 @@ class CorridorCycleRecord:
     support_direction: Optional[str]
     a_sags: bool
     b_sags: bool
+    violation_kind_a: Optional[str]
+    violation_kind_b: Optional[str]
     a_holds: bool
     b_holds: bool
     support_mvar: float
@@ -405,6 +407,16 @@ class SBXScheduler:
                 ),
                 b_sags=bool(
                     settlement is not None and settlement.b_sags
+                ),
+                violation_kind_a=(
+                    settlement.violation_kind_a
+                    if settlement is not None
+                    else None
+                ),
+                violation_kind_b=(
+                    settlement.violation_kind_b
+                    if settlement is not None
+                    else None
                 ),
                 a_holds=bool(
                     settlement is not None and settlement.a_holds

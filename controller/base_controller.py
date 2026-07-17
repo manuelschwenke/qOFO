@@ -121,7 +121,7 @@ class OFOParameters:
     property of the adapter as a whole, so when a mapping is provided
     the kernel uses the value from the first class (callers should set
     it uniformly across classes; see
-    :meth:`configs.multi_tso_config.MultiTSOConfig.make_g_w_adapt_meta`).
+    :meth:`configs.config.MultiTSOConfig.make_g_w_adapt_meta`).
     """
 
     def __post_init__(self) -> None:
@@ -586,21 +586,6 @@ class BaseOFOController(ABC):
                 f"{result.status}"
             )
 
-        # Step 7b: Post-solve gate (default: no-op, byte-identical).
-        # Subclasses may veto or replace the DISCRETE part of the
-        # solution before it is committed — BME discrete hygiene, spec
-        # §3.8: round-robin slotting and ε-improvement acceptance against
-        # the frozen-integer QP supplied by ``solve_frozen``.
-        result = self._post_solve_gate(
-            result,
-            solve_frozen=lambda: self._solve_with_frozen_integers(
-                alpha=alpha, y_current=y_current, H=H, grad_f=grad_f,
-                u_lower=u_lower, u_upper=u_upper,
-                y_lower=y_lower, y_upper=y_upper,
-                g_w_vector=g_w_vector, g_u_vector=g_u_vector,
-            ),
-        )
-
         # Step 8: Reassemble sigma in original (unreordered) variable
         # order using the precomputed continuous/integer index arrays.
         # Replaces three Python `for i in range(n_controls): if i in
@@ -678,54 +663,6 @@ class BaseOFOController(ABC):
             solve_time_s=result.solve_time_s,
         )
     
-    def _post_solve_gate(self, result, solve_frozen):
-        """Hook between the MIQP solve and the commit (step 7b).
-
-        Default: return ``result`` unchanged (byte-identical baseline).
-        BME discrete hygiene (spec §3.8) overrides this on the TSO
-        controller to enforce slotting and ε-acceptance; ``solve_frozen``
-        lazily solves the same per-step problem with every integer
-        pinned at its current value and returns that solver result.
-        """
-        return result
-
-    def _solve_with_frozen_integers(
-        self, *, alpha, y_current, H, grad_f, u_lower, u_upper,
-        y_lower, y_upper, g_w_vector, g_u_vector,
-    ):
-        """The continuous-only companion solve of §3.8.3: identical
-        per-step problem, integers pinned at their current values."""
-        u_lo = u_lower.copy()
-        u_hi = u_upper.copy()
-        for idx in self._integer_indices:
-            u_lo[idx] = self._u_current[idx]
-            u_hi[idx] = self._u_current[idx]
-        problem = build_miqp_problem(
-            alpha=alpha,
-            u_current=self._u_current,
-            y_current=y_current,
-            H=H,
-            grad_f=grad_f,
-            u_lower=u_lo,
-            u_upper=u_hi,
-            y_lower=y_lower,
-            y_upper=y_upper,
-            g_w=self.params.g_w,
-            g_u=self.params.g_u,
-            g_z=self.params.g_z,
-            integer_indices=self._integer_indices,
-            g_w_vector=g_w_vector,
-            g_u_vector=g_u_vector,
-        )
-        res = self.solver.solve(problem)
-        if not res.is_feasible:
-            raise RuntimeError(
-                f"frozen-integer QP failed at iteration "
-                f"{self.iteration}: {res.status} — the incumbent "
-                "integer point should always be feasible (§3.8.3)."
-            )
-        return res
-
     def reset(self) -> None:
         """
         Reset the controller to uninitialised state.

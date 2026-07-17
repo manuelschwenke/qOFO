@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from tuning._types import Ceilings
 from tuning.ceilings import _cache_key, compute_ceilings
 

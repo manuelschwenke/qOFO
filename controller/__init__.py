@@ -30,11 +30,6 @@ from controller.base_controller import (
 )
 from controller.tso_controller import TSOController, TSOControllerConfig
 from controller.dso_controller import DSOController, DSOControllerConfig
-from controller.common_objective import (
-    CommonObjective,
-    PhiBreakdown,
-    ZoneGradients,
-)
 
 __all__ = [
     "BaseOFOController",
@@ -44,7 +39,4 @@ __all__ = [
     "TSOControllerConfig",
     "DSOController",
     "DSOControllerConfig",
-    "CommonObjective",
-    "PhiBreakdown",
-    "ZoneGradients",
 ]

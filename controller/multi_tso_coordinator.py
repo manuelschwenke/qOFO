@@ -222,18 +222,6 @@ class ZoneDefinition:
     convention for the corresponding Q_tie row: positive Q_tie =
     reactive power flowing from this endpoint INTO the line."""
 
-    q_tie_setpoints_mvar:    Optional[NDArray[np.float64]] = None
-    """Tracking setpoints for tie-line Q [Mvar] (length = n_tie).
-    ``None`` defaults to a zero vector (target = 0 Mvar across all ties).
-    The Phase B gradient term penalises ``(Q_tie_meas - q_tie_setpoints_mvar)^2``."""
-
-    g_q_tie:                 float = 0.0
-    """Q_tie tracking weight in the per-output objective vector.  Used
-    by ``q_obj_diagonal`` for the Q_tie row block (Phase B).  Mirrors
-    ``TSOControllerConfig.g_q_tie``.  Must be set from
-    ``MultiTSOConfig.tso_g_q_tie`` at zone construction time.  Default
-    0.0 keeps Q_tie informational only (Phase A)."""
-
     def n_controls(self) -> int:
         """Total number of control variables for this zone."""
         return (
@@ -247,36 +235,32 @@ class ZoneDefinition:
     def n_outputs(self) -> int:
         """Total number of output variables (rows in H_ii).
 
-        Layout: [V_bus | Q_PCC | I_line | Q_gen | Q_tie]."""
+        Layout: [V_bus | Q_PCC | I_line | Q_gen]."""
         return (
             len(self.v_bus_indices)
             + len(self.pcc_trafo_indices)
             + len(self.line_indices)
             + len(self.gen_indices)
-            + len(self.tie_line_indices)
         )
 
     def q_obj_diagonal(self) -> NDArray[np.float64]:
         """
         Per-output objective weight vector Q_obj for this zone.
 
-        Row ordering: [V_bus (g_v) | Q_PCC (g_q_tso) | I_line (0) | Q_gen (0) | Q_tie (g_q_tie)].
+        Row ordering: [V_bus (g_v) | Q_PCC (g_q_tso) | I_line (0) | Q_gen (0)].
         Currents and Q_gen rows are driven by soft-slack
         penalties (``g_z_*``), not the objective-row weight, so their
-        q_obj entries are 0.  Q_tie weight is 0 in Phase A; set non-zero
-        in Phase B.
+        q_obj entries are 0.
         """
         n_v = len(self.v_bus_indices)
         n_pcc = len(self.pcc_trafo_indices)
         n_i = len(self.line_indices)
         n_gen = len(self.gen_indices)
-        n_tie = len(self.tie_line_indices)
         return np.concatenate([
             np.full(n_v, self.g_v),
             np.full(n_pcc, self.g_q_tso),
             np.zeros(n_i),
             np.zeros(n_gen),
-            np.full(n_tie, self.g_q_tie),
         ])
 
     def gw_diagonal(self) -> NDArray[np.float64]:
@@ -394,7 +378,7 @@ class MultiTSOCoordinator:
         ``zero_offdiag`` argument.  Honoured by any code path that would
         normally repopulate or refresh cross-zone blocks (currently the
         coordinator itself; the runner passes the flag through from
-        :data:`configs.multi_tso_config.MultiTSOConfig.local_sensitivities_tso`)."""
+        :data:`configs.config.MultiTSOConfig.local_sensitivities_tso`)."""
 
         # ── Diagnostic storage (populated during step()) ──────────────────────
         self.last_coupling_diagnostics: Dict[int, Dict] = {}
@@ -470,7 +454,7 @@ class MultiTSOCoordinator:
             an all-zero matrix of the right shape; only diagonal blocks
             ``H_ii`` are populated from ``jac``.  This is the consistent
             mode under
-            :data:`configs.multi_tso_config.MultiTSOConfig.local_sensitivities_tso`
+            :data:`configs.config.MultiTSOConfig.local_sensitivities_tso`
             where each TSO controller already operates on a reduced net
             with no knowledge of other zones — the contraction diagnostic
             and the stability M-matrix then reflect that decentralised
@@ -491,22 +475,12 @@ class MultiTSOCoordinator:
             n_pcc_i = len(zi.pcc_trafo_indices)
             n_li  = len(zi.line_indices)
             n_gen_i = len(zi.gen_indices)
-            n_tie_i = len(zi.tie_line_indices)
-
             # Row offsets — must match TSOController._build_sensitivity_matrix
-            # ([V | Q_PCC | I | Q_gen | Q_tie]).  Q_gen rows
-            # are not filled by this method (deferred); they remain zero.
-            # Q_tie rows are filled below (Phase B).  The row count must
-            # still match H_ii so the stability M-matrix assembly stays
-            # dimension-consistent.
+            # ([V | Q_PCC | I | Q_gen]).  Q_gen rows are not filled by this
+            # method (deferred); they remain zero.
             q_pcc_row_offset = n_v_i
             i_row_offset     = n_v_i + n_pcc_i
             # q_gen_row_offset = n_v_i + n_pcc_i + n_li  (still zero stub)
-            q_tie_row_offset = n_v_i + n_pcc_i + n_li + n_gen_i
-
-            # Tie-line endpoint list for zone i (used by Q_tie cross-fills).
-            tie_indices_i = list(zi.tie_line_indices)
-            tie_endpoints_i = list(zi.tie_line_endpoint_buses)
 
             # PCC HV-side bus list for zone i (used by Q_PCC fills).
             pcc_hv_buses_i: List[int] = []
@@ -529,14 +503,13 @@ class MultiTSOCoordinator:
                 )
 
                 # Output shape of this block: full ordering
-                # [V_i | Q_PCC_i | I_i | Q_gen_i | Q_tie_i].
-                # Q_gen and Q_tie rows are zero in Phase A
-                # (cross-sensitivities deferred); the row count must still
-                # match H_ii so the stability M-matrix assembly stays
-                # dimension-consistent.
+                # [V_i | Q_PCC_i | I_i | Q_gen_i].
+                # Q_gen rows are zero in Phase A (cross-sensitivities
+                # deferred); the row count must still match H_ii so the
+                # stability M-matrix assembly stays dimension-consistent.
                 H_ij = np.zeros(
                     (
-                        n_v_i + n_pcc_i + n_li + n_gen_i + n_tie_i,
+                        n_v_i + n_pcc_i + n_li + n_gen_i,
                         n_col,
                     ),
                     dtype=np.float64,
@@ -606,25 +579,6 @@ class MultiTSOCoordinator:
                             except (AttributeError, ValueError):
                                 pass
 
-                        # ∂Q_tie_i / ∂Q_DER_j (zone-i Q_tie rows; Phase B)
-                        if n_tie_i > 0:
-                            try:
-                                dQtie_dQder, _, der_map_t = (
-                                    jac.compute_dQ_line_dQ_der_matrix(
-                                        tie_line_indices=tie_indices_i,
-                                        tie_line_endpoint_buses=tie_endpoints_i,
-                                        der_bus_indices=list(zj.tso_der_buses),
-                                    )
-                                )
-                                for k_t in range(len(tie_indices_i)):
-                                    row = q_tie_row_offset + k_t
-                                    for k_der, der_bus in enumerate(der_map_t):
-                                        if der_bus in zj.tso_der_buses:
-                                            col = zj.tso_der_buses.index(der_bus)
-                                            H_ij[row, col] = dQtie_dQder[k_t, k_der]
-                            except ValueError:
-                                pass
-
                     except ValueError:
                         # All DER buses are PV/slack — ∂V/∂Q_DER is zero in
                         # the linearised model (voltage is fixed by the AVR).
@@ -673,28 +627,6 @@ class MultiTSOCoordinator:
                     if n_pcc_i > 0 and i == j:
                         for j_pcc in range(n_pcc_j):
                             H_ij[q_pcc_row_offset + j_pcc, n_der_j + j_pcc] = 1.0
-
-                    # ∂Q_tie_i / ∂Q_PCC_set_j (zone-i Q_tie rows; Phase B)
-                    # PCC setpoint acts as a Q injection at the PCC HV bus
-                    # in load convention; negate the generator-convention
-                    # sensitivity (same flip used for V/I rows above).
-                    if n_tie_i > 0 and pcc_hv_buses_j:
-                        try:
-                            dQtie_dQpcc, _, pcc_map_t = (
-                                jac.compute_dQ_line_dQ_der_matrix(
-                                    tie_line_indices=tie_indices_i,
-                                    tie_line_endpoint_buses=tie_endpoints_i,
-                                    der_bus_indices=pcc_hv_buses_j,
-                                )
-                            )
-                            for k_t in range(len(tie_indices_i)):
-                                row = q_tie_row_offset + k_t
-                                for k_pcc, pcc_bus in enumerate(pcc_map_t):
-                                    if pcc_bus in pcc_hv_buses_j:
-                                        col = n_der_j + pcc_hv_buses_j.index(pcc_bus)
-                                        H_ij[row, col] = -dQtie_dQpcc[k_t, k_pcc]
-                        except ValueError:
-                            pass
 
                 # ── AVR columns: ∂V_i / ∂V_gen_j ─────────────────────────────
                 # Skip OOS generators: their terminal bus may be isolated
@@ -764,27 +696,6 @@ class MultiTSOCoordinator:
                             except (AttributeError, ValueError):
                                 pass
 
-                        # ∂Q_tie_i / ∂V_gen_j (zone-i Q_tie rows; Phase B)
-                        if n_tie_i > 0:
-                            try:
-                                dQtie_dVgen, _, gen_map_t = (
-                                    jac.compute_dQ_line_dVgen_matrix(
-                                        tie_line_indices=tie_indices_i,
-                                        tie_line_endpoint_buses=tie_endpoints_i,
-                                        gen_bus_indices_pp=is_gen_buses_j,
-                                    )
-                                )
-                                for k_t in range(len(tie_indices_i)):
-                                    row = q_tie_row_offset + k_t
-                                    for k_gen, gen_bus in enumerate(gen_map_t):
-                                        if gen_bus in gen_terminal_buses_j:
-                                            col = (
-                                                n_der_j + n_pcc_j
-                                                + gen_terminal_buses_j.index(gen_bus)
-                                            )
-                                            H_ij[row, col] = dQtie_dVgen[k_t, k_gen]
-                            except ValueError:
-                                pass
                     # OOS generator columns stay zero in H_ij.
 
                 # ── Machine-trafo OLTC columns: ∂V_i / ∂s_OLTC_j ────────────
@@ -824,24 +735,6 @@ class MultiTSOCoordinator:
                                             col = col_offset + oltc_indices_j.index(t_idx)
                                             H_ij[row, col] = dI_ds[k_line, k_t]
 
-                        # ∂Q_tie_i / ∂s_OLTC_j (zone-i Q_tie rows; Phase B)
-                        if n_tie_i > 0:
-                            try:
-                                dQtie_ds, _, trafo_map_t = (
-                                    jac.compute_dQ_line_2w_ds_matrix(
-                                        tie_line_indices=tie_indices_i,
-                                        tie_line_endpoint_buses=tie_endpoints_i,
-                                        chg_trafo_indices=is_oltc_indices_j,
-                                    )
-                                )
-                                for k_t_tie in range(len(tie_indices_i)):
-                                    row = q_tie_row_offset + k_t_tie
-                                    for k_t, t_idx in enumerate(trafo_map_t):
-                                        if t_idx in oltc_indices_j:
-                                            col = col_offset + oltc_indices_j.index(t_idx)
-                                            H_ij[row, col] = dQtie_ds[k_t_tie, k_t]
-                            except ValueError:
-                                pass
                     # OOS OLTC columns stay zero in H_ij.
                     # NOTE: cross-zone ∂Q_PCC_i / ∂s_OLTC_j is not filled —
                     # no helper compute_dQtrafo3w_hv_ds_2w_matrix exists.
@@ -899,25 +792,6 @@ class MultiTSOCoordinator:
                                         col_offset_sh + k_sh,
                                     ] = float(dQ)
                                 except (AttributeError, ValueError):
-                                    pass
-
-                        # ∂Q_tie_i / ∂s_shunt_j (zone-i Q_tie rows; Phase B)
-                        if n_tie_i > 0:
-                            for k_t_tie, (li, endp) in enumerate(
-                                zip(tie_indices_i, tie_endpoints_i)
-                            ):
-                                try:
-                                    dQ = jac.compute_dQ_line_dQ_shunt(
-                                        line_idx=int(li),
-                                        endpoint_bus=int(endp),
-                                        shunt_bus_idx=int(sh_bus),
-                                        q_step_mvar=q_step,
-                                    )
-                                    H_ij[
-                                        q_tie_row_offset + k_t_tie,
-                                        col_offset_sh + k_sh,
-                                    ] = float(dQ)
-                                except ValueError:
                                     pass
 
                 self._H_blocks[(i, j)] = H_ij

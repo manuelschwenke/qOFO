@@ -38,7 +38,7 @@ from sbx_h.corridor import build_corridor_registry, corridor_q_flow, \
 from sbx_h.tie_line_model import q_flow, sensitivities, v_sched_for_q
 
 # Ground truth of the fixed 3-area partition (matches
-# tests/test_boundary_topology.py): corridor -> {line_idx: (bus_a, bus_b)}.
+# Frozen corridor fixture: corridor -> {line_idx: (bus_a, bus_b)}.
 EXPECTED_CORRIDORS = {
     (1, 2): {2: (1, 2), 14: (38, 8)},
     (1, 3): {25: (26, 16)},

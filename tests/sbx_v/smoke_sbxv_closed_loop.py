@@ -33,7 +33,7 @@ import numpy as np
 
 from sbx_v.config import SBXVConfig
 
-_005 = importlib.import_module("experiments.005_CIGRE_MULTI")
+_005 = importlib.import_module("experiments.CIGRE_2026.005_CIGRE_MULTI")
 from experiments.runners.multi_tso_dso import run_multi_tso_dso  # noqa: E402
 
 
@@ -42,7 +42,6 @@ def make_config(arm: str, minutes: float):
     cfg.n_total_s = 60.0 * minutes
     cfg.verbose = 0
     # Identical controller/model path on both arms (sbx v1 idiom).
-    cfg.enable_tie_coordination = False
     cfg.local_sensitivities_tso = True
     cfg.local_sensitivities_dso = True
     cfg.refresh_shared_jac_on_tso = False

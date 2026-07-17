@@ -61,7 +61,6 @@ from core.der_mapping import DERMapping
 from core.message import (
     SetpointMessage,
     CapabilityMessage,
-    TieCoordinationMessage,
 )
 from sensitivity.jacobian import JacobianSensitivities
 from sensitivity.sensitivity_updater import SensitivityUpdater
@@ -215,49 +214,6 @@ class TSOControllerConfig:
     False (legacy), the same bound is enforced as a hard input bound
     on the control Q_PCC,set."""
 
-    tie_line_indices: List[int] = field(default_factory=list)
-    """Pandapower line indices for tie lines monitored by this zone
-    (Phase A: monitored only).  A tie line is one whose two endpoints
-    sit in two different TSO zones.  Each entry corresponds — by
-    position — to an entry in ``tie_line_endpoint_buses``."""
-
-    tie_line_endpoint_buses: List[int] = field(default_factory=list)
-    """Pandapower bus indices identifying which endpoint of each tie line
-    is INSIDE this zone.  Sign convention for the corresponding Q_tie row
-    of H: positive Q_tie = reactive power flowing from this endpoint
-    INTO the line (i.e. leaving the zone).  Same length as
-    ``tie_line_indices``."""
-
-    q_tie_setpoints_mvar: Optional[NDArray[np.float64]] = None
-    """Tracking setpoints for tie-line Q [Mvar] (length = len(tie_line_indices)).
-    The Phase B gradient term penalises ``(Q_tie_meas - q_tie_setpoints_mvar)^2``.
-    Default ``None`` materialises as a zero vector at construction time."""
-
-    g_q_tie: float = 0.0
-    """Q_tie tracking weight.  Scales the gradient contribution
-    ``2 * g_q_tie * (Q_tie_meas - Q_tie_set)^T * dQ_tie/du``.  Default 0.0
-    keeps Q_tie informational only (Phase A behaviour: rows present in H,
-    no objective contribution).  Mirrors ``g_q_tso`` for Q_PCC tracking;
-    1.0 is a safe Phase-B starting point — see
-    :class:`configs.multi_tso_config.MultiTSOConfig.tso_g_q_tie` for the
-    full tuning sweep."""
-
-    g_z_q_tie: float = 0.0
-    """Soft-constraint slack penalty for Q_tie output bound (Phase B
-    optional).  Mirrors ``g_z_q_pcc``.  Default 0.0 = no slack-based
-    bound enforcement on Q_tie."""
-
-    q_tie_band_mvar: Optional[NDArray[np.float64]] = None
-    """Subsidiarity soft-cap band on the tie-line reactive exchange [Mvar].
-    When provided (length = ``len(tie_line_indices)``, non-negative), the
-    Q_tie output bound in :meth:`_get_output_limits` is tightened from the
-    wide-open Phase-A interval to ``[−band, +band]`` per tie, enforced as a
-    soft slack penalised by ``g_z_q_tie`` (which must be > 0 for the cap to
-    bite).  This is the "Q_tie soft cap" guardrail of the V-coordination
-    scheme: the horizontal tie coordinator sets the *voltage* corridor, while
-    this band bounds the emergent reactive exchange without tracking it.
-    ``None`` (default) preserves the legacy wide-open Q_tie bound."""
-
     # ── Explicit reactive-reserve penalisation (optional, togglable) ────────
     g_res_sg: float = 0.0
     """Explicit reserve-penalisation weight for transmission-connected
@@ -273,8 +229,8 @@ class TSOControllerConfig:
     sensitivities: ``2 · g_res_sg · (r_SG / Q_half)^T · ∂Q_gen/∂u``.
     Default ``0.0`` keeps the term out of the objective entirely (reserve is
     then minimised only *implicitly*, via the DSO cascade).  Toggle pattern
-    mirrors ``g_q_tie``.  See
-    :class:`configs.multi_tso_config.MultiTSOConfig.tso_g_res_sg`."""
+    See
+    :class:`configs.config.MultiTSOConfig.tso_g_res_sg`."""
 
     g_res_der: float = 0.0
     """Explicit reserve-penalisation weight for transmission-connected DER
@@ -286,7 +242,7 @@ class TSOControllerConfig:
     A weight separate from ``g_res_sg`` lets the operator prefer one resource
     class over the other.  NOTE: DSO-connected DER reserve is intentionally
     NOT penalised here — that belongs to the DSO (Layer-2) controllers.  See
-    :class:`configs.multi_tso_config.MultiTSOConfig.tso_g_res_der`."""
+    :class:`configs.config.MultiTSOConfig.tso_g_res_der`."""
 
     # ── DER actuator: w-shift (vertical shift + V_ref reanchoring) ──────────
     # The DER block of the TSO action vector is the OFO-commanded
@@ -345,11 +301,11 @@ class TSOControllerConfig:
     the gradient is re-anchored on the true operating point every step.
 
     Default ``0.0`` keeps the loss term out of the objective entirely
-    (legacy behaviour).  Toggle pattern mirrors :attr:`g_q_tie`.  NOTE: the
+    (legacy behaviour).  NOTE: the
     loss sum spans exactly the lines in ``current_line_indices`` — to count
     additional in-zone branches, add them there (the I-rows then carry their
     ``∂I/∂u`` automatically).  See
-    :class:`configs.multi_tso_config.MultiTSOConfig.tso_g_loss`."""
+    :class:`configs.config.MultiTSOConfig.tso_g_loss`."""
 
     loss_line_coeff_mw_per_ka2: Optional[List[float]] = None
     """Optional per-line override of the loss coefficient ``c_ℓ`` [MW per
@@ -360,17 +316,6 @@ class TSOControllerConfig:
     ``sensitivities.net.line`` (the same net that produces ``∂I/∂u``).
     Set a line's entry to ``0.0`` to exclude it from the loss sum while
     keeping it as a monitored/thermally-limited current output."""
-
-    loss_use_phasor: bool = False
-    """PMU hook for the loss term.  ``False`` (default) uses the
-    magnitude/current form B above (the only measurement assumed so far).
-    ``True`` selects the phasor form — the exact branch loss
-    ``P_loss = Σ_ℓ g_ℓ(V_i²+V_j²−2V_iV_j cosθ_ij)`` evaluated from measured
-    voltage phasors (``Measurement.voltage_angles_deg``), with the gradient
-    projected through the complex current sensitivity.  The phasor path is
-    NOT yet implemented; setting this to ``True`` raises ``NotImplementedError``
-    at gradient time.  Reserved so the controller can later consume full
-    voltage phasors without changing the objective wiring."""
 
     def __post_init__(self) -> None:
         """Validate configuration after initialisation."""
@@ -453,31 +398,6 @@ class TSOControllerConfig:
                     f"strictly greater than sat_eps_enter_mvar "
                     f"({self.sat_eps_enter_mvar}) to enforce hysteresis."
                 )
-
-        n_tie = len(self.tie_line_indices)
-        if len(self.tie_line_endpoint_buses) != n_tie:
-            raise ValueError(
-                f"tie_line_endpoint_buses length ({len(self.tie_line_endpoint_buses)}) "
-                f"must match tie_line_indices length ({n_tie})"
-            )
-        if self.q_tie_setpoints_mvar is None:
-            self.q_tie_setpoints_mvar = np.zeros(n_tie, dtype=np.float64)
-        elif len(self.q_tie_setpoints_mvar) != n_tie:
-            raise ValueError(
-                f"q_tie_setpoints_mvar length ({len(self.q_tie_setpoints_mvar)}) "
-                f"must match tie_line_indices length ({n_tie})"
-            )
-        if self.q_tie_band_mvar is not None:
-            self.q_tie_band_mvar = np.asarray(
-                self.q_tie_band_mvar, dtype=np.float64
-            )
-            if len(self.q_tie_band_mvar) != n_tie:
-                raise ValueError(
-                    f"q_tie_band_mvar length ({len(self.q_tie_band_mvar)}) "
-                    f"must match tie_line_indices length ({n_tie})"
-                )
-            if np.any(self.q_tie_band_mvar < 0.0):
-                raise ValueError("q_tie_band_mvar entries must be non-negative")
 
         # ── Loss-term validation ────────────────────────────────────────────
         if self.g_loss < 0.0:
@@ -694,426 +614,6 @@ class TSOController(BaseOFOController):
             self.pcc_capability_min_mvar[i] = message.q_min_mvar[msg_idx]
             self.pcc_capability_max_mvar[i] = message.q_max_mvar[msg_idx]
 
-    # ── BME (Boundary Marginal Exchange) — coordination_mode="bme" ──────
-    # Class-level defaults: a controller not enrolled in BME carries no
-    # per-instance state and behaves byte-for-byte as before.
-    bme_mode: bool = False
-    _bme_grad_bus = None  # injected g_i^bme, bus-level DER columns
-
-    def enable_bme_mode(self) -> None:
-        """Enrol this controller in BME (spec §3.5 Convention A, D2/Q1/Q3):
-        the private objective gradient is REPLACED by the externally
-        assembled common-objective gradient g_i^bme = g_own + H_{b,i}ᵀ·Σμ
-        (injected per step via :meth:`receive_bme_gradient`). Voltage
-        output constraints, CAIR bounds, integer handling and the DSO
-        cascade are untouched. Fail-fast: a private tie-tracking term
-        would double-steer the priced boundary (Q3)."""
-        if float(getattr(self.config, "g_q_tie", 0.0)) != 0.0:
-            raise ValueError(
-                "coordination_mode='bme' requires g_q_tie == 0 (Q3): the "
-                "price term already steers the tie boundary; a private "
-                "tie-flow tracking term would double-steer it."
-            )
-        self.bme_mode = True
-
-    # -- Discrete hygiene (spec §3.8; Phase 5) ---------------------------
-    _bme_hygiene = None      # dict(zone, ledger, epsilon, cost_oltc, cost_shunt)
-    _bme_slot_ctx = None     # (tick, slot_owner, may_commit) — one-shot
-    bme_ledger_indices_this_step = ()  # ledger rows written by the last gate
-
-    def configure_bme_hygiene(
-        self,
-        *,
-        zone_id: int,
-        ledger,
-        epsilon_switch: float,
-        switch_cost_oltc: float,
-        switch_cost_shunt: float,
-    ) -> None:
-        """Arm the §3.8 discrete-hygiene gate (requires BME mode):
-        round-robin slotting context is injected per tick via
-        :meth:`set_bme_slot`; ε-acceptance compares the MIQP against the
-        frozen-integer QP; every decision lands in the shared ledger."""
-        if not self.bme_mode:
-            raise RuntimeError(
-                f"{self.controller_id}: configure_bme_hygiene requires "
-                "BME mode (call enable_bme_mode first)."
-            )
-        if epsilon_switch < 0 or switch_cost_oltc < 0 or switch_cost_shunt < 0:
-            raise ValueError(
-                "epsilon_switch and switch costs must be ≥ 0."
-            )
-        self._bme_hygiene = {
-            "zone": int(zone_id),
-            "ledger": ledger,
-            "epsilon": float(epsilon_switch),
-            "cost_oltc": float(switch_cost_oltc),
-            "cost_shunt": float(switch_cost_shunt),
-        }
-
-    def set_bme_slot(
-        self, *, tick: int, slot_owner: int, may_commit: bool
-    ) -> None:
-        """Inject this tick's slotting context (one-shot, runner-fed)."""
-        if self._bme_hygiene is None:
-            raise RuntimeError(
-                f"{self.controller_id}: set_bme_slot called without "
-                "configured hygiene."
-            )
-        self._bme_slot_ctx = (int(tick), int(slot_owner), bool(may_commit))
-
-    def _post_solve_gate(self, result, solve_frozen):
-        """§3.8 gate: slotting (D5) then ε-acceptance (§3.8.3, Q5 scope:
-        MIQP integers only). Inactive (byte-identical) unless BME
-        hygiene is configured."""
-        self.bme_ledger_indices_this_step = ()
-        if not self.bme_mode or self._bme_hygiene is None:
-            return result
-        int_idx = self._int_idx_arr
-        if int_idx.size == 0:
-            return result
-        w_int = np.round(np.asarray(result.w_integer, dtype=np.float64))
-        moved = np.flatnonzero(w_int != 0)
-        if moved.size == 0:
-            return result
-
-        if self._bme_slot_ctx is None:
-            raise RuntimeError(
-                f"{self.controller_id}: discrete hygiene is armed but no "
-                "slot context was injected this tick — the runner must "
-                "call set_bme_slot before step() (spec §3.8.2)."
-            )
-        tick, slot_owner, may_commit = self._bme_slot_ctx
-        self._bme_slot_ctx = None  # one-shot
-
-        from controller.discrete_hygiene import LedgerEntry, epsilon_accepts
-        hyg = self._bme_hygiene
-        devices = []
-        deltas = []
-        costs = []
-        for j in moved:
-            u_idx = int(int_idx[j])
-            cls = "oltc" if u_idx in self._oltc_int_indices else "shunt"
-            devices.append(f"{cls}:{u_idx}")
-            deltas.append(int(w_int[j]))
-            costs.append(
-                hyg["cost_oltc"] if cls == "oltc" else hyg["cost_shunt"]
-            )
-
-        frozen = solve_frozen()
-        accepted, pred_dphi, total_cost = epsilon_accepts(
-            obj_miqp=result.objective_value,
-            obj_frozen=frozen.objective_value,
-            delta_int_abs=np.abs(np.asarray(deltas, dtype=np.float64)),
-            switch_costs=np.asarray(costs, dtype=np.float64),
-            epsilon_switch=hyg["epsilon"],
-        )
-        if not may_commit:
-            reason = "slot_blocked"
-            accepted = False
-        else:
-            reason = "accepted" if accepted else "epsilon_reject"
-
-        entry_idx = hyg["ledger"].append(LedgerEntry(
-            step=tick,
-            zone=hyg["zone"],
-            devices=tuple(devices),
-            delta_int=tuple(deltas),
-            predicted_dphi=pred_dphi,
-            accepted=accepted,
-            reason=reason,
-            slot_owner=slot_owner,
-            epsilon_switch=hyg["epsilon"],
-            switch_cost=total_cost,
-        ))
-        self.bme_ledger_indices_this_step = (entry_idx,)
-        return result if accepted else frozen
-
-    def receive_bme_gradient(
-        self, grad_bus_level: NDArray[np.float64]
-    ) -> None:
-        """Inject this step's assembled BME gradient (bus-level DER
-        columns, ZoneInputSpec order — identical to this controller's
-        u-column order). Consumed exactly once by the next
-        ``_compute_objective_gradient`` call; one-shot semantics prevent
-        a stale price from leaking into a later step."""
-        if not self.bme_mode:
-            raise RuntimeError(
-                f"{self.controller_id}: receive_bme_gradient called but "
-                "the controller is not in BME mode."
-            )
-        grad = np.asarray(grad_bus_level, dtype=np.float64)
-        if grad.ndim != 1 or not np.all(np.isfinite(grad)):
-            raise ValueError(
-                f"{self.controller_id}: BME gradient must be a finite "
-                f"1-D vector, got shape {grad.shape}."
-            )
-        self._bme_grad_bus = grad
-
-    def _bme_objective_gradient(self) -> NDArray[np.float64]:
-        """Per-DER expansion of the injected bus-level BME gradient:
-        f(u_der) = Φ(E·u_der) ⇒ ∇_der = [Eᵀ·∇_bus(DER block); rest]."""
-        if self._bme_grad_bus is None:
-            raise RuntimeError(
-                f"{self.controller_id}: BME mode is active but no "
-                "gradient was injected this step — the runner must call "
-                "receive_bme_gradient before the solve (spec §5 Phase 4 "
-                "per-step sequence)."
-            )
-        g_bus = self._bme_grad_bus
-        self._bme_grad_bus = None  # one-shot
-        mapping = self._get_der_mapping()
-        if mapping is None:
-            if g_bus.shape != (self.n_controls,):
-                raise ValueError(
-                    f"{self.controller_id}: BME gradient length "
-                    f"{g_bus.shape[0]} != n_controls {self.n_controls}."
-                )
-            return g_bus
-        n_bus_der = mapping.n_unique_bus
-        g_der = np.concatenate([
-            g_bus[:n_bus_der] @ mapping.E, g_bus[n_bus_der:],
-        ])
-        if g_der.shape != (self.n_controls,):
-            raise ValueError(
-                f"{self.controller_id}: expanded BME gradient length "
-                f"{g_der.shape[0]} != n_controls {self.n_controls}."
-            )
-        return g_der
-
-    def receive_tie_coordination(
-        self,
-        message: TieCoordinationMessage,
-    ) -> None:
-        """
-        Receive a horizontal tie-coordination message from the tie coordinator.
-
-        For each tie line in the message, redirects the voltage-tracking
-        setpoint at the in-zone boundary bus to the agreed per-side reference
-        ``v_ref_pu``.  Tracking the redirected setpoint reuses the *existing*
-        primary voltage-tracking term (``g_v``) — there is no price term, so the
-        coordination cannot compete with or override voltage tracking.  The
-        agreed difference ``ΔV_ref`` is realised implicitly as the gap between
-        the two zones' redirected boundary setpoints.
-
-        Parameters
-        ----------
-        message : TieCoordinationMessage
-            Coordination message targeting this controller.
-
-        Raises
-        ------
-        ValueError
-            If the message targets a different controller, or a boundary bus is
-            not among this controller's monitored voltage buses.
-        RuntimeError
-            If voltage tracking is disabled (``v_setpoints_pu is None``); the
-            V-coordination scheme requires it.
-        """
-        if message.target_controller_id != self.controller_id:
-            raise ValueError(
-                f"Message target '{message.target_controller_id}' does not "
-                f"match controller ID '{self.controller_id}'"
-            )
-        if self.config.v_setpoints_pu is None:
-            raise RuntimeError(
-                "Tie coordination requires voltage tracking; "
-                "v_setpoints_pu is None."
-            )
-        # Ensure the setpoint vector is a writable float array we may mutate.
-        self.config.v_setpoints_pu = np.array(
-            self.config.v_setpoints_pu, dtype=np.float64,
-        )
-        v_bus = list(self.config.voltage_bus_indices)
-
-        for k in range(message.n_ties):
-            bus = int(message.boundary_bus_indices[k])
-            if bus not in v_bus:
-                raise ValueError(
-                    f"Tie boundary bus {bus} is not in voltage_bus_indices of "
-                    f"controller '{self.controller_id}'; add it to the "
-                    f"monitored voltage buses to enable V-coordination."
-                )
-            pos = v_bus.index(bus)
-            self.config.v_setpoints_pu[pos] = float(message.v_ref_pu[k])
-
-    def report_tie_boundary_voltage(
-        self,
-        measurement: Measurement,
-        boundary_bus: int,
-    ) -> float:
-        """
-        Return the measured voltage [p.u.] at a tie-line boundary bus.
-
-        Convenience reader for the tie coordinator's realised-voltage input
-        (the coordinator never sees the plant).  Mirrors the per-bus lookup
-        used throughout the gradient code.
-
-        Parameters
-        ----------
-        measurement : Measurement
-            Current system measurements for this zone.
-        boundary_bus : int
-            Pandapower bus index of the in-zone tie endpoint.
-
-        Raises
-        ------
-        ValueError
-            If the bus is not present in the measurement.
-        """
-        meas_idx = np.where(measurement.bus_indices == boundary_bus)[0]
-        if len(meas_idx) == 0:
-            raise ValueError(
-                f"Boundary bus {boundary_bus} not found in measurement"
-            )
-        return float(measurement.voltage_magnitudes_pu[meas_idx[0]])
-
-    def _reserve_num_den(self, measurement: Measurement) -> Tuple[float, float]:
-        """Capability-weighted reserve sums over this zone's in-service
-        **synchronous generators only** (TS-DER excluded for now):
-
-            num = Σ_k s_k · w_k ,   den = Σ_k w_k ,
-            s_k = min(1, |Q_k − Q_mid,k| / Q_half,k)   (scarcity, 0 mid-band .. 1 at limit)
-            w_k = Q_half,k                              (reactive capability)
-
-        Weighting by capability lets a large machine's idle headroom dominate
-        the zone aggregate — essential so a zone hosting a big (quasi-slack)
-        machine reads *abundant*, not scarce.  The midpoint / half-band are from
-        the same state-dependent capability curve as ``g_res_sg``.
-        """
-        _EPS = 1e-6
-        num = den = 0.0
-        n_gen = len(self.config.gen_indices)
-        if (
-            n_gen > 0
-            and self.actuator_bounds.gen_params is not None
-            and len(measurement.gen_p_mw) == n_gen
-            and len(measurement.gen_vm_pu) == n_gen
-            and len(measurement.gen_q_mvar) == n_gen
-        ):
-            q_min, q_max = self.actuator_bounds.compute_gen_q_bounds(
-                measurement.gen_p_mw, measurement.gen_vm_pu,
-            )
-            q_mid = 0.5 * (q_max + q_min)
-            q_half = 0.5 * (q_max - q_min)
-            q = np.asarray(measurement.gen_q_mvar, dtype=np.float64)
-            for k in range(n_gen):
-                if self._oos_gen_mask[k] or q_half[k] <= _EPS:
-                    continue
-                w = float(q_half[k])
-                s = min(1.0, abs(float(q[k]) - float(q_mid[k])) / w)
-                num += s * w
-                den += w
-        return num, den
-
-    def report_reserve_scarcity(self, measurement: Measurement) -> float:
-        """Capability-weighted reactive-reserve *scarcity* in [0, 1] (SG-only).
-
-        ``0`` = abundant (mid-band / large idle headroom); ``1`` = saturated.
-        See :meth:`_reserve_num_den`.  Used by the tie coordinator's reserve
-        extension.  ``0.0`` when no capability info is available.
-
-        NOTE: this counts only the gens this controller owns
-        (``config.gen_indices``).  Quasi-slack / equivalent machines that sit
-        outside any zone's controllable set are folded into their *electrical*
-        zone by the runner (see the horizontal round) using
-        :meth:`report_reserve_capability` — otherwise a zone hosting such a
-        machine would read scarce despite its large idle reserve.
-        """
-        num, den = self._reserve_num_den(measurement)
-        return num / den if den > 1e-9 else 0.0
-
-    def report_reserve_capability(self, measurement: Measurement) -> float:
-        """Total reactive capability ``Σ Q_half`` [Mvar] over this zone's
-        in-service synchronous generators (the denominator of the
-        capability-weighted scarcity).  Lets the runner blend in extra
-        (quasi-slack) machines: ``μ = (scarcity·cap + Σ s·w) / (cap + Σ w)``."""
-        return self._reserve_num_den(measurement)[1]
-
-    def report_reserve_headroom(self, measurement: Measurement) -> Tuple[float, float]:
-        """Directional absolute reactive headroom ``(H_cap, H_ind)`` [Mvar].
-
-        ``H_cap = sum(max(q_max - q, 0))`` is the remaining ability to
-        increase positive reactive injection. ``H_ind = sum(max(q - q_min, 0))``
-        is the remaining ability to move toward absorption. The aggregate
-        includes in-service synchronous generators and TSO-connected DER owned
-        by this zone; equivalent/slack machines outside ``config.gen_indices``
-        are folded in by the multi-TSO runner.
-        """
-        h_cap = 0.0
-        h_ind = 0.0
-        n_gen = len(self.config.gen_indices)
-        if (
-            n_gen > 0
-            and self.actuator_bounds.gen_params is not None
-            and len(measurement.gen_p_mw) == n_gen
-            and len(measurement.gen_vm_pu) == n_gen
-            and len(measurement.gen_q_mvar) == n_gen
-        ):
-            q_min, q_max = self.actuator_bounds.compute_gen_q_bounds(
-                measurement.gen_p_mw, measurement.gen_vm_pu,
-            )
-            q = np.asarray(measurement.gen_q_mvar, dtype=np.float64)
-            for k in range(n_gen):
-                if self._oos_gen_mask[k]:
-                    continue
-                h_cap += max(float(q_max[k]) - float(q[k]), 0.0)
-                h_ind += max(float(q[k]) - float(q_min[k]), 0.0)
-
-        n_der = len(self.config.der_indices)
-        if (
-            n_der > 0
-            and len(measurement.der_p_mw) == n_der
-            and len(measurement.der_q_mvar) == n_der
-        ):
-            q_min_d, q_max_d = self.actuator_bounds.compute_der_q_bounds(
-                np.asarray(measurement.der_p_mw, dtype=np.float64)
-            )
-            q_d = np.asarray(measurement.der_q_mvar, dtype=np.float64)
-            h_cap += float(np.maximum(q_max_d - q_d, 0.0).sum())
-            h_ind += float(np.maximum(q_d - q_min_d, 0.0).sum())
-
-        return h_cap, h_ind
-
-    def report_boundary_gradient(
-        self,
-        measurement: Measurement,
-        boundary_bus: int,
-    ) -> float:
-        """Marginal of this zone's full OFO objective w.r.t. its boundary voltage.
-
-        Returns ``γ = (∇J · h_b) / (h_b · h_b)`` where ``∇J`` is the control-space
-        objective gradient (:meth:`_compute_objective_gradient` — voltage
-        tracking + reserve + effort, every weighted term) and ``h_b`` is the
-        boundary bus's voltage row of the expanded sensitivity matrix
-        (``∂V_b/∂u``).  Geometrically it is the directional derivative of the
-        objective along the minimum-norm control move that raises the boundary
-        voltage — the marginal cost to this zone of nudging its boundary up,
-        accounting for *all* objective components (a reserve-strained zone pays
-        more).  Because it uses the iterating gradient (not the converged
-        setpoint marginal), the envelope theorem does not zero the reserve term.
-        Used by the tie coordinator's combined-gradient descent.
-
-        Raises
-        ------
-        ValueError
-            If the boundary bus is not a monitored voltage bus.
-        """
-        v_bus = list(self.config.voltage_bus_indices)
-        if boundary_bus not in v_bus:
-            raise ValueError(
-                f"Boundary bus {boundary_bus} is not in voltage_bus_indices of "
-                f"controller '{self.controller_id}'."
-            )
-        pos = v_bus.index(boundary_bus)  # voltage block is the leading rows of H
-        grad_f = self._compute_objective_gradient(measurement)
-        H = self._expand_H_to_der_level(self._build_sensitivity_matrix())
-        h_b = np.ascontiguousarray(H[pos, :], dtype=np.float64)
-        denom = float(h_b @ h_b)
-        if denom <= 1e-18:
-            return 0.0
-        return float((grad_f @ h_b) / denom)
-
     def generate_setpoint_messages(
         self,
     ) -> List[SetpointMessage]:
@@ -1242,7 +742,7 @@ class TSOController(BaseOFOController):
     ) -> Optional[Tuple[NDArray[np.float64], NDArray[np.float64]]]:
         """Voltage rows of H and per-bus ``g_v`` for curvature analysis.
 
-        TSO output ordering is ``[ V_bus | Q_PCC | I_line | Q_gen | Q_tie ]``,
+        TSO output ordering is ``[ V_bus | Q_PCC | I_line | Q_gen ]``,
         so the voltage block is the leading ``n_v`` rows.  ``g_v`` is the
         scalar :attr:`TSOControllerConfig.g_v` replicated per bus.  See
         :meth:`BaseOFOController.voltage_curvature_inputs`.
@@ -1441,7 +941,7 @@ class TSOController(BaseOFOController):
         """
         Extract current output values from measurements.
 
-        Output ordering: [ V_bus | Q_PCC | I_line | Q_gen | Q_tie ]
+        Output ordering: [ V_bus | Q_PCC | I_line | Q_gen ]
 
         Q_PCC is the physical reactive power at the HV port of each PCC
         transformer (load convention into the coupler).  It is included
@@ -1453,18 +953,12 @@ class TSOController(BaseOFOController):
         from the generator PQ capability curve each iteration.  The MIQP
         can trade off small Q_gen violations against voltage tracking and
         interface-Q objectives via the per-output slack variables.
-
-        Q_tie is the reactive power flowing on each inter-zone tie line at
-        the in-zone endpoint (load convention into the line — positive Q
-        means reactive flowing OUT of this zone).  Phase A: rows present
-        in H but not weighted in the objective (informational).
         """
         n_v = len(self.config.voltage_bus_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_i = len(self.config.current_line_indices)
         n_gen = len(self.config.gen_indices)
-        n_tie = len(self.config.tie_line_indices)
-        n_outputs = n_v + n_pcc + n_i + n_gen + n_tie
+        n_outputs = n_v + n_pcc + n_i + n_gen
 
         y = np.zeros(n_outputs)
         idx = 0
@@ -1509,16 +1003,6 @@ class TSOController(BaseOFOController):
                     f"Generator {g_idx} not found in measurement.gen_indices"
                 )
             y[idx] = float(measurement.gen_q_mvar[meas_idx[0]])
-            idx += 1
-
-        # Tie-line Q at in-zone endpoint (Phase A monitoring)
-        for tie_idx in self.config.tie_line_indices:
-            meas_idx = np.where(measurement.tie_line_indices == tie_idx)[0]
-            if len(meas_idx) == 0:
-                raise ValueError(
-                    f"Tie line {tie_idx} not found in measurement.tie_line_indices"
-                )
-            y[idx] = float(measurement.tie_line_q_mvar[meas_idx[0]])
             idx += 1
 
         return y
@@ -1664,7 +1148,7 @@ class TSOController(BaseOFOController):
         """
         Get output constraint limits.
 
-        Output ordering: [ V_bus | Q_PCC | I_line | Q_gen | Q_tie ]
+        Output ordering: [ V_bus | Q_PCC | I_line | Q_gen ]
 
         Voltage outputs are constrained to the permissible band
         [v_min_pu, v_max_pu].  Tracking toward voltage setpoints
@@ -1682,16 +1166,12 @@ class TSOController(BaseOFOController):
         capability curve each iteration) and enforced as soft outputs
         with penalty ``rho_q_gen`` — see the ``g_z`` plumbing for the
         corresponding slack weight.
-
-        Q_tie bounds are wide-open in Phase A (informational rows only).
-        Phase B may tighten them using ``g_z_q_tie`` slack penalty.
         """
         n_v = len(self.config.voltage_bus_indices)
         n_pcc = len(self.config.pcc_trafo_indices)
         n_i = len(self.config.current_line_indices)
         n_gen = len(self.config.gen_indices)
-        n_tie = len(self.config.tie_line_indices)
-        n_outputs = n_v + n_pcc + n_i + n_gen + n_tie
+        n_outputs = n_v + n_pcc + n_i + n_gen
 
         y_lower = np.zeros(n_outputs)
         y_upper = np.zeros(n_outputs)
@@ -1762,20 +1242,6 @@ class TSOController(BaseOFOController):
                     y_upper[idx + k] = +1e6
             idx += n_gen
 
-        # --- Q_tie bounds -------------------------------------------------
-        # Phase A (default): wide-open, informational only.  V-coordination
-        # scheme: when q_tie_band_mvar is set, tighten to [−band, +band] per
-        # tie as the subsidiarity soft cap (enforced via g_z_q_tie slack).
-        if n_tie > 0:
-            if self.config.q_tie_band_mvar is not None:
-                band = np.asarray(self.config.q_tie_band_mvar, dtype=np.float64)
-                y_lower[idx:idx + n_tie] = -band
-                y_upper[idx:idx + n_tie] = +band
-            else:
-                y_lower[idx:idx + n_tie] = -1e6
-                y_upper[idx:idx + n_tie] = +1e6
-            idx += n_tie
-
         return y_lower, y_upper
 
     def _loss_line_coeffs(self) -> NDArray[np.float64]:
@@ -1835,16 +1301,12 @@ class TSOController(BaseOFOController):
         evaluated at the MEASURED current ``|I_ℓ|`` (the OFO linearisation
         anchor).  Returns a zero vector when the loss term is disabled
         (``g_loss == 0``) or there are no monitored current lines — preserving
-        the legacy "current is a pure constraint" behaviour.  Routes to the
-        (not-yet-implemented) phasor path when ``loss_use_phasor`` is set.
+        the legacy "current is a pure constraint" behaviour.
         """
         n_i = len(self.config.current_line_indices)
         grad_i = np.zeros(n_i, dtype=np.float64)
         if n_i == 0 or self.config.g_loss == 0.0:
             return grad_i
-        if self.config.loss_use_phasor:
-            return self._loss_output_grad_i_phasor(measurement)
-
         c = self._loss_line_coeffs()
         i_meas = np.zeros(n_i, dtype=np.float64)
         for k, li in enumerate(self.config.current_line_indices):
@@ -1857,29 +1319,6 @@ class TSOController(BaseOFOController):
             i_meas[k] = float(measurement.current_magnitudes_ka[m[0]])
         return 2.0 * self.config.g_loss * c * i_meas
 
-    def _loss_output_grad_i_phasor(
-        self,
-        measurement: Measurement,
-    ) -> NDArray[np.float64]:
-        """PMU (phasor) loss-gradient path — reserved, not yet implemented.
-
-        With voltage phasors available (``measurement.voltage_angles_deg``),
-        the exact branch loss
-        ``P_loss = Σ_ℓ g_ℓ(V_i²+V_j²−2V_iV_j cosθ_ij)`` can be evaluated and
-        differentiated.  Unlike form B, the phasor gradient is NOT confined to
-        the ``I`` block — it also has voltage-magnitude/angle components — so
-        wiring it requires extending ``_compute_output_gradient`` (and the
-        consistency test ``tests/test_tso_output_gradient.py``) beyond the
-        current rows.  Left as an explicit stub so the option is visible.
-        """
-        raise NotImplementedError(
-            "Phasor (PMU) transmission-loss form is not implemented yet. "
-            "Set TSOControllerConfig.loss_use_phasor=False to use the "
-            "current-magnitude form (form B). The voltage phasors are already "
-            "carried on Measurement.voltage_angles_deg for when the exact "
-            "P_loss = Σ g_ℓ(V_i²+V_j²−2 V_i V_j cosθ_ij) form is added."
-        )
-
     def _compute_output_gradient(
         self,
         measurement: Measurement,
@@ -1887,7 +1326,7 @@ class TSOController(BaseOFOController):
         """Output-space objective gradient ``∇_y f`` for this TSO zone.
 
         Returns the gradient of the TSO objective with respect to the *outputs*
-        ``y``, in the canonical output ordering ``[V | Q_PCC | I | Q_gen | Q_tie]``
+        ``y``, in the canonical output ordering ``[V | Q_PCC | I | Q_gen]``
         (same ordering as :meth:`_extract_outputs` and the rows of
         :meth:`_build_sensitivity_matrix`).  The control-space gradient used by
         the MIQP is recovered by projecting through the sensitivity matrix,
@@ -1908,7 +1347,6 @@ class TSOController(BaseOFOController):
         * ``Q_PCC`` : ``2 · g_q_tso · (Q_PCC − Q_PCC,set)``       (interface-Q tracking)
         * ``I``     : ``2 · g_loss · c_ℓ · |I_ℓ|``                (transmission-loss form B; ``0`` when ``g_loss == 0``)
         * ``Q_gen`` : ``2 · g_res_sg · (Q_gen − Q_mid)/Q_half²``  (SG reactive-reserve centring)
-        * ``Q_tie`` : ``2 · g_q_tie · (Q_tie − Q_tie,set)``       (tie-line-Q tracking)
 
         NOTE: the DER reactive-reserve term (``g_res_der``) is intentionally NOT
         included here — ``Q_DER`` is a direct control variable, so that term
@@ -1919,7 +1357,6 @@ class TSOController(BaseOFOController):
         n_pcc = len(self.config.pcc_trafo_indices)
         n_i = len(self.config.current_line_indices)
         n_gen = len(self.config.gen_indices)
-        n_tie = len(self.config.tie_line_indices)
 
         grad_v = np.zeros(n_v, dtype=np.float64)
         grad_pcc = np.zeros(n_pcc, dtype=np.float64)
@@ -1927,7 +1364,6 @@ class TSOController(BaseOFOController):
         # (form B), in which case ∂P_loss/∂I_ℓ = 2·g_loss·c_ℓ·|I_ℓ|.
         grad_i = self._loss_output_grad_i(measurement)
         grad_gen = np.zeros(n_gen, dtype=np.float64)
-        grad_tie = np.zeros(n_tie, dtype=np.float64)
 
         mapping = self.config.der_mapping
         n_der_for_u = mapping.n_der if mapping is not None else len(self.config.der_indices)
@@ -1952,23 +1388,6 @@ class TSOController(BaseOFOController):
             else:
                 q_pcc_set = q_pcc_meas  # zero error on first call
             grad_pcc = 2.0 * self.config.g_q_tso * (q_pcc_meas - q_pcc_set)
-
-        # --- Q_tie tracking ------------------------------------------------
-        if n_tie > 0 and self.config.g_q_tie != 0.0:
-            q_tie_meas = np.zeros(n_tie, dtype=np.float64)
-            for k, tie_idx in enumerate(self.config.tie_line_indices):
-                meas_idx = np.where(measurement.tie_line_indices == tie_idx)[0]
-                if len(meas_idx) == 0:
-                    raise ValueError(
-                        f"Tie line {tie_idx} not found in measurement.tie_line_indices"
-                    )
-                q_tie_meas[k] = float(measurement.tie_line_q_mvar[meas_idx[0]])
-            q_tie_set = (
-                self.config.q_tie_setpoints_mvar
-                if self.config.q_tie_setpoints_mvar is not None
-                else np.zeros(n_tie, dtype=np.float64)
-            )
-            grad_tie = 2.0 * self.config.g_q_tie * (q_tie_meas - q_tie_set)
 
         # --- SG reactive-reserve centring ---------------------------------
         if (
@@ -1995,10 +1414,7 @@ class TSOController(BaseOFOController):
                 if self._oos_gen_mask[k]:
                     grad_gen[k] = 0.0
 
-        # Horizontal tie coordination adds NO objective term here: it only
-        # redirects boundary-bus voltage setpoints (handled by the existing
-        # voltage-tracking block above), so the gradient is unchanged.
-        return np.concatenate([grad_v, grad_pcc, grad_i, grad_gen, grad_tie])
+        return np.concatenate([grad_v, grad_pcc, grad_i, grad_gen])
 
     def _compute_objective_gradient(
         self,
@@ -2023,16 +1439,7 @@ class TSOController(BaseOFOController):
 
         This is consistent with the DSO controller implementation and
         the interface of build_miqp_problem.
-
-        Under ``coordination_mode="bme"`` the private objective is
-        REPLACED by the common objective Φ (D2/Q1): the gradient is the
-        externally assembled g_i^bme injected via
-        :meth:`receive_bme_gradient` (Convention A — frozen-boundary own
-        gradient plus the H_{b,i}ᵀ·Σμ price term), expanded to per-DER
-        columns here. None of the private terms below contribute.
         """
-        if self.bme_mode:
-            return self._bme_objective_gradient()
 
         n_total = self.n_controls
         grad_f = np.zeros(n_total)
@@ -2041,7 +1448,6 @@ class TSOController(BaseOFOController):
         n_pcc = len(self.config.pcc_trafo_indices)
         n_i = len(self.config.current_line_indices)
         n_gen = len(self.config.gen_indices)
-        n_tie = len(self.config.tie_line_indices)
 
         # --- Component 1: DER usage regularisation ---
         # Handled implicitly by g_u in build_miqp_problem; no explicit
@@ -2108,45 +1514,7 @@ class TSOController(BaseOFOController):
             dQpcc_du = H[n_v:n_v + n_pcc, :]
             grad_f += 2.0 * self.config.g_q_tso * (q_pcc_err @ dQpcc_du)
 
-        # --- Component 4: Q_tie tracking (Phase B) ---
-        # When ``g_q_tie != 0``, push the MIQP toward solutions that
-        # keep the inter-zone tie-line reactive power close to its
-        # configured setpoint (default 0 Mvar across all ties).  Both
-        # zones touching a tie line independently steer their own
-        # in-zone endpoint Q toward the target — decentralised, with no
-        # real-time inter-zone exchange.  Mirrors the Q_PCC tracking
-        # pattern above.
-        if n_tie > 0 and self.config.g_q_tie != 0.0:
-            if not H_built:
-                H_bus = self._build_sensitivity_matrix()
-                H = self._expand_H_to_der_level(H_bus)
-                H_built = True
-
-            # Q_tie row block sits after [V | Q_PCC | I | Q_gen].
-            q_tie_row_start = n_v + n_pcc + n_i + n_gen
-
-            # Read measured Q_tie at each in-zone endpoint.  Order matches
-            # self.config.tie_line_indices because measure_zone_tso copies
-            # zone_def.tie_line_indices into measurement.tie_line_indices.
-            q_tie_meas = np.zeros(n_tie, dtype=np.float64)
-            for k, tie_idx in enumerate(self.config.tie_line_indices):
-                meas_idx = np.where(measurement.tie_line_indices == tie_idx)[0]
-                if len(meas_idx) == 0:
-                    raise ValueError(
-                        f"Tie line {tie_idx} not found in measurement.tie_line_indices"
-                    )
-                q_tie_meas[k] = float(measurement.tie_line_q_mvar[meas_idx[0]])
-
-            q_tie_set = (
-                self.config.q_tie_setpoints_mvar
-                if self.config.q_tie_setpoints_mvar is not None
-                else np.zeros(n_tie, dtype=np.float64)
-            )
-            q_tie_err = q_tie_meas - q_tie_set
-            dQtie_du = H[q_tie_row_start:q_tie_row_start + n_tie, :]
-            grad_f += 2.0 * self.config.g_q_tie * (q_tie_err @ dQtie_du)
-
-        # --- Component 5: Explicit reactive-reserve penalisation (optional) ---
+        # --- Component 4: Explicit reactive-reserve penalisation (optional) ---
         # Keep TS actuators centred in their (state-dependent) Q-capability
         # band so symmetric reactive reserve is retained.  Each actuator's
         # normalised reserve coordinate is
@@ -2155,8 +1523,8 @@ class TSOController(BaseOFOController):
         # g_res · Σ_i r_i² has gradient 2·g_res·(Q_i - Q_mid)/Q_half² w.r.t Q_i.
         # Two independent weights (SG vs DER) let the operator prefer one
         # resource class over the other.  When a weight is 0 its block is
-        # skipped — the term is then not part of the objective (mirrors the
-        # g_q_tie toggle).  DSO-connected DER reserve is intentionally NOT
+        # skipped — the term is then not part of the objective.
+        # DSO-connected DER reserve is intentionally NOT
         # penalised here — it belongs to the DSO (Layer-2) controllers.
         _RES_HALF_EPS = 1e-6  # Mvar; bands narrower than this are treated as
         #                       collapsed (no reserve preference, avoids /0).
@@ -2256,9 +1624,6 @@ class TSOController(BaseOFOController):
             dI_du = H[i_row_start:i_row_start + n_i, :]
             grad_f += grad_i_loss @ dI_du
 
-        # Horizontal tie coordination adds NO control-space term: it acts purely
-        # through the redirected boundary voltage setpoints in the voltage block
-        # above (two-loop ΔV_ref design — the price term was removed).
         return grad_f
 
     def _debug_reserve_term(
@@ -2348,17 +1713,14 @@ class TSOController(BaseOFOController):
         n_shunt = len(self.config.shunt_bus_indices)
         n_v = len(self.config.voltage_bus_indices)
         n_i = len(self.config.current_line_indices)
-        n_tie = len(self.config.tie_line_indices)
-
         n_controls = n_der_bus + n_pcc + n_gen + n_oltc + n_shunt
-        n_outputs = n_v + n_pcc + n_i + n_gen + n_tie  # +Q_tie (Phase A)
+        n_outputs = n_v + n_pcc + n_i + n_gen
 
-        # Row offsets for the five output blocks
-        # (Layout: [V_bus | Q_PCC | I_line | Q_gen | Q_tie]).
+        # Row offsets for the four output blocks
+        # (Layout: [V_bus | Q_PCC | I_line | Q_gen]).
         q_pcc_row_start = n_v
         i_row_start     = n_v + n_pcc
         q_row_start     = n_v + n_pcc + n_i  # Q_gen block
-        q_tie_row_start = n_v + n_pcc + n_i + n_gen  # Q_tie block (Phase A)
 
         H = np.zeros((n_outputs, n_controls), dtype=np.float64)
 
@@ -2729,99 +2091,6 @@ class TSOController(BaseOFOController):
             for k in range(n_gen):
                 if self._oos_gen_mask[k]:
                     H[q_row_start + k, :] = 0.0
-
-        # =====================================================================
-        # Q_tie rows: tie-line reactive power as a monitored output (Phase A).
-        # =====================================================================
-        # Row offset: q_tie_row_start = n_v + n_pcc + n_i + n_gen.
-        # Columns: DER | PCC_set | V_gen | OLTC | shunt, same as the other
-        # output blocks.  The Q_tie rows are populated only when the zone
-        # actually owns tie lines (n_tie > 0).  In Phase A the rows are
-        # informational (g_q_tie defaults to 0); the gradient uses them only
-        # when g_q_tie != 0 (Phase B).
-        if n_tie > 0:
-            tie_indices = list(self.config.tie_line_indices)
-            tie_endpoints = list(self.config.tie_line_endpoint_buses)
-
-            # --- DER Q → Q_tie ---
-            if der_bus_indices:
-                dQtie_dQder, _, _ = (
-                    self.sensitivities.compute_dQ_line_dQ_der_matrix(
-                        tie_line_indices=tie_indices,
-                        tie_line_endpoint_buses=tie_endpoints,
-                        der_bus_indices=der_bus_indices,
-                    )
-                )
-                H[q_tie_row_start:q_tie_row_start + n_tie, :n_der] = dQtie_dQder
-
-            # --- PCC setpoint (load-convention) → Q_tie ---
-            # Q_PCC,set is load-convention on the HV side; the underlying
-            # primitive uses generator convention, so negate.
-            if pcc_hv_buses:
-                dQtie_dQpcc, _, pcc_map_tie = (
-                    self.sensitivities.compute_dQ_line_dQ_der_matrix(
-                        tie_line_indices=tie_indices,
-                        tie_line_endpoint_buses=tie_endpoints,
-                        der_bus_indices=pcc_hv_buses,
-                    )
-                )
-                for j_pcc, bus in enumerate(pcc_hv_buses):
-                    if bus in pcc_map_tie:
-                        j_jac = pcc_map_tie.index(bus)
-                        col = n_der + j_pcc
-                        H[q_tie_row_start:q_tie_row_start + n_tie, col] = (
-                            -dQtie_dQpcc[:, j_jac]
-                        )
-
-            # --- V_gen setpoint → Q_tie ---
-            # Skips OOS generators (V_gen column zeroed below in any case).
-            if is_gen_buses:
-                dQtie_dVgen, _, gen_map_tie = (
-                    self.sensitivities.compute_dQ_line_dVgen_matrix(
-                        tie_line_indices=tie_indices,
-                        tie_line_endpoint_buses=tie_endpoints,
-                        gen_bus_indices_pp=is_gen_buses,
-                    )
-                )
-                for k, gen_bus_pp in enumerate(gen_terminal_buses):
-                    col = avr_start + k
-                    if gen_bus_pp in gen_map_tie:
-                        j_chg = gen_map_tie.index(gen_bus_pp)
-                        H[q_tie_row_start:q_tie_row_start + n_tie, col] = (
-                            dQtie_dVgen[:, j_chg]
-                        )
-
-            # --- 2W OLTC tap → Q_tie ---
-            if is_oltc_indices:
-                dQtie_dsOltc, _, _ = (
-                    self.sensitivities.compute_dQ_line_2w_ds_matrix(
-                        tie_line_indices=tie_indices,
-                        tie_line_endpoint_buses=tie_endpoints,
-                        chg_trafo_indices=is_oltc_indices,
-                    )
-                )
-                is_pos_t = 0
-                for k, t_idx in enumerate(self.config.oltc_trafo_indices):
-                    if not self._oos_oltc_mask[k]:
-                        target_col = n_der + n_pcc + n_gen + k
-                        H[q_tie_row_start:q_tie_row_start + n_tie, target_col] = (
-                            dQtie_dsOltc[:, is_pos_t]
-                        )
-                        is_pos_t += 1
-
-            # --- Shunt state → Q_tie ---
-            if self.config.shunt_bus_indices:
-                dQtie_dShunt, _, _ = (
-                    self.sensitivities.compute_dQ_line_dQ_shunt_matrix(
-                        tie_line_indices=tie_indices,
-                        tie_line_endpoint_buses=tie_endpoints,
-                        shunt_bus_indices=_shunt_buses_for_sens,
-                        shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
-                    )
-                )
-                col_sh_start = n_der + n_pcc + n_gen + n_oltc
-                H[q_tie_row_start:q_tie_row_start + n_tie,
-                  col_sh_start:col_sh_start + n_shunt] = dQtie_dShunt
 
         # --- Feature B: PQ-mode V_gen column zeroing for saturated AVRs ---
         # Saturated gens have V_gen setpoint motion in the saturating

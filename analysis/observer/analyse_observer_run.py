@@ -36,7 +36,7 @@ import matplotlib.pyplot as plt
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 
 # Import the experiment module by path (filename starts with a digit).
 spec = importlib.util.spec_from_file_location(

@@ -6,7 +6,7 @@ Agreed contract data per corridor (SBX-H v6).
 The contract is the WHOLE mechanism's normative object: agreed terminal
 voltages per tie line (controller intent, an explicit planning schedule,
 or planned SUPPORT intervals), the implied standard flows, the
-reactive-flow deadband, and the hold/sag support-energy settlement terms.  v6 removed the deal-layer fields
+reactive-flow deadband, and the symmetric voltage-violation support-energy settlement terms.  v6 removed the deal-layer fields
 (quantum rate, contract cap, dust threshold — archive:
 ``_archive/sbx_h_v5/``).
 

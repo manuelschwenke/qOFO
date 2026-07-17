@@ -69,7 +69,7 @@ from pathlib import Path
 from typing import Any
 
 from analysis.stability_analysis import MultiZoneStabilityResult
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from tuning._sim_loader import get_runner_module
 from tuning._types import Ceilings
 

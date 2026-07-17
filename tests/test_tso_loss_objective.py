@@ -41,7 +41,7 @@ def _build():
     return net, meta
 
 
-def _make_tso(net, meta, *, g_loss, loss_use_phasor=False, line_coeff=None):
+def _make_tso(net, meta, *, g_loss, line_coeff=None):
     """Build a Zone-2 TSO controller that monitors a few EHV lines so the
     loss term has non-empty current rows to act on."""
     from controller.tso_controller import TSOController, TSOControllerConfig
@@ -85,7 +85,6 @@ def _make_tso(net, meta, *, g_loss, loss_use_phasor=False, line_coeff=None):
         g_v=2.0,
         g_q_tso=1.5,
         g_loss=g_loss,
-        loss_use_phasor=loss_use_phasor,
         loss_line_coeff_mw_per_ka2=line_coeff,
     )
     params = OFOParameters(
@@ -210,14 +209,6 @@ def test_loss_line_coeff_override_can_exclude_a_line():
     # First monitored line contributes nothing to the loss gradient.
     assert grad_y[n_v + n_pcc] == 0.0
 
-
-def test_phasor_path_is_guarded_stub():
-    """loss_use_phasor=True raises NotImplementedError at gradient time."""
-    net, meta = _build()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
-    tso, meas, _ = _make_tso(net, meta, g_loss=5.0, loss_use_phasor=True)
-    with pytest.raises(NotImplementedError):
-        tso._compute_output_gradient(meas)
 
 
 def test_g_loss_without_current_line_warns_and_is_inert():

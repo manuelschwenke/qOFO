@@ -19,7 +19,7 @@ from typing import Callable, List
 import numpy as np
 import optuna
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from tuning._types import Ceilings
 from tuning.metrics import CostWeights, NoiseFloors, cost_components
 from tuning.parameters import BO_DIMS, resolve_high

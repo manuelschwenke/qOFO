@@ -41,8 +41,9 @@ Date: 2026-07-12 (SBX-H v6)
 
 from __future__ import annotations
 
+from collections import deque
 import math
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandapower as pp
@@ -52,6 +53,7 @@ from sbx_h.config import SBXConfig
 from sbx_h.contract import build_default_contract, with_planned_support
 from sbx_h.corridor import Corridor, build_corridor_registry
 from sbx_h.fail import rep1
+from sbx_h.metrics import VoltageTrackingEquity, voltage_tracking_equity
 from sbx_h.scheduler import AreaStepInput, SBXScheduler
 
 
@@ -235,6 +237,19 @@ class SBXRunnerAdapter:
             Tuple[int, Dict[int, float], Dict[int, float]]
         ] = []
 
+        # Rolling ex-post voltage-tracking equity over one SBX cycle.
+        # It uses all monitored TSO voltage outputs and never feeds the
+        # controller or settlement decision.
+        self.tracking_equity_history: List[
+            Tuple[int, VoltageTrackingEquity]
+        ] = []
+        self._tracking_error_window: Dict[
+            int, Deque[NDArray[np.float64]]
+        ] = {
+            area: deque(maxlen=self.config.k_sched)
+            for area in self.scheduler.area_ids
+        }
+
         # The adapter may be constructed mid-run: the first on_tso_step
         # call defines the internal iteration origin.
         self._it_offset: Optional[int] = None
@@ -287,6 +302,11 @@ class SBXRunnerAdapter:
             z: self._area_step_input(tso_controllers[z], measurements[z])
             for z in self.scheduler.area_ids
         }
+        self._record_tracking_equity(
+            iteration,
+            area_inputs,
+            tso_controllers,
+        )
         tie_p, tie_q = self._corridor_tie_measurements(measurements)
         tie_va, tie_vb = self._corridor_terminal_voltages(measurements)
         self.scheduler.record_step(iteration, area_inputs, tie_p, tie_q,
@@ -310,6 +330,51 @@ class SBXRunnerAdapter:
     # ------------------------------------------------------------------
     #  Internals
     # ------------------------------------------------------------------
+
+    def _record_tracking_equity(
+        self,
+        iteration: int,
+        area_inputs: Mapping[int, AreaStepInput],
+        tso_controllers: Mapping[int, object],
+    ) -> None:
+        """Record rolling all-bus tracking burden and cross-area Gini.
+
+        The rolling window contains the latest ``k_sched`` TSO samples,
+        i.e. one contractual metering cycle.  Errors are stored after
+        subtracting the active reference, so a schedule change is handled
+        correctly within a window.
+        """
+        for area in self.scheduler.area_ids:
+            measured = np.asarray(
+                area_inputs[area].v_meas_pu,
+                dtype=np.float64,
+            )
+            scheduled = np.asarray(
+                tso_controllers[area].config.v_setpoints_pu,
+                dtype=np.float64,
+            )
+            if measured.shape != scheduled.shape:
+                rep1(
+                    "voltage-tracking equity measurement/reference "
+                    "shape mismatch",
+                    area=area,
+                    measured_shape=measured.shape,
+                    scheduled_shape=scheduled.shape,
+                )
+            self._tracking_error_window[area].append(
+                measured - scheduled
+            )
+
+        errors_by_area = {
+            area: tuple(
+                float(value)
+                for sample in self._tracking_error_window[area]
+                for value in sample
+            )
+            for area in self.scheduler.area_ids
+        }
+        metric = voltage_tracking_equity(errors_by_area)
+        self.tracking_equity_history.append((int(iteration), metric))
 
     def _initial_schedule_diagnostics(
         self, net: pp.pandapowerNet,
@@ -336,7 +401,8 @@ class SBXRunnerAdapter:
                     ("b", corridor.area_b, line.bus_b, scheduled_b),
                 ):
                     measured = float(net.res_bus.at[bus, "vm_pu"])
-                    margin = measured - (float(scheduled) - tolerance)
+                    error = measured - float(scheduled)
+                    margin = tolerance - abs(error)
                     rows.append({
                         "corridor": key,
                         "line_idx": int(line.line_idx),
@@ -345,6 +411,7 @@ class SBXRunnerAdapter:
                         "bus": int(bus),
                         "v_meas_pu": measured,
                         "v_sched_pu": float(scheduled),
+                        "v_error_pu": error,
                         "hold_margin_pu": margin,
                         "initially_holds": bool(margin >= 0.0),
                         "schedule_source": self.schedule_source,

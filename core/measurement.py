@@ -40,9 +40,9 @@ class Measurement:
         angles the *exact* branch loss
         ``P_loss = Σ_ℓ g_ℓ (V_i² + V_j² − 2 V_i V_j cos θ_ij)`` and its
         full gradient become observable.  The default magnitude-only
-        controllers ignore this field; the loss term uses it only when
-        ``TSOControllerConfig.loss_use_phasor=True`` (not yet implemented —
-        see the loss-objective design note).  Empty array when no angle
+        controllers retain this channel for monitoring and future model
+        extensions; their active objectives remain magnitude based. Empty
+        array when no angle information is supplied.
         information is supplied.
     branch_indices : NDArray[np.int64]
         Pandapower branch (line) indices where current is measured.

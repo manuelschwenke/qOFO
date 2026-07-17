@@ -77,26 +77,29 @@ pip install -r requirements.txt
 ## Project Structure
 
 ```
-qOFO/
-├── core/                 # Core data structures
-│   ├── network_state.py  # Cached network state for Jacobian computation
-│   ├── measurement.py    # Runtime measurements from the system
-│   ├── message.py        # Inter-controller messages
-│   └── actuator_bounds.py# Operating-point-dependent actuator bounds
-│
-├── controller/           # Controller implementations
-│   ├── base_controller.py# Abstract base OFO controller
-│   ├── tso_controller.py # TSO-level MIQP controller
-│   └── dso_controller.py # DSO-level MIQP controller
-│
-├── optimisation/         # MIQP solver interface
-│   └── miqp_solver.py    # Quadratic programme formulation
-│
-├── sensitivity/          # Sensitivity calculations
-│   └── jacobian.py       # Jacobian-based sensitivity matrices
-│
-└── tests/                # Unit tests
+qOFO_GH/
+├── configs/              # Multi-system and cascade configuration
+├── core/                 # Measurements, messages, and cached state
+├── controller/           # TSO/DSO OFO controllers
+├── network/              # Transmission and distribution test systems
+├── sensitivity/          # Cached-model Jacobians and sensitivities
+├── experiments/          # Three active entry points plus CIGRE_2026
+├── sbx_h/                # Horizontal scheduled-boundary coordination
+├── sbx_v/                # Vertical band/request/grant coordination
+├── visualisation/        # Live and publication plotting
+├── docs/                 # Architecture, status, tuning, archive, daily log
+└── tests/                # Maintained regression and unit tests
 ```
+
+The supported horizontal coordination comparison is **none versus SBX-H**.
+Tie-line Q remains a measured/recorded controlled-system output. Removed
+BME, delta-V-reference, and weighted tie-Q mechanisms remain recoverable
+from Git history and their design documents are retained under
+`docs/_archive/`.
+
+Experiment outputs use
+`results/<experiment>/<NNNN>_<YYYY-MM-DD_HHMMSS>/` with `config.pkl`,
+`config.json`, and `meta.json` provenance files.
 
 ## References
 

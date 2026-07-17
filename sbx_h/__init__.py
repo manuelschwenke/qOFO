@@ -8,15 +8,17 @@ G1–G7) showed to carry the value:
 * **Contract layer** â€” agreed per-corridor boundary-voltage schedules
   ``v_std`` (controller-intended terminal references by default, an
   explicit planning schedule when supplied, and planned SUPPORT
-  intervals where one side holds a deliberately raised voltage),
+  intervals where one side holds a deliberately raised voltage). Current
+  experiments use a constant 1.03 pu schedule on every side,
   tracked by each area's own controller with the ordinary voltage
   weight by default. Implied standard flows ``q_std`` follow from the
   contracted pi-line model.
 * **Metering + support-energy settlement** — per elapsed cycle the Q
   baseline is evaluated at the active scheduled terminal voltages and
-  measured P transfer.  If exactly one side sags, the other side holds,
-  and beyond-band Q points toward the sagging side, the sagging side
-  pays the holder for delivered support energy.  Strength is reported
+  measured P transfer. If exactly one side violates its symmetric
+  schedule band, the other side holds, and beyond-band Q has the
+  relieving sign, the violating side pays the holder for delivered
+  support energy. Strength is reported
   only as an optional ex-post diagnostic, not sold as a product.
 * **Escalation indicator** — persistent violations / persistent
   beyond-band exceedance are flagged for a slow re-planning loop

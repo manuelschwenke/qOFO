@@ -7,7 +7,7 @@ import math
 
 import pytest
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from tuning._types import BOParam, Ceilings
 from tuning.parameters import (
     BO_DIMS,
@@ -37,10 +37,10 @@ def _multi_tso_config_fields() -> set[str]:
 # ---------------------------------------------------------------------------
 
 def test_bo_dims_complete() -> None:
-    """``BO_DIMS`` has exactly 9 entries (``g_w_tso_shunt`` excluded
-    while shunts are not installed; ``tso_g_q_tie`` added 2026-04-29);
+    """``BO_DIMS`` has exactly 8 entries (``g_w_tso_shunt`` excluded
+    while shunts are not installed; tie-line Q retained for monitoring only);
     every name exists on ``MultiTSOConfig``."""
-    assert len(BO_DIMS) == 9
+    assert len(BO_DIMS) == 8
     cfg_fields = _multi_tso_config_fields()
     names = [p.name for p in BO_DIMS]
     assert len(set(names)) == len(names), "duplicate BO_DIMS names"
@@ -103,6 +103,8 @@ def test_apply_to_config_applies_fixed_overrides(baseline_cfg: MultiTSOConfig) -
         live_plot_controller=True,
     )
     new_cfg = apply_to_config(diverging, _valid_params())
+    # Excluded from BO: preserve the deliberate baseline generator weight.
+    assert new_cfg.g_w_gen == 42.0
     for k, v in FIXED_OVERRIDES.items():
         assert getattr(new_cfg, k) == v, (
             f"FIXED_OVERRIDES['{k}']={v!r} not enforced; got {getattr(new_cfg, k)!r}"
@@ -198,12 +200,12 @@ def test_resolve_high_with_ceil() -> None:
 # 9. search_space: 8 entries, log on g_v + g_w_*
 # ---------------------------------------------------------------------------
 
-def test_search_space_returns_9_entries_with_log() -> None:
+def test_search_space_returns_8_entries_with_log() -> None:
     space = search_space(None)
-    assert len(space) == 9
+    assert len(space) == 8
     assert set(space.keys()) == {p.name for p in BO_DIMS}
 
-    must_be_log = {"g_v", "tso_g_q_tie", "g_w_der", "g_w_pcc",
+    must_be_log = {"g_v", "g_w_der", "g_w_pcc",
                    "g_w_tso_oltc", "g_w_dso_der", "g_w_dso_oltc"}
     for name, (low, high, log) in space.items():
         assert low > 0, f"{name}: low={low} must be > 0 for log-space search"

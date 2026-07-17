@@ -270,36 +270,9 @@ class MultiTSOIterationRecord:
     # all physical boundary lines between the two zones.
     zone_tie_q_mvar: Dict[Tuple[int, int], float] = field(default_factory=dict)
 
-    # ── Horizontal TSO-TSO tie-coordination observables (two-loop ΔV_ref) ────
-    # All keyed by tie_id (pandapower line index of the individual tie line);
-    # the coordination fields are populated when config.enable_tie_coordination
-    # is set (tie_q_mvar is populated unconditionally post-PF).  Feed the
-    # TIE-COORDINATION live plot (config.live_plot_tie_coordination).
-    tie_dvref:       Dict[int, float] = field(default_factory=dict)
-    """Agreed boundary-voltage difference ΔV_ref [p.u.] per tie (outer loop)."""
-    tie_dv_realized: Dict[int, float] = field(default_factory=dict)
-    """Realised boundary-voltage difference V_i − V_j [p.u.] per tie."""
-    tie_grad_i:      Dict[int, float] = field(default_factory=dict)
-    """Zone-i boundary objective-gradient γ_i = ∇J_i·h_b/‖h_b‖² per tie."""
-    tie_grad_j:      Dict[int, float] = field(default_factory=dict)
-    """Zone-j boundary objective-gradient γ_j per tie."""
-    tie_grad_combined: Dict[int, float] = field(default_factory=dict)
-    """Combined gradient G = κ·γ_i − (1−κ)·γ_j = ∂(J_i+J_j)/∂ΔV_ref per tie."""
-    zone_reserve_scarcity: Dict[int, float] = field(default_factory=dict)
-    """Per-zone aggregate reactive-reserve scarcity in [0,1] (0 abundant, 1
-    saturated) — the μ_i signal driving the reserve extension."""
-    zone_reserve_headroom_cap_mvar: Dict[int, float] = field(default_factory=dict)
-    """Per-zone remaining positive-Q injection headroom H_cap [Mvar]."""
-    zone_reserve_headroom_ind_mvar: Dict[int, float] = field(default_factory=dict)
-    """Per-zone remaining negative-Q / absorption headroom H_ind [Mvar]."""
-    zone_reserve_headroom_min_mvar: Dict[int, float] = field(default_factory=dict)
-    """Per-zone limiting directional headroom min(H_cap, H_ind) [Mvar]."""
-    tie_v_i:     Dict[int, float] = field(default_factory=dict)
-    """Realised boundary voltage [p.u.] at the zone-i endpoint per tie line."""
-    tie_v_j:     Dict[int, float] = field(default_factory=dict)
-    """Realised boundary voltage [p.u.] at the zone-j endpoint per tie line."""
-    tie_q_mvar:  Dict[int, float] = field(default_factory=dict)
-    """Per-tie-line reactive flow [Mvar] at the zone-i endpoint (into line)."""
+    # Physical reactive flow at each individual tie-line endpoint [Mvar].
+    # Monitoring-only: retained for runner helpers and live SBX diagnostics.
+    tie_q_mvar: Dict[int, float] = field(default_factory=dict)
 
     # Per-zone TSO shunt states (MSC/MSR tap positions; empty array if none).
     zone_tso_shunt_states: Dict[int, NDArray] = field(default_factory=dict)
@@ -321,27 +294,6 @@ class MultiTSOIterationRecord:
     total_losses_mw: float = 0.0
     """Sum of res_line.pl_mw + res_trafo.pl_mw + res_trafo3w.pl_mw across the
     whole combined network.  Filled at every step from the converged PF."""
-
-    bme_phi_mw: Optional[float] = None
-    """BME common objective Φ_global (Q7 TS-level scope: w_loss·P_loss +
-    φ_band over in-scope buses), evaluated on the converged plant PF.
-    Filled every step when ``coordination_mode="bme"`` OR when
-    ``record_bme_phi=True`` (the uniform Φ metric for the Phase 6 ladder
-    rungs none/vref/oracle); ``None`` otherwise."""
-
-    bme_phi_zone_mw: Dict[int, float] = field(default_factory=dict)
-    """Per-zone Φ_i (same scope/weights as ``bme_phi_mw``; D1 ownership,
-    50/50 tie shares — Σ_i Φ_i == Φ_global by the partition invariant).
-    Premise data for the Phulpin normalised-overcost fairness metric
-    (spec §5 Phase 6): filled alongside ``bme_phi_mw``, empty otherwise."""
-
-    bme_v_boundary: Dict[int, float] = field(default_factory=dict)
-    """Voltage magnitude [pu] at the FIXED 3-area boundary registry buses
-    (tie endpoints), recorded per step alongside ``bme_phi_mw`` on every
-    ladder rung — including the single-zone oracle, whose CONTROL
-    registry is empty but whose physical boundary buses are the same.
-    Input to the spec §5 Phase 6 oscillation indicator (dominant AR pole
-    of the boundary-voltage series)."""
 
     gen_q_headroom_mvar: Dict[int, NDArray] = field(default_factory=dict)
     """Per-zone array, parallel to ``zone_q_gen``: ``q_max(g) - |q_actual(g)|``

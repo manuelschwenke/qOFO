@@ -8,7 +8,7 @@ from typing import List
 import numpy as np
 import pytest
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from experiments.helpers.records import MultiTSOIterationRecord
 from tuning.metrics import (
     CostWeights,

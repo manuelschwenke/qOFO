@@ -14,7 +14,7 @@ Symbol map
 * k_sched: metering / settlement cycle length in TSO OFO iterations.
 * q_band_mvar: reactive-flow deadband around the baseline implied by
   scheduled voltages at measured active transfer.
-* p_support_eur_per_mvarh: energy price paid by the sagging side to the
+* p_support_eur_per_mvarh: energy price paid by the violating side to the
   side that remains inside its holding band.
 * v_hold_tolerance_pu / v_sag_threshold_pu: absolute role thresholds
   relative to the scheduled corridor-terminal voltage.
@@ -46,7 +46,7 @@ class SBXConfig:
     tso_period_s: float = 180.0
     """TSO OFO iteration period [s]."""
 
-    q_band_mvar: float = 5.0
+    q_band_mvar: float = 10.0
     """Reactive-flow settlement deadband [Mvar]. The flow baseline is
     recomputed at scheduled terminal voltages and measured active
     transfer. Hourly values may enter through q_band_schedule."""
@@ -60,12 +60,13 @@ class SBXConfig:
     exposure cap, not a sold strength product."""
 
     v_hold_tolerance_pu: float = 0.0025
-    """A side HOLDS when every own corridor terminal is no more than
-    this amount below its active scheduled voltage."""
+    """A side HOLDS when every own corridor terminal remains within
+    this symmetric absolute-error band around its active schedule."""
 
     v_sag_threshold_pu: float = 0.005
-    """A side SAGS when at least one own corridor terminal lies more
-    than this amount below its active scheduled voltage."""
+    """Compatibility name for the symmetric schedule-violation
+    threshold: a side violates when any own terminal is farther than
+    this amount below or above its active scheduled voltage."""
 
     v_viol_threshold_pu: float = 0.005
     n_need: int = 3

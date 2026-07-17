@@ -3,11 +3,11 @@ Live visualization of the active SBX-H v6 mechanism.
 
 For every TSO-TSO corridor the figure shows:
 
-- measured reference-end reactive flow Q_meas;
-- the measured-P baseline Q_0 and deadband Q_0 +/- B_Q;
+- cycle residual dQ = Q_meas - Q_0 around the no-payment deadband;
 - paid support Q_sup, signed in the corridor orientation;
-- measured and scheduled terminal voltages on both sides;
-- hold/sag/neither condition strips for side A and side B;
+- worst-terminal measured and scheduled voltages on both sides;
+- hold/violation/transition strips for side A and side B;
+- rolling all-area voltage-tracking RMSE and normalized Gini inequality;
 - cumulative bilateral settlement payments.
 
 Positive corridor quantities point from area A to area B. Q_sup is
@@ -28,12 +28,12 @@ from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
+from configs.color_config import TU_COLOURS, TU_PRIMARY
+
 from visualisation.style import (
-    COLOUR_MEAS_BAND,
     TITLE_BAR_HEIGHT_FRAC,
     apply_serif_style,
     draw_figure_header,
-    fill_section_band,
     position_figure_in_slot,
     raise_figure_to_front,
     tile_title,
@@ -43,17 +43,21 @@ if TYPE_CHECKING:
     from experiments.helpers import MultiTSOIterationRecord
     from sbx_h.adapter import SBXRunnerAdapter
 
-_C_Q_MEAS = "#cc6677"
-_C_Q0 = "#4477aa"
-_C_BAND = "#4477aa"
-_C_SUPPORT = "#aa3377"
-_C_A = "#4477aa"
-_C_B = "#ee6677"
-_C_HOLD = "#228833"
-_C_SAG = "#cc3311"
-_C_NEITHER = "#bbbbbb"
-_C_ESCALATION = "#000000"
-_ZONE_COLOURS = {1: "#4477aa", 2: "#ee6677", 3: "#228833"}
+_C_Q_MEAS = TU_PRIMARY          # 5c yellow-green primary
+_C_Q0 = TU_COLOURS[1]           # dark blue
+_C_BAND = TU_COLOURS[1]         # dark blue
+_C_SUPPORT = TU_COLOURS[5]      # magenta
+_C_A = TU_PRIMARY               # 5c yellow-green primary
+_C_B = TU_COLOURS[2]            # dark orange
+_C_HOLD = TU_COLOURS[4]         # teal
+_C_SAG = TU_COLOURS[8]          # red
+_C_NEITHER = "#B8B8B8"          # neutral transition state
+_C_ESCALATION = TU_COLOURS[10]  # purple
+_ZONE_COLOURS = {
+    1: TU_PRIMARY,
+    2: TU_COLOURS[2],
+    3: TU_COLOURS[4],
+}
 
 
 class SBXMechanismLivePlotter:
@@ -75,17 +79,16 @@ class SBXMechanismLivePlotter:
         self._layout = layout
 
         self._keys: List[Tuple[int, int]] = []
-        self._t: List[float] = []
-        self._q: Dict[Tuple[int, int], List[float]] = {}
         self._freeze_t_min: Optional[float] = None
         self._axes_q: Dict[Tuple[int, int], plt.Axes] = {}
         self._axes_v: Dict[Tuple[int, int], plt.Axes] = {}
-        self._ax_support: Optional[plt.Axes] = None
+        self._ax_equity: Optional[plt.Axes] = None
+        self._ax_equity_gini: Optional[plt.Axes] = None
         self._ax_pay: Optional[plt.Axes] = None
         self._last_adapter: Optional["SBXRunnerAdapter"] = None
         self._built = False
 
-        self._fig = plt.figure(figsize=(12.0, 9.0))
+        self._fig = plt.figure(figsize=(11.5, 6.0))
         try:
             self._fig.canvas.manager.set_window_title(
                 "SBX-H scheduled-voltage support"
@@ -95,15 +98,6 @@ class SBXMechanismLivePlotter:
         draw_figure_header(
             self._fig,
             "SBX-H - Scheduled Terminal Voltages and Reactive Support",
-        )
-        self._status = self._fig.text(
-            0.5,
-            0.947,
-            "Waiting for SBX-H contract initialization",
-            ha="center",
-            va="top",
-            fontsize=8,
-            color="0.25",
         )
         self._placeholder = self._fig.text(
             0.5,
@@ -125,8 +119,6 @@ class SBXMechanismLivePlotter:
 
     def _build(self, keys: Sequence[Tuple[int, int]]) -> None:
         self._keys = list(keys)
-        for key in self._keys:
-            self._q[key] = []
         try:
             self._placeholder.remove()
         except Exception:
@@ -134,64 +126,61 @@ class SBXMechanismLivePlotter:
 
         n_corridors = len(self._keys)
         self._fig.set_size_inches(
-            12.0,
-            2.35 * n_corridors + 4.0,
+            11.5,
+            1.35 * n_corridors + 1.95,
             forward=True,
         )
         self._fig.subplots_adjust(
-            top=1.0 - TITLE_BAR_HEIGHT_FRAC - 0.035,
-            bottom=0.055,
+            top=1.0 - TITLE_BAR_HEIGHT_FRAC - 0.024,
+            bottom=0.075,
             left=0.075,
             right=0.985,
-            hspace=0.68,
-            wspace=0.18,
+            hspace=0.34,
+            wspace=0.24,
         )
         grid = GridSpec(
-            n_corridors + 2,
+            n_corridors + 1,
             2,
             figure=self._fig,
-            height_ratios=[0.18] + [1.0] * n_corridors + [1.0],
-            hspace=0.68,
-            wspace=0.18,
-        )
-        band_axis = self._fig.add_subplot(grid[0, :])
-        fill_section_band(
-            band_axis,
-            "Corridor Flow, Terminal Voltages, and Hold/Sag State",
-            COLOUR_MEAS_BAND,
+            height_ratios=[1.0] * n_corridors + [0.72],
+            hspace=0.34,
+            wspace=0.24,
         )
 
-        previous_q = None
-        previous_v = None
+        shared_axis = None
         for index, key in enumerate(self._keys):
             q_axis = self._fig.add_subplot(
-                grid[1 + index, 0],
-                sharex=previous_q,
+                grid[index, 0],
+                sharex=shared_axis,
             )
+            if shared_axis is None:
+                shared_axis = q_axis
             v_axis = self._fig.add_subplot(
-                grid[1 + index, 1],
-                sharex=previous_v,
+                grid[index, 1],
+                sharex=shared_axis,
             )
-            previous_q = previous_q or q_axis
-            previous_v = previous_v or v_axis
             self._axes_q[key] = q_axis
             self._axes_v[key] = v_axis
+            q_axis.tick_params(labelbottom=False)
+            v_axis.tick_params(labelbottom=False)
 
-        self._ax_support = self._fig.add_subplot(
-            grid[1 + n_corridors, 0],
-            sharex=previous_q,
+        self._ax_equity = self._fig.add_subplot(
+            grid[n_corridors, 0],
+            sharex=shared_axis,
         )
+        self._ax_equity_gini = self._ax_equity.twinx()
         self._ax_pay = self._fig.add_subplot(
-            grid[1 + n_corridors, 1],
-            sharex=previous_v,
+            grid[n_corridors, 1],
+            sharex=shared_axis,
         )
         for axis in (
             list(self._axes_q.values())
             + list(self._axes_v.values())
-            + [self._ax_support, self._ax_pay]
+            + [self._ax_equity, self._ax_pay]
         ):
             axis.tick_params(axis="both", labelsize=8)
-        self._ax_support.set_xlabel("Time / min")
+        self._ax_equity_gini.tick_params(axis="y", labelsize=8)
+        self._ax_equity.set_xlabel("Time / min")
         self._ax_pay.set_xlabel("Time / min")
         position_figure_in_slot(
             self._fig,
@@ -220,11 +209,6 @@ class SBXMechanismLivePlotter:
         if self._freeze_t_min is None:
             self._freeze_t_min = rec.time_s / 60.0
         self._last_adapter = adapter
-        self._t.append(rec.time_s / 60.0)
-        for key in self._keys:
-            self._q[key].append(
-                float(corridor_q_mvar.get(key, np.nan))
-            )
         if self._call_count % self._update_every == 0:
             self._redraw(adapter)
 
@@ -278,9 +262,8 @@ class SBXMechanismLivePlotter:
         for key in self._keys:
             self._draw_corridor_q(adapter, key)
             self._draw_corridor_v(adapter, key)
-        self._draw_support(adapter)
+        self._draw_tracking_equity(adapter)
         self._draw_payments(adapter)
-        self._draw_current_status(adapter)
         try:
             self._fig.canvas.draw_idle()
             plt.pause(0.001)
@@ -294,20 +277,15 @@ class SBXMechanismLivePlotter:
     ) -> None:
         axis = self._axes_q[key]
         axis.cla()
-        axis.plot(
-            np.asarray(self._t),
-            np.asarray(self._q[key]),
-            color=_C_Q_MEAS,
-            lw=0.9,
-            label="Q_meas",
-        )
         records = adapter.scheduler.records.get(key, [])
         if records:
-            times, q0 = self._step_series(
-                adapter,
-                records,
-                [item.q_std_mvar for item in records],
-            )
+            residual = [
+                item.deviation_mvar
+                if np.isfinite(item.deviation_mvar)
+                else item.q_meas_mvar - item.q_std_mvar
+                for item in records
+            ]
+            times, delta_q = self._step_series(adapter, records, residual)
             _, band = self._step_series(
                 adapter,
                 records,
@@ -320,48 +298,78 @@ class SBXMechanismLivePlotter:
             )
             axis.fill_between(
                 times,
-                q0 - band,
-                q0 + band,
+                -band,
+                band,
                 color=_C_BAND,
-                alpha=0.14,
+                alpha=0.12,
                 lw=0,
-                label="Q_0 +/- B_Q",
+                label="deadband +/- B_Q",
             )
             axis.plot(
                 times,
-                q0,
-                color=_C_Q0,
-                lw=1.25,
-                label="Q_0",
+                band,
+                color=_C_BAND,
+                lw=0.65,
+                ls="--",
+            )
+            axis.plot(
+                times,
+                -band,
+                color=_C_BAND,
+                lw=0.65,
+                ls="--",
+            )
+            axis.plot(
+                times,
+                delta_q,
+                color=_C_Q_MEAS,
+                lw=1.15,
+                label="dQ = Q - Q_0",
             )
             axis.plot(
                 times,
                 support,
                 color=_C_SUPPORT,
-                lw=1.1,
+                lw=1.35,
                 ls="-.",
-                label="signed Q_sup",
+                label="paid Q_sup",
             )
+            axis.axhline(0.0, color=_C_Q0, lw=0.75)
+
+            was_escalated = False
             for item in records:
-                if item.escalation:
+                if item.escalation and not was_escalated:
                     axis.axvline(
                         self._cycle_time_min(adapter, item.cycle),
                         color=_C_ESCALATION,
                         lw=0.8,
                         ls=":",
                     )
+                was_escalated = item.escalation
+
+            current = records[-1]
+            detail = (
+                f"Q={current.q_meas_mvar:+.1f} | "
+                f"Q0={current.q_std_mvar:+.1f} | "
+                f"B_Q={current.q_band_mvar:.1f} Mvar"
+            )
+        else:
+            detail = "awaiting first settlement cycle"
+
         tile_title(
             axis,
-            f"Corridor ({key[0]},{key[1]}): Q at area-{key[0]} end",
+            f"({key[0]},{key[1]}) reactive residual | {detail}",
         )
-        axis.set_ylabel("Q / Mvar", fontsize=8)
-        axis.grid(alpha=0.3, lw=0.4)
-        axis.legend(
-            loc="upper left",
-            fontsize=6.7,
-            ncol=4,
-            frameon=False,
-        )
+        axis.title.set_fontsize(8.5)
+        axis.set_ylabel("dQ, Q_sup / Mvar", fontsize=8)
+        axis.grid(alpha=0.25, lw=0.4)
+        if key == self._keys[0] and records:
+            axis.legend(
+                loc="upper left",
+                fontsize=6.2,
+                ncol=3,
+                frameon=False,
+            )
 
     def _terminal_series(
         self,
@@ -386,10 +394,14 @@ class SBXMechanismLivePlotter:
                 adapter.freeze_time_s / 60.0
                 + iteration * adapter.config.tso_period_s / 60.0
             )
-            measured_a.append(min(measured[bus] for bus in buses_a))
-            measured_b.append(min(measured[bus] for bus in buses_b))
-            scheduled_a.append(min(scheduled[bus] for bus in buses_a))
-            scheduled_b.append(min(scheduled[bus] for bus in buses_b))
+            pairs_a = [(measured[bus], scheduled[bus]) for bus in buses_a]
+            pairs_b = [(measured[bus], scheduled[bus]) for bus in buses_b]
+            worst_a = max(pairs_a, key=lambda pair: abs(pair[0] - pair[1]))
+            worst_b = max(pairs_b, key=lambda pair: abs(pair[0] - pair[1]))
+            measured_a.append(worst_a[0])
+            measured_b.append(worst_b[0])
+            scheduled_a.append(worst_a[1])
+            scheduled_b.append(worst_b[1])
         return (
             np.asarray(times),
             np.asarray(measured_a),
@@ -417,23 +429,40 @@ class SBXMechanismLivePlotter:
             adapter,
             key,
         )
-        axis.plot(time, va, color=_C_A, lw=1.1, label="V_A meas")
-        axis.plot(time, vb, color=_C_B, lw=1.1, label="V_B meas")
+        tolerance = adapter.config.v_hold_tolerance_pu
+        axis.fill_between(
+            time,
+            va_ref - tolerance,
+            va_ref + tolerance,
+            color=_C_A,
+            alpha=0.07,
+            lw=0,
+        )
+        axis.fill_between(
+            time,
+            vb_ref - tolerance,
+            vb_ref + tolerance,
+            color=_C_B,
+            alpha=0.07,
+            lw=0,
+        )
+        axis.plot(time, va, color=_C_A, lw=1.15, label="V_A worst")
+        axis.plot(time, vb, color=_C_B, lw=1.15, label="V_B worst")
         axis.plot(
             time,
             va_ref,
             color=_C_A,
-            lw=0.9,
+            lw=0.85,
             ls="--",
-            label="V_A sched",
+            label="V_A scheduled",
         )
         axis.plot(
             time,
             vb_ref,
             color=_C_B,
-            lw=0.9,
+            lw=0.85,
             ls="--",
-            label="V_B sched",
+            label="V_B scheduled",
         )
 
         records = adapter.scheduler.records.get(key, [])
@@ -444,106 +473,130 @@ class SBXMechanismLivePlotter:
                 t_left,
                 t_right,
                 ymin=0.00,
-                ymax=0.035,
-                color=self._state_colour(
-                    item.a_sags,
-                    item.a_holds,
-                ),
-                alpha=0.9,
+                ymax=0.027,
+                color=self._state_colour(item.a_sags, item.a_holds),
+                alpha=0.92,
                 lw=0,
             )
             axis.axvspan(
                 t_left,
                 t_right,
-                ymin=0.045,
-                ymax=0.080,
-                color=self._state_colour(
-                    item.b_sags,
-                    item.b_holds,
-                ),
-                alpha=0.9,
+                ymin=0.034,
+                ymax=0.061,
+                color=self._state_colour(item.b_sags, item.b_holds),
+                alpha=0.92,
                 lw=0,
             )
         axis.text(
-            0.003,
-            0.017,
-            "A",
-            transform=axis.transAxes,
-            fontsize=5.5,
-            va="center",
+            0.003, 0.014, "A", transform=axis.transAxes,
+            fontsize=5.5, va="center",
         )
         axis.text(
-            0.003,
-            0.062,
-            "B",
-            transform=axis.transAxes,
-            fontsize=5.5,
-            va="center",
-        )
-        tile_title(
-            axis,
-            f"Corridor ({key[0]},{key[1]}): terminal voltages "
-            "(state strips A/B)",
-        )
-        axis.set_ylabel("V / pu", fontsize=8)
-        axis.grid(alpha=0.3, lw=0.4)
-        handles = [
-            Line2D([], [], color=_C_A, lw=1.1, label="V_A meas"),
-            Line2D([], [], color=_C_B, lw=1.1, label="V_B meas"),
-            Line2D(
-                [],
-                [],
-                color="0.35",
-                lw=0.9,
-                ls="--",
-                label="scheduled",
-            ),
-            Patch(color=_C_HOLD, label="hold=True"),
-            Patch(color=_C_SAG, label="sag=True"),
-            Patch(color=_C_NEITHER, label="neither"),
-        ]
-        axis.legend(
-            handles=handles,
-            loc="upper left",
-            fontsize=6.4,
-            ncol=3,
-            frameon=False,
+            0.003, 0.048, "B", transform=axis.transAxes,
+            fontsize=5.5, va="center",
         )
 
-    def _draw_support(self, adapter: "SBXRunnerAdapter") -> None:
-        axis = self._ax_support
-        axis.cla()
-        for key in self._keys:
-            records = adapter.scheduler.records.get(key, [])
-            if not records:
-                continue
-            times, values = self._step_series(
-                adapter,
-                records,
-                [self._signed_support(item) for item in records],
+        if time.size:
+            detail = (
+                f"A {va[-1]:.4f}/{va_ref[-1]:.4f} | "
+                f"B {vb[-1]:.4f}/{vb_ref[-1]:.4f} pu (meas/sched)"
             )
-            axis.plot(
-                times,
-                values,
-                lw=1.2,
-                label=f"({key[0]},{key[1]})",
-            )
-        axis.axhline(0.0, color="0.4", lw=0.6)
+        else:
+            detail = "awaiting terminal measurements"
         tile_title(
             axis,
-            "Paid support Q_sup (+ A to B, - B to A)",
+            f"({key[0]},{key[1]}) worst terminal voltage | {detail}",
         )
-        axis.set_ylabel("Q_sup / Mvar", fontsize=8)
+        axis.title.set_fontsize(8.5)
+        axis.set_ylabel("V / pu", fontsize=8)
+        axis.grid(alpha=0.25, lw=0.4)
+        if key == self._keys[0]:
+            handles = [
+                Line2D([], [], color=_C_A, lw=1.1, label="V_A measured"),
+                Line2D([], [], color=_C_B, lw=1.1, label="V_B measured"),
+                Line2D(
+                    [], [], color="0.35", lw=0.9, ls="--",
+                    label="schedule +/- hold tol.",
+                ),
+                Patch(color=_C_HOLD, label="hold"),
+                Patch(color=_C_SAG, label="violation"),
+                Patch(color=_C_NEITHER, label="transition"),
+            ]
+            axis.legend(
+                handles=handles,
+                loc="upper left",
+                fontsize=6.0,
+                ncol=3,
+                frameon=False,
+            )
+
+    def _draw_tracking_equity(
+        self,
+        adapter: "SBXRunnerAdapter",
+    ) -> None:
+        axis = self._ax_equity
+        gini_axis = self._ax_equity_gini
+        axis.cla()
+        gini_axis.cla()
+        gini_axis.yaxis.set_label_position("right")
+        gini_axis.yaxis.tick_right()
+        gini_axis.spines["right"].set_position(("axes", 1.0))
+
+        history = adapter.tracking_equity_history
+        handles = []
+        if history:
+            times = np.asarray([
+                adapter.freeze_time_s / 60.0
+                + iteration * adapter.config.tso_period_s / 60.0
+                for iteration, _metric in history
+            ])
+            for area in adapter.scheduler.area_ids:
+                line = axis.plot(
+                    times,
+                    [
+                        metric.area_rmse_mpu[area]
+                        for _iteration, metric in history
+                    ],
+                    lw=1.15,
+                    color=_ZONE_COLOURS.get(area, "0.3"),
+                    label=f"area {area} RMSE",
+                )[0]
+                handles.append(line)
+            gini_line = gini_axis.plot(
+                times,
+                [metric.gini for _iteration, metric in history],
+                lw=1.1,
+                ls="--",
+                color=_C_ESCALATION,
+                label="inequality G_V",
+            )[0]
+            handles.append(gini_line)
+            current = history[-1][1]
+            detail = (
+                f"mean={current.mean_rmse_mpu:.1f}, "
+                f"max=z{current.worst_area} "
+                f"{current.worst_rmse_mpu:.1f} mpu, "
+                f"G_V={current.gini:.2f}"
+            )
+        else:
+            detail = "awaiting TSO voltage samples"
+
+        tile_title(axis, f"V-tracking equity | {detail}")
+        axis.title.set_fontsize(8.0)
+        axis.set_ylabel("Cycle RMSE / mpu", fontsize=8)
         axis.set_xlabel("Time / min")
+        axis.set_ylim(bottom=0.0)
         axis.grid(alpha=0.3, lw=0.4)
-        handles, labels = axis.get_legend_handles_labels()
+        gini_axis.set_ylabel("G_V / 1", fontsize=8, rotation=270, labelpad=5)
+        gini_axis.set_ylim(0.0, 1.0)
+        gini_axis.grid(False)
+        gini_axis.tick_params(axis="y", labelsize=8)
         if handles:
             axis.legend(
-                handles,
-                labels,
+                handles=handles,
                 loc="upper left",
-                fontsize=6.7,
-                ncol=3,
+                fontsize=6.2,
+                ncol=2,
                 frameon=False,
             )
 
@@ -580,7 +633,8 @@ class SBXMechanismLivePlotter:
             )
         axis.axhline(0.0, color="0.4", lw=0.6)
         tile_title(axis, "Cumulative bilateral settlement")
-        axis.set_ylabel("Payment / EUR", fontsize=8)
+        axis.title.set_fontsize(8.5)
+        axis.set_ylabel("Net payment / EUR", fontsize=8)
         axis.set_xlabel("Time / min")
         axis.grid(alpha=0.3, lw=0.4)
         handles, labels = axis.get_legend_handles_labels()
@@ -593,23 +647,6 @@ class SBXMechanismLivePlotter:
                 ncol=3,
                 frameon=False,
             )
-
-    def _draw_current_status(
-        self,
-        adapter: "SBXRunnerAdapter",
-    ) -> None:
-        parts = []
-        for key in self._keys:
-            records = adapter.scheduler.records.get(key, [])
-            if not records:
-                continue
-            item = records[-1]
-            parts.append(
-                f"{key}: Q0={item.q_std_mvar:+.1f} Mvar, "
-                f"Qsup={self._signed_support(item):+.1f} Mvar, "
-                f"{item.support_state}"
-            )
-        self._status.set_text(" | ".join(parts))
 
     def save(self, path) -> None:
         """Force a final redraw and save the current figure."""

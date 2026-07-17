@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from experiments.helpers.records import ContingencyEvent
 from tuning._io import (
     jsonable,

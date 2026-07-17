@@ -277,7 +277,7 @@ class TestMultiTSOConfigPerClassHelper:
     a per-class :class:`Mapping` once any override appears."""
 
     def _cfg(self, **overrides):
-        from configs.multi_tso_config import MultiTSOConfig
+        from configs.config import MultiTSOConfig
         return __import__('dataclasses').replace(
             MultiTSOConfig(),
             adapt_g_w_der=True,

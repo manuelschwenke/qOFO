@@ -28,7 +28,7 @@ from typing import Any, List
 import numpy as np
 from numpy.typing import NDArray
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from experiments.helpers.comparison_metrics import (
     loss_series,
     voltage_envelope_ds,

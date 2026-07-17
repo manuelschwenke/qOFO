@@ -27,6 +27,7 @@ from sbx_h.settlement import (
     SUPPORT_BOTH_SAG,
     SUPPORT_B_SAGS_A_HOLDS,
     SUPPORT_NONE,
+    VIOLATION_OVER,
     CycleObservation,
     SettlementEngine,
     write_settlement_outputs,
@@ -149,6 +150,67 @@ def test_b_sags_a_holds_and_a_to_b_flow_pays_a(world):
     assert result.support_payer == corr.area_b
     assert result.support_payee == corr.area_a
 
+
+
+def test_a_overvoltage_b_holds_and_a_to_b_flow_pays_b(world):
+    eng, cfg, corr, contract, p_meas = engine(world)
+    result = eng.observe(
+        make_obs(
+            corr,
+            contract,
+            p_meas,
+            cfg,
+            dq_meas=12.0,
+            dv_a=0.006,
+        )
+    )
+    assert result.a_sags
+    assert result.violation_kind_a == VIOLATION_OVER
+    assert result.support_state == SUPPORT_A_SAGS_B_HOLDS
+    assert result.support_direction == DIRECTION_A_TO_B
+    assert result.support_mvar == pytest.approx(7.0)
+    assert result.support_payer == corr.area_a
+    assert result.support_payee == corr.area_b
+
+
+def test_b_overvoltage_a_holds_and_b_to_a_flow_pays_a(world):
+    eng, cfg, corr, contract, p_meas = engine(world)
+    result = eng.observe(
+        make_obs(
+            corr,
+            contract,
+            p_meas,
+            cfg,
+            dq_meas=-10.0,
+            dv_b=0.006,
+        )
+    )
+    assert result.b_sags
+    assert result.violation_kind_b == VIOLATION_OVER
+    assert result.support_state == SUPPORT_B_SAGS_A_HOLDS
+    assert result.support_direction == DIRECTION_B_TO_A
+    assert result.support_mvar == pytest.approx(5.0)
+    assert result.support_payer == corr.area_b
+    assert result.support_payee == corr.area_a
+
+
+def test_overvoltage_outside_hold_band_is_not_holding(world):
+    eng, cfg, corr, contract, p_meas = engine(world)
+    result = eng.observe(
+        make_obs(
+            corr,
+            contract,
+            p_meas,
+            cfg,
+            dq_meas=-12.0,
+            dv_a=-0.008,
+            dv_b=0.003,
+        )
+    )
+    assert result.support_state == SUPPORT_A_SAGS_B_NOT_HOLDING
+    assert not result.b_holds
+    assert not result.b_sags
+    assert result.support_eur == 0.0
 
 def test_better_side_must_still_hold_absolute_schedule(world):
     eng, cfg, corr, contract, p_meas = engine(world)

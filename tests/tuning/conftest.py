@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pytest
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 
 
 def pytest_configure(config: pytest.Config) -> None:

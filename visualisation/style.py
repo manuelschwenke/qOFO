@@ -20,9 +20,10 @@ figures a consistent appearance:
 from __future__ import annotations
 
 import os
-from typing import List
 
 import matplotlib as mpl
+
+from configs.color_config import TU_COLOURS, TU_PRIMARY
 
 # Force Qt5Agg as the default backend for all live plots.  Use
 # ``force=True`` so the switch takes effect even if matplotlib.pyplot
@@ -42,27 +43,10 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter, MultipleLocator
 
+# TU Darmstadt PANTONE palette roles
 
-# ─── TU Darmstadt PANTONE palette ───────────────────────────────────────────
-
-#: Ordered colour sequence for all data series
-#: (5c, 1c, 8c, 6c, 3c, 10c, 4c, 2c, 9c, 7c, 11c).
-TU_COLOURS: List[str] = [
-    "#B1BD00",  # 0  –  5c  Yellow-green   (PANTONE 390)
-    "#004E8A",  # 1  –  1c  Dark blue      (PANTONE 2945)
-    "#CC4C03",  # 2  –  8c  Dark orange    (PANTONE 173)
-    "#D7AC00",  # 3  –  6c  Gold           (PANTONE 110)
-    "#008877",  # 4  –  3c  Teal           (PANTONE 3285)
-    "#951169",  # 5  –  10c Magenta        (PANTONE 249)
-    "#7FAB16",  # 6  –  4c  Olive green    (PANTONE 376)
-    "#00689D",  # 7  –  2c  Mid blue       (PANTONE 3015)
-    "#B90F22",  # 8  –  9c  Red            (PANTONE 193)
-    "#D28700",  # 9  –  7c  Amber          (PANTONE 124)
-    "#611C73",  # 10 –  11c Purple         (PANTONE 268)
-]
-
-#: Olive header bar.
-COLOUR_TITLE_BAR: str = TU_COLOURS[0]
+#: TU 5c yellow-green primary header bar.
+COLOUR_TITLE_BAR: str = TU_PRIMARY
 #: Dark-orange band for MEASUREMENTS sections.
 COLOUR_MEAS_BAND: str = TU_COLOURS[2]
 #: Dark-blue band for ACTUATORS sections.

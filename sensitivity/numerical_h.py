@@ -32,7 +32,7 @@ For each input column ``k`` of the controller's H matrix the function:
 The output vector ``y`` matches the row layout used by the analytical
 builders:
 
-* TSO: ``[V_bus | Q_PCC | I_line | Q_gen | Q_tie]``
+* TSO: ``[V_bus | Q_PCC | I_line | Q_gen]``
 * DSO: ``[Q_iface | V_bus | I_line]``
 
 Perturbation magnitudes (configurable via constructor args):
@@ -68,15 +68,11 @@ import pandapower as pp
 # ---------------------------------------------------------------------------
 
 def _read_tso_outputs(net, cfg) -> NDArray[np.float64]:
-    """Read the TSO output vector ``[V | Q_PCC | I | Q_gen | Q_tie]``.
+    """Read the TSO output vector ``[V | Q_PCC | I | Q_gen]``.
 
     Q_PCC follows the analytical builder's load convention (positive =
     Q INTO the trafo from the HV bus), which is the same sign as
     ``net.res_trafo3w.q_hv_mvar`` in pandapower.
-
-    Q_tie sign convention: positive = Q leaving the zone through the
-    in-zone endpoint, i.e. ``q_from_mvar`` when the in-zone endpoint is
-    the from-bus, else ``q_to_mvar``.  Matches the analytical builder.
     """
     y: List[float] = []
 
@@ -100,19 +96,6 @@ def _read_tso_outputs(net, cfg) -> NDArray[np.float64]:
     # Q_gen
     for g in cfg.gen_indices:
         y.append(float(net.res_gen.at[g, "q_mvar"]) if g in net.res_gen.index else 0.0)
-
-    # Q_tie
-    tie_indices = getattr(cfg, "tie_line_indices", []) or []
-    tie_endpoints = getattr(cfg, "tie_line_endpoint_buses", []) or []
-    for li, in_bus in zip(tie_indices, tie_endpoints):
-        if li in net.res_line.index:
-            from_bus = int(net.line.at[li, "from_bus"])
-            if in_bus == from_bus:
-                y.append(float(net.res_line.at[li, "q_from_mvar"]))
-            else:
-                y.append(float(net.res_line.at[li, "q_to_mvar"]))
-        else:
-            y.append(0.0)
 
     return np.asarray(y, dtype=np.float64)
 
@@ -209,7 +192,7 @@ def compute_numerical_h_tso(
     H : NDArray[np.float64]
         Sensitivity matrix in the controller's layout:
 
-        * rows: ``[V_bus | Q_PCC | I_line | Q_gen | Q_tie]``
+        * rows: ``[V_bus | Q_PCC | I_line | Q_gen]``
         * cols: ``[Q_DER | Q_PCC_set | V_gen | OLTC | shunt]``
     """
     cfg = ctrl.config
@@ -221,10 +204,9 @@ def compute_numerical_h_tso(
     n_shunt = len(cfg.shunt_bus_indices)
     n_v = len(cfg.voltage_bus_indices)
     n_i = len(cfg.current_line_indices)
-    n_tie = len(getattr(cfg, "tie_line_indices", []) or [])
 
     n_inputs = n_der + n_pcc + n_gen + n_oltc + n_shunt
-    n_outputs = n_v + n_pcc + n_i + n_gen + n_tie
+    n_outputs = n_v + n_pcc + n_i + n_gen
     H = np.zeros((n_outputs, n_inputs), dtype=np.float64)
 
     if n_inputs == 0 or n_outputs == 0:

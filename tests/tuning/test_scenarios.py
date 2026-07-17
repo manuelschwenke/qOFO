@@ -7,7 +7,7 @@ from datetime import datetime
 
 import pytest
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from experiments.helpers.records import ContingencyEvent
 from tuning.scenarios import (
     ScenarioSpec,

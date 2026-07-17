@@ -29,7 +29,7 @@ import time
 import traceback
 from dataclasses import dataclass
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from experiments.helpers.records import MultiTSOIterationRecord
 from tuning._sim_loader import get_run_multi_tso_dso
 from tuning.metrics import (

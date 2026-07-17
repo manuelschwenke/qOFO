@@ -6,18 +6,19 @@ cycle-averaged corridor measurements:
 
 1. The reactive-flow baseline is recomputed at the ACTIVE scheduled
    terminal voltages and the MEASURED active-power transfer.
-2. A side SAGS if at least one terminal is below its schedule by more
-   than the sag threshold.
-3. A side HOLDS if all of its terminals remain within the holding
-   tolerance below schedule.
-4. Payment occurs only when exactly one side sags, the other side
-   holds, and the beyond-band reactive flow points from the holding
-   side toward the sagging side.
+2. A side VIOLATES its schedule if at least one terminal is below or
+   above the schedule by more than the voltage-violation threshold.
+3. A side HOLDS if every terminal remains inside the symmetric holding
+   band around its schedule.
+4. Payment occurs only when exactly one side violates, the other side
+   holds, and the beyond-band reactive flow has the relieving sign.
 
-Positive corridor Q is export from area A to area B. Therefore A
-supporting sagging B requires positive deviation; B supporting sagging
-A requires negative deviation. Payments are bilateral transfers and
-sum to zero in every settlement window.
+Positive corridor Q is export from area A to area B. An undervoltage
+needs Q toward the violating side; an overvoltage needs Q away from it.
+Payments are bilateral transfers and sum to zero in every window.
+
+The historical fields ``a_sags`` / ``b_sags`` are retained for output
+compatibility, but now mean symmetric scheduled-voltage violation.
 
 No actuator-level causality or network-strength product is claimed.
 observed_strength_mvar_per_mpu is an optional ex-post diagnostic ratio
@@ -52,6 +53,10 @@ SUPPORT_B_SAGS_A_HOLDS = "b_sags_a_holds"
 DIRECTION_B_TO_A = "b_to_a"
 DIRECTION_A_TO_B = "a_to_b"
 
+VIOLATION_UNDER = "under"
+VIOLATION_OVER = "over"
+VIOLATION_MIXED = "mixed"
+
 
 @dataclass(frozen=True)
 class CycleObservation:
@@ -80,6 +85,10 @@ class CycleSettlement:
     q_band_mvar: float
     min_v_error_a_pu: float
     min_v_error_b_pu: float
+    max_v_error_a_pu: float
+    max_v_error_b_pu: float
+    violation_kind_a: Optional[str]
+    violation_kind_b: Optional[str]
     a_sags: bool
     b_sags: bool
     a_holds: bool
@@ -206,13 +215,26 @@ class SettlementEngine:
             measured - scheduled
             for measured, scheduled in zip(v_meas_b, v_sched_b)
         )
-        min_error_a = min(errors_a)
-        min_error_b = min(errors_b)
+        min_error_a, max_error_a = min(errors_a), max(errors_a)
+        min_error_b, max_error_b = min(errors_b), max(errors_b)
 
-        a_sags = min_error_a < -self.contract.v_sag_threshold_pu
-        b_sags = min_error_b < -self.contract.v_sag_threshold_pu
-        a_holds = min_error_a >= -self.contract.v_hold_tolerance_pu
-        b_holds = min_error_b >= -self.contract.v_hold_tolerance_pu
+        def _voltage_role(errors):
+            under = min(errors) < -self.contract.v_sag_threshold_pu
+            over = max(errors) > self.contract.v_sag_threshold_pu
+            holds = max(abs(error) for error in errors) \
+                <= self.contract.v_hold_tolerance_pu
+            if under and over:
+                kind = VIOLATION_MIXED
+            elif under:
+                kind = VIOLATION_UNDER
+            elif over:
+                kind = VIOLATION_OVER
+            else:
+                kind = None
+            return under or over, holds, kind
+
+        a_sags, a_holds, violation_kind_a = _voltage_role(errors_a)
+        b_sags, b_holds, violation_kind_b = _voltage_role(errors_b)
 
         state = SUPPORT_NONE
         direction: Optional[str] = None
@@ -227,21 +249,35 @@ class SettlementEngine:
         elif a_sags:
             if b_holds:
                 state = SUPPORT_A_SAGS_B_HOLDS
-                direction = DIRECTION_B_TO_A
-                uncapped_support = max(0.0, -deviation - q_band)
-                candidate_payer = a_id
-                candidate_payee = b_id
-                holder_drop_mpu = max(0.0, -min_error_b) * 1000.0
+                if violation_kind_a == VIOLATION_UNDER:
+                    direction = DIRECTION_B_TO_A
+                    uncapped_support = max(0.0, -deviation - q_band)
+                elif violation_kind_a == VIOLATION_OVER:
+                    direction = DIRECTION_A_TO_B
+                    uncapped_support = max(0.0, deviation - q_band)
+                if direction is not None:
+                    candidate_payer = a_id
+                    candidate_payee = b_id
+                    holder_drop_mpu = max(
+                        abs(error) for error in errors_b
+                    ) * 1000.0
             else:
                 state = SUPPORT_A_SAGS_B_NOT_HOLDING
         elif b_sags:
             if a_holds:
                 state = SUPPORT_B_SAGS_A_HOLDS
-                direction = DIRECTION_A_TO_B
-                uncapped_support = max(0.0, deviation - q_band)
-                candidate_payer = b_id
-                candidate_payee = a_id
-                holder_drop_mpu = max(0.0, -min_error_a) * 1000.0
+                if violation_kind_b == VIOLATION_UNDER:
+                    direction = DIRECTION_A_TO_B
+                    uncapped_support = max(0.0, deviation - q_band)
+                elif violation_kind_b == VIOLATION_OVER:
+                    direction = DIRECTION_B_TO_A
+                    uncapped_support = max(0.0, -deviation - q_band)
+                if direction is not None:
+                    candidate_payer = b_id
+                    candidate_payee = a_id
+                    holder_drop_mpu = max(
+                        abs(error) for error in errors_a
+                    ) * 1000.0
             else:
                 state = SUPPORT_B_SAGS_A_NOT_HOLDING
 
@@ -297,6 +333,10 @@ class SettlementEngine:
             q_band_mvar=q_band,
             min_v_error_a_pu=min_error_a,
             min_v_error_b_pu=min_error_b,
+            max_v_error_a_pu=max_error_a,
+            max_v_error_b_pu=max_error_b,
+            violation_kind_a=violation_kind_a,
+            violation_kind_b=violation_kind_b,
             a_sags=a_sags,
             b_sags=b_sags,
             a_holds=a_holds,
@@ -337,6 +377,10 @@ _CSV_COLUMNS = (
     "q_band_mvar",
     "min_v_error_a_pu",
     "min_v_error_b_pu",
+    "max_v_error_a_pu",
+    "max_v_error_b_pu",
+    "violation_kind_a",
+    "violation_kind_b",
     "a_sags",
     "b_sags",
     "a_holds",
@@ -382,6 +426,10 @@ def write_settlement_outputs(
                     f"{item.q_band_mvar:.4f}",
                     f"{item.min_v_error_a_pu:.6f}",
                     f"{item.min_v_error_b_pu:.6f}",
+                    f"{item.max_v_error_a_pu:.6f}",
+                    f"{item.max_v_error_b_pu:.6f}",
+                    item.violation_kind_a or "",
+                    item.violation_kind_b or "",
                     item.a_sags,
                     item.b_sags,
                     item.a_holds,
@@ -404,11 +452,11 @@ def write_settlement_outputs(
         f"# SBX-H settlement summary - {experiment_name}",
         "",
         "Minimal v6 rule: scheduled terminal references plus "
-        "directional support-energy payment when one side sags and "
-        "the other holds.",
+        "directional support-energy payment when one side violates "
+        "its symmetric voltage band and the other holds.",
         "",
         "| Corridor | Cycles | Paid windows | Support [Mvar h] | "
-        "A sags/B holds | B sags/A holds | Both sag | "
+        "A violates/B holds | B violates/A holds | Both violate | "
         "Net payments per area [EUR] |",
         "|---|---:|---:|---:|---:|---:|---:|---|",
     ]

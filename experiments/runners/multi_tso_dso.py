@@ -99,7 +99,7 @@ from network.zone_partition import (
     get_tie_lines,
     get_zone_tie_lines,
 )
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from experiments.helpers import (
     MultiTSOIterationRecord,
     _apply_contingency,
@@ -326,17 +326,6 @@ def run_multi_tso_dso(
         return (float(zone_dict.get(zone_id, fallback))
                 if zone_dict is not None else float(fallback))
 
-    def _zone_weight_scale(ctrl: "TSOController") -> float:
-        """Sum of this zone's own active TSO objective weights -- see
-        ``MultiTSOConfig.tie_normalize_gradients`` docstring.  Used only to
-        rescale that zone's boundary gradient onto the SAME footing as a
-        zone whose weight scale equals the global ``g_v`` (a no-op there).
-        Falls back to 1.0 if a zone somehow has every weight at 0 (avoids
-        a division by zero; such a zone contributes nothing to gamma anyway)."""
-        c = ctrl.config
-        w = c.g_v + c.g_q_tso + c.g_q_tie + c.g_loss + c.g_res_sg + c.g_res_der
-        return w if w > 0.0 else 1.0
-
     # Single centralized controller path (CIGRE V5 best-case reference).
     # When True, one CentralOFOController owns every actuator and observes
     # every measurement; the 3-zone partition + per-HV metadata are retained
@@ -374,19 +363,7 @@ def run_multi_tso_dso(
     # =========================================================================
     # STEP 2: Zone partitioning
     # =========================================================================
-    if config.single_zone_partition:
-        # Oracle rung (d): ONE zone = union of the fixed 3-area TN bus
-        # sets (identical bus/actuator universe as the distributed
-        # rungs); no ties, empty boundary registry — the BME machinery's
-        # single-area degenerate mode makes g_bme = dΦ/du exactly.
-        if verbose >= 1:
-            print()
-            print("[2] SINGLE-ZONE partition (oracle rung d) ...")
-        _zm3, _ = fixed_zone_partition_ieee39(net, verbose=False)
-        _all_tn = sorted(b for buses in _zm3.values() for b in buses)
-        zone_map = {1: _all_tn}
-        bus_zone = {b: 1 for b in _all_tn}
-    elif config.use_fixed_zones:
+    if config.use_fixed_zones:
         if verbose >= 1:
             print()
             print("[2] Fixed 3-area zone partition (literature) ...")
@@ -399,12 +376,6 @@ def run_multi_tso_dso(
         zone_map, bus_zone = spectral_zone_partition(
             net, n_zones=3, verbose=(verbose >= 2)
         )
-        # ToDo: Delete
-        # Relabel: Zone 0 = most generators, Zone 2 = fewest (prime candidate for DSO)
-        # _gen_grid = list(meta.gen_grid_bus_indices or meta.gen_bus_indices)
-        # zone_map, bus_zone = relabel_zones_by_generator_count(
-        #     zone_map, bus_zone, _gen_grid
-        # )
 
     # CONSOLE OUTPUT ##########################################################
     if verbose >= 1:
@@ -600,11 +571,9 @@ def run_multi_tso_dso(
     }
 
     # ── Group HV sub-networks by zone ────────────────────────────────────────
-    # HVNetworkInfo carries its home zone from the 3-area constants; under
-    # the single-zone (oracle) partition every sub-network belongs to the
-    # one zone.
+    # HVNetworkInfo carries its home zone from the 3-area constants.
     def _hv_zone(hv) -> int:
-        return 1 if config.single_zone_partition else int(hv.zone)
+        return int(hv.zone)
 
     zone_hv_networks: Dict[int, List[HVNetworkInfo]] = {z: [] for z in zone_map}
     for hv in meta.hv_networks:
@@ -651,19 +620,8 @@ def run_multi_tso_dso(
     # terminal buses (for dispatch / ownership).
     _extend_zone_map_for_dispatch(zone_map, _hv_zone)
 
-    # Scenario-side zone map for the zonal P dispatch: ALWAYS the fixed
-    # 3-area partition. The single-zone (oracle) flag affects the CONTROL
-    # layer only — feeding it into compute_zonal_gen_dispatch would
-    # balance one system-wide residual instead of three per-zone ones and
-    # thereby change the PLANT scenario (measured on the first oracle
-    # attempt: losses nearly doubled). Spec §6: rungs share ONE scenario.
-    if config.single_zone_partition:
-        dispatch_zone_map, _ = fixed_zone_partition_ieee39(net, verbose=False)
-        _extend_zone_map_for_dispatch(
-            dispatch_zone_map, lambda hv: int(hv.zone),
-        )
-    else:
-        dispatch_zone_map = zone_map
+    # The dispatch partition is identical to the control partition.
+    dispatch_zone_map = zone_map
 
     # HV-network lookup for DSO controller init
     hv_info_map: Dict[str, HVNetworkInfo] = {hv.net_id: hv for hv in meta.hv_networks}
@@ -705,10 +663,6 @@ def run_multi_tso_dso(
             meta.tso_tertiary_shunt_q_steps_mvar,
             meta.tso_tertiary_shunt_zones,
         ):
-            # Under the single-zone (oracle) partition every bank belongs
-            # to the one zone — without the remap they would silently
-            # vanish from the control vector.
-            sz = 1 if config.single_zone_partition else sz
             if sz in zone_shunt_buses:
                 zone_shunt_buses[sz].append(int(sb))
                 zone_shunt_qsteps[sz].append(float(q_step))
@@ -776,11 +730,6 @@ def run_multi_tso_dso(
         pairs = get_zone_tie_lines(net, _tn_zone_buses_set[z], other_lists)
         zd.tie_line_indices = [li for li, _ in pairs]
         zd.tie_line_endpoint_buses = [endp for _, endp in pairs]
-        zd.q_tie_setpoints_mvar = (
-            np.zeros(len(pairs), dtype=np.float64) if pairs else None
-        )
-        zd.g_q_tie = config.tso_g_q_tie
-
     if verbose >= 1:
         for z, zd in zone_defs.items():
             hv_names = [hv.net_id for hv in zone_hv_networks.get(z, [])]
@@ -803,47 +752,6 @@ def run_multi_tso_dso(
             )
             if ties:
                 tie_line_map[(z_i, z_j)] = list(ties)
-
-    # ── Horizontal TSO-TSO tie coordination: build links + ensure each tie
-    #    endpoint bus is a monitored voltage bus (gated; no-op when off) ───────
-    # Done BEFORE controller construction so the extended v_bus_indices flow
-    # into each zone's output vector / H / g_z sizing below.
-    tie_links: List["TieLink"] = []
-    if config.enable_tie_coordination:
-        from controller.tie_coordinator import TieLink
-        # Per-zone {tie line id -> in-zone endpoint bus} from the existing
-        # ZoneDefinition tie fields (already validated, parallel arrays).
-        _endpoint_of: Dict[int, Dict[int, int]] = {
-            z: {
-                int(t): int(b)
-                for t, b in zip(zd.tie_line_indices, zd.tie_line_endpoint_buses)
-            }
-            for z, zd in zone_defs.items()
-        }
-        for (z_i, z_j), line_ids in tie_line_map.items():
-            for L in line_ids:
-                bi = _endpoint_of.get(z_i, {}).get(int(L))
-                bj = _endpoint_of.get(z_j, {}).get(int(L))
-                if bi is None or bj is None:
-                    continue
-                tie_links.append(TieLink(
-                    tie_id=int(L), zone_i=z_i, zone_j=z_j,
-                    bus_i=bi, bus_j=bj,
-                    controller_i=f"tso_zone_{z_i}",
-                    controller_j=f"tso_zone_{z_j}",
-                    v_nom_i=float(zone_defs[z_i].v_setpoint_pu),
-                    v_nom_j=float(zone_defs[z_j].v_setpoint_pu),
-                ))
-        # Ensure each endpoint bus is observed so the corridor setpoint + price
-        # act on a real V row of that zone's controller.
-        for lk in tie_links:
-            for z, bus in ((lk.zone_i, lk.bus_i), (lk.zone_j, lk.bus_j)):
-                zd = zone_defs[z]
-                if bus not in zd.v_bus_indices:
-                    zd.v_bus_indices = list(zd.v_bus_indices) + [int(bus)]
-        if verbose >= 1:
-            print(f"  [tie-coord] {len(tie_links)} tie link(s) over "
-                  f"{len(tie_line_map)} zone pair(s)")
 
     gen_limits_static: Dict[int, Dict[str, float]] = {} # ToDo: what are these limits? we want to use op-diagram!
     for g_idx in net.gen.index:
@@ -889,7 +797,6 @@ def run_multi_tso_dso(
             np.full(len(zd.pcc_trafo_indices), config.g_z_q_pcc),    # Q_PCC slacks
             np.full(len(zd.line_indices),      config.g_z_current),  # current slacks
             np.full(len(zd.gen_indices),       config.g_z_q_gen),    # Q_gen slacks
-            np.full(len(zd.tie_line_indices),  config.g_z_q_tie),    # Q_tie slacks
         ])
         # During warmup use a tiny g_z; after warmup switch to gz_diag_target
         if config.g_z_warmup_s > 0:
@@ -940,21 +847,10 @@ def run_multi_tso_dso(
             enable_saturation_mode=config.enable_avr_saturation_mode,
             g_q_tso=config.tso_g_q_pcc,
             pcc_capability_on_output=config.tso_pcc_capability_on_output,
-            tie_line_indices=zd.tie_line_indices,
-            tie_line_endpoint_buses=zd.tie_line_endpoint_buses,
-            q_tie_setpoints_mvar=zd.q_tie_setpoints_mvar,
-            g_q_tie=config.tso_g_q_tie,
-            g_z_q_tie=config.g_z_q_tie,
-            q_tie_band_mvar=(
-                np.full(len(zd.tie_line_indices), config.tie_q_band_mvar)
-                if (config.enable_tie_coordination and zd.tie_line_indices)
-                else None
-            ),
             g_res_sg=_zone_scalar(config.zone_tso_g_res_sg, z, config.tso_g_res_sg),
             g_res_der=_zone_scalar(config.zone_tso_g_res_der, z, config.tso_g_res_der),
             qv_slope_pu=config.tso_qv_slope_pu,
             g_loss=_zone_scalar(config.zone_tso_g_loss, z, config.tso_g_loss),
-            loss_use_phasor=config.tso_loss_use_phasor,
         )
 
         if verbose >= 1:
@@ -1036,96 +932,18 @@ def run_multi_tso_dso(
     if verbose >= 1:
         print(f"  [T] step [5] TSO controller construction: {perf_counter() - _t_step5:.2f} s")
 
-    # Horizontal TSO-TSO tie coordinator (gated; None when off).
-    tie_coordinator = None
-    # Equivalent/slack machines not owned by any zone controller, mapped to
-    # their electrical zone and folded into the headroom aggregate. Each entry:
-    # (gen_idx, zone, q_min, q_max).
-    tie_extra_gens: List[Tuple[int, int, float, float]] = []
-    _owned_gens = {int(g) for zd in zone_defs.values() for g in zd.gen_indices}
-    _bus_zone = {int(b): z for z, buses in tn_zone_map.items() for b in buses}
-
-    def _gen_elec_zone(g: int):
-        tb = int(net.gen.at[g, "bus"])
-        if tb in _bus_zone:
-            return _bus_zone[tb]
-        for t in net.trafo.index:
-            if int(net.trafo.at[t, "lv_bus"]) == tb:
-                hb = int(net.trafo.at[t, "hv_bus"])
-                if hb in _bus_zone:
-                    return _bus_zone[hb]
-        return None
-
-    for g in net.gen.index:
-        if int(g) in _owned_gens:
-            continue
-        z = _gen_elec_zone(int(g))
-        if z is None:
-            continue
-        qmin = float(net.gen.at[g, "min_q_mvar"])
-        qmax = float(net.gen.at[g, "max_q_mvar"])
-        tie_extra_gens.append((int(g), z, qmin, qmax))
-
-    if config.enable_tie_coordination and tie_links:
-        from controller.tie_coordinator import (
-            HorizontalTieCoordinator, TieCoordinatorConfig,
-        )
-        tie_coordinator = HorizontalTieCoordinator(
-            links=tie_links,
-            config=TieCoordinatorConfig(
-                # Both knobs are g_v-agnostic: grad_alpha ≈ 1/(2·g_v) is the
-                # voltage-tracking curvature (so tie_grad_step is a Newton-step
-                # fraction); grad_eps scales with the objective level g_v (so
-                # tie_grad_eps is the per-zone worsening cap as a fraction of the
-                # unit-error objective).  Without the g_v scaling the safeguard
-                # blocks all motion when g_v ≫ 1.
-                grad_alpha=config.tie_grad_step / (2.0 * max(float(config.g_v), 1.0)),
-                grad_eps=config.tie_grad_eps * max(float(config.g_v), 1.0),
-                anchor=config.tie_anchor,
-                deadband_v_pu=config.tie_deadband_v_pu,
-                kappa=config.tie_kappa,
-                dvref_max=config.tie_dvref_max,
-            ),
-        )
-        if config.g_z_q_tie <= 0.0:
-            import warnings
-            warnings.warn(
-                "enable_tie_coordination is True but g_z_q_tie <= 0; the "
-                "Q_tie soft cap will be inert (free slack). Set g_z_q_tie > 0 "
-                "to enforce the tie_q_band_mvar band.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-    if verbose >= 1 and tie_extra_gens:
-        print(f"  [reserve] folding {len(tie_extra_gens)} equivalent/slack "
-              f"gen(s) into zone headroom: {[(g, z) for g, z, _, _ in tie_extra_gens]}")
-
-    # ── BME (Boundary Marginal Exchange) — coordination_mode="bme" ──────────
-    # Spec §5 Phase 4: one horizontal round per TSO tick BEFORE the zones
-    # solve (measure → μ_i publish → receiver → g_i^bme inject).  See
-    # docs/BME_SPEC.md / docs/BME_STATUS.md.  Everything below is inert
-    # under coordination_mode="none" (byte-for-byte baseline).
-    # 2026-07-10 package rename (sbx → sbx_h, sbxv → sbx_v): the new
-    # package names are accepted as coordination_mode aliases; the
-    # internal mode strings remain "sbx"/"sbxv" (configs, pickles and
-    # tests predate the rename).
+    # Package names are accepted as aliases; internal mode strings remain
+    # stable for existing configs and pickles.
     if config.coordination_mode == "sbx_h":
         config.coordination_mode = "sbx"
     elif config.coordination_mode == "sbx_v":
         config.coordination_mode = "sbxv"
-    if config.coordination_mode not in ("none", "vref", "bme", "sbx",
-                                        "sbxv"):
+    if config.coordination_mode not in ("none", "sbx", "sbxv"):
         raise ValueError(
             f"unknown coordination_mode '{config.coordination_mode}' "
-            "(expected 'none', 'vref', 'bme', 'sbx' or 'sbxv'; "
-            "'sbx_h'/'sbx_v' are accepted aliases)."
+            "(expected 'none', 'sbx_h'/'sbx', or 'sbx_v'/'sbxv')."
         )
-    if config.coordination_mode == "vref" and not config.enable_tie_coordination:
-        raise ValueError(
-            "coordination_mode='vref' is the existing two-loop ΔV_ref tie "
-            "coordinator — set enable_tie_coordination=True (the vref path "
-            "is gated by that flag, unchanged)."
-        )
+
     # ── SBX (Scheduled Boundary Exchange) — coordination_mode="sbx" ─────────
     # Horizontal corridor scheduling at fixed contract prices
     # (STATUS_SBX.md, plan v2/v2.2).  Adapter construction is deferred to
@@ -1134,17 +952,6 @@ def run_multi_tso_dso(
     # Phase 5); the checks below fail fast at configuration time.
     sbx_runtime: Dict[str, Any] = {"adapter": None, "config": None}
     if config.coordination_mode == "sbx":
-        if config.enable_tie_coordination:
-            raise ValueError(
-                "coordination_mode='sbx' and enable_tie_coordination=True "
-                "are mutually exclusive — both steer the corridor-terminal "
-                "voltage references through v_setpoints_pu."
-            )
-        if config.single_zone_partition:
-            raise ValueError(
-                "coordination_mode='sbx' requires the multi-area partition "
-                "(single_zone_partition=True has no corridors)."
-            )
         # v6 (2026-07-12): the adapter reads measurements and controller
         # CONFIG only — no cached-Jacobian access remains, so the former
         # numerical_h / sensitivities restrictions are gone with the
@@ -1198,280 +1005,6 @@ def run_multi_tso_dso(
                 "defined in TSO iterations (STATUS_SBXV.md §0.3)."
             )
         sbxv_runtime["config"] = _sbxv_cfg
-
-    bme_topo = bme_obj = bme_bus = None
-    bme_ledger = bme_schedule = None
-    bme_specs = {}
-    bme_receivers = {}
-    if config.coordination_mode == "bme":
-        if config.enable_tie_coordination:
-            raise ValueError(
-                "coordination_mode='bme' and enable_tie_coordination=True "
-                "are mutually exclusive — the price term and the ΔV_ref "
-                "setpoint redirect would steer the same boundary."
-            )
-        if config.numerical_h:
-            raise ValueError(
-                "coordination_mode='bme' requires the analytic shared "
-                "Jacobian (numerical_h=True bypasses it)."
-            )
-        if config.local_sensitivities_tso or config.local_sensitivities_dso:
-            raise ValueError(
-                "coordination_mode='bme' v1 requires the full-network "
-                "shared Jacobian path (local_sensitivities_*=False): the "
-                "BME machinery reads H_{b,i}/J_int values from shared_jac "
-                "and the runner freezes reduced Jacobians. The Ward-loop "
-                "variant is future wiring (BME_STATUS.md Phase 4)."
-            )
-        if not config.refresh_shared_jac_on_tso:
-            raise ValueError(
-                "coordination_mode='bme' v1 requires "
-                "refresh_shared_jac_on_tso=True: μ_j is defined at the "
-                "measured state of step k (spec §3.4), which v1 realises "
-                "by re-linearising shared_jac each TSO tick. "
-                "Measurement-evaluated gradients on a frozen model are "
-                "noted future work."
-            )
-        if config.shunt_dispatch == "integrator":
-            raise ValueError(
-                "coordination_mode='bme' with shunt_dispatch='integrator' "
-                "is not yet wired: Q5 requires integrator-bank commits to "
-                "emit switch notices and ledger entries, which the "
-                "integrator commit path does not do yet (Phase 5 "
-                "carve-out, see BME_STATUS.md). Use the MIQP shunt path "
-                "or shunt_dispatch='off'."
-            )
-        if config.bme_h_error_rel_sigma < 0.0:
-            raise ValueError("bme_h_error_rel_sigma must be >= 0")
-        if (config.bme_h_error_rel_sigma > 0.0
-                and config.bme_h_error_seed is None):
-            raise ValueError(
-                "bme_h_error_rel_sigma > 0 requires bme_h_error_seed "
-                "(fixed per-run error field, reproducible — mirrors "
-                "bme_seed for drops)."
-            )
-        from controller.bme_gradient import BMEGradientAssembler
-        from controller.common_objective import CommonObjective
-        from core.coordination_bus import (
-            CoordinationBus, MarginalReceiver, MarginalSignal,
-        )
-        from network.boundary_topology import BoundaryTopology
-        from sensitivity.boundary_sensitivity import (
-            PerturbedZoneBoundaryView, RestrictedSensitivityProvider,
-            ZoneInputSpec,
-        )
-        from sensitivity.marginal_computer import MarginalComputer
-
-        bme_topo = BoundaryTopology(
-            net, {z: list(b) for z, b in tn_zone_map.items()},
-        )
-        bme_obj = CommonObjective(
-            bme_topo,
-            w_band=config.bme_w_band,
-            v_soft_min=config.bme_v_soft_min_pu,
-            v_soft_max=config.bme_v_soft_max_pu,
-            vn_kv_min=config.bme_vn_kv_min,
-        )
-        for z, zd in zone_defs.items():
-            tso = tso_controllers[z]
-            mapping = tso._get_der_mapping()
-            if mapping is not None:
-                der_buses = tuple(int(b) for b in mapping.unique_bus_indices)
-            else:
-                der_buses = tuple(dict.fromkeys(
-                    int(b) for b in zd.tso_der_buses
-                ))
-                if len(der_buses) != len(zd.tso_der_buses):
-                    raise ValueError(
-                        f"zone {z}: duplicate DER buses without a DER "
-                        "mapping — bus-level BME gradient columns cannot "
-                        "match the controller's u."
-                    )
-            bme_specs[z] = ZoneInputSpec(
-                zone_id=z,
-                der_bus_indices=der_buses,
-                pcc_trafo_indices=tuple(int(t) for t in zd.pcc_trafo_indices),
-                gen_indices=tuple(int(g) for g in zd.gen_indices),
-                oltc_trafo_indices=tuple(
-                    int(t) for t in zd.oltc_trafo_indices
-                ),
-                shunt_bus_indices=tuple(
-                    int(b) for b in zd.shunt_bus_indices
-                ),
-                shunt_q_steps_mvar=tuple(
-                    float(q) for q in zd.shunt_q_steps_mvar
-                ),
-            )
-            tso.enable_bme_mode()
-        if len(zone_defs) >= 2:
-            bme_bus = CoordinationBus(
-                sorted(zone_defs),
-                2 * len(bme_topo.registry),
-                delay_steps=config.bme_delay_steps,
-                drop_probability=config.bme_drop_probability,
-                seed=config.bme_seed,
-            )
-            bme_receivers = {
-                z: MarginalReceiver(
-                    z, bme_bus, beta=config.bme_beta_filter, start_step=0,
-                )
-                for z in sorted(zone_defs)
-            }
-        else:
-            # Single-zone (oracle) degenerate mode: nothing crosses a
-            # border — no bus, no receivers, empty registry; g_bme
-            # reduces to the exact global dΦ/du (single-area identity).
-            bme_bus = None
-            bme_receivers = {}
-        # ── Discrete hygiene (§3.8, Phase 5): slotting + ε-acceptance
-        # gate on every zone controller, one shared append-only ledger.
-        from core.coordination_bus import SwitchNotice
-        from controller.discrete_hygiene import (
-            SlottingSchedule, SwitchingLedger,
-        )
-        bme_ledger = SwitchingLedger()
-        bme_schedule = (
-            SlottingSchedule(sorted(zone_defs), config.bme_slot_length)
-            if config.bme_slotting else None
-        )
-        for z in zone_defs:
-            tso_controllers[z].configure_bme_hygiene(
-                zone_id=z,
-                ledger=bme_ledger,
-                epsilon_switch=config.bme_epsilon_switch,
-                switch_cost_oltc=config.bme_switch_cost_oltc,
-                switch_cost_shunt=config.bme_switch_cost_shunt,
-            )
-        bme_phi_prev = None  # Φ_global at the previous round (ledger fill)
-
-        def bme_notice_mask_hook(zone: int, notices) -> None:
-            """§3.8.1(b) estimator-masking hook. v1: NO online
-            sensitivity estimator is active and v1 re-linearises
-            shared_jac each tick, so there is nothing to mask or
-            correct — the hook exists (spec §5 Phase 5) and receives
-            every delivered notice; the online-estimation tie-in
-            (§3.9 realism story) plugs in here."""
-            return None
-
-        # Names used inside the per-tick round below.
-        _BME = (
-            BMEGradientAssembler, MarginalComputer,
-            RestrictedSensitivityProvider, MarginalSignal, SwitchNotice,
-        )
-        if verbose >= 1:
-            print(
-                f"  [BME] mode=bme: |B|={len(bme_topo.registry)} "
-                f"(stacked coords {2 * len(bme_topo.registry)}), "
-                f"d={config.bme_delay_steps}, β={config.bme_beta_filter}, "
-                f"drop={config.bme_drop_probability}, "
-                f"w_band={config.bme_w_band}, "
-                f"vn_kv_min={config.bme_vn_kv_min}"
-            )
-
-    # H-error axis (§6 MC campaign): FIXED multiplicative error field on
-    # each zone's H_{b,i}, drawn once per run per zone (systematic
-    # identification error). sigma == 0 → views pass through untouched.
-    _bme_h_err_fields: Dict[int, np.ndarray] = {}
-
-    def _bme_wrap_view(view):
-        sigma = float(config.bme_h_error_rel_sigma)
-        if sigma <= 0.0:
-            return view
-        z_v = view.zone_id
-        if z_v not in _bme_h_err_fields:
-            _rng_h = np.random.default_rng(
-                int(config.bme_h_error_seed) + z_v
-            )
-            _bme_h_err_fields[z_v] = 1.0 + sigma * _rng_h.standard_normal(
-                view.h_b_stacked().shape
-            )
-        return PerturbedZoneBoundaryView(view, _bme_h_err_fields[z_v])
-
-    if bme_obj is None and config.record_bme_phi:
-        # Uniform Φ metric for non-bme ladder rungs: build ONLY the
-        # topology + objective (no bus, no hygiene, no gradient path).
-        from controller.common_objective import CommonObjective
-        from network.boundary_topology import BoundaryTopology
-        bme_topo = BoundaryTopology(
-            net, {z: list(b) for z, b in tn_zone_map.items()},
-        )
-        bme_obj = CommonObjective(
-            bme_topo,
-            w_band=config.bme_w_band,
-            v_soft_min=config.bme_v_soft_min_pu,
-            v_soft_max=config.bme_v_soft_max_pu,
-            vn_kv_min=config.bme_vn_kv_min,
-        )
-
-    # METRIC Φ objective: the RECORDED Φ/Φ_i (and the boundary-voltage
-    # oscillation signal) must be the IDENTICAL functional on the
-    # IDENTICAL 3-area partition on EVERY rung (spec §6: uniform
-    # metrics) — the single-zone (oracle) flag collapses the CONTROL
-    # partition only, and the losses-only ablation rung zeroes the
-    # CONTROL w_band only (bme_metric_w_band overrides the recorded
-    # one). Same lesson as dispatch_zone_map above: metric/scenario
-    # objects must not inherit control-layer settings. Φ_global is
-    # partition-invariant, so the partition split alone never changes
-    # bme_phi_mw.
-    bme_metric_obj = bme_obj
-    _metric_w_band = (
-        config.bme_w_band if config.bme_metric_w_band is None
-        else float(config.bme_metric_w_band)
-    )
-    if bme_obj is not None and (
-        config.single_zone_partition
-        or _metric_w_band != config.bme_w_band
-    ):
-        from controller.common_objective import CommonObjective
-        from network.boundary_topology import BoundaryTopology
-        if config.single_zone_partition:
-            _zm_metric, _ = fixed_zone_partition_ieee39(net, verbose=False)
-            _metric_map = {
-                z: [b for b in buses if b in net.bus.index]
-                for z, buses in _zm_metric.items()
-            }
-        else:
-            _metric_map = {z: list(b) for z, b in tn_zone_map.items()}
-        bme_metric_obj = CommonObjective(
-            BoundaryTopology(net, _metric_map),
-            w_band=_metric_w_band,
-            v_soft_min=config.bme_v_soft_min_pu,
-            v_soft_max=config.bme_v_soft_max_pu,
-            vn_kv_min=config.bme_vn_kv_min,
-        )
-
-    def _compute_zone_reserve_signal(
-        measurements_now: Dict[int, Measurement],
-    ) -> Tuple[Dict[int, float], Dict[int, float], Dict[int, float], Dict[int, float]]:
-        """Return μ plus directional absolute headroom diagnostics per zone."""
-        h_cap: Dict[int, float] = {}
-        h_ind: Dict[int, float] = {}
-        for z, _ctrl in tso_controllers.items():
-            if z not in measurements_now:
-                continue
-            cap, ind = _ctrl.report_reserve_headroom(measurements_now[z])
-            h_cap[z] = float(cap)
-            h_ind[z] = float(ind)
-        for _g, _gz, _qmin, _qmax in tie_extra_gens:
-            if _gz not in h_cap:
-                h_cap[_gz] = 0.0
-                h_ind[_gz] = 0.0
-            if _g not in net.gen.index or not bool(net.gen.at[_g, "in_service"]):
-                continue
-            if _g not in net.res_gen.index:
-                continue
-            _q = float(net.res_gen.at[_g, "q_mvar"])
-            h_cap[_gz] += max(float(_qmax) - _q, 0.0)
-            h_ind[_gz] += max(_q - float(_qmin), 0.0)
-
-        scale = max(float(config.tie_reserve_headroom_scale_mvar), 1e-6)
-        zones = sorted(set(h_cap) | set(h_ind))
-        h_min = {
-            z: min(max(h_cap.get(z, 0.0), 0.0), max(h_ind.get(z, 0.0), 0.0))
-            for z in zones
-        }
-        reserve = {z: scale / (h_min[z] + scale) for z in zones}
-        return reserve, h_cap, h_ind, h_min
 
     # =========================================================================
     # STEP 7: Initialise DSO controllers (one per HV sub-network, all zones)
@@ -2711,11 +2244,9 @@ def run_multi_tso_dso(
                 hv.net_id: [f"{hv.net_id}|trafo_{t}" for t in hv.coupling_trafo_indices]
                 for hv in meta.hv_networks
             }
-        # Tie-Q tracking reference per zone-pair: the configured inter-zone
-        # tie-flow setpoint.  ZoneDefinition.q_tie_setpoints_mvar currently
-        # defaults to zeros (no commanded tie exchange), so the plotter's
-        # default reference of 0.0 Mvar is used; wire a non-zero per-pair map
-        # here if/when commanded tie setpoints are introduced.
+        # Tie-Q monitoring per zone-pair: the tracking plot shows the measured
+        # inter-zone tie flow against a fixed 0 Mvar reference — tie-Q is
+        # observed, not controlled (no commanded tie-flow setpoint exists).
         _plotter_track = TrackingLivePlotter(
             zone_ids=zone_ids_sorted,
             n_v_bus_per_zone={z: len(zd.v_bus_indices) for z, zd in zone_defs.items()},
@@ -2723,23 +2254,6 @@ def run_multi_tso_dso(
             dso_trafo_keys=_track_trafo_keys,
             tie_line_pairs=sorted(tie_line_map.keys()),
             sub_minute=False, update_every=1, slot_idx=2,
-            layout=config.live_plot_layout,
-            use_tex=config.live_plot_use_tex,
-        )
-
-    # Figure 5 — HORIZONTAL TSO-TSO COORDINATION (gated; None when off).
-    _plotter_tie = None
-    if config.live_plot_tie_coordination and tie_links:
-        from visualisation.plot_tie_coordination import TieCoordinationLivePlotter
-        _plotter_tie = TieCoordinationLivePlotter(
-            tie_ids=[lk.tie_id for lk in tie_links],
-            tie_labels={
-                lk.tie_id: f"Z{lk.zone_i}–Z{lk.zone_j} (L{lk.tie_id})"
-                for lk in tie_links
-            },
-            q_band_mvar=config.tie_q_band_mvar,
-            deadband_v_pu=config.tie_deadband_v_pu,
-            sub_minute=False, update_every=1, slot_idx=3,
             layout=config.live_plot_layout,
             use_tex=config.live_plot_use_tex,
         )
@@ -2763,6 +2277,23 @@ def run_multi_tso_dso(
         # from the pre_loop_hook state alongside the adapter.
         sbx_runtime["live_plotter"] = _plotter_sbx
 
+    # Figure 7 — SBX-V MECHANISM (gated; None when off).  The plotter
+    # reads only adapter-side market/metering state and recorded plant
+    # outputs; it never supplies information to either controller.
+    _plotter_sbxv = None
+    if config.live_plot_sbxv:
+        if config.coordination_mode != "sbxv":
+            raise ValueError(
+                "live_plot_sbxv=True requires coordination_mode='sbx_v' — "
+                "the figure draws vertical bands, grants and settlement."
+            )
+        from visualisation.plot_sbxv import SBXVMechanismLivePlotter
+        _plotter_sbxv = SBXVMechanismLivePlotter(
+            layout=config.live_plot_layout,
+            use_tex=config.live_plot_use_tex,
+        )
+        sbxv_runtime["live_plotter"] = _plotter_sbxv
+
     def _is_period_hit(time_s: float, period_s: float) -> bool:
         """True if time_s is a multiple of period_s (within 1 s tolerance)."""
         rem = time_s % period_s
@@ -2781,7 +2312,6 @@ def run_multi_tso_dso(
                 np.full(len(zd.pcc_trafo_indices), config.g_z_q_pcc),
                 np.full(len(zd.line_indices),      config.g_z_current),
                 np.full(len(zd.gen_indices),       config.g_z_q_gen),
-                np.full(len(zd.tie_line_indices),  config.g_z_q_tie),
             ])
         for dso_id_tmp, dso_ctrl_tmp in dso_controllers.items():
             cfg_tmp = dso_ctrl_tmp.config
@@ -2897,12 +2427,6 @@ def run_multi_tso_dso(
             "zone_defs": zone_defs,
             "coordinator": coordinator,
             "config": config,
-            # BME internals (None / empty unless coordination_mode="bme")
-            "bme_topology": bme_topo,
-            "bme_objective": bme_obj,
-            "bme_bus": bme_bus,
-            "bme_ledger": bme_ledger,
-            "bme_schedule": bme_schedule,
             # SBX internals ({"adapter": None, ...} unless
             # coordination_mode="sbx"; the adapter is constructed at the
             # first TSO tick after sbx_warmup_s and filled in here).
@@ -3406,193 +2930,6 @@ def run_multi_tso_dso(
                     tso_step_count - 1, measurements, tso_controllers,
                 )
 
-            # ── BME horizontal round (BEFORE the zones solve, §5 Phase 4):
-            # rebuild the area-local gradient machinery at the freshly
-            # re-linearised shared_jac operating point, compute and publish
-            # each zone's μ_i (stacked complex-boundary coordinates), pull
-            # the delayed/filtered neighbour sum, assemble
-            # g_i^bme = g_own + H_{b,i}ᵀ·(μ_i + Σ μ_j^filt) and inject it
-            # into the zone controller.  Cold start (first d ticks): price
-            # carries the self term only (logged by the receiver).
-            if config.coordination_mode == "bme":
-                (_Assembler, _MComputer, _RProvider, _MSignal,
-                 _SNotice) = _BME
-                _bme_step = tso_step_count - 1  # consecutive TSO ticks
-
-                # §3.8.3 deferred ledger fill: realised ΔΦ of the moves
-                # committed at the PREVIOUS tick, evaluated from the
-                # current plant state (simulation-oracle privilege).
-                _phi_now = bme_obj.phi_global(net)
-                if bme_phi_prev is not None:
-                    for _z in sorted(tso_controllers):
-                        for _li in tso_controllers[_z].bme_ledger_indices_this_step:
-                            bme_ledger.fill_realised(
-                                _li, _phi_now - bme_phi_prev,
-                            )
-                bme_phi_prev = _phi_now
-
-                # §3.8.1 notice consumption (delay d, drops apply): v1
-                # feeds the estimator-masking hook (documented no-op —
-                # shared_jac is re-linearised every tick). No bus in the
-                # single-zone (oracle) degenerate mode.
-                if bme_bus is not None:
-                    for _z in sorted(tso_controllers):
-                        _vis = bme_bus.notices_visible(_z, _bme_step)
-                        if _vis:
-                            bme_notice_mask_hook(_z, _vis)
-
-                _provider = _RProvider(shared_jac, bme_topo, bme_specs)
-                _assemblers = {}
-                _bme_mus = {}
-                _bme_views = {}
-                for z in sorted(tso_controllers):
-                    _comp = _MComputer(shared_jac, bme_topo, z)
-                    _zg = bme_obj.gradients(_comp)
-                    # H-error axis: identical wrapped view feeds BOTH the
-                    # price projection and the notice prediction below —
-                    # the zone's (possibly mis-identified) H is one object.
-                    _bme_views[z] = _bme_wrap_view(_provider.view(z))
-                    _assemblers[z] = _Assembler(
-                        bme_specs[z], _zg, _bme_views[z],
-                    )
-                    _bme_mus[z] = _assemblers[z].mu()
-                _vb_snap = np.concatenate([
-                    [float(shared_jac.net.res_bus.at[b, "vm_pu"])
-                     for b in bme_topo.registry],
-                    [np.deg2rad(float(
-                        shared_jac.net.res_bus.at[b, "va_degree"]))
-                     for b in bme_topo.registry],
-                ])
-                if bme_bus is not None:
-                    for z in sorted(tso_controllers):
-                        bme_bus.publish_marginal(_MSignal(
-                            zone_id=z, step=_bme_step,
-                            mu=_bme_mus[z], v_b_meas=_vb_snap,
-                        ))
-                _bme_hb_int = {}
-                for z in sorted(tso_controllers):
-                    if bme_bus is not None:
-                        _out = bme_receivers[z].update(_bme_step)
-                        _mu_total = (
-                            _bme_mus[z] + _out.mu_neighbour_sum
-                            if _out.coordinated else _bme_mus[z]
-                        )
-                    else:
-                        # Single-zone oracle: no neighbours; the (empty)
-                        # self-marginal makes g_bme = g_own = dΦ/du.
-                        _mu_total = _bme_mus[z]
-                    tso_controllers[z].receive_bme_gradient(
-                        config.bme_gradient_scale
-                        * _assemblers[z].g_bme(_mu_total)
-                    )
-                    # §3.8.2 slotting context (one-shot, consumed by the
-                    # controller's post-solve gate this tick).
-                    if bme_schedule is not None:
-                        _owner = bme_schedule.slot_owner(_bme_step)
-                        tso_controllers[z].set_bme_slot(
-                            tick=_bme_step, slot_owner=_owner,
-                            may_commit=(z == _owner),
-                        )
-                    else:
-                        tso_controllers[z].set_bme_slot(
-                            tick=_bme_step, slot_owner=-1,
-                            may_commit=True,
-                        )
-                    # Integer columns of the stacked H_{b,i} — kept for
-                    # the §3.8.1 notice emission after the solves.
-                    _n_int_z = (
-                        len(zone_defs[z].oltc_trafo_indices)
-                        + len(zone_defs[z].shunt_bus_indices)
-                    )
-                    if _n_int_z > 0:
-                        _bme_hb_int[z] = _bme_views[z].h_b_stacked()[
-                            :, -_n_int_z:
-                        ]
-
-            # Reserve-economic signal: absolute directional headroom first,
-            # scarcity scalar second. Recorded also for true OFF baselines.
-            _reserve, _hcap, _hind, _hmin = _compute_zone_reserve_signal(measurements)
-            for _z, _mu in _reserve.items():
-                rec.zone_reserve_scarcity[_z] = _mu
-                rec.zone_reserve_headroom_cap_mvar[_z] = _hcap.get(_z, 0.0)
-                rec.zone_reserve_headroom_ind_mvar[_z] = _hind.get(_z, 0.0)
-                rec.zone_reserve_headroom_min_mvar[_z] = _hmin.get(_z, 0.0)
-
-            # Horizontal TSO-TSO round (BEFORE the zones solve): each zone shares
-            # the marginal of its full OFO objective w.r.t. its boundary voltage
-            # (γ = ∇J·h_b / ‖h_b‖², incl. voltage tracking + reserve + effort);
-            # the coordinator descends the combined gradient with a per-zone
-            # safeguard.  (_reserve above is now diagnostic-only.)
-            #
-            # Coordination cadence: the OUTER loop advances ΔV_ref only every
-            # tie_coord_period_s (a multiple of tso_period_s); between updates the
-            # agreed ΔV_ref is HELD — the zones keep tracking the last per-side
-            # v_ref via their primary g_v, so the inner loop gets several steps to
-            # realise it (inner/outer timescale separation that damps the
-            # outer-loop limit cycle).  tie_coord_period_s <= 0 ⇒ every TSO step.
-            if tie_coordinator is not None:
-                _coord_now = (
-                    config.tie_coord_period_s <= 0.0
-                    or step == 1
-                    or _is_period_hit(time_s, config.tie_coord_period_s)
-                )
-                gradients: Dict[int, Tuple[float, float]] = {}
-                for lk in tie_links:
-                    # Realised boundary voltages + tie flow recorded EVERY TSO step
-                    # (plot continuity); the objective gradient γ — the expensive
-                    # part — is formed only on coordination steps.
-                    try:
-                        v_i = tso_controllers[lk.zone_i].report_tie_boundary_voltage(
-                            measurements[lk.zone_i], lk.bus_i,
-                        )
-                        v_j = tso_controllers[lk.zone_j].report_tie_boundary_voltage(
-                            measurements[lk.zone_j], lk.bus_j,
-                        )
-                    except (KeyError, ValueError):
-                        continue
-                    rec.tie_v_i[lk.tie_id] = v_i
-                    rec.tie_v_j[lk.tie_id] = v_j
-                    rec.tie_dv_realized[lk.tie_id] = v_i - v_j
-                    # Per-line tie Q at the zone-i endpoint (into-line convention).
-                    m_i = measurements[lk.zone_i]
-                    _qi = np.where(m_i.tie_line_indices == lk.tie_id)[0]
-                    if len(_qi) > 0:
-                        rec.tie_q_mvar[lk.tie_id] = float(
-                            m_i.tie_line_q_mvar[_qi[0]]
-                        )
-                    if _coord_now:
-                        try:
-                            g_i = tso_controllers[lk.zone_i].report_boundary_gradient(
-                                measurements[lk.zone_i], lk.bus_i,
-                            )
-                            g_j = tso_controllers[lk.zone_j].report_boundary_gradient(
-                                measurements[lk.zone_j], lk.bus_j,
-                            )
-                        except (KeyError, ValueError):
-                            continue
-                        if config.tie_normalize_gradients:
-                            # Rescale onto the global g_v's footing -- see
-                            # MultiTSOConfig.tie_normalize_gradients docstring.
-                            # No-op (factor 1.0) whenever a zone's own weight
-                            # scale already equals config.g_v.
-                            g_i *= config.g_v / _zone_weight_scale(tso_controllers[lk.zone_i])
-                            g_j *= config.g_v / _zone_weight_scale(tso_controllers[lk.zone_j])
-                        gradients[lk.tie_id] = (g_i, g_j)
-                if _coord_now:
-                    tie_coordinator.update(gradients)
-                    for _msg in tie_coordinator.generate_messages():
-                        _zid = int(_msg.target_controller_id.rsplit("_", 1)[-1])
-                        if _zid in tso_controllers:
-                            tso_controllers[_zid].receive_tie_coordination(_msg)
-                # Record the (updated or HELD) coordinator state every TSO step.
-                _tie_state = tie_coordinator.state()
-                for lk in tie_links:
-                    s = _tie_state[lk.tie_id]
-                    rec.tie_dvref[lk.tie_id] = s["dvref"]
-                    rec.tie_grad_i[lk.tie_id] = s["grad_i"]
-                    rec.tie_grad_j[lk.tie_id] = s["grad_j"]
-                    rec.tie_grad_combined[lk.tie_id] = s["grad_combined"]
-
             # Snapshot u_current[pcc_slice] per zone BEFORE coordinator.step
             # so the diagnostic below can show u_new - u_old per Q_PCC,set.
             _prev_pcc_u: Dict[int, NDArray[np.float64]] = {}
@@ -3621,37 +2958,6 @@ def run_multi_tso_dso(
                 sbxv_runtime["adapter"].after_solve(
                     tso_step_count - 1, tso_controllers,
                 )
-
-            # ── BME §3.8.1: publish switch notices for COMMITTED discrete
-            # moves (post-gate): dv_b^pred = H_{b,i}^d · Δu_i_d in stacked
-            # boundary coordinates; visible to neighbours at k + d.
-            if config.coordination_mode == "bme":
-                for z, tso_out in tso_outputs.items():
-                    zd_z = zone_defs[z]
-                    _n_int_z = (
-                        len(zd_z.oltc_trafo_indices)
-                        + len(zd_z.shunt_bus_indices)
-                    )
-                    if _n_int_z == 0:
-                        continue
-                    _d_int = np.round(
-                        tso_out.sigma[-_n_int_z:]
-                    ).astype(int)
-                    if not np.any(_d_int != 0):
-                        continue
-                    _dev_labels = (
-                        [f"oltc:{t}" for t in zd_z.oltc_trafo_indices]
-                        + [f"shunt:{b}" for b in zd_z.shunt_bus_indices]
-                    )
-                    _moved = tuple(
-                        lbl for lbl, d in zip(_dev_labels, _d_int) if d
-                    )
-                    if bme_bus is not None:
-                        bme_bus.publish_notice(_SNotice(
-                            zone_id=z, step=_bme_step,
-                            dv_b_pred=_bme_hb_int[z] @ _d_int.astype(float),
-                            devices=_moved,
-                        ))
 
             # ── Q_PCC,set command diagnostic ───────────────────────────
             # For each PCC trafo: print previous command, new command,
@@ -4503,25 +3809,6 @@ def run_multi_tso_dso(
             + float(net.res_trafo3w["pl_mw"].sum())
         )
 
-        # ── BME common objective Φ (uniform Phase 6 ladder metric) ───────────
-        # Recorded from the METRIC-partition objective (fixed 3-area even
-        # on the single-zone oracle rung); the control-layer bme_obj is
-        # untouched (gradients, hygiene gate).
-        if bme_metric_obj is not None:
-            rec.bme_phi_mw = float(bme_metric_obj.phi_global(net))
-            # Per-zone Φ_i (D1 partition) — the Phulpin fairness premise
-            # data (spec §5 Phase 6): Σ_i Φ_i == Φ_global by invariant.
-            rec.bme_phi_zone_mw = {
-                z: float(bme_metric_obj.phi_zone(net, z).total)
-                for z in bme_metric_obj.topology.zone_ids
-            }
-            # Boundary-voltage signal for the §5 Phase 6 oscillation
-            # indicator: vm at the fixed 3-area registry B, every step.
-            rec.bme_v_boundary = {
-                int(b): float(net.res_bus.at[b, "vm_pu"])
-                for b in bme_metric_obj.topology.registry
-            }
-
         # ── Slack saturation diagnostic (added 2026-05-02) ───────────────────
         # Records the slack's P/Q every step plus a flag for whether |Q| is
         # within 1 % of max_q_mvar (saturation indicator).  Helps post-hoc
@@ -4631,8 +3918,6 @@ def run_multi_tso_dso(
             _plotter_sys.update(rec)
         if _plotter_track is not None:
             _plotter_track.update(rec)
-        if _plotter_tie is not None:
-            _plotter_tie.update(rec)
         if _plotter_sbx is not None:
             # True reference-end corridor flow: q measured AT each tie's
             # bus_a endpoint (q_from or q_to per line orientation).
@@ -4665,6 +3950,10 @@ def run_multi_tso_dso(
             sbxv_runtime["adapter"].on_plant_step(
                 time_s, config.dt_s, net,
             )
+            if _plotter_sbxv is not None:
+                _plotter_sbxv.update(
+                    rec, sbxv_runtime["adapter"],
+                )
 
         if not _in_warmup:
             log.append(rec)

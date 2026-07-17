@@ -32,7 +32,7 @@ operating-point capability envelope.  NaN where the capability band has
 zero width (e.g. a DER in the VDE dead zone below P/S_n = 0.1).
 
 Activated like the other live plots, e.g. ``live_plot_tracking=True`` on the
-:class:`configs.multi_tso_config.MultiTSOConfig`.
+:class:`configs.config.MultiTSOConfig`.
 """
 from __future__ import annotations
 

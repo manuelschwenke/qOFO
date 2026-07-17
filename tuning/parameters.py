@@ -22,11 +22,11 @@ import dataclasses
 import math
 from typing import Any
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from tuning._types import BOParam, Ceilings
 
 
-# 9 BO dimensions.
+# 8 BO dimensions.
 # `g_w_tso_shunt` is conditionally excluded while
 # `install_tso_tertiary_shunts=False` in the baseline (no shunt actuators
 # → vacuous coordinate). The slot is pinned in FIXED_OVERRIDES so the
@@ -34,7 +34,6 @@ from tuning._types import BOParam, Ceilings
 # uncommenting and removing the FIXED_OVERRIDES entry once shunts are
 # installed.
 #
-# `tso_g_q_tie` (added 2026-04-29) is a tracking weight on the Q-tie-line
 # rows of the TSO MIQP objective — analogous to `g_q` (Q-PCC tracking),
 # scales the curvature ``Q`` block of the iteration matrix rather than
 # the proximal ``G_w`` block.  Bounds are chosen from the field's own
@@ -55,7 +54,6 @@ from tuning._types import BOParam, Ceilings
 BO_DIMS: tuple[BOParam, ...] = (
     BOParam("g_v",           log=True, low=1e2, high=1e5), #  high="ceil", fallback_high=1e7),
     BOParam("g_q",           log=True, low=1e-1,  high=1e3),
-    BOParam("tso_g_q_tie",   log=True, low=1e-1, high=1e3),
     BOParam("dso_g_v",       log=True, low=1,  high=1e5),
     BOParam("g_w_der",       log=True, low=1e-1, high=1e3), # high="ceil", fallback_high=1e4),
     # `g_w_pcc` upper bound capped at 30 (≈10^1.5) on 2026-05-02:
@@ -66,23 +64,20 @@ BO_DIMS: tuple[BOParam, ...] = (
     # paired objective-side fix (demoted ``w_q_track`` and new
     # ``w_pcc_underutil`` term).  Values above ~30 are sluggish without
     # a meaningful end-performance benefit.
-    BOParam("g_w_pcc",       log=True, low=1e-1, high=100.0),
+    BOParam("g_w_pcc",       log=True, low=1e-1, high=30.0),
     BOParam("g_w_tso_oltc",  log=True, low=1, high=1e5), # high="ceil", fallback_high=1e4),
     #BOParam("g_w_tso_shunt", log=True, low=1e-1, high="ceil", fallback_high=1e4),
     BOParam("g_w_dso_der",   log=True, low=1e-1, high=1e3), # high="ceil", fallback_high=1e4),
     BOParam("g_w_dso_oltc",  log=True, low=1, high=1e5), # high="ceil", fallback_high=1e4),
     # ── Stage-2 (Q(V) local loop) knobs ─────────────────
-    # g_w_dso_der_vref is empirically inert in the current setup
-    # (curvature dominates).  Pinned in FIXED_OVERRIDES rather than
-    # tuned to avoid wasting BO trials on a vacuous coordinate.
-    # See ``tests/diag_stage2_steps.py`` for the proof sweep.
 )
 
 
 # Fields always pinned during tuning (override baseline config).
 FIXED_OVERRIDES: dict[str, Any] = {
-    # Per-user decision: g_w_gen excluded from stability tuning
-    "g_w_gen":                 5e7,
+    # g_w_gen is excluded from BO_DIMS and therefore inherits the baseline
+    # exactly. It is deliberately not duplicated as a numeric override:
+    # run_multi_system_ofo uses a very large value to keep AVR moves slow.
 
     # Conditionally pinned: shunts not installed at TSO tertiary
     # (`install_tso_tertiary_shunts=False`), so this dim is vacuous.
@@ -90,13 +85,6 @@ FIXED_OVERRIDES: dict[str, Any] = {
     # re-installed and the BO_DIMS entry is uncommented.
     "g_w_tso_shunt":           50000.0,
 
-    # Stage-2 knob that's empirically inert (curvature dominates the
-    # MIQP step regardless of g_w_dso_der_vref across [1e-2, 1e8]).
-    # Pinned at 1.0 to keep BO from wasting trials on a vacuous
-    # coordinate.  Promote to BO_DIMS only after a controller change
-    # makes it non-redundant (e.g. lowering g_q sufficiently or
-    # disabling the K-transform).
-    "g_w_dso_der_vref":        1.0,
 
     # Integral Q-tracking off (user excluded these from BO)
     "dso_g_qi":                0.0,

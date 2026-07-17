@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from tuning.metrics import TrajectoryMetrics
 from tuning.parameters import params_from_config
 from tuning.runner import RunResult, run_one

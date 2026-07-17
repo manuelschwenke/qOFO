@@ -35,7 +35,7 @@ from core.reporting import (
     write_tuned_params_json,
 )
 from network.ieee39 import HVNetworkInfo
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 from experiments.helpers import ContingencyEvent, MultiTSOIterationRecord
 
 
@@ -96,7 +96,7 @@ def _snapshot_oltc_taps(
     ``{'trafo', 'trafo3w'}``.  Returns an empty dict if no controllers
     are installed.  Used by the local-mode OLTC rate-limit clamp to
     bound per-step tap movement (see
-    :attr:`configs.multi_tso_config.MultiTSOConfig.local_oltc_max_step_per_dt`).
+    :attr:`configs.config.MultiTSOConfig.local_oltc_max_step_per_dt`).
     """
     from pandapower.control import DiscreteTapControl
     snap: Dict[Tuple[str, int], int] = {}

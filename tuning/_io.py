@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import yaml
 
-from configs.multi_tso_config import MultiTSOConfig
+from configs.config import MultiTSOConfig
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,8 @@ from analysis.stability_analysis import (
     MultiZoneStabilityResult,
 )
 from controller.dso_controller import DSOController
+from controller.tso_controller import TSOController
+from core.measurement import Measurement
 from controller.multi_tso_coordinator import MultiTSOCoordinator, ZoneDefinition
 from core.reporting import (
     write_stability_analysis_markdown,
@@ -342,6 +344,259 @@ def _dump_contingency_diagnostics(
           f"Δ={q_gen + q_eg + q_sgen - q_load:.1f} Mvar")
     print(f"  -- end diagnostics: {label} --\n")
 
+
+
+def _measurement_values(
+    element_indices: NDArray,
+    values: NDArray,
+    requested_indices: List[int],
+) -> NDArray[np.float64]:
+    """Select a metered channel by pandapower element id.
+
+    Missing channels remain NaN.  This is deliberate: a live plot must show
+    a gap instead of silently substituting the exact plant state.
+    """
+    positions = {
+        int(idx): pos for pos, idx in enumerate(np.asarray(element_indices).ravel())
+    }
+    raw = np.asarray(values, dtype=float).ravel()
+    selected = np.full(len(requested_indices), np.nan, dtype=np.float64)
+    for out_pos, idx in enumerate(requested_indices):
+        src_pos = positions.get(int(idx))
+        if src_pos is not None and src_pos < raw.size:
+            selected[out_pos] = raw[src_pos]
+    return selected
+
+
+def _finite_min_mean_max(values: NDArray) -> Optional[Tuple[float, float, float]]:
+    """Return finite min/mean/max, or ``None`` when no channel is metered."""
+    arr = np.asarray(values, dtype=float).ravel()
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    return float(np.min(arr)), float(np.mean(arr)), float(np.max(arr))
+
+
+def _measurement_loading_percent(measurement: Measurement, config) -> NDArray:
+    """Convert noisy line-current measurements to nameplate loading percent."""
+    line_ids = list(config.current_line_indices)
+    ratings = config.current_line_max_i_ka
+    if not line_ids or ratings is None or len(ratings) != len(line_ids):
+        return np.array([], dtype=np.float64)
+    currents = _measurement_values(
+        measurement.branch_indices,
+        measurement.current_magnitudes_ka,
+        line_ids,
+    )
+    ratings_arr = np.asarray(ratings, dtype=float)
+    return np.divide(
+        100.0 * currents,
+        ratings_arr,
+        out=np.full(currents.shape, np.nan, dtype=np.float64),
+        where=ratings_arr > 0.0,
+    )
+
+
+def _normalised_q_reserve(
+    q_measured: NDArray,
+    q_min: NDArray,
+    q_max: NDArray,
+) -> NDArray[np.float64]:
+    """Perceived normalised Q reserve using the same bounds as the controller."""
+    q = np.asarray(q_measured, dtype=float)
+    q_lo = np.asarray(q_min, dtype=float)
+    q_hi = np.asarray(q_max, dtype=float)
+    width = q_hi - q_lo
+    return np.divide(
+        np.minimum(q_hi - q, q - q_lo),
+        width,
+        out=np.full(q.shape, np.nan, dtype=np.float64),
+        where=width > 1e-9,
+    )
+
+
+def _record_tso_measurement_snapshot(
+    rec: MultiTSOIterationRecord,
+    measurements: Dict[int, Measurement],
+    zone_defs: Dict[int, ZoneDefinition],
+    tie_line_map: Dict[Tuple[int, int], List[int]],
+    tso_controllers: Dict[int, TSOController],
+    *,
+    default_v_setpoint_pu: float,
+) -> None:
+    """Record the noisy pre-control TSO packets used by the controllers."""
+    for z, zd in zone_defs.items():
+        measurement = measurements.get(z)
+        controller = tso_controllers.get(z)
+        if measurement is None or controller is None:
+            continue
+        cfg = controller.config
+
+        voltage_bus_ids = list(cfg.voltage_bus_indices)
+        voltage = _measurement_values(
+            measurement.bus_indices,
+            measurement.voltage_magnitudes_pu,
+            voltage_bus_ids,
+        )
+        stats = _finite_min_mean_max(voltage)
+        if stats is not None:
+            rec.zone_v_meas_min[z], rec.zone_v_meas_mean[z], rec.zone_v_meas_max[z] = stats
+
+        if cfg.v_setpoints_pu is None:
+            v_ref = np.full(voltage.shape, default_v_setpoint_pu, dtype=float)
+        else:
+            v_ref = np.asarray(cfg.v_setpoints_pu, dtype=float)
+        valid_v = np.isfinite(voltage) & np.isfinite(v_ref)
+        if np.any(valid_v):
+            rec.zone_v_rms_err_meas_pu[z] = float(
+                np.sqrt(np.mean((voltage[valid_v] - v_ref[valid_v]) ** 2))
+            )
+
+        gen_ids = list(cfg.gen_indices)
+        q_gen = _measurement_values(
+            measurement.gen_indices, measurement.gen_q_mvar, gen_ids
+        )
+        if q_gen.size:
+            rec.zone_q_gen_meas[z] = q_gen
+            p_gen = _measurement_values(
+                measurement.gen_indices, measurement.gen_p_mw, gen_ids
+            )
+            gen_vm = _measurement_values(
+                measurement.gen_indices, measurement.gen_vm_pu, gen_ids
+            )
+            q_min, q_max = controller.actuator_bounds.compute_gen_q_bounds(
+                p_gen, gen_vm
+            )
+            rec.gen_q_reserve_meas[z] = _normalised_q_reserve(
+                q_gen, q_min, q_max
+            )
+
+        der_ids = list(cfg.der_indices)
+        q_der = _measurement_values(
+            measurement.der_indices, measurement.der_q_mvar, der_ids
+        )
+        if q_der.size:
+            rec.zone_q_der_meas[z] = q_der
+            p_der = _measurement_values(
+                measurement.der_indices, measurement.der_p_mw, der_ids
+            )
+            q_min, q_max = controller.actuator_bounds.compute_der_q_bounds(p_der)
+            rec.tso_der_q_reserve_meas[z] = _normalised_q_reserve(
+                q_der, q_min, q_max
+            )
+
+        loading = _measurement_loading_percent(measurement, cfg)
+        stats = _finite_min_mean_max(loading)
+        if stats is not None:
+            (
+                rec.zone_line_loading_meas_min_pct[z],
+                rec.zone_line_loading_meas_mean_pct[z],
+                rec.zone_line_loading_meas_max_pct[z],
+            ) = stats
+
+    # A zonal packet meters tie Q at its own endpoint.  Pairs are ordered
+    # (zi < zj), so the zi packet already has the record convention:
+    # positive Q leaves zi toward zj.
+    for pair, line_ids in tie_line_map.items():
+        zi, _ = pair
+        measurement = measurements.get(zi)
+        if measurement is None:
+            continue
+        tie_q = _measurement_values(
+            measurement.tie_line_indices,
+            measurement.tie_line_q_mvar,
+            list(line_ids),
+        )
+        finite = tie_q[np.isfinite(tie_q)]
+        if finite.size:
+            rec.zone_tie_q_meas_mvar[pair] = float(np.sum(finite))
+
+
+def _record_dso_measurement_snapshot(
+    rec: MultiTSOIterationRecord,
+    measurements: Dict[str, Measurement],
+    dso_controllers: Dict[str, DSOController],
+    dso_group_map: Dict[str, str],
+) -> None:
+    """Record noisy pre-control DSO packets, aggregated by HV group."""
+    group_voltage: Dict[str, List[float]] = {}
+    group_loading: Dict[str, List[float]] = {}
+    group_q_der: Dict[str, List[float]] = {}
+    group_q_min: Dict[str, List[float]] = {}
+    group_q_max: Dict[str, List[float]] = {}
+
+    for dso_id, measurement in measurements.items():
+        if dso_id not in dso_controllers:
+            raise KeyError(f"Missing DSO controller '{dso_id}'.")
+        if dso_id not in dso_group_map:
+            raise KeyError(f"Missing network-group mapping for DSO '{dso_id}'.")
+        controller = dso_controllers[dso_id]
+        cfg = controller.config
+        group_id = dso_group_map[dso_id]
+
+        voltage = _measurement_values(
+            measurement.bus_indices,
+            measurement.voltage_magnitudes_pu,
+            list(cfg.voltage_bus_indices),
+        )
+        group_voltage.setdefault(group_id, []).extend(
+            voltage[np.isfinite(voltage)].tolist()
+        )
+
+        loading = _measurement_loading_percent(measurement, cfg)
+        group_loading.setdefault(group_id, []).extend(
+            loading[np.isfinite(loading)].tolist()
+        )
+
+        der_ids = list(cfg.der_indices)
+        q_der = _measurement_values(
+            measurement.der_indices, measurement.der_q_mvar, der_ids
+        )
+        p_der = _measurement_values(
+            measurement.der_indices, measurement.der_p_mw, der_ids
+        )
+        q_min, q_max = controller.actuator_bounds.compute_der_q_bounds(p_der)
+        if np.any(np.isfinite(q_der)):
+            group_q_der.setdefault(group_id, []).append(float(np.nansum(q_der)))
+            group_q_min.setdefault(group_id, []).append(float(np.nansum(q_min)))
+            group_q_max.setdefault(group_id, []).append(float(np.nansum(q_max)))
+
+        q_iface = _measurement_values(
+            measurement.interface_transformer_indices,
+            measurement.interface_q_hv_side_mvar,
+            list(cfg.interface_trafo_indices),
+        )
+        rec.dso_controller_group[dso_id] = group_id
+        for trafo_idx, q_value in zip(cfg.interface_trafo_indices, q_iface):
+            key = f"{dso_id}|trafo_{int(trafo_idx)}"
+            rec.dso_trafo_group[key] = group_id
+            if np.isfinite(q_value):
+                rec.dso_trafo_q_meas_mvar[key] = float(q_value)
+
+    for group_id, values in group_voltage.items():
+        stats = _finite_min_mean_max(np.asarray(values, dtype=float))
+        if stats is not None:
+            (
+                rec.dso_group_v_meas_min_pu[group_id],
+                rec.dso_group_v_meas_mean_pu[group_id],
+                rec.dso_group_v_meas_max_pu[group_id],
+            ) = stats
+    for group_id, values in group_loading.items():
+        stats = _finite_min_mean_max(np.asarray(values, dtype=float))
+        if stats is not None:
+            (
+                rec.dso_group_i_meas_min_pct[group_id],
+                rec.dso_group_i_meas_mean_pct[group_id],
+                rec.dso_group_i_meas_max_pct[group_id],
+            ) = stats
+    for group_id, values in group_q_der.items():
+        rec.dso_group_q_der_meas_mvar[group_id] = float(np.sum(values))
+        rec.dso_group_q_der_meas_min_mvar[group_id] = float(
+            np.sum(group_q_min[group_id])
+        )
+        rec.dso_group_q_der_meas_max_mvar[group_id] = float(
+            np.sum(group_q_max[group_id])
+        )
 
 def _record_dso_group_and_transformer_data(
     rec: MultiTSOIterationRecord,

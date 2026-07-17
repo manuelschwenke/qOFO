@@ -77,6 +77,7 @@ from core.measurement import (
     measure_zone_dso,
     measure_central,
 )
+from core.measurement_noise import MeasurementNoiseModel
 from core.reporting import load_and_apply_tuned_params
 from core.profiles import (
     DEFAULT_PROFILES_CSV,
@@ -137,6 +138,8 @@ from experiments.runners._multi_tso_helpers import (
     _collect_contingency_watch_buses,
     _dump_contingency_diagnostics,
     _record_dso_group_and_transformer_data,
+    _record_dso_measurement_snapshot,
+    _record_tso_measurement_snapshot,
     _record_hv_group_observables,
     _record_local_dso_trafo_data,
     _record_zone_live_plot_observables,
@@ -318,6 +321,22 @@ def run_multi_tso_dso(
     v_set = config.v_setpoint_pu
     verbose = config.verbose
 
+    measurement_noise_model = MeasurementNoiseModel(config.measurement_noise)
+
+    def _feedback_measurement(
+        measurement: Measurement,
+        *,
+        sample_id,
+        initialisation: bool = False,
+    ) -> Measurement:
+        """Apply configured sensor noise to one controller-facing packet."""
+        return measurement_noise_model.apply(
+            measurement,
+            net,
+            sample_id=sample_id,
+            initialisation=initialisation,
+        )
+
     def _zone_scalar(zone_dict: Optional[Dict[int, float]], zone_id: int,
                       fallback: float) -> float:
         """Per-zone override lookup mirroring the ``zone_v_setpoints_pu``
@@ -346,6 +365,24 @@ def run_multi_tso_dso(
         print("  MULTI-TSO / MULTI-DSO OFO -- IEEE 39-bus New England")
         print(f"  V_set = {v_set:.3f} p.u.  |  N_zones = 3")
         print(f"  Zone partition: {zone_method}  |  4 HV sub-networks (DSO_1..DSO_4)")
+        if config.measurement_noise.enabled:
+            _eq = config.measurement_noise.equivalent_bounds()
+            _comp = config.measurement_noise.profile_components()
+            _persistent = 100.0 * (
+                1.0 - config.measurement_noise.sample_noise_fraction
+            )
+            print(
+                "  Measurement chain: "
+                f"{config.measurement_noise.profile} "
+                f"(equiv. rectangular: "
+                f"V_EHV={100 * _eq['voltage_ehv']:.2f}%, "
+                f"V_HV={100 * _eq['voltage_hv']:.2f}%, "
+                f"I={100 * _eq['current']:.2f}%, "
+                f"P_EHV={100 * _eq['active_power_ehv']:.2f}%; "
+                f"phase={_comp['power_phase_angle_deg']:.3f} deg; "
+                f"{_persistent:.0f}% persistent; "
+                f"seed={config.measurement_noise.seed})"
+            )
         print("=" * 72)
 
     # =========================================================================
@@ -1892,9 +1929,17 @@ def run_multi_tso_dso(
     # operating point (profiles + correct tap positions).
     _t = perf_counter()
     for z, ctrl in tso_controllers.items():
-        ctrl.initialise(measure_zone_tso(net, zone_defs[z], 0))
+        ctrl.initialise(_feedback_measurement(
+            measure_zone_tso(net, zone_defs[z], 0),
+            sample_id=("initialisation", 0),
+            initialisation=True,
+        ))
     for dso_id, dso_ctrl in dso_controllers.items():
-        dso_ctrl.initialise(measure_zone_dso(net, dso_ctrl.config, 0))
+        dso_ctrl.initialise(_feedback_measurement(
+            measure_zone_dso(net, dso_ctrl.config, 0),
+            sample_id=("initialisation", 0),
+            initialisation=True,
+        ))
     if _central and central_controller is not None:
         # The centralized controller always uses the FULL-network Jacobian
         # rebuilt at the post-Phase-2 operating point (overriding any
@@ -1902,7 +1947,11 @@ def run_multi_tso_dso(
         # to the recording-only TSO/DSO controllers).
         central_controller.sensitivities = shared_jac
         central_controller.invalidate_sensitivity_cache()
-        central_controller.initialise(measure_central(net, central_cfg, 0))
+        central_controller.initialise(_feedback_measurement(
+            measure_central(net, central_cfg, 0),
+            sample_id=("initialisation", 0),
+            initialisation=True,
+        ))
         if getattr(config, "debug_central_curvature", False):
             _dump_central_curvature(central_controller, central_cfg)
     if verbose >= 1:
@@ -1979,7 +2028,11 @@ def run_multi_tso_dso(
     # (with real bounds) produces a large corrective jump.
     _t = perf_counter()
     for dso_id, dso_ctrl in dso_controllers.items():
-        meas_init_dso = measure_zone_dso(net, dso_ctrl.config, 0)
+        meas_init_dso = _feedback_measurement(
+            measure_zone_dso(net, dso_ctrl.config, 0),
+            sample_id=("initialisation", 0),
+            initialisation=True,
+        )
         tso_id = dso_to_tso_id[dso_id]
         cap_msg = dso_ctrl.generate_capability_message(
             target_controller_id=tso_id,
@@ -2526,6 +2579,11 @@ def run_multi_tso_dso(
         rec = MultiTSOIterationRecord(
             step=step, time_s=time_s, tso_active=run_tso, dso_active=run_dso
         )
+        # Preserve the exact noisy packets presented to each controller.
+        # They are recorded separately from the post-control plant truth.
+        tso_plot_measurements: Dict[int, Measurement] = {}
+        dso_plot_measurements: Dict[str, Measurement] = {}
+
 
         # ── Local-mode OLTC rate-limit snapshot ──────────────────────────────
         # Snapshot every DiscreteTapControl tap_pos at the start of the
@@ -2750,7 +2808,11 @@ def run_multi_tso_dso(
         # step and the per-DSO step; the 3-zone scaffolding below it is used
         # only for recording.
         if run_central and central_controller is not None:
-            meas_central = measure_central(net, central_cfg, step)
+            meas_central = _feedback_measurement(
+                measure_central(net, central_cfg, step),
+                sample_id=("control", step),
+            )
+            tso_plot_measurements = {z: meas_central for z in zone_defs}
             # w-shift reanchoring: reset the DER block of _u_current to the
             # measured Q so the OFO update u_new = u_old + sigma yields
             # q_set = Q_meas + sigma (the per-step "increment" interpretation
@@ -2826,9 +2888,13 @@ def run_multi_tso_dso(
 
             # Build per-zone measurements from plant network
             measurements: Dict[int, Measurement] = {
-                z: measure_zone_tso(net, zd, step)
+                z: _feedback_measurement(
+                    measure_zone_tso(net, zd, step),
+                    sample_id=("control", step),
+                )
                 for z, zd in zone_defs.items()
             }
+            tso_plot_measurements = measurements
 
             # ── SBX horizontal round (BEFORE the zones solve): feed the
             # scheduler every TSO tick. At cycle boundaries the elapsed
@@ -3400,7 +3466,11 @@ def run_multi_tso_dso(
                 # meas_dso reflects the current operating point BEFORE this DSO step.
                 # This is the correct basis for the capability message: it tells the TSO
                 # what the DSO can still do from its present dispatch, not what it just did.
-                meas_dso = measure_zone_dso(net, dso_ctrl.config, step)
+                meas_dso = _feedback_measurement(
+                    measure_zone_dso(net, dso_ctrl.config, step),
+                    sample_id=("control", step),
+                )
+                dso_plot_measurements[dso_id] = meas_dso
 
                 # --- Capability message: DSO → TSO (must precede TSO solve) ----------
                 tso_id = dso_to_tso_id[dso_id]
@@ -3684,9 +3754,11 @@ def run_multi_tso_dso(
 
         # ── Record plant voltages per zone ────────────────────────────────────
         for z, zd in zone_defs.items():
+            vm_bus_ids = [
+                int(b) for b in zd.v_bus_indices if b in net.res_bus.index
+            ]
             vm_zone = np.array(
-                [float(net.res_bus.at[b, "vm_pu"]) for b in zd.v_bus_indices
-                 if b in net.res_bus.index],
+                [float(net.res_bus.at[b, "vm_pu"]) for b in vm_bus_ids],
                 dtype=np.float64,
             )
             if vm_zone.size > 0:
@@ -3695,8 +3767,22 @@ def run_multi_tso_dso(
                 rec.zone_v_mean[z] = float(vm_zone.mean())
                 # Spatial RMS of the voltage error to the setpoint across the
                 # zone's observed EHV buses (CIGRE per-zone tracking figure).
+                cfg_v = tso_controllers[z].config
+                if cfg_v.v_setpoints_pu is None:
+                    v_ref_zone = np.full(vm_zone.shape, v_set, dtype=float)
+                else:
+                    v_ref_by_bus = {
+                        int(bus): float(ref)
+                        for bus, ref in zip(
+                            cfg_v.voltage_bus_indices, cfg_v.v_setpoints_pu
+                        )
+                    }
+                    v_ref_zone = np.array(
+                        [v_ref_by_bus.get(bus, v_set) for bus in vm_bus_ids],
+                        dtype=float,
+                    )
                 rec.zone_v_rms_err_pu[z] = float(
-                    np.sqrt(np.mean((vm_zone - v_set) ** 2))
+                    np.sqrt(np.mean((vm_zone - v_ref_zone) ** 2))
                 )
 
             # Generator P, Q from converged power flow (every step).
@@ -3839,6 +3925,22 @@ def run_multi_tso_dso(
             zone_defs=zone_defs, tn_zone_map=tn_zone_map,
             tie_line_map=tie_line_map,
         )
+
+        # Controller-facing analogue snapshots: these are the same noisy
+        # pre-control packets consumed by the OFO controllers.  Exact plant
+        # observables above remain available to the system/tracking views.
+        if tso_plot_measurements:
+            _record_tso_measurement_snapshot(
+                rec, tso_plot_measurements, zone_defs, tie_line_map,
+                tso_controllers, default_v_setpoint_pu=v_set,
+            )
+        if dso_plot_measurements:
+            _record_dso_measurement_snapshot(
+                rec,
+                dso_plot_measurements,
+                dso_controllers,
+                dso_group_map,
+            )
         # Integrator mode: the recorder reads zd.shunt_bus_indices (empty here),
         # so populate the live-plot shunt states from the integrator banks'
         # committed pandapower steps (read by explicit shunt index — a tertiary

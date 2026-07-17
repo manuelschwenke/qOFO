@@ -9,10 +9,11 @@ MultiTSOConfig  — multi-zone TSO / multi-DSO experiment (experiments/000_M_TSO
 CascadeConfig   — single-TSO single-DSO cascade experiment (experiments/001_S_TSO_S_DSO.py).
 """
 
-from configs.config import MultiTSOConfig
+from configs.config import MeasurementNoiseConfig, MultiTSOConfig
 from configs.cascade_config import CascadeConfig
 
 __all__ = [
     "MultiTSOConfig",
+    "MeasurementNoiseConfig",
     "CascadeConfig",
 ]

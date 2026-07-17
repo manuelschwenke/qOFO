@@ -122,7 +122,7 @@ class TSOControllerLivePlotter:
             bottom=0.045, left=0.10, right=0.985,
             hspace=0.60,
         )
-        draw_figure_header(self._fig, "Multi-TSO Controller")
+        draw_figure_header(self._fig, "Multi-TSO Controller - metered view")
 
         plot_h = 1.0
         band_h = 0.18
@@ -137,7 +137,7 @@ class TSOControllerLivePlotter:
 
         # Row 0: MEAS band
         self._ax_band_meas = self._fig.add_subplot(gs[0, 0])
-        fill_section_band(self._ax_band_meas, "Measurements", COLOUR_MEAS_BAND)
+        fill_section_band(self._ax_band_meas, "Noisy measurements (pre-control)", COLOUR_MEAS_BAND)
 
         # Measurement rows (V + gen Q always; reserves / tie Q / line currents optional)
         row = 1
@@ -186,7 +186,7 @@ class TSOControllerLivePlotter:
             tile_title(self._ax_tie,   "TSO Reactive Power Tie-Line Flows")
         if self._ax_iline is not None:
             tile_title(self._ax_iline, "TSO Line Currents (Loading %)")
-        tile_title(self._ax_qder,      "TSO DER Q Infeed per Zone")
+        tile_title(self._ax_qder,      "TSO DER Q Infeed per Zone (metered)")
         tile_title(self._ax_vgen,  "TSO Generator AVR Setpoints")
         tile_title(self._ax_oltc,  "TSO Machine Transformer Taps")
         tile_title(self._ax_shunt, "TSO Shunt States  (+ reactor/MSR  /  - capacitor/MSC)")
@@ -204,35 +204,45 @@ class TSOControllerLivePlotter:
     # ─── update ─────────────────────────────────────────────────────────
 
     def update(self, rec: "MultiTSOIterationRecord") -> None:
-        """Append this record's data and redraw if cadence matches."""
-        t_unit = rec.time_s if self._sub_minute else rec.time_s / 60.0
-        self._t_all.append(t_unit)
+        """Append one noisy pre-control TSO sample and applied commands."""
+        v_min = getattr(rec, "zone_v_meas_min", {})
+        v_mean = getattr(rec, "zone_v_meas_mean", {})
+        v_max = getattr(rec, "zone_v_meas_max", {})
+        q_gen = getattr(rec, "zone_q_gen_meas", {})
+        q_der = getattr(rec, "zone_q_der_meas", {})
+        gen_reserve = getattr(rec, "gen_q_reserve_meas", {})
+        der_reserve = getattr(rec, "tso_der_q_reserve_meas", {})
+        i_min = getattr(rec, "zone_line_loading_meas_min_pct", {})
+        i_mean = getattr(rec, "zone_line_loading_meas_mean_pct", {})
+        i_max = getattr(rec, "zone_line_loading_meas_max_pct", {})
+        tie_q = getattr(rec, "zone_tie_q_meas_mvar", {})
+        has_measurement = bool(v_mean or q_gen or q_der or i_mean or tie_q)
 
-        for z in self._zone_ids:
-            self._zone_v_min[z].append(rec.zone_v_min.get(z, float("nan")))
-            self._zone_v_mean[z].append(rec.zone_v_mean.get(z, float("nan")))
-            self._zone_v_max[z].append(rec.zone_v_max.get(z, float("nan")))
-            self._zone_q_gen[z].append(
-                np.asarray(rec.zone_q_gen.get(z, []), dtype=float)
-            )
-            self._zone_gen_reserve[z].append(
-                np.asarray(rec.gen_q_reserve.get(z, []), dtype=float)
-            )
-            self._zone_der_reserve[z].append(
-                np.asarray(rec.tso_der_q_reserve.get(z, []), dtype=float)
-            )
-            self._zone_i_max[z].append(rec.zone_line_loading_max_pct.get(z, float("nan")))
-            self._zone_i_mean[z].append(rec.zone_line_loading_mean_pct.get(z, float("nan")))
-            self._zone_i_min[z].append(rec.zone_line_loading_min_pct.get(z, float("nan")))
-        for pair in self._tie_pairs:
-            self._tie_q[pair].append(rec.zone_tie_q_mvar.get(pair, float("nan")))
-
-        if rec.tso_active:
+        if has_measurement:
+            t_unit = rec.time_s if self._sub_minute else rec.time_s / 60.0
+            self._t_all.append(t_unit)
             self._t_tso.append(t_unit)
             for z in self._zone_ids:
-                self._zone_q_der[z].append(
-                    np.asarray(rec.zone_q_der.get(z, []), dtype=float)
+                self._zone_v_min[z].append(v_min.get(z, float("nan")))
+                self._zone_v_mean[z].append(v_mean.get(z, float("nan")))
+                self._zone_v_max[z].append(v_max.get(z, float("nan")))
+                self._zone_q_gen[z].append(
+                    np.asarray(q_gen.get(z, []), dtype=float)
                 )
+                self._zone_gen_reserve[z].append(
+                    np.asarray(gen_reserve.get(z, []), dtype=float)
+                )
+                self._zone_der_reserve[z].append(
+                    np.asarray(der_reserve.get(z, []), dtype=float)
+                )
+                self._zone_i_min[z].append(i_min.get(z, float("nan")))
+                self._zone_i_mean[z].append(i_mean.get(z, float("nan")))
+                self._zone_i_max[z].append(i_max.get(z, float("nan")))
+                self._zone_q_der[z].append(
+                    np.asarray(q_der.get(z, []), dtype=float)
+                )
+                # Setpoints and discrete states are issued/read-back digital
+                # controller variables, so no analogue metering noise applies.
                 self._zone_v_gen[z].append(
                     np.asarray(rec.zone_v_gen.get(z, []), dtype=float)
                 )
@@ -242,6 +252,8 @@ class TSOControllerLivePlotter:
                 self._zone_shunt[z].append(
                     np.asarray(rec.zone_tso_shunt_states.get(z, []), dtype=float)
                 )
+            for pair in self._tie_pairs:
+                self._tie_q[pair].append(tie_q.get(pair, float("nan")))
 
         self._call_count += 1
         if self._call_count % self._update_every == 0:
@@ -427,7 +439,7 @@ class TSOControllerLivePlotter:
     def _redraw_der_q(self) -> None:
         ax = self._ax_qder
         ax.clear()
-        tile_title(ax, "TSO DER Q Infeed per Zone")
+        tile_title(ax, "TSO DER Q Infeed per Zone (metered)")
         t = np.asarray(self._t_tso, dtype=float)
         self._plot_padded_multi(ax, t, self._zone_q_der, drawstyle="default")
         ax.set_ylabel(r"Q$_\mathrm{DER}$ / Mvar")

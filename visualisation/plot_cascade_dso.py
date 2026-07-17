@@ -148,7 +148,7 @@ class CascadeDSOLivePlotter:
             bottom=0.04, left=0.10, right=0.985,
             hspace=0.38,
         )
-        draw_figure_header(self._fig, "Cascade-DSO Controller")
+        draw_figure_header(self._fig, "Cascade-DSO Controller - metered view")
 
         plot_h = 1.0
         band_h = 0.2
@@ -163,7 +163,7 @@ class CascadeDSOLivePlotter:
 
         # Row 0: MEAS band
         ax = self._fig.add_subplot(gs[0, 0])
-        fill_section_band(ax, "Measurements", COLOUR_MEAS_BAND)
+        fill_section_band(ax, "Noisy measurements (pre-control)", COLOUR_MEAS_BAND)
 
         # Row 1: DSO voltages per group
         self._ax_v = self._fig.add_subplot(gs[1, 0])
@@ -177,7 +177,7 @@ class CascadeDSOLivePlotter:
         for idx, dso_id in enumerate(self._dso_ids):
             axi = self._fig.add_subplot(gs[2 + idx, 0], sharex=self._ax_v)
             if idx == 0:
-                tile_title(axi, "TSO-DSO Interface Q")
+                tile_title(axi, "TSO-DSO Interface Q (metered / setpoint)")
             self._ax_iface[dso_id] = axi
 
         # Optional DSO line currents row
@@ -196,7 +196,7 @@ class CascadeDSOLivePlotter:
 
         # DSO DER Q per group
         self._ax_qder = self._fig.add_subplot(gs[row, 0], sharex=self._ax_v)
-        tile_title(self._ax_qder, "DSO DER Q per HV Network Group")
+        tile_title(self._ax_qder, "DSO DER Q per HV Network Group (metered)")
         row += 1
 
         # Tap positions per DSO.  As for interface Q above, only the
@@ -238,7 +238,7 @@ class CascadeDSOLivePlotter:
         self._t_all.append(t_unit)
 
         # Discover group IDs lazily from the record
-        for g in sorted(rec.dso_group_v_min_pu.keys()):
+        for g in sorted(rec.dso_group_v_meas_min_pu.keys()):
             if g not in self._g_v_min:
                 self._group_ids.append(g)
                 self._g_v_min[g]     = [np.nan] * (len(self._t_all) - 1)
@@ -253,18 +253,18 @@ class CascadeDSOLivePlotter:
 
         # Append per-group voltages + line loadings (every step)
         for g in self._group_ids:
-            self._g_v_min[g] .append(rec.dso_group_v_min_pu .get(g, np.nan))
-            self._g_v_mean[g].append(rec.dso_group_v_mean_pu.get(g, np.nan))
-            self._g_v_max[g] .append(rec.dso_group_v_max_pu .get(g, np.nan))
-            self._g_i_max[g] .append(rec.dso_group_i_max_pct .get(g, np.nan))
-            self._g_i_mean[g].append(rec.dso_group_i_mean_pct.get(g, np.nan))
-            self._g_i_min[g] .append(rec.dso_group_i_min_pct .get(g, np.nan))
-            self._g_q_der[g]     .append(rec.dso_group_q_der_mvar    .get(g, np.nan))
-            self._g_q_der_min[g] .append(rec.dso_group_q_der_min_mvar.get(g, np.nan))
-            self._g_q_der_max[g] .append(rec.dso_group_q_der_max_mvar.get(g, np.nan))
+            self._g_v_min[g] .append(rec.dso_group_v_meas_min_pu .get(g, np.nan))
+            self._g_v_mean[g].append(rec.dso_group_v_meas_mean_pu.get(g, np.nan))
+            self._g_v_max[g] .append(rec.dso_group_v_meas_max_pu .get(g, np.nan))
+            self._g_i_max[g] .append(rec.dso_group_i_meas_max_pct .get(g, np.nan))
+            self._g_i_mean[g].append(rec.dso_group_i_meas_mean_pct.get(g, np.nan))
+            self._g_i_min[g] .append(rec.dso_group_i_meas_min_pct .get(g, np.nan))
+            self._g_q_der[g]     .append(rec.dso_group_q_der_meas_mvar.get(g, np.nan))
+            self._g_q_der_min[g] .append(rec.dso_group_q_der_meas_min_mvar.get(g, np.nan))
+            self._g_q_der_max[g] .append(rec.dso_group_q_der_meas_max_mvar.get(g, np.nan))
 
         # Per-trafo data — discover trafo keys lazily
-        for trafo_key in list(rec.dso_trafo_q_actual_mvar.keys()) + list(rec.dso_trafo_tap_pos.keys()):
+        for trafo_key in list(rec.dso_trafo_q_meas_mvar.keys()) + list(rec.dso_trafo_tap_pos.keys()):
             if trafo_key not in self._trafo_q_actual:
                 # Bucket by DSO id (first segment before "|")
                 dso_id = trafo_key.split("|", 1)[0]
@@ -277,14 +277,14 @@ class CascadeDSOLivePlotter:
                 self._trafo_q_cap_max [trafo_key] = [np.nan] * (len(self._t_dso))
 
         if rec.dso_active or any(
-            (k in rec.dso_trafo_q_actual_mvar) for k in self._trafo_q_actual.keys()
+            (k in rec.dso_trafo_q_meas_mvar) for k in self._trafo_q_actual.keys()
         ):
             self._t_dso.append(t_unit)
             for trafo_key in self._trafo_q_actual.keys():
                 self._trafo_q_set     [trafo_key].append(
                     rec.dso_trafo_q_set_mvar     .get(trafo_key, np.nan))
                 self._trafo_q_actual  [trafo_key].append(
-                    rec.dso_trafo_q_actual_mvar  .get(trafo_key, np.nan))
+                    rec.dso_trafo_q_meas_mvar    .get(trafo_key, np.nan))
                 self._trafo_tap       [trafo_key].append(
                     rec.dso_trafo_tap_pos        .get(trafo_key, np.nan))
                 self._trafo_q_cap_min [trafo_key].append(
@@ -351,7 +351,7 @@ class CascadeDSOLivePlotter:
         ax.clear()
         # Only the first DSO's axis gets the section title.
         if dso_id == self._dso_ids[0]:
-            tile_title(ax, "TSO-DSO Interface Q")
+            tile_title(ax, "TSO-DSO Interface Q (metered / setpoint)")
         num = _dso_num(dso_id)
         # Compact two-line y-label:  "Q_{DS<k>}"  /  "/ Mvar"
         ax.set_ylabel(rf"$Q_{{\mathrm{{DS{num}}}}}$" + "\n/ Mvar")
@@ -439,7 +439,7 @@ class CascadeDSOLivePlotter:
     def _redraw_der_q(self) -> None:
         ax = self._ax_qder
         ax.clear()
-        tile_title(ax, "DSO DER Q per HV Network Group")
+        tile_title(ax, "DSO DER Q per HV Network Group (metered)")
         ax.set_ylabel(r"Q$_\mathrm{DER}$ / Mvar")
         if not self._group_ids:
             _fill_empty(ax, "no DSO DER dispatch available")

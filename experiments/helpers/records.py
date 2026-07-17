@@ -159,7 +159,7 @@ class MultiTSOIterationRecord:
     """
     One timestep's worth of simulation data for the multi-zone TSO/DSO runner.
 
-    Stores per-zone TSO outputs and plant measurements.
+    Stores per-zone TSO outputs, plant truth, and controller measurements.
     DSO outputs are stored in the ``dso_*`` fields (indexed by dso_id string).
     """
 
@@ -190,6 +190,23 @@ class MultiTSOIterationRecord:
     older pickles load; the plotter falls back to ``|zone_v_mean - v_set|``
     when this dict is empty."""
 
+
+    # Noisy, controller-facing TSO measurement snapshot (pre-control).
+    # These fields are intentionally separate from the exact post-control
+    # plant fields above.  Controller/tracking plots must never silently
+    # substitute plant truth when a metered sample is unavailable.
+    zone_v_meas_min:  Dict[int, float] = field(default_factory=dict)
+    zone_v_meas_max:  Dict[int, float] = field(default_factory=dict)
+    zone_v_meas_mean: Dict[int, float] = field(default_factory=dict)
+    zone_v_rms_err_meas_pu: Dict[int, float] = field(default_factory=dict)
+    zone_q_gen_meas: Dict[int, NDArray] = field(default_factory=dict)
+    zone_q_der_meas: Dict[int, NDArray] = field(default_factory=dict)
+    zone_line_loading_meas_max_pct:  Dict[int, float] = field(default_factory=dict)
+    zone_line_loading_meas_mean_pct: Dict[int, float] = field(default_factory=dict)
+    zone_line_loading_meas_min_pct:  Dict[int, float] = field(default_factory=dict)
+    zone_tie_q_meas_mvar: Dict[Tuple[int, int], float] = field(default_factory=dict)
+    gen_q_reserve_meas: Dict[int, NDArray] = field(default_factory=dict)
+    tso_der_q_reserve_meas: Dict[int, NDArray] = field(default_factory=dict)
     # Per-zone stability diagnostic from coordinator
     zone_contraction_lhs: Dict[int, float] = field(default_factory=dict)
 
@@ -208,9 +225,21 @@ class MultiTSOIterationRecord:
     dso_group_v_mean_pu:      Dict[str, float] = field(default_factory=dict)
     dso_group_v_max_pu:       Dict[str, float] = field(default_factory=dict)
 
+    # Noisy, controller-facing DSO measurement snapshot (pre-control).
+    dso_group_q_der_meas_mvar:     Dict[str, float] = field(default_factory=dict)
+    dso_group_q_der_meas_min_mvar: Dict[str, float] = field(default_factory=dict)
+    dso_group_q_der_meas_max_mvar: Dict[str, float] = field(default_factory=dict)
+    dso_group_v_meas_min_pu:       Dict[str, float] = field(default_factory=dict)
+    dso_group_v_meas_mean_pu:      Dict[str, float] = field(default_factory=dict)
+    dso_group_v_meas_max_pu:       Dict[str, float] = field(default_factory=dict)
+    dso_group_i_meas_max_pct:      Dict[str, float] = field(default_factory=dict)
+    dso_group_i_meas_mean_pct:     Dict[str, float] = field(default_factory=dict)
+    dso_group_i_meas_min_pct:      Dict[str, float] = field(default_factory=dict)
+
     # Transformer-level DSO interface and OLTC data
     dso_trafo_q_set_mvar:    Dict[str, float] = field(default_factory=dict)
     dso_trafo_q_actual_mvar: Dict[str, float] = field(default_factory=dict)
+    dso_trafo_q_meas_mvar:   Dict[str, float] = field(default_factory=dict)
     dso_trafo_tap_pos:       Dict[str, int] = field(default_factory=dict)
 
     # DSO-reported PCC Q-capability envelope, in absolute Mvar at the HV side

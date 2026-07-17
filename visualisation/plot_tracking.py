@@ -3,11 +3,11 @@ visualisation/plot_tracking.py
 ==============================
 Live plotter for Figure 4 — TRACKING ERRORS & RESERVES.
 
-Six tiles grouped into two colour-banded sections.  Unlike the
-MULTI-TSO CONTROLLER / CASCADE-DSO / SYSTEM figures (which show the raw
-measured/actuated quantities), this figure shows derived control-performance
-KPIs: how well each control objective is tracked and how much reactive-power
-reserve the continuous actuators retain.
+Six tiles grouped into two colour-banded sections.  Each derived KPI overlays
+two information perspectives: exact post-control plant truth is a solid line,
+while noisy pre-control samples actually presented to the controllers are point
+markers.  The separation exposes both realised performance and the controller's
+perceived tracking error/reactive-power reserve without implying simultaneity.
 
     TRACKING ERRORS (orange)
         1. TS voltage tracking error — spatial RMS of (V − V_set) over each
@@ -101,6 +101,15 @@ class TrackingLivePlotter:
         self._gen_reserve: Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
         self._der_reserve: Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
 
+        # Noisy pre-control controller view, aligned to the truth timeline
+        # with NaN gaps on steps where the respective controller did not sample.
+        self._zone_v_rms_meas: Dict[int, List[float]] = {z: [] for z in self._zone_ids}
+        self._agg_v_rms_meas: List[float] = []
+        self._dso_q_rms_meas: Dict[str, List[float]] = {d: [] for d in self._dso_ids}
+        self._tie_rms_meas: List[float] = []
+        self._gen_reserve_meas: Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
+        self._der_reserve_meas: Dict[int, List[np.ndarray]] = {z: [] for z in self._zone_ids}
+
         # ── Figure + GridSpec ────────────────────────────────────────────
         self._fig = plt.figure(figsize=(6.2, 10.0))
         try:
@@ -113,7 +122,7 @@ class TrackingLivePlotter:
             bottom=0.045, left=0.10, right=0.985,
             hspace=0.60,
         )
-        draw_figure_header(self._fig, "Tracking & Reserves")
+        draw_figure_header(self._fig, "Tracking & Reserves - truth post / metered pre")
 
         plot_h = 1.0
         band_h = 0.18
@@ -125,7 +134,7 @@ class TrackingLivePlotter:
 
         # Row 0: TRACKING ERRORS band
         self._ax_band_err = self._fig.add_subplot(gs[0, 0])
-        fill_section_band(self._ax_band_err, "Tracking Errors", COLOUR_MEAS_BAND)
+        fill_section_band(self._ax_band_err, "Tracking errors (truth post / metered pre)", COLOUR_MEAS_BAND)
 
         self._ax_v_zone = self._fig.add_subplot(gs[1, 0])
         self._ax_v_agg  = self._fig.add_subplot(gs[2, 0], sharex=self._ax_v_zone)
@@ -134,7 +143,7 @@ class TrackingLivePlotter:
 
         # Row 5: RESERVES band
         self._ax_band_res = self._fig.add_subplot(gs[5, 0])
-        fill_section_band(self._ax_band_res, "Reserves", COLOUR_ACT_BAND)
+        fill_section_band(self._ax_band_res, "Reserves (truth post / metered pre)", COLOUR_ACT_BAND)
 
         self._ax_res_gen = self._fig.add_subplot(gs[6, 0], sharex=self._ax_v_zone)
         self._ax_res_der = self._fig.add_subplot(gs[7, 0], sharex=self._ax_v_zone)
@@ -179,6 +188,19 @@ class TrackingLivePlotter:
                 den += n
         # Tile 2: system-wide voltage RMS error (bus-count-weighted aggregate).
         self._agg_v_rms.append(float(np.sqrt(num / den)) if den > 0 else float("nan"))
+        v_rms_meas = getattr(rec, "zone_v_rms_err_meas_pu", {})
+        num_meas, den_meas = 0.0, 0
+        for z in self._zone_ids:
+            r_meas = float(v_rms_meas.get(z, float("nan")))
+            self._zone_v_rms_meas[z].append(r_meas)
+            n = self._n_v_bus.get(z, 0)
+            if np.isfinite(r_meas) and n > 0:
+                num_meas += n * r_meas * r_meas
+                den_meas += n
+        self._agg_v_rms_meas.append(
+            float(np.sqrt(num_meas / den_meas))
+            if den_meas > 0 else float("nan")
+        )
 
         # Tile 3: per-DSO interface-Q RMS tracking error over the DSO's trafos.
         for dso in self._dso_ids:
@@ -192,6 +214,18 @@ class TrackingLivePlotter:
                 float(np.sqrt(np.mean(np.square(errs)))) if errs else float("nan")
             )
 
+        q_iface_meas = getattr(rec, "dso_trafo_q_meas_mvar", {})
+        for dso in self._dso_ids:
+            errs_meas: List[float] = []
+            for key in self._dso_trafo_keys.get(dso, []):
+                q_set = rec.dso_trafo_q_set_mvar.get(key)
+                q_meas = q_iface_meas.get(key)
+                if q_set is not None and q_meas is not None:
+                    errs_meas.append(float(q_meas) - float(q_set))
+            self._dso_q_rms_meas[dso].append(
+                float(np.sqrt(np.mean(np.square(errs_meas))))
+                if errs_meas else float("nan")
+            )
         # Tile 4: tie-line Q RMS tracking error over all inter-zone tie groups.
         tie_errs: List[float] = []
         for pair in self._tie_pairs:
@@ -201,6 +235,18 @@ class TrackingLivePlotter:
         self._tie_rms.append(
             float(np.sqrt(np.mean(np.square(tie_errs)))) if tie_errs else float("nan")
         )
+        tie_errs_meas: List[float] = []
+        tie_q_meas = getattr(rec, "zone_tie_q_meas_mvar", {})
+        for pair in self._tie_pairs:
+            q_meas = tie_q_meas.get(pair)
+            if q_meas is not None:
+                tie_errs_meas.append(
+                    float(q_meas) - float(self._tie_ref.get(pair, 0.0))
+                )
+        self._tie_rms_meas.append(
+            float(np.sqrt(np.mean(np.square(tie_errs_meas))))
+            if tie_errs_meas else float("nan")
+        )
 
         # Tiles 5 & 6: per-element reserve arrays (NaN-padded downstream).
         for z in self._zone_ids:
@@ -209,6 +255,16 @@ class TrackingLivePlotter:
             )
             self._der_reserve[z].append(
                 np.asarray(rec.tso_der_q_reserve.get(z, []), dtype=float)
+            )
+            self._gen_reserve_meas[z].append(
+                np.asarray(
+                    getattr(rec, "gen_q_reserve_meas", {}).get(z, []), dtype=float
+                )
+            )
+            self._der_reserve_meas[z].append(
+                np.asarray(
+                    getattr(rec, "tso_der_q_reserve_meas", {}).get(z, []), dtype=float
+                )
             )
 
         self._call_count += 1
@@ -223,9 +279,9 @@ class TrackingLivePlotter:
         self._redraw_q_dso()
         self._redraw_q_tie()
         self._redraw_reserve(self._ax_res_gen, self._gen_reserve,
-                             "Synchronous Generator Q Reserve")
+                             self._gen_reserve_meas, "Synchronous Generator Q Reserve")
         self._redraw_reserve(self._ax_res_der, self._der_reserve,
-                             "TSO DER Q Reserve")
+                             self._der_reserve_meas, "TSO DER Q Reserve")
         for ax in self._plot_axes:
             apply_x_fmt(ax, sub_minute=self._sub_minute)
         # Shared-x cleanup (mirrors TSOControllerLivePlotter._redraw).
@@ -247,7 +303,9 @@ class TrackingLivePlotter:
         t = np.asarray(self._t_all, dtype=float)
         for i, z in enumerate(self._zone_ids):
             ax.plot(t, np.asarray(self._zone_v_rms[z], dtype=float),
-                    color=_c(i + 1), lw=1.1, label=f"Z{z}")
+                    color=_c(i + 1), lw=1.1, label=f"Z{z} truth")
+            ax.plot(t, np.asarray(self._zone_v_rms_meas[z], dtype=float),
+                    color=_c(i + 1), ls="none", marker=".", ms=3, label=f"Z{z} measured")
         ax.set_ylabel(r"V RMS err / p.u.")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper left", fontsize=7,
@@ -259,7 +317,9 @@ class TrackingLivePlotter:
         tile_title(ax, "TS Voltage Tracking Error (System RMS)")
         t = np.asarray(self._t_all, dtype=float)
         ax.plot(t, np.asarray(self._agg_v_rms, dtype=float),
-                color=_c(8), lw=1.3, label="all zones")
+                color=_c(8), lw=1.3, label="truth post-control")
+        ax.plot(t, np.asarray(self._agg_v_rms_meas, dtype=float),
+                color=_c(8), ls="none", marker=".", ms=3, label="measured pre-control")
         ax.set_ylabel(r"V RMS err / p.u.")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper left", fontsize=7, frameon=False)
@@ -277,7 +337,9 @@ class TrackingLivePlotter:
         t = np.asarray(self._t_all, dtype=float)
         for i, dso in enumerate(self._dso_ids):
             ax.plot(t, np.asarray(self._dso_q_rms[dso], dtype=float),
-                    color=_c(i + 1), lw=1.1, label=dso)
+                    color=_c(i + 1), lw=1.1, label=f"{dso} truth")
+            ax.plot(t, np.asarray(self._dso_q_rms_meas[dso], dtype=float),
+                    color=_c(i + 1), ls="none", marker=".", ms=3, label=f"{dso} measured")
         ax.set_ylabel(r"Q RMS err / Mvar")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper left", fontsize=7,
@@ -295,7 +357,9 @@ class TrackingLivePlotter:
             return
         t = np.asarray(self._t_all, dtype=float)
         ax.plot(t, np.asarray(self._tie_rms, dtype=float),
-                color=_c(8), lw=1.3, label="all tie lines")
+                color=_c(8), lw=1.3, label="truth post-control")
+        ax.plot(t, np.asarray(self._tie_rms_meas, dtype=float),
+                color=_c(8), ls="none", marker=".", ms=3, label="measured pre-control")
         ax.set_ylabel(r"Q RMS err / Mvar")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper left", fontsize=7, frameon=False)
@@ -304,6 +368,7 @@ class TrackingLivePlotter:
         self,
         ax: plt.Axes,
         arrs_per_zone: Dict[int, List[np.ndarray]],
+        measured_per_zone: Dict[int, List[np.ndarray]],
         title: str,
     ) -> None:
         ax.clear()
@@ -314,21 +379,44 @@ class TrackingLivePlotter:
         color_idx = 0
         any_line = False
         for z in self._zone_ids:
-            arrs = arrs_per_zone[z]
-            n = max((a.size for a in arrs), default=0)
+            truth_arrs = arrs_per_zone[z]
+            measured_arrs = measured_per_zone[z]
+            n = max(
+                max((a.size for a in truth_arrs), default=0),
+                max((a.size for a in measured_arrs), default=0),
+            )
             if n == 0:
                 continue
-            series = np.full((len(arrs), n), np.nan)
-            for r, a in enumerate(arrs):
-                if a.size > 0:
-                    series[r, :a.size] = a
+            truth = np.full((len(truth_arrs), n), np.nan)
+            measured = np.full((len(measured_arrs), n), np.nan)
+            for row, values in enumerate(truth_arrs):
+                if values.size > 0:
+                    truth[row, :values.size] = values
+            for row, values in enumerate(measured_arrs):
+                if values.size > 0:
+                    measured[row, :values.size] = values
             for k in range(n):
-                ax.plot(t, series[:, k], color=_c(color_idx), lw=0.9, alpha=0.85)
+                color = _c(color_idx)
+                ax.plot(t, truth[:, k], color=color, lw=0.9, alpha=0.85)
+                ax.plot(
+                    t, measured[:, k], color=color,
+                    ls="none", marker=".", ms=3, alpha=0.8,
+                )
                 color_idx += 1
                 any_line = True
         ax.set_ylabel(r"$r_Q$ / -")
         ax.grid(True, alpha=0.3)
-        if not any_line:
+        if any_line:
+            ax.legend(
+                handles=[
+                    plt.Line2D([0], [0], color="0.3", lw=1.0,
+                               label="truth post-control"),
+                    plt.Line2D([0], [0], color="0.3", ls="none", marker=".",
+                               label="measured pre-control"),
+                ],
+                loc="upper left", fontsize=7, frameon=False,
+            )
+        else:
             ax.text(0.5, 0.5, "no elements",
                     transform=ax.transAxes, ha="center", va="center",
                     color="gray", fontsize=8, style="italic")

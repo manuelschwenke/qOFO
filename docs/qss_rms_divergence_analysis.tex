@@ -1,0 +1,855 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{graphicx}
+\usepackage{longtable}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[hidelinks]{hyperref}
+
+\sisetup{detect-weight=true,detect-family=true}
+
+\newcommand{\pu}{\ensuremath{\mathrm{p.u.}}}
+\newcommand{\Mvar}{\ensuremath{\mathrm{Mvar}}}
+\newcommand{\qss}{\textsc{qss}}
+\newcommand{\rms}{\textsc{rms}}
+
+\title{On the divergence between the quasi-steady-state and RMS
+representations of a hierarchical reactive-power control cascade\\[2mm]
+\large Candidate causes, experimental elimination, and the residual mechanism}
+\author{}
+\date{2026--07--25}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The quasi-steady-state (\qss) substitution premise underlying the two-layer
+online feedback optimisation (OFO) cascade asserts that the reactive-power
+plant may be represented by an algebraic power-flow solution rather than by
+its electromechanical dynamics. Testing this premise against a PowerFactory
+\rms{} model of a modified IEEE~39-bus system revealed a persistent
+divergence between the two representations, concentrated in one distribution
+underlay. This report enumerates the candidate causes, documents the
+experiments used to eliminate them, and reports the residual mechanism. The
+outcome is that the two plant models are equivalent to
+\SI{0.106}{\Mvar} when the DER reactive-power droop is continuous, and that
+the divergence is created by the \emph{dead zone} of the droop
+characteristic, which admits more than one self-consistent equilibrium. Both
+the \qss{} operating point and the point reached by the \rms{} trajectory are
+shown to be valid equilibria of the same \rms{} differential-algebraic model.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Setting and notation}
+
+\subsection{Plant and control hierarchy}
+
+The test system is a modified IEEE~39-bus network (scenario
+\texttt{wind\_replace}) partitioned into three transmission control zones,
+each of which hosts high-voltage underlays denoted $\mathrm{DSO}_1 \dots
+\mathrm{DSO}_4$. Layer~1 (transmission) dispatches AVR set-points, on-load
+tap changers (OLTC), switched shunts and transmission-connected DER every
+\SI{180}{\second}. Layer~2 (\SI{110}{\kilo\volt}) tracks the reactive-power
+set-point issued at the transmission--distribution interface using local
+OLTCs and DER every \SI{20}{\second}. Both layers are mixed-integer
+quadratic programmes acting on cached sensitivities; neither controller has
+access to the plant equations.
+
+Two plant realisations are compared under an identical controller stack:
+
+\begin{description}
+  \item[\qss{} plant] a \texttt{pandapower} power flow with an anchored ZIP
+        load model, solved to convergence at each dispatch instant
+        (\texttt{run\_control=True}, i.e.\ the local droop loops are iterated
+        to their fixed point);
+  \item[\rms{} plant] a PowerFactory \rms{} time-domain model with WECC
+        converter models (REGC/REEC), synchronous-machine AVRs and
+        governors, integrated continuously between dispatch instants.
+\end{description}
+
+\subsection{The reactive-power droop law}
+
+Each of the 44 DER parks realises a re-anchored, vertically shifted $Q(V)$
+characteristic. With $S_n$ the park rating, $\sigma$ the droop slope,
+$\delta$ the dead-zone half-width, $q^{\mathrm{set}}$ the OFO command and
+$V^{\mathrm{a}}$ the anchor voltage,
+%
+\begin{equation}
+  Q \;=\; \operatorname{clip}\!\Big(
+    q^{\mathrm{set}} - \tfrac{S_n}{\sigma}\,
+    \mathrm{dz}_{\delta}\!\left(V - V^{\mathrm{a}}\right),\;
+    Q_{\min},\, Q_{\max}\Big),
+  \label{eq:droop}
+\end{equation}
+%
+where the dead-zone operator is
+%
+\begin{equation}
+  \mathrm{dz}_{\delta}(x) =
+  \begin{cases}
+    x-\delta, & x > \delta,\\
+    0, & |x| \le \delta,\\
+    x+\delta, & x < -\delta .
+  \end{cases}
+  \label{eq:deadzone}
+\end{equation}
+%
+At every dispatch instant both plants re-anchor $V^{\mathrm{a}} \leftarrow V$
+and write the new offset $q^{\mathrm{set}}$, so that the droop contribution
+is reset to zero and $Q = q^{\mathrm{set}}$ holds instantaneously; the droop
+subsequently acts only on deviations from that operating point. Nominal
+parameters are $\sigma = 0.06$, $\delta = 0.01\,\pu$.
+
+In the \rms{} model, \eqref{eq:droop} is implemented as a DSL block in the
+plant-control slot of the WECC composite,
+%
+\begin{equation}
+  \dot{x}_1 = \frac{u - x_1}{T_f}, \qquad
+  Q^{\mathrm{ext}} = \operatorname{clip}\!\big(
+  q^{\mathrm{set}} - K_{\mathrm{droop}}\,
+  \mathrm{dz}_{\delta}(x_1 - V^{\mathrm{a}}),\,
+  q_{\min},\, q_{\max}\big),
+  \label{eq:qvpre}
+\end{equation}
+%
+with $K_{\mathrm{droop}} = 1/\sigma$ in per-unit of the park rating and
+$T_f = \SI{0.02}{\second}$. The filter constant is three orders of magnitude
+below the \SI{20}{\second} dispatch window, so at a dispatch instant
+$x_1 = u$ to numerical precision and \eqref{eq:qvpre} reduces exactly to
+\eqref{eq:droop}.
+
+\subsection{Metric}
+
+Unless stated otherwise the reported quantity is the root-mean-square
+deviation between the \qss{} and \rms{} realisations of the twelve
+transmission--distribution interface reactive-power flows, evaluated over a
+common horizon of 15 dispatch intervals ($\SI{300}{\second}$, $n = 180$
+samples). Using a fixed horizon is essential: the deviation grows with time,
+so runs of different length are not comparable.
+
+%======================================================================
+\section{The observation}
+
+Under closed-loop co-simulation with time-varying profiles, the two
+representations do not track one another. The deviation is concentrated in
+$\mathrm{DSO}_4$, whose DER reactive power diverges monotonically from
+$\SI{2.9}{\Mvar}$ at $t=\SI{20}{\second}$ to $\SI{48}{\Mvar}$ after three
+hours, after which it saturates. The remaining underlays exhibit a
+transient deviation at the first profiled interval which subsequently
+self-corrects. Because both plants are driven by one controller stack of
+identical construction, and because the initial states agree to
+$1.5\times10^{-5}\,\pu$, this behaviour requires explanation.
+
+%======================================================================
+\section{Candidate causes}
+
+Four classes of explanation were considered. They are listed here in the
+order in which they were tested, which is roughly the order of increasing
+subtlety.
+
+\begin{description}
+  \item[\textbf{A. Command delivery.}] The \rms{} plant receives controller
+        commands as discrete simulation events. If events are delivered
+        late, partially, or not at all, the \rms{} plant executes a
+        different input trajectory than the \qss{} plant, and no statement
+        about plant equivalence can be made.
+  \item[\textbf{B. Effective control law.}] The two implementations might
+        realise different laws despite sharing the label ``$Q(V)$
+        droop'': a different regulated voltage (remote, compensated, or
+        filtered), proportional--integral rather than droop action,
+        different gain normalisation, different limits, or a different load
+        model. A related structural difference is the representation of
+        primary frequency control.
+  \item[\textbf{C. Numerical and initialisation effects.}] The \qss{}
+        solution is obtained by a damped fixed-point iteration from a
+        warm start. A different warm start, a different damping factor, or a
+        different initial anchor could select a different numerical
+        solution.
+  \item[\textbf{D. Structural properties of the closed loop.}] The \rms{}
+        endpoint might not be an equilibrium at all; more than one
+        equilibrium might exist; or the two independent control loops might
+        amplify an arbitrarily small plant difference.
+\end{description}
+
+%======================================================================
+\section{Experimental elimination}
+
+\subsection{A. Command delivery}
+
+\paragraph{Event starvation.} PowerFactory admits newly created simulation
+events into a running \rms{} calculation at a bounded rate. With profiles
+enabled, approximately 177 events per dispatch interval were created, so the
+backlog grew by roughly one interval per interval; events scheduled beyond
+$t\approx\SI{300}{\second}$ of a \SI{600}{\second} run never executed. This
+was established by row-exact forensics on the event folder and result file
+of an affected run. The defect was removed by pre-creating a persistent event
+pool before the calculation starts and by delivering exogenous profiles
+through \texttt{ElmFile} playback rather than as events.
+
+\paragraph{Re-anchor and offset delivery.} Each dispatch writes \emph{two}
+parameter events per park: the offset $q^{\mathrm{set}}$ and the anchor
+$V^{\mathrm{a}}$. Partial delivery of this pair would apply a new offset
+against a stale anchor, injecting a spurious droop term
+$K_{\mathrm{droop}}(V - V^{\mathrm{a}}_{\text{old}})$; at
+$K_{\mathrm{droop}} = 16.7$ a stale anchor of $0.01\,\pu$ corresponds to a
+reactive-power error of $17\%$ of park rating. The anchor signal is not
+recorded in the standard monitor set, so this could not be excluded from
+existing results.
+
+A dedicated probe issued known dispatches and read the parameters back from
+the DSL block (\texttt{c:qset}, \texttt{c:Vanchor}, \texttt{c:Kdroop},
+\texttt{c:db}), then compared the delivered reactive power against
+\eqref{eq:qvpre} evaluated with the parameters the simulator actually holds.
+Results are given in Table~\ref{tab:delivery}. Both parameters are delivered
+exactly, on all 44 parks, in every dispatch, under production
+(\texttt{ElmFile}) and under the legacy event-based profile delivery. The
+event pool showed no admission backlog
+(\texttt{pending\_admission}~$=0$) with $5.2\times10^4$ objects present.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Delivery of the re-anchor pair, 44 parks $\times$ 6 dispatches.
+  $r_Q$ is the residual of the assumed law evaluated with the parameters
+  held by the simulator.}
+  \label{tab:delivery}
+  \begin{tabular}{lccc}
+    \toprule
+    Profile delivery & $\max|\Delta q^{\mathrm{set}}|$ [\pu] &
+    $\max|\Delta V^{\mathrm{a}}|$ [\pu] & $\max |r_Q|$ [\Mvar] \\
+    \midrule
+    none                       & $0$                  & $0$ & $0.212$ \\
+    \texttt{ElmFile} (production) & $1.4\times10^{-17}$ & $0$ & $0.043$ \\
+    events (legacy, stress)    & $1.4\times10^{-17}$   & $0$ & $0.043$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The residual $r_Q \le \SI{0.043}{\Mvar}$ on parks rated several hundred
+\si{\mega\volt\ampere} ($\approx 0.01\%$) is attributable to the difference
+between the instantaneous terminal voltage used in the check and the
+filtered state $x_1$ of \eqref{eq:qvpre} while the plant is still settling
+within the advance. Its magnitude does not grow across dispatches.
+
+\emph{Conclusion:} commands are delivered intact, and the \rms{} model
+implements the assumed law. Class~A is eliminated.
+
+\subsection{B. Effective control law}
+
+Each candidate mismatch was checked against the implementation and, where
+possible, against measurement. Table~\ref{tab:law} summarises.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Candidate law mismatches and their disposition.}
+  \label{tab:law}
+  \begin{tabular}{p{0.32\linewidth}p{0.50\linewidth}c}
+    \toprule
+    Candidate & Finding & Status \\
+    \midrule
+    Remote or pilot-node voltage &
+    \rms{} reads the park's own terminal (\texttt{bus1.cterm}); \qss{} reads
+    the same bus; parity $1.5\times10^{-5}$ & excluded \\
+    Compensated voltage ($X_c$) &
+    $v_{\mathrm{eff}} = x_1 - V^{\mathrm{a}}$ contains no current term &
+    excluded \\
+    Filtered voltage &
+    $T_f = \SI{0.02}{\second} \ll \SI{20}{\second}$; no steady-state lag &
+    excluded \\
+    PI regulator instead of droop &
+    the DSL block has no integrator on the control path; both sides permit
+    $V \neq V_{\mathrm{ref}}$ & excluded \\
+    Gain normalisation &
+    $K_{\mathrm{droop}} = 1/\sigma$ equals $S_n/\sigma$ in per-unit &
+    excluded \\
+    Dead zone &
+    identical parameter on both sides & \emph{shared, see \S\ref{sec:mech}} \\
+    Reactive limits &
+    mirrored from one capability function; diagnostic runs use a
+    $\pm1.0\,\pu$ box so limits do not bind & excluded \\
+    Load model &
+    anchored ZIP on both sides & excluded \\
+    Discrete states (taps, shunts) &
+    zero tap divergences in the converged configuration & excluded \\
+    Primary frequency control &
+    \qss{} uses a distributed slack ($\Delta P \propto S_n$, no frequency
+    state); \rms{} uses non-uniform governors & \textbf{structural,
+    bounded} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The frequency representation is a genuine structural difference and cannot
+be excluded by inspection. It is, however, bounded by the open-loop
+experiment of \S\ref{sec:uy}: with a continuous droop the two plants agree
+to \SI{0.106}{\Mvar} under identical inputs, which bounds the aggregate
+contribution of all remaining structural differences, frequency included.
+
+\subsection{C. Numerical and initialisation effects}
+
+Three experiments were carried out on the \qss{} side alone, and are
+therefore free of any \rms{} interaction.
+
+\paragraph{Warm-start dependence.} The closed-loop iteration was started
+from three initial conditions: the analytical linear warm start, zero
+reactive power, and the reactive power at which the \rms{} model settles.
+All three converge to the same point
+($\{26.7,\,13.3,\,7.5,\,22.8\}\,\Mvar$ per underlay), including the start
+placed exactly at the \rms{} solution. The \qss{} equilibrium is therefore
+independent of the warm start; the warm start accelerates convergence but
+does not select the solution.
+
+\paragraph{Damping dependence.} The local loop implements
+$Q \leftarrow Q + \lambda\,(Q^{\star}(V) - Q)$, whose fixed points are
+independent of $\lambda$. Sweeping $\lambda \in \{0.5, 0.1, 0.02\}$ from
+both starting points confirms this: all convergent cases reach the same
+point (residual $\approx \SI{0.09}{\Mvar}$). At $\lambda = 0.5$ the
+iteration fails to converge and exhibits a limit cycle of approximately
+\SI{17}{\Mvar} peak-to-peak with identical amplitude from both starts,
+i.e.\ one cycle rather than a second attractor.
+
+\paragraph{Initial anchor mismatch.} Prior to the first dispatch the \qss{}
+droop falls back to a nominal anchor of $1.03\,\pu$, whereas the \rms{}
+model is anchored at the local terminal voltage ($\approx 1.02\,\pu$).
+A configuration option was implemented to anchor both sides at the local
+voltage at initialisation. The resulting change is negligible: the
+$\mathrm{DSO}_4$ deviation after \SI{600}{\second} is \SI{-18.3}{\Mvar}
+without and \SI{-19.5}{\Mvar} with the correction.
+
+\emph{Conclusion:} class~C is eliminated. The \qss{} solution is not an
+artefact of warm start, damping, or initial anchoring.
+
+\subsection{D.1 Stationarity of the RMS endpoint}
+\label{sec:hold}
+
+A simulation end time does not prove an equilibrium, and the system's
+electromechanical modes ring for \SIrange{13}{22}{\second} against a
+\SI{20}{\second} dispatch interval. The following test was therefore
+carried out. The \qss{} plant was advanced to a profiled operating point and
+its \emph{closed-loop} problem converged there, so that the droop is at its
+fixed point. PowerFactory was synchronised to that state, initialised, and
+then advanced for \SI{300}{\second} with no dispatch, no profile step and no
+disturbance of any kind. Drift was monitored on bus voltages, park reactive
+power, machine reactive power and machine speed.
+
+The worst bus-voltage drift over \SI{300}{\second} is
+$6.17\times10^{-11}\,\pu$, and it is flat: $6.11\times10^{-11}$ is already
+reached after the first \SI{20}{\second} chunk. Reactive powers and machine
+speeds do not move within printing precision. This test was run at the
+nominal dead zone $\delta = 0.01\,\pu$, i.e.\ in the configuration in which
+the closed loop diverges.
+
+\emph{Conclusion:} the \qss{} operating point \emph{is} an equilibrium of
+the \rms{} differential-algebraic model. Class~D.1 is eliminated.
+
+%======================================================================
+\section{The residual mechanism}
+\label{sec:mech}
+
+\subsection{Uniqueness of the continuous droop}
+
+For a continuous droop the equilibrium is unique. Writing the network
+response as $V = V_0 + S_{VQ} Q$ with $S_{VQ} = \partial V/\partial Q > 0$
+and the control law without dead zone as
+$Q = q^{\mathrm{set}} - R\,(V - V^{\mathrm{a}})$, $R = S_n/\sigma > 0$,
+elimination gives
+%
+\begin{equation}
+  Q\,\big(1 + R\,S_{VQ}\big)
+  \;=\;
+  q^{\mathrm{set}} - R\,\big(V_0 - V^{\mathrm{a}}\big),
+  \label{eq:unique}
+\end{equation}
+%
+and since $R S_{VQ} > 0$ the coefficient never vanishes. A steeper droop
+increases the loop gain $R S_{VQ}$ and may render the fixed-point
+\emph{iteration} oscillatory, but it does not create a second solution.
+
+\subsection{Effect of the dead zone}
+
+The dead zone destroys this argument, and does so even though it is
+implemented identically in both models. Inside the dead zone the control law
+reduces to $Q = q^{\mathrm{set}}$, independent of $V$: the park becomes a
+constant reactive-power source and \eqref{eq:unique} no longer constrains
+the voltage. The equilibrium condition is thus piecewise, and near an edge
+$|V - V^{\mathrm{a}}| \approx \delta$ the in-band and out-of-band branches
+can both be self-consistent. Which branch a park occupies is itself part of
+the solution, and with 44 parks the number of admissible branch combinations
+is large.
+
+This is the central point, and it differs from the usual framing: the
+divergence does not arise because the two models contain \emph{different}
+dead zones, but because they contain the \emph{same} one. A correctly
+implemented, shared dead zone is by itself sufficient to admit more than one
+equilibrium.
+
+\subsection{Which excursion actually reaches the dead-zone edge}
+\label{sec:excursion}
+
+The argument of the preceding subsection is necessary but not sufficient: it
+establishes that multiple branches \emph{can} exist, not that the system
+visits them. A screening of the \qss{} plant alone settles this and, in
+doing so, corrects a plausible but incorrect reading of the mechanism.
+
+Running the static closed loop over a three-hour profiled horizon and
+recording, for every dispatch interval and park, the excursion from the
+anchor set at that dispatch,
+$\mathrm{exc}(i,k) = |V_i(t_{k+1}) - V^{\mathrm{a}}_i(t_k)|$, gives a
+maximum of $0.00828\,\pu$ over $4.7\times10^4$ park-intervals, with the
+$99$th percentile at $0.00178\,\pu$. At the nominal dead zone
+$\delta = 0.01\,\pu$ the \qss{} droop therefore \emph{never} engages. Since a
+dormant droop implies $Q \equiv q^{\mathrm{set}}$ and hence identical
+injections, the divergence cannot be explained by the two plants selecting
+different branches of the same characteristic.
+
+The resolution is that the \emph{dynamic} excursion of the \rms{} model is
+substantially larger than the quasi-static displacement, because the
+integration passes through the electromechanical transient rather than
+jumping to the algebraic solution. Evaluating the same statistic on the
+harvested \rms{} terminal voltages gives the values in
+Table~\ref{tab:excursion}.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Maximum per-interval voltage excursion in the \rms{} model,
+  compared with the $\delta$-independent quasi-static value of
+  $0.00828\,\pu$, and the resulting plant residual.}
+  \label{tab:excursion}
+  \begin{tabular}{lcccc}
+    \toprule
+    $\delta$ [\pu] & \rms{} max excursion [\pu] & ratio to $\delta$ &
+    crossing rate & plant residual [\Mvar]\\
+    \midrule
+    $0$      & $0.00227$ & ---    & ---      & $0.362$\\
+    $0.0025$ & $0.00452$ & $1.81$ & $20.9\%$ & $0.289$\\
+    $0.005$  & $0.00695$ & $1.39$ & $12.7\%$ & $0.288$\\
+    $0.0075$ & $0.00968$ & $1.29$ & $10.9\%$ & $0.592$\\
+    $0.01$   & $0.01256$ & $1.26$ & $8.8\%$  & $0.690$\\
+    $0.015$  & $0.01912$ & $1.27$ & $7.0\%$  & $8.352$\\
+    $0.02$   & $0.02384$ & $1.19$ & $5.3\%$  & $8.851$\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Two regularities emerge. First, the \rms{} excursion is essentially
+\emph{set} by the dead zone, $\mathrm{exc}_{\max} \approx 1.2$--$1.3\,\delta$
+for $\delta \ge 0.005\,\pu$: the voltage drifts unopposed until it clears the
+dead zone, at which point the droop engages and arrests it. The dead-zone
+half-width therefore prescribes the amplitude of the dynamic voltage swing.
+Second, the quasi-static displacement is $\delta$-independent at
+$0.00828\,\pu$, because the algebraic model has no transient to damp.
+
+At $\delta = 0.01\,\pu$ the droop consequently engages in $8.8\%$ of
+\rms{} park-intervals and in none of the \qss{} ones. The two plants then
+apply different reactive power in response to identical commands, which is
+the immediate origin of the residual.
+
+Within the reference operating condition these figures suggested a screening
+criterion requiring no \rms{} simulation, namely $\delta \lesssim
+\max_{i,k}|V_i(t_{k+1}) - V^{\mathrm{a}}_i(t_k)|_{\qss}$, whose right-hand
+side is obtainable from a static run in minutes and evaluates to
+$0.0083\,\pu$ here.
+
+\paragraph{This criterion was tested out of sample and failed.} A
+quasi-static screening across a season\,$\times$\,time-of-day grid showed the
+right-hand side to vary by a factor of $2.52$ over the year
+($0.00812$--$0.02051\,\pu$), so the criterion cannot be a fixed number. The
+prediction was therefore registered in the sharper form: at
+2016-07-15 03:00, where the quasi-static excursion is $0.02051\,\pu$ and the
+\qss{} droop itself engages in $1.48\%$ of park-intervals (against $0\%$ at
+the reference), the reduced \qss/\rms{} asymmetry should give a residual
+\emph{below} the reference \SI{0.69}{\Mvar}. The measured residual is
+\SI{8.28}{\Mvar}, a factor of twelve in the opposite direction. The criterion
+is consequently withdrawn.
+
+The same measurement also excludes the simpler reading that the residual
+follows the \rms{} swing amplitude: at the summer condition the \rms{}
+excursion is \emph{smaller} than at the reference ($0.01032$ versus
+$0.01256\,\pu$) while the residual is twelve times larger. The sign of the
+asymmetry even reverses --- at the reference the \rms{} moves further, at the
+summer condition the quasi-static model does, its algebraic step overshooting
+what the \rms{} attains dynamically within one interval.
+
+A further hypothesis, that the residual is ordered by the \emph{difference}
+between the per-interval displacements of the two representations, was also
+tested out of sample and rejected: at 2016-01-15 03:00 that difference takes
+its smallest measured value ($0.00199\,\pu$, against $0.0043$ at the
+reference) while the residual is \SI{4.90}{\Mvar}, seven times the reference
+value.
+
+\paragraph{The quasi-static excursion orders both axes.} The analyses above
+assumed the quasi-static displacement to be independent of $\delta$. Direct
+measurement refutes that assumption: it varies by a factor of $8.5$ across
+the dead-zone range, because a wider dead zone withholds regulation and
+allows the operating point to travel further within a dispatch interval.
+Recomputing with the measured values places every result obtained so far ---
+seven dead-zone settings at one operating condition, and three operating
+conditions at one dead-zone setting --- on a single monotone curve,
+Table~\ref{tab:unified}.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Plant residual ordered by the quasi-static per-interval voltage
+  excursion. Rows in bold are different \emph{operating conditions} at the
+  nominal $\delta = 0.01\,\pu$; the remainder are dead-zone settings at the
+  reference condition.}
+  \label{tab:unified}
+  \begin{tabular}{ccl}
+    \toprule
+    \qss{} excursion [\pu] & plant residual [\Mvar] & source \\
+    \midrule
+    $0.00255$ & $0.362$ & $\delta = 0$ \\
+    $0.00463$ & $0.289$ & $\delta = 0.0025$ \\
+    $0.00629$ & $0.288$ & $\delta = 0.005$ \\
+    $0.00798$ & $0.592$ & $\delta = 0.0075$ \\
+    $0.00828$ & $0.690$ & $\delta = 0.01$ (reference) \\
+    $\mathbf{0.01573}$ & $\mathbf{4.903}$ & \textbf{2016-01-15 03:00} \\
+    $0.01746$ & $8.352$ & $\delta = 0.015$ \\
+    $\mathbf{0.02051}$ & $\mathbf{8.282}$ & \textbf{2016-07-15 03:00} \\
+    $0.02161$ & $8.851$ & $\delta = 0.02$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The curve is a low plateau of $0.3$--$\SI{0.7}{\Mvar}$ below roughly
+$0.009\,\pu$, a steep transition, and a high plateau of $8$--$\SI{9}{\Mvar}$
+above roughly $0.017\,\pu$. The single departure from monotonicity is at the
+lower end, where $\delta = 0$ gives a slightly larger residual than
+$\delta = 0.0025$; this is the chattering regime discussed in
+\S\ref{sec:design}, in which the undamped droop responds to arbitrarily small
+deviations.
+
+The operating-condition rows constitute an out-of-sample test, since the
+curve is determined entirely by the dead-zone sweep at the reference
+condition. Both are placed correctly: $0.02051\,\pu$ falls on the upper
+plateau (measured \SI{8.28}{\Mvar}) and $0.01573\,\pu$ within the transition
+(measured \SI{4.90}{\Mvar}). The screening criterion is therefore restated as
+an absolute condition on the excursion itself,
+%
+\begin{equation}
+  \max_{i,k}\,\big|V_i(t_{k+1}) - V^{\mathrm{a}}_i(t_k)\big|_{\qss}
+  \;\lesssim\; 0.009\,\pu ,
+  \label{eq:criterion}
+\end{equation}
+%
+rather than as a condition relating $\delta$ to that excursion, which was the
+form rejected above. The left-hand side is obtainable from a static run in
+minutes and requires no \rms{} simulation; both the dead-zone width and the
+operating condition enter through it.
+
+The numerical thresholds in \eqref{eq:criterion} are calibrated on one
+network and one profile year, and the steepness of the transition means that
+excursions between $0.009$ and $0.017\,\pu$ admit no quantitative prediction
+of the residual --- only the statement that it is neither small nor
+saturated.
+
+\subsection{Positive demonstration of multiplicity}
+
+Two facts established above combine into a direct demonstration:
+
+\begin{enumerate}
+  \item the \qss{} operating point is an equilibrium of the \rms{} model
+        (\S\ref{sec:hold}, drift $6.17\times10^{-11}\,\pu$ over
+        \SI{300}{\second});
+  \item the \rms{} model, integrated along the co-simulation trajectory,
+        settles at a \emph{different} point.
+\end{enumerate}
+
+Both points are solutions of the same model. The system therefore possesses
+at least two equilibria, and the trajectory selects between them. This is a
+constructive demonstration rather than an inference by elimination.
+
+%======================================================================
+\section{Quantitative results}
+\label{sec:uy}
+
+\subsection{Plant equivalence under identical inputs}
+
+To separate plant equivalence from control-loop behaviour, the actuator and
+profile trajectory recorded from the \qss{} run was replayed verbatim into
+the \rms{} plant, so that both plants receive identical inputs and no
+controller can react. The resulting residual is a property of the plant
+models alone. It was measured as a function of the dead-zone half-width.
+
+\subsection{Closed-loop deviation and amplification}
+
+The same sweep was repeated in closed loop, i.e.\ with two independent
+controller stacks. The ratio of the closed-loop deviation to the plant
+residual isolates the contribution of control-loop interaction.
+Table~\ref{tab:map} collects both, together with the droop-gain sweep.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Validity map under the $\pm1.0\,\pu$ diagnostic capability
+  override. Interface-Q RMSE over 15 dispatch intervals.}
+  \label{tab:map}
+  \begin{tabular}{lccc}
+    \toprule
+    Configuration & Plant residual [\Mvar] & Closed loop [\Mvar] &
+    Amplification \\
+    \midrule
+    \multicolumn{4}{l}{\emph{Dead-zone sweep} ($\sigma = 0.06$)}\\
+    $\delta = 0$        & $0.106$ & $0.12$ & $1.1$ \\
+    $\delta = 0.005$    & $0.246$ & $0.65$ & $2.6$ \\
+    $\delta = 0.01$     & $0.710$ & $2.11$ & $3.0$ \\
+    $\delta = 0.02$     & $8.906$ & $4.33$ & $0.5$ \\
+    \midrule
+    \multicolumn{4}{l}{\emph{Droop-gain sweep} ($\delta = 0.01$)}\\
+    $\sigma = 0.12$ (half gain)   & $0.710$ & $1.26$ & $1.8$ \\
+    $\sigma = 0.06$ (nominal)     & $0.710$ & $2.11$ & $3.0$ \\
+    $\sigma = 0.03$ (double gain) & $0.710$ & $9.04$ & $12.7$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Three observations follow.
+
+\begin{enumerate}
+  \item \textbf{With a continuous droop the two plant models are
+        equivalent.} At $\delta = 0$ the residual under identical inputs is
+        \SI{0.106}{\Mvar}, which is the numerical floor of the comparison.
+        Any structural mismatch --- including the frequency representation
+        --- is bounded by this figure.
+  \item \textbf{The dead zone is the dominant driver.} The plant residual
+        grows by a factor of approximately $84$ across the range
+        $\delta \in [0, 0.02]$. This is a plant-level effect, present with
+        no controller in the loop.
+  \item \textbf{The control-loop contribution is secondary and changes
+        sign.} For narrow dead zones the two independent loops amplify the
+        plant residual (up to $3\times$, and $12.7\times$ at double droop
+        gain). At $\delta = 0.02$ the amplification falls below unity: the
+        wide dead zone disables local voltage regulation, so under identical
+        inputs nothing holds the two trajectories together, whereas in
+        closed loop the OFO controllers observe the drift and correct it.
+        The curves cross at $\delta \approx 0.0125$.
+\end{enumerate}
+
+\subsection{Consequence for the closed-loop cascade}
+
+Removing the dead zone restores agreement in full closed-loop operation. A
+one-hour co-simulation with $\delta = 0$ yields an interface-Q RMSE of
+\SI{1.03}{\Mvar} and a zone-voltage RMSE of $8.5\times10^{-4}\,\pu$, with no
+unsettled dispatch interval out of 2160 interface-power and 540 voltage
+samples, and no divergence of discrete states.
+
+\subsection{Results under physical capability limits}
+\label{sec:vde}
+
+The results of Table~\ref{tab:map} were obtained with a diagnostic
+$\pm1.0\,\pu$ reactive-capability box, which removes limit binding and
+therefore isolates the droop mechanism. The sweep was repeated under the
+physical VDE-AR-N-4120 and STATCOM operating diagrams on a finer dead-zone
+grid; under those limits several parks saturate and the distribution coupler
+OLTCs become active. Table~\ref{tab:vde} and Figure~\ref{fig:vde} report the
+outcome.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Validity map under physical VDE capability, compared with the
+  $\pm1.0\,\pu$ diagnostic override. Interface-Q RMSE over 15 dispatch
+  intervals, $\sigma = 0.06$.}
+  \label{tab:vde}
+  \begin{tabular}{lccc@{\hskip 8mm}ccc}
+    \toprule
+    & \multicolumn{3}{c}{physical VDE}
+    & \multicolumn{3}{c}{$\pm1.0\,\pu$ diagnostic}\\
+    \cmidrule(lr){2-4}\cmidrule(lr){5-7}
+    $\delta$ [\pu] & floor & closed & amplif.
+                   & floor & closed & amplif.\\
+    \midrule
+    $0$      & $0.362$ & $0.599$ & $1.65$ & $0.106$ & $0.119$ & $1.12$\\
+    $0.0025$ & $0.289$ & $0.493$ & $1.71$ & ---     & ---     & ---   \\
+    $0.005$  & $0.288$ & $0.600$ & $2.09$ & $0.246$ & $0.645$ & $2.63$\\
+    $0.0075$ & $0.592$ & $2.053$ & $3.47$ & ---     & ---     & ---   \\
+    $0.01$   & $0.690$ & $2.099$ & $3.04$ & $0.710$ & $2.113$ & $2.98$\\
+    $0.015$  & $8.352$ & $5.445$ & $0.65$ & ---     & ---     & ---   \\
+    $0.02$   & $8.851$ & $4.206$ & $0.48$ & $8.906$ & $4.325$ & $0.49$\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{../results/p2_validity_map/vde_validity_map.pdf}
+  \caption{Plant equivalence, closed-loop deviation and amplification as
+  functions of the dead-zone half-width, under physical and diagnostic
+  capability models. Logarithmic ordinate in (a) and (b).}
+  \label{fig:vde}
+\end{figure}
+
+Four conclusions follow, of which the third was not anticipated.
+
+\begin{enumerate}
+  \item \textbf{Capability limits raise the plant residual only where the
+        dead zone is inactive.} At $\delta = 0$ the residual increases from
+        \SI{0.106}{\Mvar} to \SI{0.362}{\Mvar} when physical limits are
+        restored, a factor of $3.4$: saturation pins the reactive power of
+        individual parks and thereby removes part of the local voltage
+        regulation. At $\delta \ge 0.01$ the two capability models give
+        indistinguishable residuals ($0.690$ versus $0.710$, and $8.851$
+        versus \SI{8.906}{\Mvar}). Once the dead zone is wide enough, it
+        dominates completely and the capability model is irrelevant.
+  \item \textbf{The degradation is a threshold, not a gradual trend.}
+        Between $\delta = 0.01$ and $\delta = 0.015$ the plant residual
+        rises from \SI{0.690}{\Mvar} to \SI{8.352}{\Mvar}, a factor of
+        $12$ in a single step, while the four points below $\delta = 0.01$
+        remain within a factor of $2.4$ of one another. The finer grid
+        introduced for this sweep was necessary to resolve this; the
+        coarser grid of Table~\ref{tab:map} suggested a smooth power law.
+  \item \textbf{The nominal dead zone lies immediately below the
+        threshold.} The design value $\delta = 0.01\,\pu$ yields a plant
+        residual of \SI{0.690}{\Mvar}, whereas $\delta = 0.015\,\pu$ yields
+        \SI{8.35}{\Mvar}. The quasi-steady-state substitution is therefore
+        admissible at the nominal parameterisation, but without margin: a
+        50\,\% increase of the dead zone invalidates it.
+  \item \textbf{The amplification structure is independent of the
+        capability model.} Both capability regimes peak at
+        $3.0$--$3.5$ near $\delta \approx 0.0075$--$0.01$ and fall below
+        unity between $\delta = 0.01$ and $\delta = 0.015$. The
+        control-loop mechanism of \S\ref{sec:mech} is thus a property of
+        the dead-zone characteristic and not an artefact of the diagnostic
+        capability box under which it was first observed.
+\end{enumerate}
+
+%======================================================================
+\section{The dead zone as a design parameter}
+\label{sec:design}
+
+The preceding sections treat the dead-zone half-width as a property of the
+plant to be respected, not as a quantity to be chosen. It must be
+emphasised that selecting $\delta$ so as to improve the agreement between
+the two models would invert the purpose of the study: the dead zone is a
+grid-code parameter, and if the installed parks operate at
+$\delta = 0.01\,\pu$ then the model must do likewise. The result of
+\S\ref{sec:vde} is a condition on the validity of the method, not a
+recommendation to modify the plant.
+
+If, however, $\delta$ is genuinely a design degree of freedom, the relevant
+criteria are control performance and actuator effort rather than model
+agreement. Table~\ref{tab:design} evaluates both on the \rms{} plant of the
+physical-capability sweep.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Dead zone as a design choice: control performance and actuator
+  effort, physical VDE capability, \rms{} plant, 15 dispatch intervals.
+  Tracking error is $|Q^{\mathrm{act}} - Q^{\mathrm{set}}|$ over the twelve
+  interfaces; travel is the summed inter-dispatch change of DER reactive
+  power per underlay.}
+  \label{tab:design}
+  \begin{tabular}{lcccc}
+    \toprule
+    $\delta$ [\pu] & mean $|e|$ [\Mvar] & max $|e|$ [\Mvar]
+                   & DER-$Q$ travel [\Mvar] & tap switches \\
+    \midrule
+    $0$        & $2.846$ & $6.337$  & $100.8$ & $0$ \\
+    $0.0025$   & $1.242$ & $6.187$  & $104.7$ & $0$ \\
+    $0.005$    & $\mathbf{1.104}$ & $6.250$ & $\mathbf{100.1}$ & $0$ \\
+    $0.0075$   & $1.496$ & $6.815$  & $110.6$ & $0$ \\
+    $0.01$     & $1.652$ & $10.179$ & $126.4$ & $1$ \\
+    $0.015$    & $3.013$ & $16.826$ & $156.2$ & $1$ \\
+    $0.02$     & $2.912$ & $16.828$ & $145.2$ & $1$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Two observations are relevant.
+
+First, the tracking error is minimised at $\delta \approx 0.005\,\pu$, where
+it is $33\%$ below the value at the nominal $\delta = 0.01\,\pu$, at
+essentially unchanged converter travel and without tap operation. The plant
+residual of \S\ref{sec:vde} is minimised at the same width. The two criteria
+therefore agree.
+
+Second, and less intuitively, $\delta = 0$ is a poor operating choice
+despite being the configuration in which the multiplicity of \S\ref{sec:mech}
+disappears: the tracking error degrades to \SI{2.85}{\Mvar}, a factor of
+$2.6$ worse than at $\delta = 0.005\,\pu$. Without a dead zone every park
+applies the full droop gain $K_{\mathrm{droop}} = 16.7$ to arbitrarily small
+voltage deviations, including those arising from the mutual interaction of
+the 44 parks, so the local loops chatter against one another. A narrow dead
+zone suppresses this without materially reducing the regulating action. The
+configuration that is most convenient for model comparison is thus not the
+configuration that controls best, and the two should not be conflated.
+
+The co-simulation is deterministic --- measurement noise is disabled,
+profiles are fixed and the mixed-integer programmes are solved to optimality
+--- so the differences in Table~\ref{tab:design} are exact for this
+configuration rather than samples requiring an error estimate. They
+nevertheless correspond to a single operating point and a \SI{300}{\second}
+window; a recommendation would require the comparison to be repeated across
+operating points and over a full profile day, since a narrower dead zone
+implies response to smaller excursions and hence potentially greater
+converter duty over long horizons.
+
+%======================================================================
+\section{Consequences for the premises}
+
+The premise under test, $y_{\rms}(\infty; u) = y_{\qss}(u)$, must be
+qualified rather than accepted or rejected outright.
+
+\begin{itemize}
+  \item It holds to \SI{0.106}{\Mvar} when the DER characteristic is
+        continuous, and to \SI{0.362}{\Mvar} when physical capability
+        limits are additionally imposed. In that regime the
+        quasi-steady-state substitution is justified, and the closed-loop
+        cascade reproduces the dynamic result.
+  \item Its validity is bounded by a \emph{threshold} in the dead-zone
+        half-width rather than degrading smoothly: at the reference
+        operating condition the plant residual rises by a factor of $12$
+        between $\delta = 0.01$ and $\delta = 0.015\,\pu$.
+  \item \textbf{That threshold is not a property of the system alone.} At a
+        different operating condition (2016-07-15 03:00) the residual is
+        \SI{8.28}{\Mvar} already at $\delta = 0.01\,\pu$, i.e.\ the
+        parameterisation that is admissible at the reference condition is
+        not admissible there. Any statement of the form ``the premise holds
+        for $\delta \le \delta^{\ast}$'' therefore requires the operating
+        condition to be quantified as well; a single-condition study
+        overstates the validity region.
+  \item The nominal design value $\delta = 0.01\,\pu$ lies immediately
+        below the threshold \emph{at the reference condition}, and above it
+        at the summer condition tested. The premise is thus conditional on
+        the operating point, which should be stated explicitly rather than
+        left implicit.
+  \item A separate premise --- that two independently controlled
+        realisations of the same plant remain comparable --- fails
+        independently, with a magnitude proportional to the droop loop gain
+        (up to $12.7\times$ at double gain) and with a structure that is
+        invariant to the capability model.
+\end{itemize}
+
+The practical implication is that the substitution premise should be stated
+with a validity condition on the actuator characteristic, rather than as an
+unconditional property of the timescale separation.
+
+%======================================================================
+\section{Threats to validity}
+
+\begin{itemize}
+  \item All results correspond to a single profile day and one operating
+        point; the dead-zone effect is expected to depend on where the
+        operating point sits relative to the anchor.
+  \item The comparison horizon is \SI{300}{\second} for the sweep and
+        \SI{3600}{\second} for the confirmation run. The deviation grows
+        with time before saturating, so absolute figures are
+        horizon-dependent; the reported ratios are not.
+  \item The demonstration of multiplicity establishes that at least two
+        equilibria exist and that the trajectory selects between them. It
+        does not characterise the basins of attraction, nor does it
+        enumerate the equilibria.
+  \item Stationarity was verified on bus voltages, park and machine
+        reactive power, and machine speed. Limiter states and tap timers
+        were not monitored individually; they are inactive in the
+        configuration tested.
+  \item The frequency representation differs structurally between the two
+        plants. Its contribution is bounded by \SI{0.106}{\Mvar} in the
+        present study, but it would not be negligible in an
+        active-power-dominated investigation.
+\end{itemize}
+
+\end{document}

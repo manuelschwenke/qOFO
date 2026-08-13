@@ -76,10 +76,6 @@ def make_config():
         gw_dso_oltc=140.0,
         gw_dso_shunt=5000.0,
         gw_oltc_cross_dso=0,
-        # DSO integral Q-tracking
-        g_qi=0.1,
-        lambda_qi=0.9,
-        q_integral_max_mvar=50.0,
         # Generator capability
         gen_xd_pu=1.2,
         gen_i_f_max_pu=2.65,

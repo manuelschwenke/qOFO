@@ -24,10 +24,12 @@ easy to reproduce and compare with the literature.
 
 Scenarios
 ---------
-* ``"base"``: all 9 PV generators active, no modifications.
-* ``"reduced_gen_z2"``: removes the ex-slack generator at bus 30 from Zone 2.
-* ``"wind_replace"``: replaces selected generators with STATCOM-capable wind
-  parks (all Zone 2 at half P_mw, 2 each in Zones 1 and 3 at same P_mw).
+Both public scenarios use the validated transmission-side wind replacement:
+
+* ``"base_410"``: 410 MW installed DER in every underlying DSO.
+* ``"rural_700"``: 700 MW installed DER in every underlying DSO.
+
+The capacity selection takes effect when :func:`add_hv_networks` is called.
 
 Usage
 -----
@@ -70,7 +72,7 @@ from network.ieee39.scenarios import SCENARIO_REGISTRY
 def build_ieee39_net(
     *,
     ext_grid_vm_pu: float = 1.03,
-    scenario: str = "base",
+    scenario: str = "base_410",
     verbose: bool = False,
 ) -> Tuple[pp.pandapowerNet, IEEE39NetworkMeta]:
     """
@@ -81,12 +83,10 @@ def build_ieee39_net(
     ext_grid_vm_pu : float
         Voltage setpoint of the slack external grid [p.u.].
     scenario : str
-        Network scenario.  ``"base"`` leaves all generators active.
-        ``"reduced_gen_z2"`` removes the generator at bus 30 (Zone 2),
-        leaving only Gen 1 (bus 31) in that zone.
-        ``"wind_replace"`` replaces generators with STATCOM-capable wind
-        parks: all Zone 2 gens at half P_mw; G1 + G8 in Zone 1 and
-        G4 + G5 in Zone 3 at the same P_mw as the original generators.
+        Public study scenario. ``"base_410"`` and ``"rural_700"`` both
+        apply the validated transmission-side wind replacement and select
+        410 MW or 700 MW installed DER per DSO when
+        :func:`network.ieee39.hv_networks.add_hv_networks` is called.
 
     Returns
     -------
@@ -369,6 +369,16 @@ def build_ieee39_net(
     )
 
     # -- Apply scenario --------------------------------------------------------
+    # Transitional read compatibility for stored configurations. The alias is
+    # deliberately not advertised in SCENARIO_REGISTRY: new studies must use
+    # the installed-capacity name explicitly.
+    if scenario == "wind_replace":
+        import warnings
+        warnings.warn(
+            "scenario='wind_replace' is deprecated; use 'base_410'",
+            DeprecationWarning, stacklevel=2,
+        )
+        scenario = "base_410"
     if scenario not in SCENARIO_REGISTRY:
         raise ValueError(
             f"Unknown scenario: {scenario!r}. "
@@ -377,6 +387,7 @@ def build_ieee39_net(
     apply_fn = SCENARIO_REGISTRY[scenario]
     net, meta = apply_fn(net, meta, ext_grid_vm_pu=ext_grid_vm_pu,
                          new_gen_bus30_idx=_new_gen_bus30_idx)
+    net["ieee39_scenario"] = scenario
 
     if verbose:
         p_load_const = float(

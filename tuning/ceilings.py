@@ -64,6 +64,7 @@ import dataclasses
 import hashlib
 import json
 import math
+import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -162,8 +163,15 @@ def compute_ceilings(
     result = _run_one_step_stability(baseline_cfg)
     ceilings = _ceilings_from_result(result, baseline_cfg)
 
-    with cache_file.open("w") as f:
+    # Write via a per-process temp file + atomic replace.  Two calibration
+    # stages run concurrently against this cache and derive the *same* keys
+    # (the key excludes ``g_w_*``), so a plain ``open("w")`` could leave a
+    # reader in the other process seeing a half-written JSON.  The payload is
+    # deterministic, so whichever replace lands last is equivalent.
+    tmp_file = cache_file.with_suffix(f".{os.getpid()}.tmp")
+    with tmp_file.open("w") as f:
         json.dump(asdict(ceilings), f, indent=2, default=str)
+    os.replace(tmp_file, cache_file)
 
     return ceilings
 

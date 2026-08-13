@@ -554,4 +554,4 @@ of the internal `"sbxv"`; `MultiTSOConfig.sbxv_config` and the
 `sbxv_runtime` hook key unchanged. Historical entries in this file keep
 the old paths. `pytest tests/sbx_h tests/sbx_v` → 165 passed after the
 rename. Details:
-`docs/daily_log/2026-07-10_sbx_h_rename_and_015_helpfulness.md`.
+`docs/daily_log/07_2026/2026-07-10_sbx_h_rename_and_015_helpfulness.md`.

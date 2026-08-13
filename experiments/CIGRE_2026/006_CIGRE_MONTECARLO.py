@@ -240,9 +240,6 @@ def make_cigre_config() -> MultiTSOConfig:
         tso_g_res_sg=0,
         # ── DSO objective tuning ──
         dso_g_v=1E5,  # reduced to avoid competing with Q tracking
-        dso_g_qi=0,  # integral Q-tracking (0 = off)
-        dso_lambda_qi=0.95,  # leaky integrator decay
-        dso_q_integral_max_mvar=200.0,
         dso_gamma_oltc_q=0.0,  # DER-primary, OLTC-backup
         # ── TSO weights (w-shift closed-loop curvature) ──
         g_w_der=100,
@@ -307,7 +304,7 @@ def make_cigre_config() -> MultiTSOConfig:
         contingencies=[
         ],
     )
-    cfg.scenario = "wind_replace"
+    cfg.scenario = "base_410"
     cfg.warmup_s = 0.0
     # Distributed slack: the active-power imbalance after a disturbance (load
     # connection, generator trip) is shared across all machines weighted by
@@ -649,7 +646,7 @@ def _gen_selection_info() -> List[Dict[str, Any]]:
     """Resolve ``GEN_SELECT`` to gen_info dicts annotated with (zone, k_in_zone)
     and capability parameters, via the plot_cigre helpers."""
     from visualisation.plot_cigre import _gen_info_with_k, _select_gens
-    gen_info = _gen_info_with_k("wind_replace")
+    gen_info = _gen_info_with_k("base_410")
     return _select_gens(gen_info, GEN_SELECT)
 
 

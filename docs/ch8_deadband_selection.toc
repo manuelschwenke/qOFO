@@ -1,0 +1,31 @@
+\contentsline {section}{\numberline {1}The parameter and the question}{1}{section.1}%
+\contentsline {subsection}{\numberline {1.1}Plant, actuators, controlled outputs}{2}{subsection.1.1}%
+\contentsline {subsection}{\numberline {1.2}Excitation}{2}{subsection.1.2}%
+\contentsline {section}{\numberline {2}Provenance: the sensitivity reduction was corrected}{2}{section.2}%
+\contentsline {section}{\numberline {3}Windows}{3}{section.3}%
+\contentsline {paragraph}{The screening figures that selected the windows are void.}{3}{section*.2}%
+\contentsline {paragraph}{A deep-import window with capable DER does not exist in this data.}{3}{section*.3}%
+\contentsline {paragraph}{Feasibility is empirical.}{3}{section*.4}%
+\contentsline {subsection}{\numberline {3.1}A degenerate window}{4}{subsection.3.1}%
+\contentsline {section}{\numberline {4}Experiment 1: the profiled sweep, and why it fails}{4}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Result: no optimum can be defined}{4}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Why: the metric is not a function of $\ensuremath {\delta }$}{6}{subsection.4.2}%
+\contentsline {section}{\numberline {5}Experiment 2: measuring the mechanism}{6}{section.5}%
+\contentsline {paragraph}{A normalisation hypothesis, tested and refuted.}{7}{section*.5}%
+\contentsline {section}{\numberline {6}Experiment 3: the threshold, measured directly}{7}{section.6}%
+\contentsline {paragraph}{The excitation is not independent of $\ensuremath {\delta }$.}{8}{section*.6}%
+\contentsline {paragraph}{The threshold is measured on the TS parks.}{8}{section*.7}%
+\contentsline {paragraph}{Large dead bands are unreachable by \emph {uniform} disturbances.}{8}{section*.8}%
+\contentsline {section}{\numberline {7}The design rule}{8}{section.7}%
+\contentsline {subsection}{\numberline {7.1}Worked example: a \SI {0.01}{\ensuremath {\mathrm {p.u.}}} limit}{9}{subsection.7.1}%
+\contentsline {section}{\numberline {8}The dead band as a detector threshold: N-1 evidence}{9}{section.8}%
+\contentsline {subsection}{\numberline {8.1}Why the earlier sections could not find an optimum}{9}{subsection.8.1}%
+\contentsline {subsection}{\numberline {8.2}Method}{10}{subsection.8.2}%
+\contentsline {paragraph}{The disturbance is a transient, and that is the point.}{10}{section*.9}%
+\contentsline {paragraph}{Quasi-static screening cannot select the severe case.}{10}{section*.10}%
+\contentsline {subsection}{\numberline {8.3}The lower bound: what the droop must ignore}{10}{subsection.8.3}%
+\contentsline {subsection}{\numberline {8.4}The upper bound: what the droop must catch}{12}{subsection.8.4}%
+\contentsline {subsection}{\numberline {8.5}Choice of $\ensuremath {\delta }$}{12}{subsection.8.5}%
+\contentsline {paragraph}{Why a quantile and not the maximum.}{12}{section*.11}%
+\contentsline {paragraph}{One dead band, not two.}{12}{section*.12}%
+\contentsline {section}{\numberline {9}Threats to validity}{13}{section.9}%

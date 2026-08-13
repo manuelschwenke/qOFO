@@ -4,26 +4,58 @@ tuning/parameters.py
 Declarative definition of the Bayesian-optimization decision space and
 the mapping between BO param dicts and :class:`MultiTSOConfig` instances.
 
-The BO search space is 8-dimensional.  Three integral-Q-tracking
-parameters (``dso_g_qi``, ``dso_lambda_qi``, ``dso_q_integral_max_mvar``)
-are excluded by user decision (integrator off in this thesis
-configuration).
+The BO search space is 8-dimensional.
 
 ``FIXED_OVERRIDES`` lists fields that are always overwritten when
 applying BO params, regardless of their value in the baseline config:
-live plots disabled, verbose silenced, integral mode off, etc.  This
-guarantees that BO trials are headless and deterministic w.r.t. the
-baseline.
+live plots disabled, verbose silenced, etc.  This guarantees that BO
+trials are headless and deterministic w.r.t. the baseline.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 import math
 from typing import Any
 
 from configs.config import MultiTSOConfig
 from tuning._types import BOParam, Ceilings
+
+
+#: Bumped whenever the *meaning* of a coordinate changes in a way that makes
+#: old trials incomparable, even if the bounds happen to stay the same.
+#: Bounds changes are caught automatically by the fingerprint below; this is
+#: for semantic changes the numbers cannot express.
+SEARCH_SPACE_VERSION: int = 2
+
+
+def search_space_fingerprint() -> str:
+    """Stable digest of the decision space, for storage in ``study.user_attrs``.
+
+    Resuming a study across a change of search space silently mixes trials that
+    were never comparable.  That happened here: every persisted IEEE-39 study
+    records a 9th parameter, ``tso_g_q_tie``, which is not in
+    :data:`BO_DIMS` any more -- and is not even a field of
+    :class:`~configs.config.MultiTSOConfig` (the field is ``tso_g_q_pcc``).
+    Feeding such a study's best-params back through :func:`apply_to_config`
+    raises ``ValueError: Unknown BO params``.
+
+    :func:`tuning.tune.main` compares this digest against the one recorded on
+    the study and refuses to resume on a mismatch.
+    """
+    payload = {
+        "version": SEARCH_SPACE_VERSION,
+        "dims": sorted(
+            (p.name, float(p.low), str(p.high), bool(p.log)) for p in BO_DIMS
+        ),
+        "fixed": sorted(
+            (k, str(v)) for k, v in FIXED_OVERRIDES.items()
+        ),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 # 8 BO dimensions.
@@ -85,11 +117,6 @@ FIXED_OVERRIDES: dict[str, Any] = {
     # re-installed and the BO_DIMS entry is uncommented.
     "g_w_tso_shunt":           50000.0,
 
-
-    # Integral Q-tracking off (user excluded these from BO)
-    "dso_g_qi":                0.0,
-    "dso_lambda_qi":           0.9,
-    "dso_q_integral_max_mvar": 50.0,
 
     # Structural choices, not tuned
     "dso_gamma_oltc_q":        0.0,
@@ -194,5 +221,43 @@ def params_from_config(cfg: MultiTSOConfig) -> dict[str, float]:
     a config.
 
     Useful for warm-starting BO from a known-good config.
+
+    This is a *pure extractor* and deliberately does not validate -- callers
+    that need the config to be reachable by the optimiser should ask
+    :func:`out_of_box_params` and decide what to do about it.
     """
     return {p.name: float(getattr(cfg, p.name)) for p in BO_DIMS}
+
+
+def out_of_box_params(
+    cfg: MultiTSOConfig,
+    ceilings: Ceilings | None = None,
+) -> dict[str, tuple[float, float, float]]:
+    """Config fields that the search space **cannot represent**.
+
+    Returns ``{name: (value, low, high)}`` for every BO dimension whose value
+    in ``cfg`` lies outside its bounds -- i.e. operating points no trial can
+    ever propose.
+
+    This is not hypothetical.  Three independent configurations are all
+    outside the current box on the same two coordinates:
+
+    =========================  ==========  ============  ==================
+    config                     ``g_v``     ``g_w_pcc``   box
+    =========================  ==========  ============  ==================
+    hand-tuned ``make_config``  1e7         80            ``g_v``: [1e2, 1e5]
+    ``baseline_002_ieee39``     1e5 (edge)  100           ``g_w_pcc``: [0.1, 30]
+    ``tests/tuning/conftest``   1.2e5       100
+    =========================  ==========  ============  ==================
+
+    The hand-tuned point is the one you report as controlling well, so the
+    optimiser was searching a region that excluded the only known-good answer.
+    Hard-coding ``--no-warm-start-baseline`` suppressed the symptom.
+    """
+    out: dict[str, tuple[float, float, float]] = {}
+    for p in BO_DIMS:
+        v = float(getattr(cfg, p.name))
+        hi = resolve_high(p, ceilings)
+        if v < p.low or v > hi:
+            out[p.name] = (v, float(p.low), float(hi))
+    return out

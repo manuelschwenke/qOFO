@@ -77,18 +77,14 @@ GEN_NAMEPLATE: Dict[int, Tuple[str, float, str]] = {
 
 
 # ---------------------------------------------------------------------------
-#  SimBench profile empirical means (used for the 50/50 load split)
+#  SimBench profile empirical means (used for active-load normalization)
 # ---------------------------------------------------------------------------
-# Every 345 kV load is split 50 % constant + 50 % profile-driven.  The
-# profile-driven half's ``base_p_mw`` / ``base_q_mvar`` is scaled by
-# ``0.5 / PROFILE_MEAN[profile]`` so that the *time mean* of the aggregate
-# bus load equals the IEEE 39 base case.
+# Active loads use constant and profile-driven fractions; the empirical
+# means support normalization of the profile-driven active-power rows.
 #
-# Values are empirical means over the 8 760 h (35 136-sample) series in
-# ``data/profiles.csv``.  ``mv_rural_qload`` has a slightly negative mean
-# (-0.050) and is intentionally omitted: its variable half on HV loads is
-# driven by the profile directly, while the mean Q is carried by a
-# per-HV-load constant Q (see network/ieee39/hv_networks.py).
+# Values are empirical means over data/profiles.csv. mv_rural_qload is
+# intentionally omitted because HV reactive demand is profile-only and not
+# mean-normalized.
 
 PROFILE_MEAN: Dict[str, float] = {
     "HS4_pload":      0.4436,
@@ -114,9 +110,8 @@ PROFILE_MEAN: Dict[str, float] = {
 # IEEE 39 base case at high-profile timestamps).  See diagnostic in
 # tuning/scripts/check_load_peaks.py.
 #
-# ``mv_rural_qload`` retains its special "constant carries mean, variable
-# swings around zero" convention in hv_networks.py; PROFILE_MAX["mv_rural_qload"]
-# is provided for completeness only.
+# mv_rural_qload is applied directly to the complete DSO reactive-load base;
+# its empirical maximum is provided for auditing the resulting Q range.
 
 PROFILE_MAX: Dict[str, float] = {
     "HS4_pload":      1.0000,
@@ -138,10 +133,10 @@ PROFILE_MAX: Dict[str, float] = {
 #     p_total(t) = p_orig * (LOAD_CONST_FRACTION
 #                            + LOAD_VAR_FRACTION * profile[t] / PROFILE_MAX[prof])
 # with peak at p_orig (when profile = max) and trough at
-# LOAD_CONST_FRACTION * p_orig (when profile = 0).  Same convention applies
-# to the HV sub-network P loads (mv_rural_pload).  The HV Q convention is
-# different (constant = full q_per_bus, variable = 0.5 * q_per_bus around
-# zero mean) because mv_rural_qload has near-zero mean.
+# LOAD_CONST_FRACTION * p_orig (when profile = 0). The same convention applies
+# to the HV sub-network active loads (mv_rural_pload). HV reactive demand
+# instead has zero constant component and follows
+# Q_load(t) = DSO_Q_PROFILE_BASE_MVAR * mv_rural_qload(t).
 
 LOAD_CONST_FRACTION: float = 0.4
 LOAD_VAR_FRACTION:   float = 0.6
@@ -200,35 +195,67 @@ HV_LINE_TOPOLOGY: List[Tuple[int, int, float]] = [
     (7, 8, 10),  (8, 9, 20),  (6, 9, 15),
 ]
 
-# TUDA DER data: (hv_bus_no, p_mw, profile_name)
-# TUDA_WIND_PARKS: List[Tuple[int, float, str]] = [
-#     (4,  60.0, "WP7"),
-#     (5, 130.0, "WP10"),
-#     (6, 110.0, "WP7"),
-#     (9, 110.0, "WP10"),
-# ]
-TUDA_WIND_PARKS: List[Tuple[int, float, str]] = [
-    (4,  40.0, "WP7"),
-    (5, 60.0, "WP10"),
-    (6, 50.0, "WP7"),
-]
+# DSO-specific 110 kV overhead conductor types from pandapower's standard
+# library.  DSO 3 is reinforced for the doubled load/DER stress case; the
+# remaining networks use the intermediate 305 mm2 conductor.
+DSO_HV_LINE_STD_TYPES: Dict[str, str] = {
+    "DSO_1": "305-AL1/39-ST1A 110.0",
+    "DSO_2": "305-AL1/39-ST1A 110.0",
+    "DSO_3": "490-AL1/64-ST1A 110.0",
+    "DSO_4": "305-AL1/39-ST1A 110.0",
+}
 
-# TUDA PV plants: (hv_bus_no, p_mw)  -- all use profile "PV3"
-# TUDA_PV_PLANTS: List[Tuple[int, float]] = [
-#     (3, 100.0),
-#     (4,  60.0),
-#     (5,  40.0),
-#     (7,  30.0),
-# ]
-TUDA_PV_PLANTS: List[Tuple[int, float]] = [
-    (3, 50.0),
-    (4,  40.0),
-    (5,  30.0),
-    (7,  20.0),
-]
+# Every DSO uses the measured rural reactive-load profile as its complete
+# reactive demand.  The aggregate base is distributed over the ten HV buses
+# with the same 1:2 low/high-load weighting as active power.
+DSO_Q_PROFILE_BASE_MVAR: float = 500.0
 
-# STATCOM-capable wind park at each HV coupling bus (MVA rating)
-HV_COUPLING_WP_MVA: float = 40.0
+# Number of physical circuits per DSO corridor.  Omitted paths are single
+# circuits.  DSO 3 needs the second circuit on (5, 6) for the doubled
+# active-load and generation stress case.
+DSO_HV_LINE_PARALLEL: Dict[Tuple[str, int, int], int] = {
+    ("DSO_3", 5, 6): 2,
+}
+
+# DSO DER capacity scenarios. Every installed rating is integer-valued
+# MW/MVA by design; scenario selection never creates fractional capacities.
+#
+# ``base_410``: 270 MW wind (150 internal + 3 x 40 coupling) + 140 MW PV.
+# ``rural_700``: 460 MW wind (250 internal + 3 x 70 coupling) + 240 MW PV.
+#
+# Wind tuple: (hv_bus_no, p_mw, profile_name)
+# PV tuple:   (hv_bus_no, p_mw), all using profile ``PV3``.
+DEFAULT_DSO_DER_CAPACITY_SCENARIO: str = "base_410"
+DSO_DER_CAPACITY_SCENARIOS: Dict[str, dict] = {
+    "base_410": {
+        "wind_parks": (
+            (4, 40, "WP7"),
+            (5, 60, "WP10"),
+            (6, 50, "WP7"),
+        ),
+        "pv_plants": (
+            (3, 50),
+            (4, 40),
+            (5, 30),
+            (7, 20),
+        ),
+        "coupling_wp_mva": 40,
+    },
+    "rural_700": {
+        "wind_parks": (
+            (4, 70, "WP7"),
+            (5, 100, "WP10"),
+            (6, 80, "WP7"),
+        ),
+        "pv_plants": (
+            (3, 80),
+            (4, 70),
+            (5, 50),
+            (7, 40),
+        ),
+        "coupling_wp_mva": 70,
+    },
+}
 
 # HV buses with concentrated load (P and Q multiplied by the factor below).
 # Used to create an intentional load–generation asymmetry across the HV
@@ -244,17 +271,46 @@ ZONE3_BUSES_0IDX: Set[int] = set(range(14, 24)) | {32, 33, 34, 35}
 #
 # Each entry: (net_id, zone, ieee_buses_1idx, hv_coupling, line_scale, gen_type)
 # ieee_buses_1idx are 1-indexed IEEE bus labels matching the picture.
+#
+# ``ieee_1idx[i]`` and ``hv_buses[i]`` are paired POSITIONALLY: TN bus
+# ``ieee_1idx[i]`` is coupled to HV bus ``hv_buses[i]``.  A 345/110 kV coupler
+# sits inside the EHV substation, so the two are geographically co-sited and
+# the HV route between two coupling points should be comparable to the TN
+# route between the corresponding TN buses.
+#
+# ``scale`` and the ``hv_buses`` ordering were calibrated on 2026-07-29 by
+# ``analysis/dso_ts_coupling_geometry.py``; see
+# ``docs/daily_log/07_2026/2026-07-29_dso_ts_coupling_geometry.md``.
+#
+#   scale = kappa / geomean_ij(d_HV,ij / D_TN,ij)   with kappa = 1.0
+#
+# The TN footprints differ by a factor of 4.7 (DSO_3 36 km, DSO_4 169 km
+# geomean pair distance), so a common scale = 1.00 fit none of them.  The
+# ``hv_buses`` ordering (0, 3, 8) keeps the same coupling-bus SET as the
+# previous (3, 0, 8) — it only swaps which TN bus feeds which coupler — and
+# roughly halves the residual shape mismatch for DSO_2/3/4.  ``scale`` itself
+# is invariant under that permutation (the product of the three HV pair
+# distances 60 x 65 x 85 km is fixed), so the two changes are independent.
+#
+# KNOWN LIMITATION: at these scales the longest circuit is 55.9 km (DSO_2) and
+# 97.6 km (DSO_4), beyond the 51.6 km longest 110 kV overhead circuit observed
+# anywhere in SimBench (``analysis/simbench_hv_benchmark.py``).  These two
+# sub-networks are geometrically consistent with their TN footprint but their
+# individual circuits are longer than the empirical reference — they must be
+# read as aggregated corridors, not single tower lines.  Capping both at 1.29
+# would restore SimBench admissibility at the cost of DSO_4 being ~47 % smaller
+# than its TN footprint implies.
 
 SUBNET_DEFS: List[dict] = [
     dict(net_id="DSO_1", zone=2,
-         ieee_1idx=(7, 8, 5),    hv_buses=(3, 0, 8), scale=1.00, gen="mixed"), # 0.75
+         ieee_1idx=(7, 8, 5),    hv_buses=(0, 3, 8), scale=0.82, gen="mixed"),
     # DSO_2 disabled — PF diverges with 3 HV sub-networks (investigate coupling buses)
     dict(net_id="DSO_2", zone=2,
-         ieee_1idx=(12, 14, 4),   hv_buses=(3, 0, 8), scale=1.00, gen="mixed"),
+         ieee_1idx=(12, 14, 4),  hv_buses=(0, 3, 8), scale=1.40, gen="mixed"),
     dict(net_id="DSO_3", zone=2,
-         ieee_1idx=(11, 10, 13), hv_buses=(3, 0, 8), scale=1.00, gen="mixed"), # 0.75
+         ieee_1idx=(11, 10, 13), hv_buses=(0, 3, 8), scale=0.52, gen="mixed"),
     dict(net_id="DSO_4", zone=3,
-        ieee_1idx=(24, 21, 23), hv_buses=(3, 0, 8), scale=1.00, gen="mixed"),
+         ieee_1idx=(24, 21, 23), hv_buses=(0, 3, 8), scale=2.44, gen="mixed"),
     # dict(net_id="DSO_5", zone=1,
-    #      ieee_1idx=(27, 26, 25), hv_buses=(3, 0, 8), scale=3.00, gen="wind"),
+    #      ieee_1idx=(27, 26, 25), hv_buses=(0, 3, 8), scale=3.00, gen="wind"),
 ]

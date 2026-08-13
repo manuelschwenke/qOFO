@@ -27,11 +27,109 @@ Date: 2025-02-05
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Optional
 
 import math
 import numpy as np
 from numpy.typing import NDArray
+
+
+#: Ablation override for the DER operating diagram, in pu of S_n.
+#: ``None`` (default) uses the real diagram (STATCOM circle / VDE box).
+#: When set to a float ``x``, EVERY DER gets the symmetric box
+#: ``[-x*S_n, +x*S_n]`` regardless of ``op_diagram`` and P.
+#:
+#: This is a *diagnostic* knob, not a modelling choice: it answers "does the
+#: capability constraint cause the DSO's steady-state interface-Q offset?"
+#: by removing the constraint entirely.  Introduced 2026-07-21 after a
+#: per-park audit found 12 of 44 parks pinned at an individual limit while
+#: the *aggregate* headroom looked ample (DSO_1 134.1 of 168.1 Mvar with 5/10
+#: parks saturated), i.e. aggregate numbers hid the binding constraint.
+#:
+#: MUST be honoured identically by the controller's bound computation
+#: (``ActuatorBounds._compute_single_der_q_capability``) and by the plant's
+#: clip (``controller.der_qv_local_loop._qv_capability``).  If the two ever
+#: disagree the controller optimises against a plant it does not have --
+#: the exact failure mode that produced the Gate-E STATCOM bug.
+DER_Q_CAPABILITY_OVERRIDE_PU: Optional[float] = None
+
+
+def set_der_q_capability_override(value: Optional[float]) -> None:
+    """Set (or clear with ``None``) the global DER capability override."""
+    global DER_Q_CAPABILITY_OVERRIDE_PU
+    DER_Q_CAPABILITY_OVERRIDE_PU = (
+        None if value is None else float(value)
+    )
+
+
+#: Diagnostic override of the DER Q(V) *deadband* [pu], applied to BOTH plants
+#: (static QVLocalLoop via ``net.sgen.qv_deadband_pu`` and RMS QVPRE via
+#: ``_anchor_qv_precontrollers``).  The nominal 0.01 pu deadband puts the parks
+#: at their dead-zone edge at the profiled operating point, where the droop is
+#: multi-valued (with the ZIP loads): the two solvers settle in different
+#: basins and the DSO_4 interface-Q setpoints diverge (2026-07-24 finding).
+#: Setting this to 0 removes the dead zone so the droop is single-valued and
+#: both plants converge to the same equilibrium.  ``None`` keeps each park's
+#: own snapshot/config deadband.
+DER_QV_DEADBAND_OVERRIDE_PU: Optional[float] = None
+
+
+def set_der_qv_deadband_override(value: Optional[float]) -> None:
+    """Set (or clear with ``None``) the global DER Q(V) deadband override."""
+    global DER_QV_DEADBAND_OVERRIDE_PU
+    DER_QV_DEADBAND_OVERRIDE_PU = (
+        None if value is None else float(value)
+    )
+
+
+#: Per-park DER Q(V) deadband [pu], keyed by pandapower sgen index.
+#:
+#: The RMS plant anchors its Q(V) pre-controllers from the *exported snapshot*,
+#: which ``export.make_snapshots`` writes using ``MultiTSOConfig()`` DEFAULTS --
+#: not the deadband of the run being executed.  The blanket scalar above was
+#: therefore the only channel by which a per-run deadband reached PowerFactory,
+#: and being a single number it cannot express ``delta_TS != delta_DS``.
+#:
+#: This map carries the per-level (and per-park-override) values that
+#: ``tag_der_q_modes`` has already written into ``net.sgen.qv_deadband_pu`` on
+#: the static side, so both plants are driven from ONE column rather than from
+#: two independently-derived numbers.  Precedence in ``pf.plant``:
+#: blanket scalar > this map > snapshot value.
+DER_QV_DEADBAND_BY_SGEN_PU: Dict[int, float] = {}
+
+
+def set_der_qv_deadband_by_sgen(mapping: Optional[Dict[int, float]]) -> None:
+    """Publish the per-sgen Q(V) deadband map (``None``/empty clears it)."""
+    global DER_QV_DEADBAND_BY_SGEN_PU
+    DER_QV_DEADBAND_BY_SGEN_PU = (
+        {} if not mapping else {int(k): float(v) for k, v in mapping.items()}
+    )
+
+
+#: Per-park DER Q(V) DROOP [pu], keyed by pandapower sgen index.
+#:
+#: Same defect, same remedy as the deadband map above: the RMS plant anchors
+#: its Q(V) pre-controllers from the exported snapshot, which
+#: ``export.make_snapshots`` writes using ``MultiTSOConfig()`` DEFAULTS.  So
+#: ``--der-slope`` changed the static plant (via ``tag_der_q_modes`` ->
+#: ``net.sgen.qv_slope_pu``) while the RMS plant silently kept the snapshot's
+#: 0.06, and a droop sweep would have compared two different plants.  Harmless
+#: until now only because both defaults happened to be 0.06.
+#:
+#: NOTE ON THE NAME: ``qv_slope_pu`` is the DROOP, not a gain.  It enters as a
+#: divisor of the voltage error -- static ``R = S_n/slope`` [Mvar/pu_v], RMS
+#: ``Kdroop = 1/slope`` -- so ``slope = 0.06`` means 0.06 pu of voltage
+#: deviation commands full rated Q, i.e. a 6 % droop.  The grid code permits
+#: 5-15 %.
+DER_QV_SLOPE_BY_SGEN_PU: Dict[int, float] = {}
+
+
+def set_der_qv_slope_by_sgen(mapping: Optional[Dict[int, float]]) -> None:
+    """Publish the per-sgen Q(V) droop map (``None``/empty clears it)."""
+    global DER_QV_SLOPE_BY_SGEN_PU
+    DER_QV_SLOPE_BY_SGEN_PU = (
+        {} if not mapping else {int(k): float(v) for k, v in mapping.items()}
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -79,6 +177,70 @@ class GeneratorParameters:
     i_f_max_pu: float = 2.7
     beta: float = 0.15
     q0_pu: float = 0.4
+
+    def __post_init__(self) -> None:
+        # Coherence of the (xd, i_f_max) pair.  The rotor-limit circle of
+        # ``compute_generator_q_limits`` is centred at -v²/xd with radius
+        # v·i_f_max/xd, so at p = 0, v = 1 it reaches (i_f_max - 1)/xd.  If that
+        # exceeds the stator radius the rotor circle lies wholly outside the
+        # stator circle and the field limit never binds — the capability curve
+        # silently degenerates to stator + UEL.  Fail fast instead (a mixed
+        # turbo/salient-pole pairing such as xd = 1.2 with i_f_max = 2.65 is the
+        # typical way this happens).
+        if self.xd_pu <= 0.0:
+            raise ValueError(f"xd_pu must be > 0, got {self.xd_pu}")
+        if (self.i_f_max_pu - 1.0) / self.xd_pu >= 1.0:
+            raise ValueError(
+                f"Incoherent capability parameters: xd_pu={self.xd_pu}, "
+                f"i_f_max_pu={self.i_f_max_pu} give a rotor limit of "
+                f"{(self.i_f_max_pu - 1.0) / self.xd_pu:.3f} p.u. at p=0, which "
+                f"does not bind inside the stator circle.  Require "
+                f"xd_pu > i_f_max_pu - 1."
+            )
+
+    @classmethod
+    def round_rotor(
+        cls, s_rated_mva: float, p_max_mw: float, p_min_mw: float = 0.0,
+    ) -> "GeneratorParameters":
+        """Large turbogenerator (cylindrical rotor): steam/gas and nuclear sets.
+
+        xd = 1.8 p.u., i_f_max = 2.7 p.u. (Milano eq. 12.10, ranges 1.0-1.8 and
+        2.6-2.73).  Rotor limit binds at (2.7-1)/1.8 = 0.94 p.u. at zero load.
+        """
+        return cls(
+            s_rated_mva=s_rated_mva, p_max_mw=p_max_mw, p_min_mw=p_min_mw,
+            xd_pu=1.8, i_f_max_pu=2.7, beta=0.15, q0_pu=0.4,
+        )
+
+    @classmethod
+    def salient_pole(
+        cls, s_rated_mva: float, p_max_mw: float, p_min_mw: float = 0.0,
+    ) -> "GeneratorParameters":
+        """Salient-pole machine (hydro sets).
+
+        xd = 1.0 p.u., i_f_max = 1.79 p.u. (Milano eq. 12.9, ranges 0.6-1.2 and
+        1.7-1.79).  Rotor limit binds at (1.79-1)/1.0 = 0.79 p.u. at zero load.
+        Note that xd = 0.6 with i_f_max = 1.7 would NOT bind; keep xd >= 0.8.
+        """
+        return cls(
+            s_rated_mva=s_rated_mva, p_max_mw=p_max_mw, p_min_mw=p_min_mw,
+            xd_pu=1.0, i_f_max_pu=1.79, beta=0.15, q0_pu=0.4,
+        )
+
+
+#: ``net.gen["type"]`` values (from ``network.ieee39.constants.GEN_NAMEPLATE``)
+#: that denote salient-pole machines.  Everything else — including the
+#: aggregated "Equivalent" slack anchor — is treated as round rotor.
+SALIENT_POLE_GEN_TYPES = frozenset({"Hydro"})
+
+
+def generator_parameters_for_type(
+    gen_type: str, s_rated_mva: float, p_max_mw: float, p_min_mw: float = 0.0,
+) -> GeneratorParameters:
+    """Select the capability parameter set from the machine type label."""
+    if str(gen_type) in SALIENT_POLE_GEN_TYPES:
+        return GeneratorParameters.salient_pole(s_rated_mva, p_max_mw, p_min_mw)
+    return GeneratorParameters.round_rotor(s_rated_mva, p_max_mw, p_min_mw)
 
 
 def compute_generator_q_limits(
@@ -386,6 +548,10 @@ class ActuatorBounds:
         q_max : float
             Maximum reactive power in Mvar (overexcited/inductive).
         """
+        if DER_Q_CAPABILITY_OVERRIDE_PU is not None:
+            q = float(DER_Q_CAPABILITY_OVERRIDE_PU) * s_rated_mva
+            return -q, q
+
         if op_diagram == 'STATCOM':
             # Full circle diagram: Q = ±sqrt(S_n² - P²)
             # p_ratio = |P| / S_n, so P_pu² = p_ratio²

@@ -81,6 +81,7 @@ import numpy as np
 import pandapower as pp
 
 from network.ieee39.meta import HVNetworkInfo, IEEE39NetworkMeta
+from sensitivity.jacobian import runpp_with_stored_jacobian
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +126,163 @@ class DSOLocalNetResult:
 
 
 # ---------------------------------------------------------------------------
+#  Thevenin boundary helper (shared by the TSO and DSO reductions)
+# ---------------------------------------------------------------------------
+
+#: Per-unit base used when converting a boundary impedance to per-unit for
+#: the EMF back-solve.  Any consistent value works -- it cancels -- but the
+#: system base keeps the intermediate numbers interpretable.
+_S_BASE_MVA: float = 100.0
+
+
+def add_thevenin_boundary(
+    net: pp.pandapowerNet,
+    bus: int,
+    p_inj_mw: float,
+    q_inj_mvar: float,
+    z_ohm: complex,
+    *,
+    vm_pu: Optional[float] = None,
+    va_degree: Optional[float] = None,
+    slack: bool = False,
+    name: str = "WARD_THEVENIN",
+) -> Tuple[int, int, int]:
+    """Attach a Thevenin source behind *z_ohm* to *bus*.
+
+    Creates an auxiliary bus, a series branch of impedance *z_ohm*, and a
+    voltage source at the auxiliary bus.  The EMF and its active in-feed are
+    back-solved so that the ORIGINAL operating point at *bus* -- its cached
+    voltage phasor and the cached injection ``(p_inj_mw, q_inj_mvar)`` --
+    is reproduced exactly, for any *z_ohm*.
+
+    This makes the whole family a one-parameter sweep that always matches at
+    the linearisation point and differs only in the derivative, which is what
+    the sensitivity model is made of.  The two conventions already in use are
+    its endpoints: ``z -> inf`` is the constant PQ equivalent, ``z -> 0`` the
+    stiff voltage source.
+
+    The decisive structural difference from ``z = 0``: the source sits on the
+    auxiliary bus, so *bus* itself stays an ordinary PQ bus of the reduced
+    network.  It keeps a row in the reduced Jacobian and therefore HAS a
+    voltage sensitivity -- which a slack or PV bus structurally cannot.
+
+    Parameters
+    ----------
+    net : pp.pandapowerNet
+        Reduced network, already carrying converged ``res_bus`` values for
+        *bus* (read before the surrounding tables are edited).
+    bus : int
+        Boundary bus the equivalent attaches to.
+    p_inj_mw, q_inj_mvar : float
+        Cached injection INTO *bus* from the system being condensed.
+    z_ohm : complex
+        Series impedance of the equivalent, in ohms at the nominal voltage
+        of *bus*.  Must have non-zero magnitude; use the ``"pv"`` boundary
+        for the exact zero-impedance case.
+    vm_pu, va_degree : float, optional
+        Cached voltage phasor at *bus*.  Pass these when the caller has
+        already captured them: the reduction drops buses, and pandapower's
+        ``drop_buses`` prunes the matching ``res_bus`` rows with them, so by
+        the time the boundary is attached the result table may no longer
+        hold the value.  Falls back to ``net.res_bus`` and then to a flat
+        1.0 / 0 deg.
+    slack : bool
+        If True the source carries the angle reference.  Used on the DSO
+        side, where the overlaying system supplies it.
+    name : str
+        Element name prefix, kept for later identification.
+
+    Returns
+    -------
+    (aux_bus, branch_idx, gen_idx)
+    """
+    if abs(z_ohm) <= 0.0:
+        raise ValueError("z_ohm must be non-zero; use tie_boundary='pv' for Z=0")
+
+    vn_kv = float(net.bus.at[bus, "vn_kv"])
+    if vm_pu is None:
+        vm_pu = (float(net.res_bus.at[bus, "vm_pu"])
+                 if bus in net.res_bus.index else 1.0)
+    if va_degree is None:
+        va_degree = (float(net.res_bus.at[bus, "va_degree"])
+                     if bus in net.res_bus.index else 0.0)
+    vm, va = float(vm_pu), float(va_degree)
+    if not np.isfinite(vm) or vm <= 0.0 or not np.isfinite(va):
+        vm, va = 1.0, 0.0
+
+    # Back-solve the EMF in per unit on (_S_BASE_MVA, vn_kv).
+    z_base = (vn_kv ** 2) / _S_BASE_MVA
+    z_pu = complex(z_ohm) / z_base
+    v_pu = vm * np.exp(1j * np.deg2rad(va))
+    s_pu = complex(p_inj_mw, q_inj_mvar) / _S_BASE_MVA
+    i_pu = np.conj(s_pu / v_pu)
+    e_pu = v_pu + z_pu * i_pu
+    p_src_mw = float(np.real(e_pu * np.conj(i_pu)) * _S_BASE_MVA)
+
+    aux = int(pp.create_bus(
+        net, vn_kv=vn_kv, name=f"{name}_AUX_{int(bus)}",
+        type="b", in_service=True,
+    ))
+    # A line rather than an impedance element: r/x are then plain ohms at the
+    # bus nominal voltage, with no per-unit base to get wrong.  Zero shunt
+    # capacitance keeps it a pure series Thevenin.
+    br = int(pp.create_line_from_parameters(
+        net, from_bus=int(bus), to_bus=aux, length_km=1.0,
+        r_ohm_per_km=float(np.real(z_ohm)),
+        x_ohm_per_km=float(np.imag(z_ohm)),
+        c_nf_per_km=0.0, max_i_ka=1.0e3,
+        name=f"{name}_Z_{int(bus)}",
+    ))
+    gi = int(pp.create_gen(
+        net, bus=aux, p_mw=p_src_mw, vm_pu=float(np.abs(e_pu)),
+        slack=bool(slack),
+        min_p_mw=-1e6, max_p_mw=1e6,
+        min_q_mvar=-1e6, max_q_mvar=1e6,
+        name=f"{name}_SRC_{int(bus)}",
+    ))
+    return aux, br, gi
+
+
+#: Measured physical Thevenin stiffness per corridor, k = |Z_th| / |Z_line|,
+#: from ``experiments/CIGRE_2026/007f_ZTH_PER_CORRIDOR.py`` on the IEEE 39-bus
+#: ``base_410`` case at 2016-01-05 08:00.
+#:
+#: Keyed by ``(line_idx, far_end_bus)`` and NOT by line alone: a tie line is
+#: shared by two zones, and each zone looks into a different external system
+#: through a different far-end terminal, so the same line carries two different
+#: values.  Line 2 is 1.82 seen from zone 1 (far bus 2) but 0.83 seen from zone 2
+#: (far bus 1); line 5 is 2.14 from zone 2 and 1.40 from zone 3.
+#:
+#: The spread is physical: corridors terminating at an AVR-regulated machine are
+#: stiff (line 14 / bus 38 at 0.05 ends essentially ON a machine), corridors
+#: ending deep in the neighbour are soft (line 14 / bus 8 at 2.73).
+#:
+#: Operating-point specific.  Re-measure with 007f for a different scenario.
+THEVENIN_K_PER_CORRIDOR: Dict[Tuple[int, int], float] = {
+    # zone 1
+    (2, 2): 1.82, (14, 8): 2.73, (25, 16): 1.24,
+    # zone 2
+    (2, 1): 0.83, (5, 17): 2.14, (14, 38): 0.05, (18, 14): 1.19,
+    # zone 3
+    (5, 2): 1.40, (18, 13): 0.89, (25, 26): 2.52,
+}
+
+#: Population mean of the above; the fallback for corridors not listed, and the
+#: best single default from the 007d H-error sweep (the two agree).
+THEVENIN_K_DEFAULT: float = 1.5
+
+
+def line_series_impedance_ohm(net: pp.pandapowerNet, line_idx: int) -> complex:
+    """Series impedance of one line in ohms (parallel circuits accounted for)."""
+    r = float(net.line.at[line_idx, "r_ohm_per_km"])
+    x = float(net.line.at[line_idx, "x_ohm_per_km"])
+    ln = float(net.line.at[line_idx, "length_km"])
+    par = float(net.line.at[line_idx, "parallel"]) if "parallel" in net.line.columns else 1.0
+    par = max(par, 1.0)
+    return complex(r * ln / par, x * ln / par)
+
+
+# ---------------------------------------------------------------------------
 #  TSO reduction
 # ---------------------------------------------------------------------------
 
@@ -139,6 +297,8 @@ def build_tso_local_net(
     tso_shunt_buses_in_zone: Iterable[int],
     tso_shunt_q_steps_mvar_in_zone: Iterable[float],
     *,
+    tie_boundary: str = "pq",
+    tie_thevenin_k: float = 1.0,
     verbose: int = 0,
 ) -> TSOLocalNetResult:
     """Build the reduced TSO network for one zone.
@@ -185,11 +345,92 @@ def build_tso_local_net(
         Plant tertiary bus index of each TSO-owned shunt in this zone.
     tso_shunt_q_steps_mvar_in_zone : Iterable[float]
         Per-shunt rated Mvar per step (same order).
+    tie_boundary : {"pq", "pv", "z"}
+        Boundary condition placed at each tie-line far-end stub bus,
+        i.e. how the neighbouring TSO area is condensed.  All three
+        reproduce the cached operating point at the far-end bus by
+        construction and differ only in the *derivative* -- which is
+        the whole content of the H matrix extracted afterwards:
+
+        * ``"pq"`` (default, historical behaviour): constant PQ load
+          at the cached corridor flow.  Infinite Thevenin impedance
+          behind the boundary: the far-end voltage moves freely, so
+          the neighbour offers no voltage support at all.
+        * ``"pv"``: a PV generator holding the cached far-end voltage
+          magnitude and the cached active in-flow, reactive power
+          free.  Zero Thevenin impedance: the neighbour holds the
+          boundary voltage perfectly.
+        * ``"z"``: a constant shunt admittance matched to the cached
+          flow, ``y = S*/|V|^2``.  Finite stiffness between the two
+          extremes, at no extra information cost.  Only well posed
+          when the equivalent *absorbs* -- a constant-Z negative load
+          injects more as the voltage rises, so an importing corridor
+          falls back to ``"pq"`` for that stub (a warning is printed
+          at ``verbose >= 1``).
+
+        * ``"thevenin"``: voltage source behind a series impedance of
+          ``tie_thevenin_k`` times the tie line's own series impedance,
+          on an auxiliary bus.  The finite-impedance case the other
+          three approximate, and the only one that leaves the far-end
+          bus an ordinary PQ bus with a voltage sensitivity of its own.
+
+        ``"pq"`` and ``"pv"`` bracket the true finite-impedance
+        equivalent; see the horizontal-interface discussion in the
+        thesis (Ch 6, multi-area local model).
+    tie_thevenin_k : float or dict
+        Only read when ``tie_boundary="thevenin"``.  Boundary impedance
+        as a multiple of the tie line's own series impedance -- a
+        dimensionless, sweepable stiffness knob.  ``k -> 0`` approaches
+        the ``"pv"`` limit, ``k -> inf`` the ``"pq"`` limit.
+
+        A float applies one value to every corridor.  A dict keyed by
+        ``(line_idx, far_end_bus)`` sets it per corridor; corridors not
+        listed fall back to :data:`THEVENIN_K_DEFAULT`.  The key is the
+        pair and not the line alone because a tie line is shared by two
+        zones which look into different external systems through
+        different terminals, so one line carries two values.
+        :data:`THEVENIN_K_PER_CORRIDOR` holds the measured set.
 
     Returns
     -------
     TSOLocalNetResult
     """
+    if tie_boundary not in ("pq", "pv", "z", "thevenin"):
+        raise ValueError(
+            f"tie_boundary must be one of 'pq', 'pv', 'z', 'thevenin'; "
+            f"got {tie_boundary!r}"
+        )
+    if tie_boundary == "thevenin":
+        if isinstance(tie_thevenin_k, dict):
+            bad = {k: v for k, v in tie_thevenin_k.items() if not float(v) > 0.0}
+            if bad:
+                raise ValueError(
+                    f"tie_thevenin_k entries must be > 0; offending: {bad}"
+                )
+        elif not (float(tie_thevenin_k) > 0.0):
+            raise ValueError(
+                f"tie_thevenin_k must be > 0 for tie_boundary='thevenin'; "
+                f"got {tie_thevenin_k}"
+            )
+
+    def _k_for(line_idx: int, far_bus: int) -> float:
+        """Boundary stiffness for one corridor stub.
+
+        A dict is keyed by ``(line_idx, far_bus)`` rather than by line alone
+        because a tie line is shared between two zones, and each looks into a
+        different external system through a different terminal -- so the same
+        line legitimately carries two different values.  Corridors absent from
+        the mapping fall back to the population mean.
+        """
+        if not isinstance(tie_thevenin_k, dict):
+            return float(tie_thevenin_k)
+        key = (int(line_idx), int(far_bus))
+        if key in tie_thevenin_k:
+            return float(tie_thevenin_k[key])
+        if verbose >= 1:
+            print(f"  [build_tso_local_net] no k for corridor {key}; "
+                  f"using default {THEVENIN_K_DEFAULT}")
+        return float(THEVENIN_K_DEFAULT)
     sub = copy.deepcopy(net)
 
     zone_bus_set: set = set(int(b) for b in zone_bus_indices)
@@ -242,7 +483,13 @@ def build_tso_local_net(
     # res_line.p_xxx is power INTO the line at side xxx, so power into
     # bus from rest-of-system = +p_xxx_mw_at_far).  Load draws this much
     # ⇒ load.p_mw = -p_xxx_mw_at_far.
-    tie_load_specs: List[Tuple[int, float, float]] = []  # (bus, p, q)
+    # Each entry is (bus, p_inj_mw, q_inj_mvar, v_pu, va_deg, line_idx),
+    # where the injection is what the rest-of-system pushes INTO the far-end
+    # bus at the cached state.  The voltage phasor is captured HERE, before
+    # ``pp.drop_buses`` prunes the matching ``res_bus`` rows, and the line
+    # index lets the "thevenin" variant scale its impedance to the tie
+    # line's own.  The "pq" variant uses only the injection.
+    tie_load_specs: List[Tuple[int, float, float, float, float, int]] = []
     for li, far in far_end_buses:
         if li not in sub.res_line.index:
             continue
@@ -253,7 +500,14 @@ def build_tso_local_net(
         else:
             p_far = float(sub.res_line.at[li, "p_to_mw"])
             q_far = float(sub.res_line.at[li, "q_to_mvar"])
-        tie_load_specs.append((far, -p_far, -q_far))
+        if far in sub.res_bus.index:
+            v_far = float(sub.res_bus.at[far, "vm_pu"])
+            va_far = float(sub.res_bus.at[far, "va_degree"])
+        else:
+            v_far, va_far = 1.0, 0.0
+        if not np.isfinite(v_far) or v_far <= 0.0 or not np.isfinite(va_far):
+            v_far, va_far = 1.0, 0.0
+        tie_load_specs.append((far, p_far, q_far, v_far, va_far, int(li)))
 
     # 3W primary PQ-load values: trafo was drawing (p_hv_mw, q_hv_mvar)
     # from the TN at cached state; after we delete the trafo, replace by a
@@ -439,10 +693,79 @@ def build_tso_local_net(
     # of the MV bus) is represented by a load at the MV bus — the
     # trafo itself stays alive and the primary bus remains a normal
     # zone-TN bus with its existing TN connectivity intact.
-    for far, p_load, q_load in tie_load_specs:
-        if far in sub.bus.index:
-            pp.create_load(sub, bus=int(far), p_mw=p_load, q_mvar=q_load,
-                           name="WARD_TIE")
+    #
+    # ``tie_boundary`` selects WHICH boundary condition the neighbouring
+    # area is condensed to.  All three match the cached injection at the
+    # cached voltage, so the reduced power flow below reproduces the same
+    # far-end operating point in every variant; they differ only in how
+    # that bus responds when the zone's own actuators move, which is what
+    # the extracted H matrix is made of.
+    n_tie_z_fallback = 0
+    for far, p_inj, q_inj, v_far, va_far, li_tie in tie_load_specs:
+        if far not in sub.bus.index:
+            continue
+
+        if tie_boundary == "thevenin":
+            # Voltage source behind a finite impedance on an auxiliary bus.
+            # The far-end bus stays an ordinary PQ bus and therefore keeps a
+            # row in the reduced Jacobian -- unlike the "pv" case, where the
+            # boundary voltage is structurally fixed.
+            z_line = (
+                line_series_impedance_ohm(sub, li_tie)
+                if li_tie in sub.line.index else complex(0.0, 0.0)
+            )
+            if abs(z_line) <= 0.0:
+                # Degenerate line data: fall back to a 1 % reactance on the
+                # bus base rather than divide by zero.
+                vn = float(sub.bus.at[far, "vn_kv"])
+                z_line = complex(0.0, 0.01 * vn ** 2 / _S_BASE_MVA)
+            add_thevenin_boundary(
+                sub, int(far), p_inj, q_inj,
+                complex(_k_for(li_tie, far)) * z_line,
+                vm_pu=v_far, va_degree=va_far,
+                slack=False, name="WARD_TIE_TH",
+            )
+            continue
+
+        if tie_boundary == "pv":
+            # Neighbour holds the boundary voltage: PV bus at the cached
+            # magnitude and cached active in-feed, reactive power free.
+            # No angle reference here -- the in-zone slack of step 9 still
+            # supplies it, so this stays a PV and not a second slack.
+            pp.create_gen(
+                sub, bus=int(far), p_mw=p_inj, vm_pu=float(v_far),
+                slack=False,
+                min_p_mw=-1e6, max_p_mw=1e6,
+                min_q_mvar=-1e6, max_q_mvar=1e6,
+                name="WARD_TIE_PV",
+            )
+            continue
+
+        if tie_boundary == "z":
+            # Constant admittance matched at the cached voltage.  A
+            # pandapower shunt CONSUMES (p_mw, q_mvar) at 1 pu and scales
+            # with V^2, so match consumption -(p_inj, q_inj) at v_far.
+            p_sh = -p_inj / (v_far ** 2)
+            q_sh = -q_inj / (v_far ** 2)
+            if p_sh >= 0.0 and q_sh >= 0.0:
+                # Genuinely passive absorber: stiffening with rising V,
+                # which is the direction the true equivalent moves in.
+                pp.create_shunt(
+                    sub, bus=int(far), p_mw=p_sh, q_mvar=q_sh, step=1,
+                    name="WARD_TIE_Z",
+                )
+                continue
+            # Otherwise the constant-Z form would be an active source whose
+            # output GROWS with voltage -- softer than constant power, i.e.
+            # further from the truth, not closer.  Fall back to PQ.
+            n_tie_z_fallback += 1
+
+        pp.create_load(sub, bus=int(far), p_mw=-p_inj, q_mvar=-q_inj,
+                       name="WARD_TIE")
+    if verbose >= 1 and n_tie_z_fallback:
+        print(f"  [build_tso_local_net] tie_boundary='z': "
+              f"{n_tie_z_fallback}/{len(tie_load_specs)} stub(s) are net "
+              f"sources -> constant-Z ill-posed, fell back to PQ there")
     for mv_bus, p_load, q_load in mv_load_specs:
         if mv_bus in sub.bus.index:
             pp.create_load(sub, bus=int(mv_bus), p_mw=p_load, q_mvar=q_load,
@@ -570,44 +893,47 @@ def build_tso_local_net(
         return TSOLocalNetResult(net=sub, synthetic_shunt_map=synthetic_shunt_map,
                                   slack_gen_idx=None)
 
-    # ── 10. Converge the reduced net ──────────────────────────────────────
-    # Try ``init='results'`` first to warm-start NR from the cached plant
-    # state (preserved through deepcopy).  This is necessary now that the
-    # reduced net keeps the 3W coupler trafos with their MV/LV stubs —
-    # a flat start often fails to converge under multiple coupler trafos
-    # at off-nominal tap positions.  Fall back to flat if results-start
-    # diverges.  Either way ``net._ppc['internal']['J']`` is populated
-    # because NR runs at least one iteration to verify the warm start
-    # (results-start mismatches enough to require a Jacobian build).
-    # Apply a small numerical kick so NR runs ≥ 1 iteration (otherwise
-    # results-init can converge in 0 steps and leave J unpopulated).
-    if not sub.bus.empty:
-        first_bus = int(sub.bus.index[0])
-        if first_bus in sub.res_bus.index:
-            sub.res_bus.at[first_bus, "vm_pu"] = float(
-                sub.res_bus.at[first_bus, "vm_pu"]
-            ) + 1e-8
-    try:
-        pp.runpp(
-            sub,
-            run_control=False,
-            distributed_slack=False,
-            calculate_voltage_angles=True,
-            enforce_q_lims=False,
-            max_iteration=50,
-            init="results",
-        )
-    except Exception:
-        pp.runpp(
-            sub,
-            run_control=False,
-            distributed_slack=False,
-            calculate_voltage_angles=True,
-            enforce_q_lims=False,
-            max_iteration=200,
-            init="flat",
-        )
+    # ── 9c. Generators: use CACHED OUTPUT, not the scheduled setpoint ─────
+    # The plant solves with ``distributed_slack=True``, so a generator's actual
+    # output differs from its ``p_mw`` setpoint -- the machines share the slack
+    # burden through their participation factors, and ``res_gen.p_mw`` is what
+    # they really produced. The reduced net solves with
+    # ``distributed_slack=False``, which holds every PV generator exactly at
+    # ``p_mw``; carrying the setpoint over therefore injects power the plant
+    # never had. Measured 2026-08-01, zone 0 at 2016-01-05 08:00: setpoints
+    # 250.0 / 830.0 MW against cached outputs of 160.1 / 740.1 MW, i.e. 180 MW
+    # of phantom injection, which the promoted slack then had to absorb
+    # (-214.0 MW solved against +100.6 MW cached).
+    #
+    # ``res_gen.p_mw`` is the TSO's own machine telemetry, so this uses no
+    # information from beyond the zone boundary. The slack generator's p_mw is
+    # ignored by the solver and is overwritten here only for consistency.
+    #
+    # Boundary gens added by ``tie_boundary="pv"`` are skipped by name: they
+    # are new rows whose freshly assigned index can collide with a DIFFERENT
+    # machine's index in the plant's ``res_gen`` (the reduced net dropped
+    # rows, so ``create_gen`` reuses a gap), which would overwrite the
+    # boundary in-feed with an unrelated machine's cached output.
+    if not sub.gen.empty and net.res_gen is not None and not net.res_gen.empty:
+        for g in sub.gen.index:
+            if str(sub.gen.at[g, "name"]).startswith("WARD_"):
+                continue
+            if g in net.res_gen.index:
+                p_cached = float(net.res_gen.at[g, "p_mw"])
+                if np.isfinite(p_cached):
+                    sub.gen.at[g, "p_mw"] = p_cached
 
+    # ── 10. Converge the reduced net ──────────────────────────────────────
+    # Try a results warm start from the cached plant state; the shared guard
+    # perturbs a genuine PQ/PV Newton state rather than the commonly fixed
+    # first/slack bus, falls back to a flat start, and verifies that J exists.
+    runpp_with_stored_jacobian(
+        sub,
+        run_control=False,
+        distributed_slack=False,
+        calculate_voltage_angles=True,
+        enforce_q_lims=False,
+    )
     if verbose >= 2:
         print(f"  [build_tso_local_net] reduced net: "
               f"{len(sub.bus)} buses, {len(sub.line)} lines, "
@@ -630,6 +956,8 @@ def build_dso_local_net(
     net: pp.pandapowerNet,
     hv_info: HVNetworkInfo,
     *,
+    boundary: str = "slack",
+    thevenin_k: float = 1.0,
     verbose: int = 0,
 ) -> DSOLocalNetResult:
     """Build the reduced DSO network for one HV sub-network.
@@ -657,27 +985,111 @@ def build_dso_local_net(
         Plant network at the cached operating point.
     hv_info : HVNetworkInfo
         Metadata for the HV sub-network whose local Jacobian we build.
+    boundary : {"slack", "thevenin"}
+        How the overlaying transmission system is condensed at each
+        coupling-transformer primary bus.
+
+        * ``"slack"`` (default, historical): a voltage source placed
+          DIRECTLY on the primary bus -- the first coupler carries the
+          angle reference, the rest are PV at the cached active in-feed.
+          Consequence: the primary buses are a slack and PV buses of the
+          reduced network, so they have no ``dV/dQ`` at all.  The slack
+          bus is eliminated from the reduced Jacobian outright and PV
+          buses have ``d|V|/dQ = 0`` by construction, so the \\gls{DSO}
+          cannot monitor, constrain, or even evaluate a sensitivity at
+          its own transmission-side terminals.
+        * ``"thevenin"``: the same source moved one bus back, behind a
+          series impedance of ``thevenin_k`` times the coupling
+          transformer's own HV-MV short-circuit impedance, on an
+          auxiliary bus.  The primary bus then stays an ordinary PQ bus
+          of the reduced network, keeps its row in the reduced Jacobian,
+          and therefore HAS a voltage sensitivity.  ``k -> 0`` recovers
+          the ``"slack"`` behaviour in the limit.
+
+        Both reproduce the cached operating point at the primary bus, so
+        they differ only in the derivative.
+    thevenin_k : float
+        Boundary impedance for ``boundary="thevenin"``, as a multiple of
+        the coupling transformer's HV-MV short-circuit impedance.
 
     Returns
     -------
     DSOLocalNetResult
     """
+    if boundary not in ("slack", "thevenin"):
+        raise ValueError(
+            f"boundary must be 'slack' or 'thevenin'; got {boundary!r}"
+        )
+    if boundary == "thevenin" and not (float(thevenin_k) > 0.0):
+        raise ValueError(
+            f"thevenin_k must be > 0 for boundary='thevenin'; got {thevenin_k}"
+        )
+
     sub = copy.deepcopy(net)
 
     # ── 1. Build the keep-bus set ─────────────────────────────────────────
     keep_buses: set = set(int(b) for b in hv_info.bus_indices)
     keep_buses.update(int(b) for b in hv_info.coupling_lv_bus_indices)
     keep_buses.update(int(b) for b in hv_info.coupling_hv_bus_indices)
+    # The sub-network's own auxiliary buses. Omitting these dropped part of the
+    # DSO ITSELF -- `pp.drop_buses` takes their loads and sgens with them, so
+    # the reduced net was not a reduction of the DSO but a different network.
+    # Measured 2026-08-01 at DSO 4, 2016-01-05 08:00: internal surplus
+    # (sgen 265.6 - load 49.7 = 215.9 MW) against a coupler outflow of only
+    # 83.8 MW, i.e. 132 MW of the DSO's own injection missing, which the
+    # boundary slack then absorbed (-137.0 MW solved against -26.5 MW cached).
+    keep_buses.update(int(b) for b in
+                      getattr(hv_info, "internal_aux_bus_indices", ()) or ())
     primary_buses: List[int] = [int(b) for b in hv_info.coupling_ieee_buses]
     keep_buses.update(primary_buses)
 
     # ── 2. Cached V at primary buses ─────────────────────────────────────
     primary_v_cached: Dict[int, float] = {}
+    primary_va_cached: Dict[int, float] = {}
     for b in primary_buses:
         if b in sub.res_bus.index:
             primary_v_cached[b] = float(sub.res_bus.at[b, "vm_pu"])
+            primary_va_cached[b] = float(sub.res_bus.at[b, "va_degree"])
         else:
             primary_v_cached[b] = 1.0  # fallback
+            primary_va_cached[b] = 0.0
+
+    # Cached ACTIVE power the TN supplies into each coupler, keyed by primary
+    # bus. Only the first primary bus becomes the slack; the others are PV
+    # gens, whose P is FIXED at whatever they are created with. Leaving them at
+    # zero forces a multi-coupler DSO to push its entire real-power exchange
+    # through the single slack coupler, which is not the combined solution.
+    # Measured 2026-08-01 at DSO 4, 2016-01-05 08:00: cached coupler flows were
+    # -26.5 / -64.9 / +7.9 MW, so ~73 MW was misrouted through one transformer
+    # and the buses behind it sat 0.08-0.10 pu low while those behind the other
+    # two were within 0.015 pu.
+    #
+    # ``p_hv_mw`` is power flowing INTO the trafo at the primary bus; after the
+    # TN is deleted the boundary gen is the only other element there, so it must
+    # inject exactly that.
+    primary_p_cached: Dict[int, float] = {}
+    # Reactive counterpart and the coupler's own short-circuit impedance are
+    # needed only by the "thevenin" boundary, which must reproduce the FULL
+    # cached injection (not just P) to land on the same operating point, and
+    # needs a physical impedance scale for its stiffness knob.
+    primary_q_cached: Dict[int, float] = {}
+    primary_z_ref_ohm: Dict[int, complex] = {}
+    for _t3w, _pb in zip(hv_info.coupling_trafo_indices, primary_buses):
+        _t3w, _pb = int(_t3w), int(_pb)
+        if _t3w in net.res_trafo3w.index:
+            primary_p_cached[_pb] = float(net.res_trafo3w.at[_t3w, "p_hv_mw"])
+            primary_q_cached[_pb] = float(net.res_trafo3w.at[_t3w, "q_hv_mvar"])
+        if _t3w in net.trafo3w.index:
+            # Z_hv-mv referred to the HV side, in ohms.
+            vk = float(net.trafo3w.at[_t3w, "vk_hv_percent"]) / 100.0
+            vkr = float(net.trafo3w.at[_t3w, "vkr_hv_percent"]) / 100.0
+            sn = float(net.trafo3w.at[_t3w, "sn_hv_mva"])
+            vn = float(net.trafo3w.at[_t3w, "vn_hv_kv"])
+            if sn > 0.0 and vn > 0.0 and vk > 0.0:
+                z_mag = vk * vn ** 2 / sn
+                r = vkr * vn ** 2 / sn
+                x = float(np.sqrt(max(z_mag ** 2 - r ** 2, 0.0)))
+                primary_z_ref_ohm[_pb] = complex(r, x if x > 0 else z_mag)
 
     # ── 3. Drop everything not in keep_buses ──────────────────────────────
     # First drop other trafo3w (other DSOs' couplers).  Then pp.drop_buses
@@ -744,13 +1156,34 @@ def build_dso_local_net(
         # Only the first primary bus becomes the true slack; any
         # additional primary buses (multi-trafo DSOs) get pinned via PV
         # gens at the same V_cached.  pandapower allows only one slack.
-        is_slack = (k == 0) or all(
-            int(g) not in sub.gen.index or not bool(sub.gen.at[g, "slack"])
-            for g in sub.gen.index
-        )
         is_slack = (k == 0)
+
+        if boundary == "thevenin":
+            # Move the source one bus back, behind a finite impedance, so
+            # the primary bus itself stays an ordinary PQ bus of the
+            # reduced network and keeps its Jacobian row.
+            z_ref = primary_z_ref_ohm.get(int(b))
+            if z_ref is None or abs(z_ref) <= 0.0:
+                vn_b = float(sub.bus.at[b, "vn_kv"])
+                z_ref = complex(0.0, 0.10 * vn_b ** 2 / _S_BASE_MVA)
+            _aux, _br, gi = add_thevenin_boundary(
+                sub, int(b),
+                float(primary_p_cached.get(int(b), 0.0)),
+                float(primary_q_cached.get(int(b), 0.0)),
+                complex(thevenin_k) * z_ref,
+                vm_pu=v_cached,
+                va_degree=primary_va_cached.get(int(b), 0.0),
+                slack=is_slack,
+                name="WARD_DSO_BOUNDARY_TH",
+            )
+            virtual_slacks.append(int(gi))
+            continue
+
+        # The slack gen's p_mw is ignored by the solver; for the PV boundary
+        # gens it IS the coupler's real-power exchange and must not be 0.
         gi = pp.create_gen(
-            sub, bus=int(b), p_mw=0.0, vm_pu=float(v_cached),
+            sub, bus=int(b), p_mw=float(primary_p_cached.get(int(b), 0.0)),
+            vm_pu=float(v_cached),
             slack=is_slack,
             min_p_mw=-1e6, max_p_mw=1e6,
             min_q_mvar=-1e6, max_q_mvar=1e6,
@@ -759,16 +1192,40 @@ def build_dso_local_net(
         virtual_slacks.append(int(gi))
 
     # ── 6. Converge ───────────────────────────────────────────────────────
-    # Use init='flat' so NR actually runs (and the Jacobian gets stored —
-    # see comment in :func:`build_tso_local_net`).
-    pp.runpp(
+    # Start flat so NR actually runs and the Jacobian gets stored (see comment
+    # in :func:`build_tso_local_net`), then fall back to a DC start.
+    #
+    # The flat point is a poor guess for a reduced net carrying heavy DER
+    # injection behind a single Ward boundary slack, and it is not merely slow
+    # but divergent: measured 2026-07-30 on scenario ``rural_700`` with the DER
+    # Q(V) dead zone at delta = 0, where every DER answers any deviation so the
+    # reduced net's |Q| is at its largest, NR failed after 100 flat iterations
+    # (delta = 0.005 on the same window converges).  The DC start supplies a
+    # consistent angle profile and gets through.
+    #
+    # Routed through the shared helper, as :func:`build_tso_local_net` already
+    # is, so the "J was actually stored" guarantee is enforced here too rather
+    # than being inferred from the flat start having iterated -- the caller
+    # feeds this net straight into JacobianSensitivities, which requires J.
+    runpp_with_stored_jacobian(
         sub,
         run_control=False,
         distributed_slack=False,
         calculate_voltage_angles=True,
         enforce_q_lims=False,
-        max_iteration=100,
-        init="flat",
+        # DC FIRST, flat only as a fallback. The ladder is tried in order and
+        # stops at the first convergence, so leading with a flat start meant
+        # the DC start was never reached whenever flat converged -- and on this
+        # network flat converges to the LOW-VOLTAGE root. Measured 2026-08-01
+        # at 2016-01-05 08:00: the flat solution put the whole HV sub-network
+        # near 0.74 pu against 1.03 pu in the combined solution (max error
+        # 0.29 pu, tertiary buses collapsing to 0.0), while the DC start lands
+        # within 0.023 pu. Every DSO sensitivity was therefore linearised about
+        # a point the plant is nowhere near. A flat start is a poor guess for a
+        # sub-network carrying heavy DER injection behind one boundary slack;
+        # the DC start supplies a consistent angle profile and finds the
+        # operational branch.
+        init_sequence=(("dc", 200), ("flat", 100)),
     )
 
     if verbose >= 2:

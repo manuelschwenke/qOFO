@@ -1,5 +1,13 @@
 # PI-Regelcharakteristik des DSO-OFO-Controllers
 
+> **Status (2026-07-31): historisch.** Der hier beschriebene I-Anteil
+> (`g_qi`, `lambda_qi`, `q_integral_max_mvar`, `_q_error_integral`,
+> `reset_integral()`) wurde aus `controller/dso_controller.py` und allen
+> Config-Dataclasses entfernt. Er war in allen Thesis-Konfigurationen
+> deaktiviert (`g_qi = 0`). Das Dokument bleibt als Herleitung der
+> P-/PI-Charakteristik erhalten; die Abschnitte zum I-Anteil beschreiben
+> keinen im Code vorhandenen Mechanismus mehr.
+
 ## Regelstrecke und Stellglieder
 
 Der DSO-OFO-Controller regelt die Blindleistung an der ÜN-VN-Schnittstelle

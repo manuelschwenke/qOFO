@@ -327,9 +327,6 @@ def run_cascade(
         current_line_indices=dso_lines,
         current_line_max_i_ka=dso_line_max_i_ka,
         g_q=g_q,
-        g_qi=config.g_qi,
-        lambda_qi=config.lambda_qi,
-        q_integral_max_mvar=config.q_integral_max_mvar,
         v_setpoints_pu=dso_v_setpoints,
         g_v=config.dso_g_v,
     )

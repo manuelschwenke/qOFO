@@ -11,14 +11,17 @@ import pytest
 from configs.config import MultiTSOConfig
 from experiments.helpers.records import MultiTSOIterationRecord
 from tuning.metrics import (
+    INFEASIBLE_SENTINEL,
     CostWeights,
     NoiseFloors,
     TrajectoryMetrics,
     _count_oscillations,
     _count_tap_switches,
+    _decimate_to_ticks,
     _itae,
     _itae_pcc_underutilization,
     _normalise,
+    _tap_wear,
     extract_metrics,
 )
 
@@ -33,11 +36,13 @@ def test_extract_metrics_empty_log_returns_sentinel(
     m = extract_metrics([], baseline_cfg)
     assert isinstance(m, TrajectoryMetrics)
     assert m.pf_failures == 1
-    # Catastrophe penalty should match the configured w_pf (cost = w_pf
-    # * min(pf_fail, 1) for any divergence).  Comparing against the
-    # default rather than a hard-coded 1000 keeps the test resilient to
-    # weight rebalancing.
-    assert m.cost_J == pytest.approx(CostWeights().w_pf)
+    # An empty log means nothing was simulated, so it must be inadmissible —
+    # not merely expensive.  It previously scored ``w_pf`` (=100), which was
+    # *cheaper* than 35–43 % of converged runs and so made divergence a
+    # profitable direction for the sampler.
+    assert m.cost_J == pytest.approx(INFEASIBLE_SENTINEL)
+    assert not m.feasible
+    assert m.infeasible_reason == "empty_log"
     assert m.n_records == 0
     assert m.n_tso_active == 0
     assert m.n_dso_active == 0
@@ -92,9 +97,20 @@ def test_itae_zero_error() -> None:
 def test_normalize_with_zero_scale_returns_zero() -> None:
     assert _normalise(5.0, scale=0.0) == 0.0
     assert _normalise(5.0, scale=-1.0) == 0.0
-    assert _normalise(float("nan"), scale=1.0) == 1.0
-    assert _normalise(float("inf"), scale=1.0) == 1.0
     assert _normalise(2.0, scale=4.0) == pytest.approx(0.5)
+
+
+def test_normalize_maps_non_finite_to_inf() -> None:
+    """A metric that could not be computed must dominate the cost.
+
+    This previously returned ``1.0`` ("nominal-bad").  Combined with
+    ``_itae`` returning ``0.0`` for an all-NaN trajectory, that made a
+    diverged run cost exactly ``w_pf`` — which sat at only the ~60th
+    percentile of *converged* costs, so divergence was a rewarded search
+    direction.  Regression guard: keep this mapping at ``inf``.
+    """
+    assert _normalise(float("nan"), scale=1.0) == float("inf")
+    assert _normalise(float("inf"), scale=1.0) == float("inf")
 
 
 # ---------------------------------------------------------------------------
@@ -273,3 +289,101 @@ def test_itae_pcc_underutilization_negative_voltage_error_symmetric() -> None:
     )
     assert out_pos == pytest.approx(out_neg)
     assert out_pos > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Regression guards for the four defects found in the 2026-07-31 BO audit.
+# Each of these encodes a bug that made a tuning parameter unidentifiable or
+# made divergence a profitable search direction.  See
+# docs/daily_log/07_2026/2026-07-31_bo_tuning_audit.md.
+# ---------------------------------------------------------------------------
+
+
+def test_oscillation_survives_held_commands() -> None:
+    """Defect 2: the oscillation term was identically zero in 100 % of runs.
+
+    Commands are logged once per plant step but only change on controller
+    ticks, so with ``dt_s=20`` / ``tso_period_s=180`` each command is held for
+    9 records and ``Delta u`` becomes ``[0, ..., 0, D, 0, ..., 0, D, ...]``.
+    ``_count_oscillations`` needs two *adjacent* above-floor deltas, so on the
+    held sequence it can never fire.  Decimating to the tick grid first is what
+    restores the intended semantics — this test fails if that is removed.
+    """
+    held = np.repeat(
+        np.array([[0.0], [50.0], [-50.0], [60.0], [-60.0], [70.0]]), 9, axis=0,
+    )
+    active = np.zeros(held.shape[0], dtype=bool)
+    active[::9] = True                       # one controller tick per hold
+
+    assert _count_oscillations(held, 20.0) == 0, "held sequence must be blind"
+    assert _count_oscillations(_decimate_to_ticks(held, active), 20.0) == 4
+
+
+def test_decimate_is_a_noop_without_tick_flags() -> None:
+    """Older logs carry no ``*_active`` flags; degrade gracefully, never empty."""
+    seq = np.array([[1.0], [2.0], [3.0]])
+    out = _decimate_to_ticks(seq, np.zeros(3, dtype=bool))
+    assert out.shape == seq.shape
+
+
+def test_tap_wear_is_per_transformer_not_fleet_sum() -> None:
+    """Defect 3: wear limits are per transformer, so the fleet sum hides them.
+
+    ``norm_tap = (n_tso + n_dso)/5`` also meant the two OLTC weights entered
+    the cost only through their *sum* — they could not be told apart no matter
+    how many trials were spent.  Here one changer hunts while the other is
+    quiet; the metric must report the worst one, not the average.
+    """
+    taps = np.zeros((41, 2))
+    taps[:, 0] = np.tile([0.0, 1.0], 21)[:41]                    # hunts
+    taps[:, 1] = np.concatenate([np.zeros(20), np.ones(21)])     # one move
+
+    ops_per_h, reversals_per_h = _tap_wear(taps, duration_s=86400.0)
+    # 40 moves over 24 h on the worst changer.  Reported per HOUR, not per day:
+    # the design scenarios are event-dense 75-min windows and a real day is
+    # mostly quiet, so extrapolating one to the other inflates the rate ~19x.
+    # The hand-tuned reference makes 5.0 taps in its window -- an unremarkable
+    # 4.0/hour that read as a pathological "96/day" under the first version of
+    # this metric, and tripped a wear limit it had no business tripping.
+    assert ops_per_h == pytest.approx(40.0 / 24.0)   # worst changer, not mean
+    assert reversals_per_h > 1.0
+
+
+def test_absent_quantity_is_not_a_divergence(
+    baseline_cfg: MultiTSOConfig,
+) -> None:
+    """A metric with nothing to measure scores 0, not ``nan``.
+
+    Guards the distinction between "this network has no tie pairs / no PCC
+    interfaces" (fine, nothing to get wrong) and "the values are non-finite"
+    (divergence).  Collapsing the two marks healthy runs inadmissible.
+    """
+    log = [_make_record(i) for i in range(5)]
+    for r in log:
+        r.zone_tie_q_mvar.clear()             # no inter-zone ties at all
+    m = extract_metrics(log, baseline_cfg)
+    assert m.itae_q_tie == 0.0
+    assert m.feasible, m.infeasible_reason
+
+
+def test_diverged_log_is_infeasible_not_cheap(
+    baseline_cfg: MultiTSOConfig,
+) -> None:
+    """Defect 1, end to end: divergence must never undercut a converged run.
+
+    A NaN-voltage trajectory used to produce ``itae = 0`` (perfect tracking!)
+    and a total cost of ``w_pf`` = 100 — cheaper than 35-43 % of *converged*
+    runs, so the optimiser was rewarded for finding divergent regions.
+    """
+    log = [_make_record(i) for i in range(5)]
+    for r in log:
+        for z in r.zone_v_mean:
+            r.zone_v_mean[z] = float("nan")
+            r.zone_v_min[z] = float("nan")
+            r.zone_v_max[z] = float("nan")
+
+    m = extract_metrics(log, baseline_cfg)
+    assert not m.feasible
+    assert m.infeasible_reason == "pf_failure"
+    assert m.cost_J == pytest.approx(INFEASIBLE_SENTINEL)
+    assert m.cost_J > CostWeights().w_pf * 100

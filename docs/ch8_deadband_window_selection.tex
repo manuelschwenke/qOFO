@@ -1,0 +1,845 @@
+% ---------------------------------------------------------------------------
+% Ch. 8 §2 -- Selection of the DER Q(V) dead-zone half-width.
+% METHOD SECTION. Results are placeholders (marked RESULTS PLACEHOLDER).
+%
+% To \input this into the thesis, delete everything from \documentclass down to
+% \tableofcontents, and the closing \end{document}. The macros in the preamble
+% (\pu, \Mvar, \qss, \rms) match docs/qss_rms_divergence_analysis.tex; drop them
+% if the thesis already defines equivalents.
+%
+% Generated 2026-07-31 alongside the runs it describes.
+% ---------------------------------------------------------------------------
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[hidelinks]{hyperref}
+
+\sisetup{detect-weight=true,detect-family=true}
+
+\newcommand{\pu}{\ensuremath{\mathrm{p.u.}}}
+\newcommand{\Mvar}{\ensuremath{\mathrm{Mvar}}}
+\newcommand{\qss}{\textsc{qss}}
+\newcommand{\rms}{\textsc{rms}}
+\newcommand{\dz}{\ensuremath{\delta}}
+
+\title{Selection of the DER $Q(V)$ dead-zone half-width\\[2mm]
+\large Experimental design, choice of profile windows, and their
+representativeness}
+\author{}
+\date{2026--07--31}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+%======================================================================
+\section{Purpose and claim under test}
+
+The distribution-connected DER follow a local reactive-power droop
+$Q(V)$ with a dead zone of half-width $\dz$ about a re-anchored voltage
+reference. The dead zone is a design parameter, and the claim to be tested is
+that it is a \emph{two-sided} one:
+
+\begin{description}
+  \item[$\dz$ too narrow] the local droop answers every small profile
+    variation. The DER move continuously and the outer online feedback
+    optimisation (OFO) layer repeatedly re-anchors against them.
+  \item[$\dz$ too wide] the droop is inactive between dispatches, so no local
+    voltage support acts and the interface reactive power drifts until the next
+    OFO step corrects it.
+\end{description}
+
+If both extremes degrade the controlled quantities, the useful $\dz$ is an
+interior minimum, and the experiment must exhibit that minimum rather than
+assume it.
+
+\subsection{Assumptions, actuators and controlled outputs}
+
+\begin{itemize}
+  \item \textbf{Plant.} Modified IEEE~39-bus transmission system, scenario
+    \texttt{rural\_700}, with four HV (\SI{110}{\kilo\volt}) distribution
+    underlays. $\mathrm{DSO}_3$ carries a scenario multiplier of $2\times$
+    installed DER and $2\times$ active-load base; its reactive load is
+    \emph{not} scaled. Every DSO has zero constant reactive load and follows
+    $Q_\mathrm{load}(t) = \SI{500}{\Mvar}\cdot m_\mathrm{qload}(t)$.
+  \item \textbf{Actuators.} DER reactive power (continuous, $Q(V)$ droop with
+    dead zone), coupler three-winding OLTCs, machine two-winding OLTCs, and
+    MSC/MSR switched shunts.
+  \item \textbf{Controlled outputs.} Reactive power flow at the EHV--HV
+    interfaces, and nodal voltages within their admissible band.
+  \item \textbf{DER capability.} The physical VDE-AR-N-4120 operating diagrams
+    are used throughout (\texttt{--physical-capability}). This matters for the
+    window selection: the diagram makes reactive capability contingent on
+    active power, so a park at $P=0$ has \emph{no} reactive capability. See
+    \S\ref{sec:degenerate}.
+  \item \textbf{Disturbance class.} Profiled operation --- the annual
+    load/DER time series, not an injected step. This is deliberate: the dead
+    zone exists to filter the small-signal variation of normal operation, so a
+    step test would not exercise the mechanism under study.
+  \item \textbf{No contingencies, and no measurement noise.} Every run in the
+    study records \texttt{contingencies = []},
+    \texttt{measurement\_noise.enabled = False} and
+    \texttt{enable\_reachability\_guard = False}. The profile evolution is
+    therefore the \emph{only} exogenous disturbance. The consequences for the
+    parameter under study are discussed in \S\ref{sec:excitation}; they are not
+    incidental.
+  \item \textbf{Controllers see only their cached sensitivities.} No controller
+    is given the plant equations.
+\end{itemize}
+
+\subsection{Measured quantities}
+
+Three controlled quantities are evaluated on the \emph{same} runs:
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lll}
+\toprule
+Symbol & Definition & Unit \\
+\midrule
+interface $Q$ & mean $|Q_\mathrm{act}-Q_\mathrm{set}|$ over the TS--DSO
+  interfaces & \si{\Mvar} \\
+TS voltage & per-zone RMS voltage error & \pu \\
+DS voltage & RMS deviation of each DSO group's mean $V$ from
+  \SI{1.03}{\pu} & \pu \\
+\bottomrule
+\end{tabular}
+\caption{Controlled quantities evaluated for every dead band.}
+\label{tab:metrics}
+\end{table}
+
+%======================================================================
+\section{Experimental grid}
+
+The sweep is a full factorial over dead band and profile window,
+\[
+  \dz \in \{0,\ 0.001,\ 0.0025,\ 0.005,\ 0.0075,\ 0.01,\ 0.015,\ 0.02,\ 0.03\}
+  \ \pu,
+\]
+crossed with the profile windows of Table~\ref{tab:windows}. Each cell is an
+independent closed-loop co-simulation against the PowerFactory \rms{} plant,
+with a quasi-static reference leg run on the same controller configuration.
+
+\paragraph{Why $\dz = 0.001$ was added, and what it showed.} The initial grid
+stepped from $0$ straight to $0.0025$, across which the interface-$Q$ error
+changes by a factor of three (\S\ref{sec:findings}). A single interval carrying
+the entire narrow-side transition cannot distinguish a gradual degradation from
+an abrupt one, and the distinction matters for the design rule: an abrupt
+collapse means the dead band must simply be non-zero, whereas a gradual one
+means its exact value trades off continuously against voltage quality.
+
+The transition is \textbf{abrupt}. In the mildest window the interface-$Q$ error
+falls from \SI{1.395}{\Mvar} at $\dz=0$ to \SI{0.533}{\Mvar} at
+$\dz=\SI{0.001}{\pu}$ --- a dead zone of one part in a thousand recovers
+\SI{90}{\percent} of the entire penalty between $\dz=0$ and the optimum
+\SI{0.441}{\Mvar} at $\dz=0.005$. The remaining \SI{10}{\percent} is spread over
+a range four times wider.
+
+This changes the form of the design rule. The requirement is not a particular
+$\dz$ but a \emph{non-zero} one: the tracking benefit saturates almost
+immediately, while the DS voltage cost continues to accrue across the whole
+range (\SI{0.00225}{\pu} at $\dz=0$, \SI{0.00418}{\pu} at $0.001$,
+\SI{0.00902}{\pu} at $0.03$). A dead band should therefore be chosen as small as
+the measurement chain permits rather than optimised for tracking --- with the
+caveat of \S\ref{sec:excitation} that no measurement noise is present in these
+runs, which is precisely what would set that lower limit in practice.
+
+The grid was not swept in one pass. The initial matrix covered
+$\dz\in\{0.0025,\dots,0.015\}$; $\dz=0$ and the upper points
+$\dz\in\{0.02,0.03\}$ were added afterwards, the latter because the argument
+minimum for one window was found to lie \emph{at} the upper end of the original
+range and was therefore a bound rather than a measured optimum
+(\S\ref{sec:edge}).
+
+A note on the $\dz=0$ cell, since it decides the central claim. It was
+initially excluded on the basis of a recorded cost of approximately
+\SI{4.9}{\hour} per run, attributed to the static-leg initialisation at a zero
+dead band. \textbf{That figure is void}: measured on 2026-07-31, the three
+$\dz=0$ runs took \SI{12.3}{\minute}, \SI{12.8}{\minute} and
+\SI{13.2}{\minute} --- indistinguishable from every other cell, and a factor of
+roughly $23$ below the recorded estimate. The exclusion therefore withheld the
+single most informative point in the study for no reason. All cells are
+ordinary grid points and cost approximately \SI{13}{\minute}.
+
+%======================================================================
+\section{Selection of the profile windows}
+\label{sec:windows}
+
+\subsection{What the windows are for}
+
+The dead band is a single scalar applied to all DER, so the question is not
+only \emph{what} its optimum is but whether that optimum is a property of the
+system or an artefact of the operating point at which it was measured. The
+windows exist to answer that second question, and the design requirement is
+therefore a \emph{spread} of operating points rather than a statistically
+representative sample of the year.
+
+\subsection{Provenance of the initial screening, and its limits}
+\label{sec:screening}
+
+The first three windows were drawn from a Tier-1 seasonal screening that ranked
+quarter-hours by the quasi-static per-interval voltage excursion:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Window & Screening excursion & Intended role \\
+\midrule
+2016-01-05 08:00 & \SI{0.00828}{\pu} & low (reference) \\
+2016-01-15 03:00 & \SI{0.01573}{\pu} & mid \\
+2016-07-15 03:00 & \SI{0.02051}{\pu} & high / annual maximum \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{These figures were measured on an earlier network topology and are not
+valid descriptors of the runs reported here.} They are recorded because they
+document how the windows were \emph{chosen}; they must not be used to
+characterise the operating points, to order them by severity, or as a regressor
+against which the optimum is fitted. \S\ref{sec:degenerate} gives the concrete
+demonstration of why: the window this screening ranked as the annual maximum
+turned out, on the current topology, to be the least demanding of the three.
+
+The corresponding column in the machine-readable output is named
+\texttt{screening\_excursion\_pu\_old\_topology} for this reason.
+
+\subsection{Measured characterisation of the windows}
+
+Table~\ref{tab:windows} characterises each window by quantities measured on the
+current topology, either from the profile data or from the runs themselves.
+These, not the screening figures, are what the windows should be described by.
+
+\begin{table}[htbp]
+\centering
+\sisetup{table-number-alignment=center}
+\begin{tabular}{lS[table-format=4.1]S[table-format=4.1]S[table-format=+5.1]cc}
+\toprule
+Window & {DER $P$} & {Load $P$} & {Net infeed} & Parks with & PCC capability \\
+       & {[\si{\mega\watt}]} & {[\si{\mega\watt}]} & {[\si{\mega\watt}]}
+       & zero $Q$ cap. & {[\si{\Mvar}]} \\
+\midrule
+2016-02-22 13:00 & 2262.4 & 2379.9 & -117.4 & {pending}
+  & {pending} \\
+2016-01-05 08:00 & 2324.5 & 1916.0 &  408.6 & 16/44
+  & $[-45.2,\,41.6]$ \\
+2016-01-15 03:00 & 2605.7 & 1800.7 &  805.0 & 16/44
+  & $[-44.3,\,41.8]$ \\
+2016-12-18 14:00 & 2741.8 & 1374.7 & 1367.1 & 16/44
+  & $[-42.0,\,46.1]$ \\
+\addlinespace
+2016-07-15 03:00 &   29.2 & 1055.3 & -1026.1 & \textbf{44/44}
+  & $[0.0,\,0.0]$ \\
+2016-05-01 16:00 & 3458.6 & 1258.6 & 2200.0 & \multicolumn{2}{c}{\emph{no
+  convergent solution}} \\
+\bottomrule
+\end{tabular}
+\caption{Windows characterised by current-topology quantities, ordered by net
+infeed. The first four are the live windows of the study. The last two carry no
+results: 2016-07-15 03:00 is retained as a null result
+(\S\ref{sec:degenerate}), and 2016-05-01 16:00 admits no convergent power-flow
+solution (\S\ref{sec:extra-windows}). PCC capability is the initial zone-2
+value; zone~3 is comparable. Net infeed is
+$\sum P_\mathrm{DER}-\sum P_\mathrm{load}$ over the profiled rows.}
+\label{tab:windows}
+\end{table}
+
+The three original live windows span a factor of $3.3$ in net infeed ($+409$ to
+$+\SI{1367}{\mega\watt}$) while holding DER reactive capability essentially
+constant: all three have the same $16/44$ parks below the VDE capability
+threshold and comparable PCC envelopes of roughly $\pm\SI{45}{\Mvar}$. The
+comparison therefore varies the loading condition while leaving the available
+actuator authority unchanged, which is the property that makes a shift in
+$\dz^\star$ attributable to the operating point rather than to a change in the
+actuator set.
+
+It should be stated precisely \emph{what} varies. Across those three, DER infeed
+is similar ($2325$, $2606$, $\SI{2742}{\mega\watt}$) and the spread in net
+infeed comes predominantly from the load, which falls from $1916$ to
+$\SI{1375}{\mega\watt}$. The axis is therefore better described as
+\emph{decreasing load at near-constant generation} than as increasing
+generation, and the resulting stress is a light-load voltage-rise condition.
+
+\subsection{Two further windows, and one that does not exist}
+\label{sec:extra-windows}
+
+All three original live windows are net \emph{exporting}. The dead band was
+therefore selected entirely within the voltage-rise regime, in which the local
+droop absorbs reactive power. Two windows were added to widen that basis.
+
+\paragraph{2016-05-01 16:00 --- $+\SI{2200}{\mega\watt}$: attempted and
+infeasible.} This window was chosen to extend the export axis
+\SI{61}{\percent} above the previous maximum, deliberately below the annual
+peak, because 2016-07-25 13:00 at $+\SI{3259}{\mega\watt}$ had already aborted
+with a non-convergent Jacobian probe. \textbf{It failed the same way.} All nine
+dead bands raised \texttt{LoadflowNotConverged} in the static leg, each within
+roughly \SI{30}{\second} and before the simulation proper began, so the failure
+is a property of the operating point and not of $\dz$.
+
+The export axis therefore could not be extended, and the study has \emph{four}
+live windows rather than five. What the attempt does buy is a much tighter
+bound on feasibility: $+\SI{1367}{\mega\watt}$ converges and
+$+\SI{2200}{\mega\watt}$ does not, where previously the bracket was
+$+805$ to $+\SI{3259}{\mega\watt}$. A further attempt would sensibly target
+$+1600$ to $+\SI{1700}{\mega\watt}$.
+
+That this could not be predicted offline is itself worth recording: a
+pandapower probe with a flat start declared feasible hours infeasible, while a
+probe with runner-like settings declared this window feasible. Neither
+reproduces the runner, so feasibility here is an empirical property established
+by running.
+
+\paragraph{2016-02-22 13:00 --- $-\SI{117}{\mega\watt}$, net import.} The only
+window in the set with negative net infeed \emph{and} capable DER, and thus the
+only one probing the voltage-drop regime, in which the droop must inject rather
+than absorb.
+
+\paragraph{A deep-import window with capable DER does not exist in this data.}
+This is a property of the profiles rather than a gap in the search, and it
+bounds what the study can claim. DER output and load are positively correlated
+--- both peak in daytime hours --- so the hours with substantial reactive
+capability are precisely the hours with high generation. Screening all
+$35\,136$ quarter-hours, \emph{no} hour combines $P_\mathrm{DER} \geq
+\SI{2200}{\mega\watt}$ with net infeed below $-\SI{300}{\mega\watt}$. The deeply
+importing hours are the low-generation ones, and under the VDE capability
+diagram their parks have little or no reactive capability --- the limiting case
+being the degenerate window of \S\ref{sec:degenerate}, where infeed is
+\SI{29}{\mega\watt} and capability is exactly zero.
+
+The consequence is that \textbf{$\dz$ cannot be assessed under deep import with
+active DER on this system}, because that operating point does not occur. Any
+statement about dead-band selection in a voltage-drop regime is therefore
+restricted to the near-balanced condition of 2016-02-22 13:00. A study of that
+regime would need either a different generation mix or an artificial
+dispatch, and either choice would leave the annual profile set.
+
+\subsection{A degenerate window, and what it establishes}
+\label{sec:degenerate}
+
+The window originally selected as the most severe, 2016-07-15 03:00, returned
+\emph{bit-identical} results for all five dead bands of the initial grid. The
+identity extends to the full per-park reactive-power record, not merely to the
+aggregated metrics, so it is not a numerical coincidence.
+
+The cause is the DER capability model. At a July night hour there is no
+photovoltaic infeed and the wind profiles sit inside a genuine multi-day lull,
+giving an aggregate DER infeed of \SI{29.2}{\mega\watt} against
+\SI{2605.7}{\mega\watt} at 2016-01-15 03:00. Under the VDE-AR-N-4120 diagram
+reactive capability is contingent on active power, so \emph{all} 44 parks report
+zero reactive capability and both zone PCC capability intervals collapse to
+$[0,0]\,\si{\Mvar}$. With no DER able to move, the $Q(V)$ characteristic never
+binds and its dead zone cannot influence anything.
+
+Two conclusions follow, and both belong in the thesis rather than in a
+footnote:
+
+\begin{enumerate}
+  \item \textbf{Dead-band selection presupposes DER reactive headroom.} The
+    parameter is meaningful only where the continuous actuators it governs can
+    act. This is a statement about the applicability of the design rule, not a
+    limitation of the experiment.
+  \item \textbf{The screening that selected this window was not merely
+    imprecise but misleading}, having ranked it the most severe operating point
+    of the three. This is the evidence for the provenance restriction stated in
+    \S\ref{sec:screening}.
+\end{enumerate}
+
+The window is retained in the data set as a documented null result and is
+excluded from the cross-window comparison of optima.
+
+\subsection{Selection of the replacement window}
+
+The replacement, 2016-12-18 14:00, was selected under three criteria applied in
+order:
+
+\begin{enumerate}
+  \item \textbf{Actuator availability.} Every DER park must carry meaningful
+    active power, so that reactive capability exists under the VDE diagram.
+    Screening all $35\,136$ quarter-hours, this holds for approximately
+    \SI{37}{\percent} of the year.
+  \item \textbf{Elevated stress.} Net infeed must exceed that of the existing
+    windows, net infeed being the quantity that drives the voltage rise the
+    dead zone is meant to filter.
+  \item \textbf{Numerical feasibility.} The operating point must admit a
+    converged power-flow solution in the static leg.
+\end{enumerate}
+
+The third criterion is not a formality. A first candidate, 2016-07-25 13:00,
+was selected on criteria 1--2 at $+\SI{3259}{\mega\watt}$ net infeed --- close to
+the annual maximum --- and failed criterion 3: the static leg's Jacobian probe
+did not converge. An offline power-flow screen was not able to predict this
+reliably, since its verdict depended strongly on the initialisation and slack
+treatment and did not reproduce the runner's behaviour. The criterion was
+therefore applied empirically, and the replacement was chosen with margin
+rather than at maximum stress: $+\SI{1367}{\mega\watt}$, a factor $1.7$ above
+2016-01-15 03:00 and well inside the region known to solve.
+
+\subsection{In what sense the windows are representative}
+\label{sec:representative}
+
+The claim that should be made is narrow, and it is worth stating precisely
+because a stronger one is not supported.
+
+\textbf{What the window set supports.} The four live windows are
+\emph{contrasting} operating points spanning net infeed from
+$-117$ to $+\SI{1367}{\mega\watt}$ (Table~\ref{tab:windows}), a range that
+crosses zero and therefore covers both the voltage-rise and the near-balanced
+condition. If the optimum $\dz^\star$ is common to all of them, that is evidence
+of a system property; if it moves monotonically with loading, that is evidence
+of an operating-point dependence with an identifiable direction. Either outcome
+is informative, and both are conclusions about \emph{sensitivity to the
+operating point}, which is what the design requires.
+
+\textbf{What it does not support.} The windows are not a random or stratified
+sample of the operating year, and no frequency-weighted statement --- such as an
+expected annual performance, or a $\dz$ optimal in an annual-average sense ---
+can be drawn from four purposively chosen points. Three of them were selected
+under a screening now known to be invalid as a severity measure
+(\S\ref{sec:screening}), and the fourth under a different criterion (net
+infeed). The set is \emph{purposive}, not representative in the sampling sense,
+and is reported as such. It is also asymmetric about zero: the export side
+reaches $+\SI{1367}{\mega\watt}$ while the import side stops at
+$-\SI{117}{\mega\watt}$. Both limits are structural rather than chosen --- the
+import side by the correlation between DER output and load
+(\S\ref{sec:extra-windows}), the export side by power-flow feasibility.
+
+\textbf{What would strengthen it.} A screening of the annual profile on the
+current topology, using a quantity measured on these runs --- DER reactive
+headroom, or a per-interval voltage excursion recomputed post-fix --- would
+allow the windows to be placed on a defensible severity axis and would permit a
+stratified selection. That screening does not presently exist; the old one is
+void, and inventing a value for the replacement window would mix two
+incompatible measurements. This is recorded as an open item rather than
+papered over.
+
+%======================================================================
+\section{Results}
+
+% ===================== RESULTS PLACEHOLDER ============================
+% Populate from results/deadband_selection/ once the full grid is complete:
+%   deadband_metrics.csv  -- one row per run
+%   deadband_optima.csv   -- argmin per window per metric, with at_range_edge
+%   figures/deadband_selection.{png,pdf}
+%   figures/deadband_band.{png,pdf}
+% ======================================================================
+
+\subsection{Per-window response}
+
+\begin{figure}[htbp]
+\centering
+% \includegraphics[width=\textwidth]{figures/deadband_selection.pdf}
+\framebox[0.9\textwidth][c]{\rule{0pt}{6cm}%
+  \textsf{PLACEHOLDER: deadband\_selection.pdf}}
+\caption{The three controlled quantities against the dead-zone half-width
+$\dz$, one curve set per profile window. Left axis \si{\Mvar}, right axis
+\pu. Each interior minimum is ringed.}
+\label{fig:selection}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\sisetup{table-number-alignment=center}
+\begin{tabular}{S[table-format=1.4]
+                S[table-format=1.3]S[table-format=1.5]S[table-format=1.5]
+                S[table-format=1.3]S[table-format=1.5]S[table-format=1.5]
+                S[table-format=1.3]S[table-format=1.5]S[table-format=1.5]}
+\toprule
+& \multicolumn{3}{c}{2016-01-05 08:00}
+& \multicolumn{3}{c}{2016-01-15 03:00}
+& \multicolumn{3}{c}{2016-12-18 14:00} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}
+{$\dz$} & {$Q$} & {TS $V$} & {DS $V$}
+        & {$Q$} & {TS $V$} & {DS $V$}
+        & {$Q$} & {TS $V$} & {DS $V$} \\
+\midrule
+0      & 1.395 & 0.00559 & 0.00225 & 4.367 & 0.00662 & 0.00821 & 3.568 & 0.00809 & 0.00577 \\
+0.0025 & 0.463 & 0.00530 & 0.00535 & 2.824 & 0.00593 & 0.01199 & 1.838 & 0.00737 & 0.00991 \\
+0.005  & 0.441 & 0.00531 & 0.00639 & 2.363 & 0.00586 & 0.01350 & 1.615 & 0.00726 & 0.01197 \\
+0.0075 & 0.466 & 0.00549 & 0.00728 & 2.082 & 0.00589 & 0.01473 & 1.544 & 0.00736 & 0.01343 \\
+0.01   & 0.510 & 0.00581 & 0.00776 & 1.951 & 0.00596 & 0.01587 & 1.512 & 0.00753 & 0.01419 \\
+0.015  & 0.533 & 0.00619 & 0.00839 & 1.644 & 0.00601 & 0.01691 & 1.494 & 0.00749 & 0.01347 \\
+0.02   & 0.527 & 0.00614 & 0.00887 & 1.524 & 0.00592 & 0.01650 & 1.210 & 0.00692 & 0.01377 \\
+0.03   & 0.640 & 0.00609 & 0.00902 & 1.572 & 0.00582 & 0.01615 & 1.126 & 0.00703 & 0.01393 \\
+\bottomrule
+\end{tabular}
+\caption{Measured response for every cell of the grid: interface $Q$ in
+\si{\Mvar}, TS and DS voltage in \pu. The degenerate window
+2016-07-15 03:00 is omitted --- all five of its cells returned
+$Q = \SI{2.167}{\Mvar}$, TS $V = \SI{0.00592}{\pu}$,
+DS $V = \SI{0.01570}{\pu}$ identically (\S\ref{sec:degenerate}).}
+\label{tab:results}
+\end{table}
+
+\subsection{Does the optimum move with the operating point?}
+
+\begin{figure}[htbp]
+\centering
+% \includegraphics[width=\textwidth]{figures/deadband_band.pdf}
+\framebox[0.9\textwidth][c]{\rule{0pt}{6cm}%
+  \textsf{PLACEHOLDER: deadband\_band.pdf}}
+\caption{Minimum/maximum band across the live windows, each metric normalised
+to its own best value, so that the \emph{shape} of the response can be compared
+across operating points whose absolute levels differ.}
+\label{fig:band}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Window & $\dz^\star$ (interface $Q$) & $\dz^\star$ (TS $V$) & $\dz^\star$ (DS $V$) \\
+\midrule
+2016-01-05 08:00 & 0.005 & 0.0025 & $0^{\dagger}$ \\
+2016-01-15 03:00 & 0.02  & $0.03^{\dagger}$ & $0^{\dagger}$ \\
+2016-12-18 14:00 & $0.03^{\dagger}$ & 0.02 & $0^{\dagger}$ \\
+\addlinespace
+2016-07-15 03:00 & \multicolumn{3}{c}{flat --- no optimum exists} \\
+\bottomrule
+\end{tabular}
+\caption{Argument minima per window and metric, in \pu. $^{\dagger}$ marks an
+entry at the edge of the swept range: a bound, not a measured optimum
+(\S\ref{sec:edge}). The interface-$Q$ optima of the first two windows are
+interior and therefore measured.}
+\label{tab:optima}
+\end{table}
+
+\subsection{Findings}
+\label{sec:findings}
+
+\paragraph{The dead zone is genuinely two-sided, and the zero anchor is what
+establishes it.} At $\dz=0$ the interface-$Q$ error is
+$3.2\times$, $2.9\times$ and $3.2\times$ its optimal value in the three live
+windows. Without that point the narrow-side branch rested on a difference of
+about \SI{5}{\percent} between $\dz=0.0025$ and $\dz=0.005$ in the mildest
+window, which is not separable from run-to-run variation. With it, the
+narrow-side penalty is unambiguous.
+
+\paragraph{$\dz^\star$ is strongly operating-point dependent.} The
+interface-$Q$ optimum moves $0.005 \rightarrow 0.02 \rightarrow \geq 0.03$, a
+factor of at least six. The first two are bracketed interior minima; the third
+is still falling at the widest dead band swept, so the true separation is
+larger than measured.
+
+\paragraph{The two controlled quantities select opposite ends.} DS voltage is
+best at $\dz=0$ in \emph{every} live window, while interface $Q$ is at its worst
+there. Moving from $\dz=0$ to the interface-$Q$ optimum costs a factor
+$2.0$--$2.8$ in DS voltage error. The dead zone therefore does not have a single
+optimum across the controlled outputs: it purchases interface-$Q$ tracking at
+the cost of DS voltage quality, and the design choice is where on that exchange
+to sit. TS voltage does not discriminate --- its optimum lands at $0.0025$,
+$0.03$ and $0.02$ across the three windows with a spread of \SIrange{1}{3}
+{\percent}, and should not be used to select $\dz$.
+
+\subsection{Pareto analysis: which dead bands survive both objectives}
+\label{sec:pareto}
+
+Since the two controlled quantities select opposite ends of the range, a single
+$\dz^\star$ does not exist and the correct object is the set of non-dominated
+dead bands. A dead band is \emph{dominated} when another is at least as good in
+every objective and strictly better in one; a dominated dead band is never a
+rational choice, because the alternative costs nothing to adopt.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{llll}
+\toprule
+Window & Net infeed & Pareto-optimal $\dz$ & dominated \\
+\midrule
+2016-02-22 13:00 & $-117$ & $0.005,\ 0.0075,\ 0.03$
+  & $0,\ 0.001,\ 0.0025,\ 0.01,\ 0.015,\ 0.02$ \\
+2016-01-05 08:00 & $+409$ & $0,\ 0.001,\ 0.0025,\ 0.005$
+  & $0.0075,\ 0.01,\ 0.015,\ 0.02,\ 0.03$ \\
+2016-01-15 03:00 & $+805$ & all but $0.015$ & $0.015$ \\
+2016-12-18 14:00 & $+1367$ & all but $0.01$ & $0.01$ \\
+\midrule
+\textbf{intersection} & & $\mathbf{0.005}$ & \\
+\bottomrule
+\end{tabular}
+\caption{Non-dominated dead bands per window over (interface $Q$, DS $V$), in
+\pu; net infeed in \si{\mega\watt}. Including TS voltage as a third objective
+leaves every set unchanged, which is independent confirmation that it does not
+discriminate.}
+\label{tab:pareto}
+\end{table}
+
+\paragraph{One dead band survives every regime.} The intersection is the single
+value $\dz = \SI{0.005}{\pu}$. This is a considerably stronger statement than
+the three export windows alone support: among those, $\dz \in \{0, 0.001,
+0.0025, 0.005\}$ are all non-dominated, and no unique choice emerges. Adding the
+one window with negative net infeed collapses the set to a point.
+
+\paragraph{Why the import window is decisive: the voltage trade-off reverses.}
+In every exporting window, DS voltage is monotonically best at $\dz = 0$ ---
+the droop absorbs reactive power, and a tighter band means it absorbs sooner. In
+the importing window the droop must \emph{inject}, and DS voltage instead has an
+\emph{interior} minimum at $\dz = \SI{0.0075}{\pu}$
+(\SIlist{0.00658;0.00634;0.00587;0.00521;0.00498}{\pu} for
+$\dz = 0 \dots 0.0075$, rising thereafter). The narrow dead bands that are
+Pareto-optimal under export are therefore \emph{dominated} under import: they
+are worse for both objectives at once.
+
+A dead band selected only in the voltage-rise regime would thus have been chosen
+against evidence that does not hold when the sign of the interface flow
+reverses. Since the import side of the axis reaches only
+$-\SI{117}{\mega\watt}$ for the structural reason of
+\S\ref{sec:extra-windows}, this conclusion rests on one window and should be
+treated as indicative until a deeper-import operating point can be constructed.
+
+\paragraph{The single-objective reading is overturned.} On interface-$Q$
+tracking alone the optimum moves $0.005 \rightarrow 0.02 \rightarrow \geq 0.03$
+and the wide dead bands appear best. Once DS voltage enters, \emph{every}
+$\dz \geq 0.0075$ is dominated in the mildest window: another dead band is
+better there in both objectives simultaneously. A dead band that is dominated
+in any operating point is a poor fixed choice, because in that condition
+voltage quality is surrendered for no tracking benefit.
+
+\paragraph{Compromise point.} Normalising each objective to its own best value
+within a window, $r_i(\dz) = f_i(\dz)/\min_\dz f_i(\dz) \geq 1$, and minimising
+the worst ratio (Chebyshev scalarisation) gives:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+$\dz$ & 2016-01-05 & 2016-01-15 & 2016-12-18 & worst case \\
+\midrule
+$0$      & 3.16 & 2.87 & 3.17 & 3.17 \\
+$0.0025$ & 2.38 & 1.85 & 1.72 & \textbf{2.38} \\
+$0.005$  & 2.84 & 1.64 & 2.07 & 2.84 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+$\dz = \SI{0.0025}{\pu}$ minimises the worst-case relative sacrifice across all
+windows and objectives, and is Chebyshev-optimal in two of the three.
+
+\paragraph{Recommendation.} $\dz = \SI{0.005}{\pu}$, and unusually for a
+multi-objective problem this needs no weighting argument: it is the only dead
+band that is non-dominated in every operating regime tested
+(Table~\ref{tab:pareto}). Any other choice is beaten on \emph{both} objectives
+simultaneously somewhere in the operating range.
+
+The Chebyshev compromise agrees in two of the four windows and prefers
+$\SI{0.001}{\pu}$ in the other two, but that disagreement is not a genuine
+alternative: $\SI{0.001}{\pu}$ is dominated under import, so no weighting of the
+objectives rescues it there. The scalarisation weights each objective by its own
+best value within a window, which is a modelling choice; the Pareto set is free
+of that choice, which is why the recommendation is stated from the set rather
+than from the scalarisation.
+
+A caveat on one data point. In the importing window the interface-$Q$ error
+rises smoothly from \SI{1.334}{\Mvar} at $\dz = 0.005$ to \SI{1.633}{\Mvar} at
+$\dz = 0.02$, then drops sharply to \SI{1.178}{\Mvar} at $\dz = 0.03$. That
+discontinuity places $0.03$ in the window's Pareto set. It is out of character
+with the rest of the curve and should be checked before being relied upon: the
+dead zone is known to admit more than one self-consistent equilibrium
+(\texttt{docs/qss\_rms\_divergence\_analysis.tex}), so a jump of this kind may
+be the run settling into a different one rather than a smooth trend. It does not
+affect the recommendation, since $0.03$ is dominated in two other windows.
+
+Produced by \texttt{analysis/deadband\_pareto.py}.
+
+%======================================================================
+\section{Disturbance rejection under a load step}
+\label{sec:step}
+
+\subsection{Why a second experiment is needed}
+
+The sweep above selects $\dz$ against profile evolution, which is a slow,
+continuous excitation. It therefore says nothing about how the dead zone behaves
+when the system is displaced abruptly. The two regimes plausibly favour opposite
+choices, and that tension is the point of the experiment:
+
+\begin{itemize}
+  \item Under \emph{profiled operation} a wider dead band tracked the interface
+    better at stressed operating points (\S\ref{sec:findings}), because the
+    local droop stops competing with the outer optimisation between dispatches.
+  \item Under a \emph{step} a narrower dead band should reject better, because
+    the droop begins responding at a smaller voltage deviation and therefore
+    acts sooner and more strongly.
+\end{itemize}
+
+If both hold, $\dz$ cannot be chosen on tracking quality alone: it also sets how
+much of a disturbance the local layer absorbs before the slower cascade
+responds.
+
+\subsection{The disturbance is a load step, not a contingency}
+
+The step multiplies every active-load profile
+(\texttt{mv\_rural\_pload}, \texttt{HS4\_pload}, \texttt{HS5\_pload}) by a
+constant factor from a fixed instant onward. Reactive-load columns are excluded
+deliberately: \texttt{mv\_rural\_qload} is signed and predominantly negative in
+this data, so scaling it would deepen a capacitive injection rather than add
+load.
+
+This is \emph{not} a contingency, and the distinction is structural rather than
+terminological. A contingency switches an element out of service by mutating the
+pandapower network, which the \rms{} plant rejects --- for that plant the
+network is only a measurement mirror, so the change would never reach
+PowerFactory and the co-simulation would be silently inconsistent. A load step
+needs none of that machinery: it perturbs the exogenous profile, which both
+plants already consume through supported paths --- the static plant through
+\texttt{apply\_profiles}, the \rms{} plant through
+\texttt{Plant.apply\_exogenous} (\texttt{EvtLod} load events). No element is
+switched, and both legs see the identical disturbance.
+
+\paragraph{The step is applied after interpolation.} This is an implementation
+detail with a substantive consequence. The profile source is
+\SI{15}{\minute} data, which \texttt{load\_profiles} interpolates linearly to
+the \SI{20}{\second} dispatch step. Perturbing the source file would therefore
+produce a \SI{15}{\minute} \emph{ramp}, not a step, and the experiment would
+silently measure something else. The perturbation is applied to the interpolated
+frame instead. Verified: the ratio between stepped and baseline profiles is
+exactly $1$ before the instant and exactly the factor after it, with zero
+intermediate samples.
+
+\subsection{Design}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\toprule
+Item & Value \\
+\midrule
+Step magnitudes & $\times 1.10$ (mild) and $\times 1.25$ (severe) \\
+Step instant & $t = \SI{100}{\second}$ of a \SI{300}{\second} horizon \\
+Before / after & 5 / 10 dispatch intervals \\
+Dead bands & the full nine-point grid \\
+Windows & 2016-01-05 08:00 (mild, sharp interior optimum) and \\
+        & 2016-12-18 14:00 (stressed, shallow optimum) \\
+Runs & $9 \times 2 \times 2 = 36$ \\
+\bottomrule
+\end{tabular}
+\caption{Disturbance-rejection grid. The \SI{200}{\second} of recovery spans a
+full \SI{180}{\second} TSO dispatch period, so the response is not truncated
+before the slower layer has acted even once.}
+\label{tab:steptable}
+\end{table}
+
+The two windows are chosen as the extremes of the profiled-operation result: one
+where $\dz^\star$ is sharp and narrow, one where it is shallow and wide. If the
+step reverses the ranking, it should be most visible between these two.
+
+\paragraph{Separation from the undisturbed study.} The stepped runs are written
+to the same results directory with an otherwise identical configuration. The
+admission filter of the profiled-operation analysis therefore requires
+\texttt{load\_step\_time\_s} to be absent, so a disturbed run cannot enter the
+undisturbed curves. This is the same class of safeguard as the scenario and
+multiplier checks of \S\ref{sec:comparability}.
+
+\subsection{Results}
+
+% ===================== RESULTS PLACEHOLDER ============================
+% Metrics to report, computed separately over the pre-step and post-step
+% intervals rather than averaged across the event:
+%   - peak interface-Q excursion after the step
+%   - peak nodal-voltage excursion after the step
+%   - dispatch intervals to re-settle within the 2% band
+%   - steady-state error restored, pre vs post
+% ======================================================================
+
+\begin{figure}[htbp]
+\centering
+% \includegraphics[width=\textwidth]{figures/deadband_step.pdf}
+\framebox[0.9\textwidth][c]{\rule{0pt}{6cm}%
+  \textsf{PLACEHOLDER: disturbance rejection vs $\dz$}}
+\caption{Rejection of the load step against dead-zone half-width, for both step
+magnitudes and both windows. Expected: rejection degrades monotonically with
+$\dz$, opposing the profiled-operation result.}
+\label{fig:step}
+\end{figure}
+
+Averaging a metric across the step instant would let the transient dominate the
+mean and hide the steady-state behaviour the earlier sections measure, so every
+quantity is reported pre- and post-step separately.
+
+%======================================================================
+\section{Reporting conventions and threats to validity}
+
+\subsection{Edge values are bounds, not optima}
+\label{sec:edge}
+
+An argument minimum that falls on the smallest or largest dead band swept is
+not a measured optimum: the metric may still be improving beyond the range. Such
+entries are flagged (\texttt{at\_range\_edge}) and reported as bounds. Where the
+interface-$Q$ minimum was found at an edge, the range was extended
+(\S\ref{sec:windows}) until the minimum was bracketed, or the residual bound is
+stated explicitly.
+
+This distinction propagates: if the optima of two windows differ and one is an
+edge value, the measured spread is a \emph{lower bound} on the true separation.
+
+\subsection{A flat metric has no optimum}
+
+Where a metric does not vary with $\dz$ within a window, the argument minimum is
+an artefact of ordering and is suppressed rather than reported. This is what the
+degenerate window of \S\ref{sec:degenerate} would otherwise have contributed.
+
+\subsection{The excitation the dead band was tuned against}
+\label{sec:excitation}
+
+The dead zone is selected here against a single class of excitation: the
+evolution of the load and DER profiles. No contingency is applied, and
+measurement noise is disabled. Two consequences follow, and they act in the
+same direction.
+
+\paragraph{Measurement noise.} A dead zone's standard justification is to
+prevent the actuator from responding to noise on the measured voltage. That
+mechanism is absent here by construction, so the entire narrow-side branch of
+the argument --- that a too-small $\dz$ causes the DER to move continuously and
+the OFO layer to re-anchor against them --- is carried by genuine profile
+variation alone. Since measurement noise would contribute exactly the small,
+fast, approximately zero-mean excitation that a dead band exists to reject,
+adding it should penalise narrow dead bands further. The value of $\dz^\star$
+reported here is therefore expected to be a \emph{lower} bound on the value
+appropriate to a noisy plant. The direction of this bias is argued, not
+measured; quantifying it requires repeating the sweep with a noise model.
+
+\paragraph{Contingencies.} No element outage is applied anywhere in this study.
+The abrupt-disturbance question is addressed instead by the load step of
+\S\ref{sec:step}, which reaches both plants through the exogenous-profile path;
+a genuine outage would require switching support in the \rms{} plant, which does
+not currently exist. A load step and a line trip are not equivalent: the trip
+also changes the network topology, and therefore the sensitivities the
+controllers hold cached, whereas the step changes only the operating point. The
+results here should accordingly not be read as a dead band validated for
+post-contingency operation.
+
+\paragraph{Reachability guard.} The quasi-static voltage-reachability guard is
+disabled, because it would solve a second plant behind the \rms{} adapter. This
+removes a mechanism that could otherwise mask a poor $\dz$ by intervening
+before the dead zone's effect became visible in the controlled outputs.
+
+\subsection{Comparability across runs}
+\label{sec:comparability}
+
+Runs enter the study only if their stored configuration matches on scenario, DER
+capability model, profile use, droop slope, seeding options, and the per-DSO
+scenario multipliers. The multiplier check is not cosmetic: an earlier run
+predating the $\mathrm{DSO}_3$ multipliers would otherwise have been admitted
+beside scaled runs, which the runner itself warns are not comparable.
+
+\subsection{Open items}
+
+\begin{enumerate}
+  \item No current-topology severity screening exists
+    (\S\ref{sec:representative}); the windows are purposive.
+  \item The metric set contains no direct measure of actuator activity, whereas
+    the mechanism attributed to a too-narrow dead band is DER chatter and
+    repeated re-anchoring. Interface $Q$ registers this only indirectly. A
+    direct measure --- DER reactive traverse per dispatch interval, or tap
+    operations --- can be derived from the stored per-park records without
+    re-running anything, and would evidence the narrow-side branch of the
+    argument far better than an inferred penalty.
+  \item The sweep has not been repeated with measurement noise enabled
+    (\S\ref{sec:excitation}). This is the single change most likely to move
+    $\dz^\star$, and in a predictable direction.
+  \item Whether the thesis quotes \texttt{rural\_700}, \texttt{base\_410}, or
+    both remains open; the results here are \texttt{rural\_700} only.
+\end{enumerate}
+
+\end{document}

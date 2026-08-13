@@ -1,0 +1,36 @@
+meta:
+  baseline_path: \\e5server\homefolders$\mschwenke\Python_Projekte\qOFO_GH\tuning\scripts\configs\baseline_ieee39.yaml
+  best_trial_number: 173
+  best_value: 0.6321401376964743
+  ceilings:
+    g_v: 10012754.50199748
+    g_w_der: 49.93630872506195
+    g_w_dso_der: 798.9809396009912
+    g_w_dso_oltc: .inf
+    g_w_pcc: 79.89809396009912
+    g_w_tso_oltc: 7045.8660094001725
+    g_w_tso_shunt: .inf
+  ceilings_notes: 'continuous via isotropic 1/g_w scaling, rho(M_full^c)=0.9987 at
+    baseline; g_w_tso_oltc from C3.g_min_required (max over 7 OLTCs); g_w_tso_shunt:
+    no shunt actuators in stability result; g_w_dso_oltc: no analytical bound (DSO
+    OLTCs settle finitely by Prop. 1.3); ceiling=inf, BO uses fallback_high'
+  constraints:
+    g1_diverged: 0.0
+    g2_corridor: -0.0001
+    g3_contraction: -0.05721585148544306
+    g4_settling: -300.0
+    g5a_tap_ops: -3.2142857142857135
+    g5b_tap_reversals: -1.2053571428571428
+  cvar_pct: 100.0
+  n_trials: 180
+  search_space_fingerprint: 28e4a48605e74730
+  search_space_version: 2
+  solver: GUROBI ?
+  space: reparam
+  study_name: v5_reparam_v2
+  timestamp: '2026-08-04T23:42:18.917728'
+params:
+  dso_lambda: 1.0964048871681646
+  dso_v_priority: 0.7641326900293102
+  tau_der_pcc: 0.01618211331204804
+  tso_lambda: 1.1975421798462904

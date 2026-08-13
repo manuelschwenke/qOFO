@@ -8,8 +8,8 @@
 (`TieCoordinationMessage`), `controller/tso_controller.py`
 (`receive_tie_coordination` / `report_tie_boundary_voltage`, Q_tie band),
 `experiments/007_TIE_COORDINATION.py`, `visualisation/plot_tie_coordination.py`.
-**History:** `docs/daily_log/2026-06-25_tso_tso_v_coordination.md` (first, failed
-price design) and `docs/daily_log/2026-06-25_tso_tso_two_loop_refactor.md`
+**History:** `docs/daily_log/06_2026/2026-06-25_tso_tso_v_coordination.md` (first, failed
+price design) and `docs/daily_log/06_2026/2026-06-25_tso_tso_two_loop_refactor.md`
 (current design).
 
 ---

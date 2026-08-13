@@ -1131,7 +1131,7 @@ predate the rename); `MultiTSOConfig` field names unchanged
 the old paths (they document the past). Verification: full suite
 `pytest tests/sbx_h tests/sbx_v` → **165 passed**; import smoke of all
 SBX experiments green. Details:
-`docs/daily_log/2026-07-10_sbx_h_rename_and_015_helpfulness.md`.
+`docs/daily_log/07_2026/2026-07-10_sbx_h_rename_and_015_helpfulness.md`.
 
 ### 015 (rewritten) — when is SBX-H useful over NO explicit communication?
 

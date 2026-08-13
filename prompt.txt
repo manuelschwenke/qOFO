@@ -1,0 +1,80 @@
+Run experiment E3 (tracking accuracy versus dead-band half-width) for the
+dissertation's Chapter 9 dead-band selection.
+
+Project root: \\130.83.232.108\homefolders$\mschwenke\Python_Projekte\qOFO_GH
+Python env: qOFO_clean
+
+FIRST, before writing anything: read results/deadband_droop/README.md and one
+config.json from an existing run in results/deadband_droop/data (folders
+0437-0536, the 2026-08-07 load-step campaign). Derive the runner invocation and
+the full config schema from those. Do not guess the CLI or the key names.
+
+WHAT E3 IS
+A sweep measuring how much the local Q(V) droop layer degrades the OFO's
+tracking accuracy as its dead band narrows. Narrow band => the droop answers
+voltage movement the OFO is itself producing => the two layers compete. The
+sweep should show tracking accuracy flat above some half-width and degrading
+below it; that knee is the lower bound on the dead band, measured on the harm
+rather than on a false-activation proxy.
+
+CONFIG
+32 undisturbed RMS runs: 8 half-widths x 2 droop slopes x 2 operating windows.
+- Half-widths (runner_rms.tso_qv_deadband_pu): 0, 0.0025, 0.005, 0.0075, 0.01,
+  0.02, 0.05, 0.2 p.u. The 0.2 leg is the droop-out-of-loop reference.
+- Droop slopes (runner_rms.tso_qv_slope_pu): 0.05 and 0.10.
+- Operating windows: import (net infeed -117 MW) and export (+409 MW).
+- Horizon 900 s.
+- NO contingency. These are undisturbed runs.
+
+IMPORTANT, this differs from the load-step campaign: the dead band must be LIVE
+FROM t=0. Set runner_rms.tso_qv_deadband_pu to the swept value and do NOT use
+qv_deadband_at_contingency. Consequence: the legs will NOT share a common start,
+because a configured width also feeds the controllers and the static plant. That
+is correct here - each leg is its own closed-loop system - but it means legs
+cannot be differenced against a shared baseline trajectory. Compare aggregate
+metrics only, never pointwise trajectory differences.
+
+OFO on, with the current empirically found objective/step-size parameters. Do
+not retune. Voltage references are 1.03 p.u. at both levels, with weights g_v
+(TS) and dso_g_v (DS).
+
+WHAT TO RECORD
+Sample at each dispatch instant k-, i.e. the pre-apply measurement (achieved-
+value tracking), discarding the first TSO period as initialisation transient:
+- TS voltage tracking: |V_i - 1.03| over TS buses. Report unweighted and
+  g_v-weighted, as RMS over (bus, dispatch) and as max.
+- DS voltage tracking: |V_j - 1.03| over DS buses. Unweighted and
+  dso_g_v-weighted, RMS and max.
+- DS interface Q tracking: |Q_iface - Q_set| at each EHV-HV interface at each DS
+  dispatch. RMS and max, in Mvar; also as a fraction of that interface's
+  capability band if the run records it.
+- The OFO objective value at each dispatch.
+- Droop activation count per run: how many (park, window) pairs crossed the
+  band. This lets the tracking result be cross-plotted against the
+  false-activation proxy from experiment E1.
+
+OUTPUT
+- Write runs to a NEW folder results/deadband_droop_e3_tracking/data, run
+  numbers 0540-0579. Do not write into results/deadband_droop/data - that is
+  the load-step campaign and must stay intact.
+- Long-format CSV: one row per (run, dispatch instant, level, metric).
+- Summary CSV: one row per run (half-width, slope, window) with the RMS and max
+  aggregates and the activation count.
+- Preserve each run's own config.json. Cell identity must be recoverable from
+  config.json alone, not from sweep logs - the existing campaign's logs are
+  UTF-16 and wrapped mid-path, which makes them useless for identification.
+
+If the 32 runs need to be split across machines or sessions, they shard on any
+axis - the cells are fully independent. Whatever shards, the profile day,
+start_time, seeds and baseline config must be identical across shards or the
+results will not pool.
+
+REPORT BACK
+- Tracking metric versus half-width, per level, per slope, per operating window.
+- Whether the expected shape appears (flat above ~0.01 p.u., degrading below),
+  and at which rung the knee sits.
+- Activation count versus half-width, to compare against E1.
+- Anything that had to deviate from the config above.
+
+Log what you did to 00_daily_log per the project convention: what changed, the
+method, timestamp, reason.

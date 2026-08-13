@@ -154,6 +154,25 @@ class TSOControllerConfig:
     gen_vm_min_pu: float = 0.95
     gen_vm_max_pu: float = 1.07
 
+    non_dispatchable_gen_indices: Set[int] = field(default_factory=set)
+    """``net.gen`` indices whose AVR setpoint the controller must NOT move.
+
+    These machines stay fully **observed** -- their Q still enters the
+    reserve term and the Q_gen soft constraint -- but their V-ref column is
+    zeroed in ``H`` and their input bounds are pinned, so the MIQP cannot
+    dispatch them.  This is deliberately weaker than the out-of-service mask
+    (which additionally zeroes the Q_gen row, gradient and reserve terms,
+    i.e. "the machine is gone").
+
+    Motivation (2026-07-21): the IEEE 39-bus slack ``G 01`` is the 10 GVA
+    'Rest of USA/Canada' network equivalent.  pandapower models it as a slack
+    bus with a settable ``vm_pu``, so the OFO was dispatching it; the
+    PowerFactory RMS model has no AVR block for it at all (network
+    equivalents ship without controllers), so those writes were silently
+    skipped.  A TSO does not dispatch a neighbouring interconnection's
+    voltage, so the actuator is removed on **both** sides rather than added
+    to the RMS."""
+
     gen_oltc_map: Dict[int, int] = field(default_factory=dict)
     """Maps generator position index (in gen_indices) to OLTC position
     index (in oltc_trafo_indices).  Only generators with a dedicated
@@ -532,6 +551,15 @@ class TSOController(BaseOFOController):
         self._oos_gen_mask: NDArray[np.bool_] = np.zeros(n_gen, dtype=np.bool_)
         self._oos_oltc_mask: NDArray[np.bool_] = np.zeros(n_oltc, dtype=np.bool_)
 
+        # Permanently non-dispatchable AVRs (see the config field).  Unlike
+        # the OOS mask this is structural, never toggled at runtime, and it
+        # leaves every Q_gen output term intact.
+        self._fixed_v_gen_mask: NDArray[np.bool_] = np.asarray(
+            [g in config.non_dispatchable_gen_indices
+             for g in config.gen_indices],
+            dtype=np.bool_,
+        ) if n_gen else np.zeros(0, dtype=np.bool_)
+
         # AVR saturation mode per generator.  Values:
         #   0  = free (AVR regulating, gen acts as PV)
         #  +1  = saturated at upper Q limit (overexcitation)
@@ -754,6 +782,45 @@ class TSOController(BaseOFOController):
         H_v = np.ascontiguousarray(H[:n_v, :], dtype=np.float64)
         g_v_vec = self._g_v_vector()
         return H_v, g_v_vec
+
+    def objective_curvature_inputs(
+        self,
+    ) -> Optional[Tuple[NDArray[np.float64], NDArray[np.float64]]]:
+        """Voltage **and** interface-Q rows, each with its own weight.
+
+        Output ordering is ``[ V_bus | Q_PCC | I_line | Q_gen ]``.  The
+        interface-Q block is included when ``g_q_tso > 0`` so the curvature
+        reflects the whole weighted objective rather than the voltage block
+        alone.  With the default ``tso_g_q_pcc = 0`` this reduces exactly to
+        :meth:`voltage_curvature_inputs`.
+
+        The line-current and generator-Q rows carry reserve/loss objectives
+        that are inactive in this configuration (``tso_g_res_* = 0``,
+        ``tso_g_loss = 0``); they are omitted rather than included at weight
+        zero, since a zero-weight row contributes nothing to ``M`` either way.
+        """
+        n_v = len(self.config.voltage_bus_indices)
+        n_pcc = len(self.config.pcc_trafo_indices)
+        g_q_tso = float(getattr(self.config, "g_q_tso", 0.0) or 0.0)
+
+        use_v = n_v > 0
+        use_q = n_pcc > 0 and g_q_tso > 0.0
+        if not use_v and not use_q:
+            return None
+
+        H = self._expand_H_to_der_level(self._build_sensitivity_matrix())
+        blocks: list[NDArray[np.float64]] = []
+        weights: list[NDArray[np.float64]] = []
+        if use_v:
+            blocks.append(np.asarray(H[:n_v, :], dtype=np.float64))
+            weights.append(np.asarray(self._g_v_vector(), dtype=np.float64))
+        if use_q:
+            blocks.append(np.asarray(H[n_v:n_v + n_pcc, :], dtype=np.float64))
+            weights.append(np.full(n_pcc, g_q_tso, dtype=np.float64))
+
+        H_y = np.ascontiguousarray(np.vstack(blocks), dtype=np.float64)
+        g_y = np.concatenate(weights)
+        return H_y, g_y
 
     # =========================================================================
     # Implementation of abstract methods
@@ -1096,6 +1163,17 @@ class TSOController(BaseOFOController):
         avr_end = avr_start + n_gen
         u_lower[avr_start:avr_end] = self.config.gen_vm_min_pu
         u_upper[avr_start:avr_end] = self.config.gen_vm_max_pu
+
+        # Non-dispatchable AVRs: collapse the band onto the present setpoint.
+        # ``initialise()`` fills ``_u_current`` from the measurement and
+        # ``step()`` refuses to run without it, so it is always available
+        # here; the guard mirrors the defensive style of the OOS freeze below.
+        if n_gen and self._u_current is not None:
+            for k in range(n_gen):
+                if self._fixed_v_gen_mask[k]:
+                    pin = float(self._u_current[avr_start + k])
+                    u_lower[avr_start + k] = pin
+                    u_upper[avr_start + k] = pin
 
         # --- AVR saturation: asymmetric clamp (Feature B, gated) ---
         # When the AVR is saturated, the MIQP can only move in the
@@ -2109,6 +2187,13 @@ class TSOController(BaseOFOController):
         # for these actuators, complementing the frozen bounds.
         for k in range(n_gen):
             if self._oos_gen_mask[k]:
+                H[:, avr_start + k] = 0.0
+        # Non-dispatchable AVRs: same column zeroing, different reason -- the
+        # machine is in service and its Q_gen *row* stays intact, but the
+        # controller has no authority over its setpoint (see
+        # non_dispatchable_gen_indices).
+        for k in range(n_gen):
+            if self._fixed_v_gen_mask[k]:
                 H[:, avr_start + k] = 0.0
         col_oltc_start = n_der_bus + n_pcc + n_gen
         for k in range(n_oltc):

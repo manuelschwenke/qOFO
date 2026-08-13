@@ -293,6 +293,44 @@ def remove_generators(
     # -- Drop the generator rows from net.gen -----------------------------------
     net.gen.drop(index=sorted(requested), inplace=True)
 
+    if terminal_buses_to_remove:
+        # -- Drop loads stranded on the removed terminal buses ---------------
+        #
+        # case39 places a small load at IEEE bus 31 (0-idx 30), which the
+        # machine-trafo loop turns into G2's 10.5 kV terminal bus.  Removing
+        # the generator (wind_replace) previously left that load's const and
+        # profile rows referencing a non-existent bus; pandapower silently
+        # excluded them from the power flow (res_load = 0), so the load
+        # table overstated the served demand by ~6.5 MW.  Dropping the rows
+        # is therefore behaviour-neutral for the power flow and makes the
+        # model self-consistent (discovered by the Phase-0 snapshot
+        # exporter's referential-integrity check, 2026-07-17).
+        removed_bus_set = set(terminal_buses_to_remove)
+        stranded_loads = net.load.index[
+            net.load["bus"].isin(removed_bus_set)
+        ].tolist()
+        if stranded_loads:
+            net.load.drop(index=stranded_loads, inplace=True)
+
+        # Fail-Fast: any OTHER element still referencing a removed terminal
+        # bus indicates a genuine topology error, not the known load quirk.
+        _residual_refs = []
+        for _tbl, _cols in (("line", ("from_bus", "to_bus")),
+                            ("trafo", ("hv_bus", "lv_bus")),
+                            ("trafo3w", ("hv_bus", "mv_bus", "lv_bus")),
+                            ("sgen", ("bus",)),
+                            ("gen", ("bus",)),
+                            ("shunt", ("bus",))):
+            _df = net[_tbl]
+            for _c in _cols:
+                _bad = _df.index[_df[_c].isin(removed_bus_set)].tolist()
+                _residual_refs += [f"{_tbl}[{i}].{_c}" for i in _bad]
+        if _residual_refs:
+            raise ValueError(
+                f"Removing terminal buses {sorted(removed_bus_set)} leaves "
+                f"dangling references: {_residual_refs}"
+            )
+
     # -- Rebuild all gen-related meta fields ------------------------------------
     #
     # All four fields (gen_indices, gen_bus_indices, gen_grid_bus_indices,
@@ -330,6 +368,9 @@ def remove_generators(
         gen_grid_bus_indices  = tuple(new_gen_grid_bus_indices),
         machine_trafo_indices = tuple(new_machine_trafo_indices),
         machine_trafo_gen_map = tuple(new_machine_trafo_gen_map),
+        internal_aux_bus_indices = meta.internal_aux_bus_indices,
+        internal_aux_parent_buses = meta.internal_aux_parent_buses,
+        internal_aux_line_indices = meta.internal_aux_line_indices,
         tso_der_indices       = meta.tso_der_indices,
         tso_der_buses         = meta.tso_der_buses,
         dso_pcc_trafo_indices = meta.dso_pcc_trafo_indices,

@@ -131,9 +131,6 @@ def make_cigre_config() -> MultiTSOConfig:
         tso_g_res_sg=0,
         # ── DSO objective tuning ──
         dso_g_v=1E5,              # reduced to avoid competing with Q tracking
-        dso_g_qi=0,                   # integral Q-tracking (0 = off)
-        dso_lambda_qi=0.95,           # leaky integrator decay
-        dso_q_integral_max_mvar=200.0,
         dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
         # ── TSO weights (w-shift closed-loop curvature) ──
         g_w_der=100,
@@ -207,7 +204,7 @@ def make_cigre_config() -> MultiTSOConfig:
             ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
         ],
     )
-    cfg.scenario = "wind_replace"
+    cfg.scenario = "base_410"
     cfg.warmup_s = 0.0
     return cfg
 
@@ -589,7 +586,7 @@ def make_figures(logs: Dict[str, List[MultiTSOIterationRecord]]) -> None:
     fig_logs = {k: v for k, v in logs.items() if k not in FIG_EXCLUDE}
     make_cigre_figures(
         fig_logs, out_dirs,
-        scenario="wind_replace",
+        scenario="base_410",
         gen_select=GEN_SELECT,
         v_set=V_SET,
         iface_show_v5=IFACE_SHOW_V5,

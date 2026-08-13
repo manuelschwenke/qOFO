@@ -20,8 +20,8 @@ from network.ieee39.hv_networks import add_hv_networks
 
 @pytest.fixture()
 def base_net_meta():
-    """Fresh wind_replace IEEE39 + HV sub-networks per test."""
-    net, meta = build_ieee39_net(scenario="wind_replace", verbose=False)
+    """Fresh base_410 IEEE39 + HV sub-networks per test."""
+    net, meta = build_ieee39_net(scenario="base_410", verbose=False)
     meta = add_hv_networks(net, meta, verbose=False)
     return net, meta
 

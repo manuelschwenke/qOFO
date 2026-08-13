@@ -190,6 +190,16 @@ class MultiTSOIterationRecord:
     older pickles load; the plotter falls back to ``|zone_v_mean - v_set|``
     when this dict is empty."""
 
+    bus_vm_pu: Dict[int, float] = field(default_factory=dict)
+    """``{pandapower bus index: vm_pu}`` for every voltage-observed EHV bus
+    and every DSO-group bus, after the end-of-step solve.
+
+    Added 2026-07-21 for the Gate-E per-bus comparison: ``zone_v_min/max/mean``
+    only give an envelope, so a static-vs-RMS voltage plot could not be drawn
+    bus-by-bus -- an RMS trace inside the static envelope was unresolvable.
+    Defaulted so older pickles load; consumers must treat an empty dict as
+    "not recorded" rather than "no buses"."""
+
 
     # Noisy, controller-facing TSO measurement snapshot (pre-control).
     # These fields are intentionally separate from the exact post-control
@@ -216,6 +226,17 @@ class MultiTSOIterationRecord:
     dso_q_set_mvar:    Dict[str, Optional[float]] = field(default_factory=dict)
     dso_objective:     Dict[str, Optional[float]] = field(default_factory=dict)
     dso_status:        Dict[str, Optional[str]]   = field(default_factory=dict)
+
+    dso_sigma_norm:    Dict[str, float] = field(default_factory=dict)
+    """‖σ‖₂ of the DSO MIQP step, per DSO.  Added 2026-07-21: a controller
+    that solves and *chooses* a zero step is otherwise indistinguishable
+    from one that failed or was constrained, which blocked the Gate-E
+    investigation into a 120 s DSO response delay."""
+
+    dso_z_slack_max:   Dict[str, float] = field(default_factory=dict)
+    """max |z| over the DSO MIQP slack variables, per DSO.  Non-zero means
+    an output soft constraint (voltage / current / capability) is being
+    violated and is competing with interface-Q tracking in the objective."""
 
     # DSO network-group aggregates
     dso_group_q_der_mvar:     Dict[str, float] = field(default_factory=dict)

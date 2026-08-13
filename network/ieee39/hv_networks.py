@@ -27,10 +27,15 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandapower as pp
 
+from network.ieee39.aux_load_buses import separate_colocated_zip_loads
 from network.ieee39.meta import IEEE39NetworkMeta, HVNetworkInfo
 from network.ieee39.constants import (
+    DEFAULT_DSO_DER_CAPACITY_SCENARIO,
+    DSO_DER_CAPACITY_SCENARIOS,
+    DSO_HV_LINE_PARALLEL,
+    DSO_HV_LINE_STD_TYPES,
+    DSO_Q_PROFILE_BASE_MVAR,
     HV_LINE_TOPOLOGY,
-    HV_COUPLING_WP_MVA,
     HV_HIGH_LOAD_BUS_NOS,
     HV_HIGH_LOAD_FACTOR,
     LOAD_CONST_FRACTION,
@@ -38,12 +43,33 @@ from network.ieee39.constants import (
     LOAD_VAR_FRACTION,
     PROFILE_MAX,
     PROFILE_MEAN,
-    TUDA_WIND_PARKS,
-    TUDA_PV_PLANTS,
     ZONE3_BUSES_0IDX,
     SUBNET_DEFS,
 )
 from network.ieee39.helpers import get_load_at_bus
+
+
+def _ensure_pandapower_line_std_type(
+    net: pp.pandapowerNet,
+    std_type: str,
+) -> None:
+    """Install a built-in pandapower line type if the net omitted it."""
+    if std_type in net.std_types["line"]:
+        return
+    library = pp.create_empty_network()
+    try:
+        std_type_data = library.std_types["line"][std_type]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown pandapower line standard type {std_type!r}"
+        ) from exc
+    pp.create_std_type(
+        net,
+        std_type_data,
+        std_type,
+        element="line",
+        overwrite=True,
+    )
 
 
 # =====================================================================
@@ -57,8 +83,9 @@ def _create_hv_subnetwork(
     *,
     line_length_scale: float = 1.0,
     total_p_mw: float = 500.0,
-    total_q_mvar: float = 50.0,
+    total_q_mvar: float = DSO_Q_PROFILE_BASE_MVAR,
     gen_type: str = "mixed",
+    generation_scenario: str = DEFAULT_DSO_DER_CAPACITY_SCENARIO,
 ) -> HVNetworkInfo:
     """
     Create one copy of the TUDA 110 kV HV network and couple it to the
@@ -84,12 +111,33 @@ def _create_hv_subnetwork(
         ``"mixed"`` -- standard TUDA (4 wind + 4 PV).
         ``"pv"``    -- all wind replaced by PV of same capacity.
         ``"wind"``  -- all PV removed except 30 MW at HV bus 7.
+    generation_scenario : str
+        Installed-capacity scenario from ``DSO_DER_CAPACITY_SCENARIOS``.
 
     Returns
     -------
     HVNetworkInfo
     """
     # ── 1. Create 10 HV buses at 110 kV ──────────────────────────────────────
+    try:
+        capacity = DSO_DER_CAPACITY_SCENARIOS[generation_scenario]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown DSO DER capacity scenario {generation_scenario!r}; "
+            f"valid: {sorted(DSO_DER_CAPACITY_SCENARIOS)}"
+        ) from exc
+    wind_parks = capacity["wind_parks"]
+    pv_plants = capacity["pv_plants"]
+    coupling_wp_mva = capacity["coupling_wp_mva"]
+
+    try:
+        line_std_type = DSO_HV_LINE_STD_TYPES[net_id]
+    except KeyError as exc:
+        raise ValueError(
+            f"No HV line standard type configured for {net_id!r}"
+        ) from exc
+    _ensure_pandapower_line_std_type(net, line_std_type)
+
     bus_map: Dict[int, int] = {}
     bus_indices: List[int] = []
     for i in range(10):
@@ -109,7 +157,8 @@ def _create_hv_subnetwork(
             from_bus=bus_map[f],
             to_bus=bus_map[t],
             length_km=base_km * line_length_scale,
-            std_type="184-AL1/30-ST1A 110.0",
+            std_type=line_std_type,
+            parallel=DSO_HV_LINE_PARALLEL.get((net_id, f, t), 1),
             name=f"{net_id}|Line_({f}-{t})",
             subnet="DN",
         )
@@ -169,19 +218,13 @@ def _create_hv_subnetwork(
         coupling_hv_bus_indices.append(hv_bus)
 
     # ── 4. Create loads — two rows per HV bus, mirroring the TN convention:
-    #       * Constant row: no profile, carries time-mean.  For P this is
-    #         0.5 * per-bus share.  For Q this is the FULL per-bus share:
-    #         ``mv_rural_qload`` has near-zero mean (≈ -0.050), so the
-    #         variable row contributes ≈ 0 on time average, and the
-    #         constant row must carry the whole HV Q mean to match
-    #         ``total_q_mvar``.
-    #       * Variable row: profile-driven.  For P, ``base_p_mw`` is mean-
-    #         normalised so the time mean equals 0.5 * per-bus share.  For
-    #         Q, ``base_q_mvar = 0.5 * q_per_bus`` sets the reactive swing
-    #         amplitude while its time mean adds a small capacitive bias
-    #         (≈ -2.5 % of HV Q), accepted as a design tradeoff.
+    #       * Constant row: no profile, carries the constant active-power
+    #         fraction and zero reactive power.
+    #       * Variable row: profile-driven. For P, base_p_mw is normalized
+    #         to the active-load profile. For Q, base_q_mvar carries the
+    #         complete per-bus share and is multiplied by mv_rural_qload.
     #
-    #       Load concentration on ``HV_HIGH_LOAD_BUS_NOS`` is expressed
+    #       Load concentration on HV_HIGH_LOAD_BUS_NOS is expressed
     #       as a relative weight so that the weighted sum across all 10
     #       buses equals ``total_p_mw`` / ``total_q_mvar`` (no hidden
     #       inflation).
@@ -205,35 +248,32 @@ def _create_hv_subnetwork(
         q_per_bus = q_per_bus_uniform * w
         sn_bus = max(abs(p_per_bus), abs(q_per_bus), 1.0)
 
-        # Constant row: c * P (so peak = (c+v) * p_per_bus = p_per_bus when
-        # the variable profile hits its maximum), FULL Q (the mv_rural_qload
-        # profile has near-zero mean so the variable Q row swings around 0
-        # and the constant row carries the per-bus mean Q).
+        # Constant row: c * P only. Reactive demand has no constant
+        # reference; its complete aggregate base is assigned to the
+        # profile-driven row below.
         lidx_c = pp.create_load(
             net,
             bus=bus_map[i],
             sn_mva=sn_bus,
             p_mw=c * p_per_bus,
-            q_mvar=q_per_bus,
+            q_mvar=0.0,
             name=f"{net_id}|HV_MV_Sub_{i}_const",
             subnet="DN",
         )
         net.load.at[lidx_c, "base_p_mw"] = c * p_per_bus
-        net.load.at[lidx_c, "base_q_mvar"] = q_per_bus
+        net.load.at[lidx_c, "base_q_mvar"] = 0.0
         net.load.at[lidx_c, "profile_p"] = None
         net.load.at[lidx_c, "profile_q"] = None
         load_indices.append(int(lidx_c))
 
         # Variable row: max-normalised P (peak at LOAD_PEAK_BOOST * v *
-        # p_per_bus when profile hits max); swing-amplitude Q around zero
-        # (kept as 0.5 * q_per_bus to preserve the previous Q swing behaviour,
-        # since mv_rural_qload has near-zero mean and ~0.34 max amplitude --
-        # the boost is intentionally not applied to HV Q).
+        # p_per_bus when profile hits max); profile-only Q around zero. The
+        # aggregate base_q_mvar over all ten rows equals total_q_mvar.
         base_p_var = LOAD_PEAK_BOOST * v * p_per_bus / max_mv_p
-        base_q_var = 0.5 * q_per_bus
+        base_q_var = q_per_bus
         # Initial p_mw at the per-bus IEEE share at peak (c+v=1.0); this
         # plus the c*p_per_bus constant row gives a startup PF that matches
-        # the original 0.5 + 0.5 = 1.0 * p_per_bus convention.
+        # the current 0.4 + 0.6 = 1.0 * p_per_bus convention.
         # apply_profiles() overwrites this every step.
         lidx_v = pp.create_load(
             net,
@@ -256,7 +296,7 @@ def _create_hv_subnetwork(
     sgen_indices: List[int] = []
 
     if gen_type == "mixed":
-        for i, (bus_no, p_mw, profile) in enumerate(TUDA_WIND_PARKS):
+        for i, (bus_no, p_mw, profile) in enumerate(wind_parks):
             sidx = pp.create_sgen(
                 net, bus=bus_map[bus_no],
                 p_mw=p_mw, q_mvar=0.0, sn_mva=p_mw,
@@ -266,7 +306,7 @@ def _create_hv_subnetwork(
                 op_diagram="VDE-AR-N-4120-v2",
             )
             sgen_indices.append(int(sidx))
-        for i, (bus_no, p_mw) in enumerate(TUDA_PV_PLANTS):
+        for i, (bus_no, p_mw) in enumerate(pv_plants):
             sidx = pp.create_sgen(
                 net, bus=bus_map[bus_no],
                 p_mw=p_mw, q_mvar=0.0, sn_mva=p_mw,
@@ -278,7 +318,7 @@ def _create_hv_subnetwork(
             sgen_indices.append(int(sidx))
 
     elif gen_type == "pv":
-        for i, (bus_no, p_mw) in enumerate(TUDA_PV_PLANTS):
+        for i, (bus_no, p_mw) in enumerate(pv_plants):
             sidx = pp.create_sgen(
                 net, bus=bus_map[bus_no],
                 p_mw=p_mw, q_mvar=0.0, sn_mva=p_mw,
@@ -288,7 +328,7 @@ def _create_hv_subnetwork(
                 op_diagram="VDE-AR-N-4120-v2",
             )
             sgen_indices.append(int(sidx))
-        for i, (bus_no, p_mw, _) in enumerate(TUDA_WIND_PARKS):
+        for i, (bus_no, p_mw, _) in enumerate(wind_parks):
             sidx = pp.create_sgen(
                 net, bus=bus_map[bus_no],
                 p_mw=p_mw, q_mvar=0.0, sn_mva=p_mw,
@@ -300,7 +340,7 @@ def _create_hv_subnetwork(
             sgen_indices.append(int(sidx))
 
     elif gen_type == "wind":
-        for i, (bus_no, p_mw, profile) in enumerate(TUDA_WIND_PARKS):
+        for i, (bus_no, p_mw, profile) in enumerate(wind_parks):
             sidx = pp.create_sgen(
                 net, bus=bus_map[bus_no],
                 p_mw=p_mw, q_mvar=0.0, sn_mva=p_mw,
@@ -310,7 +350,7 @@ def _create_hv_subnetwork(
                 op_diagram="VDE-AR-N-4120-v2",
             )
             sgen_indices.append(int(sidx))
-        for bus_no, p_mw in TUDA_PV_PLANTS:
+        for bus_no, p_mw in pv_plants:
             if bus_no != 7:
                 continue
             sidx = pp.create_sgen(
@@ -333,19 +373,34 @@ def _create_hv_subnetwork(
     #   couples to the 345 kV backbone via a 3W transformer.  This gives
     #   the DSO controller a continuously controllable Q actuator at each
     #   transformer node, improving reactive-power controllability.
+    #   op_diagram: VDE-AR-N-4120-v2, NOT 'STATCOM' (changed 2026-07-21).
+    #   Relying on "Q headroom from profile < 1" made the capability zero
+    #   whenever profiles are disabled: with rated P = S_n the circular
+    #   STATCOM diagram gives Q = ±sqrt(S_n² − P²) = 0.  The grid-code box
+    #   is P-independent above P/S_n = 0.2 and holds at rated P.
     for ieee_bus, hv_no in coupling_map:
         hv_bus = bus_map[hv_no]
-        wp_sn = HV_COUPLING_WP_MVA
-        wp_p = wp_sn                    # rated P = S_n; Q headroom from profile < 1
+        wp_sn = coupling_wp_mva
+        wp_p = wp_sn                    # rated P = S_n
         sidx = pp.create_sgen(
             net, bus=hv_bus,
             p_mw=wp_p, q_mvar=0.0, sn_mva=wp_sn,
             type="WP", profile="WP10",
             name=f"{net_id}|WP_STATCOM_HV{hv_no}",
             subnet="DN",
-            op_diagram="STATCOM",
+            op_diagram="VDE-AR-N-4120-v2",
         )
         sgen_indices.append(int(sidx))
+
+    aux_bus_indices, aux_parent_buses, aux_line_indices = (
+        separate_colocated_zip_loads(
+            net,
+            load_indices=load_indices,
+            injection_sgen_indices=sgen_indices,
+            aux_subnet="DN_AUX",
+            name_prefix=net_id,
+        )
+    )
 
     return HVNetworkInfo(
         net_id=net_id,
@@ -357,6 +412,9 @@ def _create_hv_subnetwork(
         coupling_ieee_buses=tuple(coupling_ieee_buses),
         coupling_hv_bus_indices=tuple(coupling_hv_bus_indices),
         coupling_lv_bus_indices=tuple(coupling_lv_bus_indices),
+        internal_aux_bus_indices=tuple(aux_bus_indices),
+        internal_aux_parent_buses=tuple(aux_parent_buses),
+        internal_aux_line_indices=tuple(aux_line_indices),
         line_length_scale=line_length_scale,
         total_ref_p_mw=total_p_mw,
         total_ref_q_mvar=total_q_mvar,
@@ -405,7 +463,10 @@ def _compute_reference_loads(
     n_couplers: int = 3,
 ) -> Dict[str, Tuple[float, float]]:
     """
-    Compute the reference (total_p_mw, total_q_mvar) for each sub-network.
+    Compute TN-derived reference P and a legacy Q estimate per sub-network.
+
+    The caller uses the active-power value. Physical DSO reactive load is
+    independently fixed by DSO_Q_PROFILE_BASE_MVAR.
 
     Each HV sub-network carries **half** of the pooled coupling-bus load
     (the other half stays at the 345 kV coupling bus as the constant row
@@ -421,7 +482,8 @@ def _compute_reference_loads(
 
     Returns
     -------
-    dict : net_id -> (total_p_mw, total_q_mvar)  -- the HALF that moves to HV
+    dict : net_id -> (total_p_mw, legacy_total_q_mvar)
+        The TN-derived half-pool values; the Q item is retained for audit only.
     """
     max_s_mva = n_couplers * coupler_sn_mva          # 900 MVA default
     n_nets = len(SUBNET_DEFS)
@@ -459,6 +521,63 @@ def _compute_reference_loads(
         ref[sdef["net_id"]] = (share_p, share_q)
 
     return ref
+
+
+# =====================================================================
+#  Internal: build-time power flow with a start-strategy ladder
+# =====================================================================
+
+def _reinit_pf(
+    net: pp.pandapowerNet,
+    what: str,
+    *,
+    enforce_q_lims: bool = False,
+) -> None:
+    """Solve a build-time power flow, trying progressively stronger starts.
+
+    These two solves only establish a *starting point*: the runner's Phase 1/2
+    OLTC initialisation re-derives the STATCOM Q under tap control and
+    re-converges before anything is measured.  The build-time point itself is
+    unrealistic by construction -- every coupling OLTC still sits at
+    ``tap_pos=0`` -- so demanding that it solve from a single slack bus is a
+    stronger requirement than the model actually needs.
+
+    Measured 2026-07-30 on scenario ``rural_700`` (2800 MW DSO DER): once the
+    STATCOM seed is held to its rating, the neutral-tap state no longer solves
+    single-slack at all, while ``distributed_slack=True`` reaches
+    V in [0.9076, 1.0579].  ``base_410`` still succeeds on the first rung, so
+    its build-time state is unchanged.
+
+    Only ``net.sgen.q_mvar`` (the seed) persists from here; ``gen.p_mw`` is not
+    modified and the result tables are overwritten by the runner immediately.
+    """
+    attempts = (
+        dict(init="auto"),
+        dict(init="dc"),
+        dict(init="dc", distributed_slack=True),
+    )
+    last: Exception | None = None
+    for i, extra in enumerate(attempts):
+        try:
+            pp.runpp(
+                net,
+                run_control=False,
+                calculate_voltage_angles=True,
+                max_iteration=100,
+                enforce_q_lims=enforce_q_lims,
+                **extra,
+            )
+            return
+        except Exception as exc:            # pragma: no cover - solver-dependent
+            last = exc
+            continue
+    raise RuntimeError(
+        f"add_hv_networks: {what} did not converge under any start strategy "
+        f"({len(attempts)} tried, last error: {type(last).__name__}: {last}). "
+        f"The build-time operating point has all coupling OLTCs at tap_pos=0, "
+        f"so a scenario with very high DER penetration can be genuinely "
+        f"unsolvable here even though it is fine after Phase 1/2 tap init."
+    ) from last
 
 
 # =====================================================================
@@ -537,6 +656,7 @@ def add_hv_networks(
     msr_n_levels: int = 4,
     msc_q_step_mvar: float = 50.0,
     msr_q_step_mvar: float = 50.0,
+    dso_generation_scenario: str | None = None,
     verbose: bool = True,
 ) -> IEEE39NetworkMeta:
     """
@@ -565,6 +685,10 @@ def add_hv_networks(
         IEEE 39-bus network from ``build_ieee39_net()`` (modified in-place).
     meta : IEEE39NetworkMeta
         Existing metadata (replaced with updated copy).
+    dso_generation_scenario : str, optional
+        Installed DER capacity scenario. By default it is inherited from
+        ``net["ieee39_scenario"]``; valid values are ``"base_410"`` and
+        ``"rural_700"``.
     verbose : bool
         Print connection summary table (default True).
 
@@ -577,6 +701,18 @@ def add_hv_networks(
     # =====================================================================
     # 1. Compute reference loads BEFORE modifying anything
     # =====================================================================
+    if dso_generation_scenario is None:
+        dso_generation_scenario = str(
+            net.get("ieee39_scenario", DEFAULT_DSO_DER_CAPACITY_SCENARIO)
+        )
+    if dso_generation_scenario not in DSO_DER_CAPACITY_SCENARIOS:
+        raise ValueError(
+            f"Unknown DSO DER capacity scenario "
+            f"{dso_generation_scenario!r}; valid: "
+            f"{sorted(DSO_DER_CAPACITY_SCENARIOS)}"
+        )
+    net["dso_generation_scenario"] = dso_generation_scenario
+
     ref_loads = _compute_reference_loads(net)
 
     if verbose:
@@ -644,7 +780,8 @@ def add_hv_networks(
         ieee_0idx = [b - 1 for b in sdef["ieee_1idx"]]
         hv_buses = sdef["hv_buses"]
         coupling_map = list(zip(ieee_0idx, hv_buses))
-        total_p, total_q = ref_loads[net_id]
+        total_p, _reference_total_q = ref_loads[net_id]
+        total_q = DSO_Q_PROFILE_BASE_MVAR
 
         if verbose:
             print(f"[add_hv_networks] Creating {net_id} (zone {sdef['zone']}, "
@@ -657,6 +794,7 @@ def add_hv_networks(
             total_p_mw=total_p,
             total_q_mvar=total_q,
             gen_type=sdef["gen"],
+            generation_scenario=dso_generation_scenario,
         )
         hv.zone = sdef["zone"]
         hv_nets.append(hv)
@@ -778,18 +916,43 @@ def add_hv_networks(
                 in_service=True, name="_TEMP_REINIT",
             )
             _tmp_map[int(gi)] = si
-        pp.runpp(net, run_control=False, calculate_voltage_angles=True,
-                 init='auto', max_iteration=100)
+        # Derive the Q without enforcing limits -- as the comment above says,
+        # this PF is robust precisely because the PV-gens may absorb any
+        # mismatch as Q.  Enforcing limits here instead destabilises it:
+        # pandapower's PV->PQ limit loop does not converge on ``rural_700`` at
+        # the neutral-tap build point (measured 2026-07-30).
+        _reinit_pf(net, "STATCOM Q re-initialisation")
+        # Clamp on write-back, so the *stored* seed respects the converter
+        # rating even though the derivation PF was unconstrained.  Without the
+        # clamp the seed is inherited verbatim: measured 2026-07-30 on scenario
+        # ``rural_700``, the bus-5 device came out at 1655 Mvar on a 500 MVA
+        # rating (S/Sn = 3.46), putting 33 of 118 buses above 1.10 pu and that
+        # bus at 1.1485 pu.  Phase 1 of the runner re-derives these values under
+        # tap control with limits enforced, so the bad seed was transient -- but
+        # it made an unrelated convergence failure at runner step [6] read as a
+        # reactive-capability problem.
+        #
+        # This bounds Q to the *declared* limit only.  ``max_q_mvar=sn`` ignores
+        # P, and these devices are built with sn_mva == p_mw, so the clamped
+        # seed can still reach S/Sn = sqrt(2) ~ 1.41.  Sizing their true
+        # capability (a separate STATCOM rating, or an oversized converter with
+        # q_max = sqrt(sn^2 - p^2)) is an open modelling question, deliberately
+        # not decided here.
         for gi, si in _tmp_map.items():
-            net.sgen.at[si, "q_mvar"] = float(net.res_gen.at[gi, "q_mvar"])
+            _q_raw = float(net.res_gen.at[gi, "q_mvar"])
+            _sn = float(net.sgen.at[si, "sn_mva"])
+            _q = float(np.clip(_q_raw, -_sn, _sn)) if _sn > 0.0 else _q_raw
+            if verbose >= 1 and abs(_q - _q_raw) > 1e-6:
+                print(f"  [add_hv_networks] {net.sgen.at[si, 'name']}: seed Q "
+                      f"{_q_raw:.1f} -> {_q:.1f} Mvar (clamped to +-sn={_sn:.1f})")
+            net.sgen.at[si, "q_mvar"] = _q
             net.sgen.at[si, "in_service"] = True
         net.gen.drop(index=list(_tmp_map.keys()), inplace=True)
 
     # Verification power flow (with STATCOM Q already self-consistent if
     # the reinit ran above).  Runs unconditionally so scenarios without
     # STATCOM sgens still get a final convergence check.
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True,
-             init='auto', max_iteration=100)
+    _reinit_pf(net, "post-reinit verification")
 
     # =====================================================================
     # 6. Debug output
@@ -851,6 +1014,18 @@ def add_hv_networks(
         gen_grid_bus_indices=meta.gen_grid_bus_indices,
         machine_trafo_indices=meta.machine_trafo_indices,
         machine_trafo_gen_map=meta.machine_trafo_gen_map,
+        internal_aux_bus_indices=tuple(
+            list(meta.internal_aux_bus_indices)
+            + [int(b) for hv in hv_nets for b in hv.internal_aux_bus_indices]
+        ),
+        internal_aux_parent_buses=tuple(
+            list(meta.internal_aux_parent_buses)
+            + [int(b) for hv in hv_nets for b in hv.internal_aux_parent_buses]
+        ),
+        internal_aux_line_indices=tuple(
+            list(meta.internal_aux_line_indices)
+            + [int(li) for hv in hv_nets for li in hv.internal_aux_line_indices]
+        ),
         tso_der_indices=tuple(tso_der_indices_updated),
         tso_der_buses=tuple(tso_der_buses_updated),
         # DSO fields carried over

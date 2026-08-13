@@ -8,7 +8,12 @@ import numpy as np
 import optuna
 import pytest
 
-from tuning.metrics import CostWeights, TrajectoryMetrics, cost_components
+from tuning.metrics import (
+    CostWeights,
+    MetricScales,
+    TrajectoryMetrics,
+    cost_components,
+)
 from tuning.objective import cvar_aggregate, sample_params
 from tuning.parameters import BO_DIMS, resolve_high
 
@@ -127,12 +132,19 @@ def test_cost_components_includes_pcc_underutil_keys() -> None:
 
 
 def test_cost_components_pcc_underutil_contributes_when_active() -> None:
-    """When ``itae_pcc_underutil > 0``, both the normalised value and
-    the weighted contribution are positive and follow the expected
-    formula ``contrib = w_pcc_underutil × itae / 1400``."""
-    m = _make_traj(itae_pcc_underutil=1400.0)   # norm should be 1.0
+    """When ``itae_pcc_underutil > 0``, both the normalised value and the
+    weighted contribution are positive and follow
+    ``contrib = w_pcc_underutil × itae / scales.pcc_underutil``.
+
+    The scale is read from :class:`MetricScales` rather than hardcoded: it is a
+    *calibration constant*, recalibrated 2026-08-04 from 1400.0 to 2.3499, and
+    the literal here asserted the old value rather than the behaviour named in
+    this docstring.
+    """
+    scales = MetricScales()
+    m = _make_traj(itae_pcc_underutil=scales.pcc_underutil)   # norm == 1.0
     weights = CostWeights()
-    out = cost_components(m, weights=weights)
+    out = cost_components(m, weights=weights, scales=scales)
     assert out["norm_pcc_underutil"] == pytest.approx(1.0)
     assert out["contrib_pcc_underutil"] == pytest.approx(weights.w_pcc_underutil)
 

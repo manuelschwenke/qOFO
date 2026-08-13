@@ -92,6 +92,11 @@ def _qv_capability(sn: float, op_diagram: str, p_mw: float) -> tuple[float, floa
     """
     if sn <= 0.0:
         return 0.0, 0.0
+    # Ablation override, read at call time so it stays in lockstep with the
+    # controller's bound computation (see core.actuator_bounds).
+    from core.actuator_bounds import DER_Q_CAPABILITY_OVERRIDE_PU as _ovr
+    if _ovr is not None:
+        return -float(_ovr) * sn, float(_ovr) * sn
     if op_diagram == "STATCOM":
         p_pu_sq = min((p_mw / sn) ** 2, 1.0)
         q_pu = math.sqrt(max(1.0 - p_pu_sq, 0.0))

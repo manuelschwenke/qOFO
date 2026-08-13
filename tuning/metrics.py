@@ -33,6 +33,7 @@ from experiments.helpers.comparison_metrics import (
     loss_series,
     voltage_envelope_ds,
     voltage_envelope_ts,
+    voltage_rms_err_all,
     voltage_rmsd_ds,
     voltage_rmsd_ts,
     voltage_violation_counts_ds,
@@ -154,49 +155,156 @@ class NoiseFloors:
 
 
 # ---------------------------------------------------------------------------
+# Normalisation scales — SINGLE SOURCE OF TRUTH
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MetricScales:
+    """Divisors turning raw metrics into ``O(1)`` normalised quantities.
+
+    Previously these constants were duplicated in :func:`cost_components` and
+    :func:`extract_metrics` and had to be kept in sync by hand; a divergence
+    between the two silently made ``cost_components()`` disagree with
+    ``cost_J``.  They now live here and both call sites consume this object.
+
+    Scales are **engineering tolerances**, i.e. ``norm = 1`` means "at the edge
+    of acceptable".  They are calibrated once, from a random-prior sample, and
+    never from optimiser output -- see ``docs/tuning/`` for the rationale.
+    """
+
+    # Calibrated 2026-08-04 from a 65-draw Sobol sample of the *prior*
+    # (tuning.scripts.calibrate_metrics --n-draws 64 --n-scenarios 3, all draws
+    # 3/3 feasible).  Values are the sample **p90**, not the median.
+    #
+    # Why p90: a scale is an engineering *tolerance* -- ``norm = 1`` means "at
+    # the edge of acceptable" (see the class docstring), which is a high
+    # quantile, not a typical value.  Normalising by the median instead makes a
+    # heavy-tailed term explode exactly when its tail is realised, and the
+    # aggregator deliberately looks at the tail.  Two terms are extremely
+    # heavy-tailed in this sample -- ``pcc_underutil`` median 2.35 vs p90 1286.9
+    # (547x) and ``v_band_excess`` 0.00042 vs 0.0247 (59x) -- and with median
+    # scales they became 71 % and 25 % of the whole objective, i.e. 96 % between
+    # them, concentrated in one scenario.  ``calibrate_metrics`` reports both
+    # quantiles; take p90.
+    #
+    # Median values are kept in the trailing comments for reference.
+    #
+    # Voltage quality, measured against ``v_setpoint_pu`` (not against the
+    # hard corridor, which is almost never touched).
+    v_rms_ts:      float = 0.020104   # pu, TS spatial RMS   (median 0.0075014)
+    v_rms_ds:      float = 0.014107   # pu, DS spatial RMS   (median 0.0047005)
+    v_worst_ts:    float = 0.054357   # pu, p95 worst bus TS (median 0.02385)
+    v_worst_ds:    float = 0.096455   # pu, p95 worst bus DS (median 0.052996)
+    v_quality_band: float = 0.020   # pu, half-width of the inner quality band
+    v_band_excess: float = 0.024673   # pu/step beyond band  (median 0.00041973)
+
+    # Interface tracking.
+    q_pcc:         float = 33658.0    # min * Mvar  (median 7878.9)
+    q_tie:         float = 202390.0   # min * Mvar  (median 69144.0)
+    #: min * pu * Mvar.  The original hand-set 1400.0 was close to this p90 and
+    #: was therefore *correct*; the median-based 2.3499 briefly replaced it and
+    #: made this term 71 % of the objective.
+    pcc_underutil: float = 1286.9
+
+    # Actuator activity.
+    osc_pct:       float = 1.0      # percent of step-pairs that flipped sign
+    tap_ops_tso:   float = 6.0      # tap operations per hour per MT transformer
+    tap_ops_dso:   float = 6.0      # tap operations per hour per NC transformer
+    tap_reversals: float = 2.0      # reversals per hour per transformer
+
+    # Legacy horizon-ITAE scales, kept so the pre-existing scalar path and its
+    # regression tests stay reproducible.  Superseded by the window-normalised
+    # metrics; do not use for new terms.
+    itae_v_ts:     float = 14.0     # min * pu
+    itae_v_ds:     float = 30.0     # min * pu
+
+
+#: Finite stand-in for "this run is inadmissible".  Deliberately far above any
+#: achievable finite cost (the largest observed across 1555 historical runs was
+#: ~1.7e3) yet finite, because samplers handle ``inf`` poorly.  Feasibility is
+#: reported separately via :attr:`TrajectoryMetrics.infeasible_reason`; this
+#: value only keeps the scalar path well-ordered.
+INFEASIBLE_SENTINEL: float = 1.0e6
+
+
+# ---------------------------------------------------------------------------
 # Output dataclass
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class TrajectoryMetrics:
-    """All metrics extracted from one closed-loop log."""
+    """All metrics extracted from one closed-loop log.
+
+    Every field has a default so that new fields can be appended without
+    breaking the explicit-keyword constructions in the test-suite.
+    """
 
     # tracking
-    itae_v_ts:           float
-    itae_v_ds:           float
-    rmsd_v_ts:           float
-    rmsd_v_ds:           float
-    itae_q_pcc:          float
-    itae_q_tie:          float
-    itae_pcc_underutil:  float
+    itae_v_ts:           float = 0.0
+    itae_v_ds:           float = 0.0
+    rmsd_v_ts:           float = 0.0
+    rmsd_v_ds:           float = 0.0
+    itae_q_pcc:          float = 0.0
+    itae_q_tie:          float = 0.0
+    itae_pcc_underutil:  float = 0.0
 
     # constraint health
-    n_viol_v_ts:         int
-    n_viol_v_ds:         int
-    voltage_excess_pu:   float    # smooth band-edge excess used in cost
+    n_viol_v_ts:         int = 0
+    n_viol_v_ds:         int = 0
+    voltage_excess_pu:   float = 0.0   # smooth hard-corridor excess
 
     # actuator activity
-    n_osc_der:           int
-    n_osc_pcc:           int
-    n_osc_v_gen:         int
-    n_tap_switches_tso:  int
-    n_tap_switches_dso:  int
-    osc_rate:            float    # rate in [0, 1] used in cost
+    n_osc_der:           int = 0
+    n_osc_pcc:           int = 0
+    n_osc_v_gen:         int = 0
+    n_tap_switches_tso:  int = 0
+    n_tap_switches_dso:  int = 0
+    osc_rate:            float = 0.0   # rate in [0, 1] used in cost
 
     # stability
-    rho_emp_p95:         float
-    pf_failures:         int
+    rho_emp_p95:         float = 0.0
+    pf_failures:         int = 0
 
     # losses (diagnostic only — not in J by default)
-    losses_mean_mw:      float
+    losses_mean_mw:      float = 0.0
 
     # composite
-    cost_J:              float
+    cost_J:              float = 0.0
 
     # bookkeeping
-    n_records:           int
-    n_tso_active:        int
-    n_dso_active:        int
+    n_records:           int = 0
+    n_tso_active:        int = 0
+    n_dso_active:        int = 0
+
+    # ── Voltage quality against v_setpoint_pu (see ``_v_quality``) ──────────
+    v_rms_ts:            float = 0.0   # pu, time-mean spatial RMS deviation
+    v_rms_ds:            float = 0.0
+    v_worst_ts:          float = 0.0   # pu, p95 worst-bus deviation
+    v_worst_ds:          float = 0.0
+    v_band_excess_ts:    float = 0.0   # pu, mean excess beyond inner band
+    v_band_excess_ds:    float = 0.0
+
+    # ── Per-transformer actuator wear (worst transformer, not fleet sum) ────
+    tap_ops_per_h_tso: float = 0.0
+    tap_ops_per_h_dso: float = 0.0
+    tap_reversals_per_h_tso: float = 0.0
+    tap_reversals_per_h_dso: float = 0.0
+
+    # ── Feasibility (consumed by the constrained objective) ────────────────
+    infeasible_reason:   str = ""
+    """Empty when the run is admissible.  Non-empty values name the first
+    failing check (``"pf_failure"``, ``"empty_log"``, ...).  Kept separate from
+    :attr:`cost_J` so feasibility can be a *constraint* rather than a term in a
+    weighted sum -- mixing them is what let divergence undercut poor-but-stable
+    operation."""
+
+    duration_s:          float = 0.0
+    """Simulated horizon, needed to express switching as a rate."""
+
+    @property
+    def feasible(self) -> bool:
+        """True when no admissibility check failed."""
+        return not self.infeasible_reason
 
 
 # ---------------------------------------------------------------------------
@@ -209,16 +317,25 @@ def _itae(t_min: NDArray[np.float64], abs_err: NDArray[np.float64]) -> float:
     ``t_min`` is in minutes (matching the
     :mod:`comparison_metrics` convention).  Returns ITAE in
     ``minute · pu`` (or ``minute · Mvar``).  NaN entries are dropped.
+
+    Returns ``nan`` -- **not** ``0.0`` -- when fewer than two finite samples
+    survive.  Returning ``0.0`` made a fully diverged (all-NaN) trajectory look
+    like *perfect* tracking: combined with ``_normalise(0.0) == 0.0`` it gave a
+    diverged run a cost of exactly ``w_pf``, which historically undercut 35-43 %
+    of *converged* runs and made divergence a rewarded search direction.
+    ``nan`` propagates through :func:`_normalise` to ``inf`` instead.
     """
     if t_min.size < 2:
-        return 0.0
+        return float("nan")
     integrand = t_min * abs_err
     finite = np.isfinite(integrand) & np.isfinite(t_min)
     if int(finite.sum()) < 2:
-        return 0.0
-    # ``np.trapezoid`` replaces ``np.trapz`` in NumPy 2.x; the latter
-    # raises a DeprecationWarning.
-    trapz_fn = getattr(np, "trapezoid", np.trapz)
+        return float("nan")
+    # ``np.trapezoid`` replaces ``np.trapz`` in NumPy 2.x, which *removes*
+    # the old name -- so the fallback must stay unevaluated on 2.x, i.e. no
+    # ``getattr(np, "trapezoid", np.trapz)``: that raises AttributeError
+    # while computing the default.
+    trapz_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
     return float(trapz_fn(integrand[finite], t_min[finite]))
 
 
@@ -286,12 +403,100 @@ def _count_oscillations(
     return int(np.sum(flips))
 
 
+def _decimate_to_ticks(
+    seq: NDArray[np.float64],
+    active: NDArray[np.bool_],
+) -> NDArray[np.float64]:
+    """Keep only the rows where the issuing controller actually stepped.
+
+    Commands are logged once per plant step but only *change* on controller
+    ticks.  With ``dt_s=20`` and ``tso_period_s=180`` each TSO command is held
+    for 9 records, so the raw difference sequence is
+    ``[0, ..., 0, Δ, 0, ..., 0, Δ, ...]``.  :func:`_count_oscillations` requires
+    two *adjacent* above-floor deltas, so on the held sequence it returns 0 for
+    every trajectory -- which is exactly what was observed empirically
+    (``norm_osc`` identically zero across 1555 scenario-runs).  Decimating to
+    the tick grid first restores the intended semantics.
+
+    Rows whose ``active`` flag is False are dropped.  If the flag is never set
+    (older logs), the sequence is returned unchanged so behaviour degrades
+    gracefully rather than silently emptying.
+    """
+    if seq.size == 0 or active.size == 0:
+        return seq
+    n = min(seq.shape[0], int(active.size))
+    mask = active[:n]
+    if not bool(mask.any()):
+        return seq
+    return seq[:n][mask]
+
+
 def _count_tap_switches(taps_seq: NDArray[np.float64]) -> int:
     """Sum of ``|Δtap|`` across all ``(step, actuator)`` pairs."""
     if taps_seq.size == 0 or taps_seq.shape[0] < 2:
         return 0
     dtaps = np.diff(taps_seq, axis=0)
     return int(np.nansum(np.abs(dtaps)))
+
+
+def _count_tap_reversals(taps_seq: NDArray[np.float64]) -> int:
+    """Count direction changes in the tap sequence, per actuator.
+
+    A *reversal* is a sign change between consecutive non-zero tap movements,
+    ignoring the intervening hold periods.  This is the hunting indicator, and
+    unlike :func:`_count_oscillations` it is immune to the hold-padding of
+    :func:`_decimate_to_ticks` because zero moves are skipped rather than
+    treated as sign-zero neighbours.
+    """
+    if taps_seq.size == 0 or taps_seq.shape[0] < 3:
+        return 0
+    total = 0
+    dtaps = np.diff(taps_seq, axis=0)
+    for col in range(dtaps.shape[1]):
+        moves = dtaps[:, col]
+        moves = moves[np.isfinite(moves) & (moves != 0.0)]
+        if moves.size < 2:
+            continue
+        signs = np.sign(moves)
+        total += int(np.sum(signs[1:] != signs[:-1]))
+    return total
+
+
+def _tap_wear(
+    taps_seq: NDArray[np.float64],
+    duration_s: float,
+) -> tuple[float, float]:
+    """``(max ops/hour, max reversals/hour)`` over the individual transformers.
+
+    Wear limits are *per transformer*, so aggregating over the fleet (as the
+    legacy ``norm_tap = (n_tso + n_dso)/5`` did) hides a single hunting tap
+    changer behind a quiet fleet -- and makes the two OLTC weights enter the
+    cost only through their sum, which is half the reason they were never
+    identifiable.  The worst transformer is what an asset owner constrains.
+
+    **Per hour, deliberately not per day.**  An operational maintenance budget
+    is naturally quoted per day, and this metric was first written that way --
+    but the design scenarios are event-dense 75-minute windows, and a real day
+    is mostly quiet.  Extrapolating the one to the other inflates the figure by
+    roughly the ratio of stressed to total time: the hand-tuned reference makes
+    5.0 taps in a 75-min disturbance window, an unremarkable 4.0 taps/hour, and
+    the same number reads as a pathological "96 ops/day".  Reporting the rate
+    over the window actually simulated keeps the quantity honest; convert to a
+    daily budget only against a representative daily profile, never against a
+    design scenario.
+    """
+    if taps_seq.size == 0 or taps_seq.shape[0] < 2 or duration_s <= 0.0:
+        return 0.0, 0.0
+    hours = duration_s / 3600.0
+    dtaps = np.diff(taps_seq, axis=0)
+    ops = np.nansum(np.abs(dtaps), axis=0)                 # per transformer
+    max_ops_per_h = float(np.max(ops) / hours) if ops.size else 0.0
+    rev = [
+        _count_tap_reversals(taps_seq[:, [c]])
+        for c in range(taps_seq.shape[1])
+    ]
+    max_rev_per_h = float(max(rev) / hours) if rev else 0.0
+    return max_ops_per_h, max_rev_per_h
 
 
 def _detect_pf_failures(records: List[MultiTSOIterationRecord]) -> int:
@@ -334,6 +539,13 @@ def _voltage_band_excess(
     cost — TPE's Parzen kernels handle ramps far better than step
     functions, which the previous ``n_viol / len(records)`` formulation
     introduced at the band boundary.
+
+    ``low``/``high`` should be passed from ``cfg.v_min_pu`` / ``cfg.v_max_pu``
+    rather than left at the defaults, which merely happen to match the current
+    config.  Note this quantity is near-zero for any sane operating point (the
+    corridor is +/-7-8 % around a 1.03 pu setpoint) -- it belongs in the
+    feasibility constraints, not in the cost.  The graded quality signal is
+    :func:`_v_quality`.
     """
     excess = 0.0
     for r in records:
@@ -352,22 +564,102 @@ def _voltage_band_excess(
     return excess
 
 
+def _v_quality(
+    records: List[MultiTSOIterationRecord],
+    v_set: float,
+    quality_band: float,
+) -> dict[str, float]:
+    """Voltage quality **against ``v_set``**, not against the hard corridor.
+
+    The hard corridor is ``[0.90, 1.10]`` around a setpoint of ``1.03``, so band
+    excess is essentially never observed and carries no information for tuning.
+    It remains valuable as a *constraint* (an always-satisfied constraint is free
+    insurance) but it cannot be the quality signal.  These three quantities are
+    the quality signal:
+
+    ``v_rms_ts`` / ``v_rms_ds``
+        Time-mean of the **spatial RMS** deviation from ``v_set``, read from
+        ``zone_v_rms_err_pu`` via
+        :func:`~experiments.helpers.comparison_metrics.voltage_rms_err_per_zone`.
+        The legacy metric used the spatial *mean* voltage, under which a zone
+        half at 1.00 pu and half at 1.06 pu scores as perfect.  Also identical
+        to ``rms_v_ts_pu`` in ``cigre_summary_table``, so the tuning objective
+        and the reported thesis metric are the same quantity.
+
+    ``v_worst_ts`` / ``v_worst_ds``
+        p95 over time of the worst-bus deviation ``max(|v_max - v_set|,
+        |v_min - v_set|)``.  Catches an acceptable RMS hiding one far-off bus.
+
+    ``v_band_excess_ts`` / ``v_band_excess_ds``
+        Mean per-step excess beyond the **inner** band ``v_set +/- quality_band``.
+        Graded and active in the regime the controller actually operates in --
+        the role the 0.90/1.10 hinge was meant to play and never did.
+    """
+    out = {
+        "v_rms_ts": float("nan"), "v_rms_ds": float("nan"),
+        "v_worst_ts": float("nan"), "v_worst_ds": float("nan"),
+        "v_band_excess_ts": 0.0, "v_band_excess_ds": 0.0,
+    }
+    if not records:
+        return out
+
+    rms_ts = voltage_rms_err_all(records, v_set)["rms_err_pu"]
+    if rms_ts.size and bool(np.isfinite(rms_ts).any()):
+        out["v_rms_ts"] = float(np.nanmean(rms_ts))
+
+    # DSO groups report only min/mean/max, so the spatial RMS is unavailable;
+    # |mean - v_set| is the honest fallback and is what the DS envelope gives.
+    env_ds = voltage_envelope_ds(records)
+    if env_ds["v_mean"].size and bool(np.isfinite(env_ds["v_mean"]).any()):
+        out["v_rms_ds"] = float(np.nanmean(np.abs(env_ds["v_mean"] - v_set)))
+
+    def _worst_and_excess(
+        v_min: NDArray[np.float64], v_max: NDArray[np.float64],
+    ) -> tuple[float, float]:
+        dev = np.fmax(np.abs(v_max - v_set), np.abs(v_min - v_set))
+        dev = dev[np.isfinite(dev)]
+        if dev.size == 0:
+            return float("nan"), 0.0
+        worst = float(np.percentile(dev, 95.0))
+        excess = float(np.mean(np.maximum(dev - quality_band, 0.0)))
+        return worst, excess
+
+    env_ts = voltage_envelope_ts(records)
+    out["v_worst_ts"], out["v_band_excess_ts"] = _worst_and_excess(
+        env_ts["v_min"], env_ts["v_max"],
+    )
+    out["v_worst_ds"], out["v_band_excess_ds"] = _worst_and_excess(
+        env_ds["v_min"], env_ds["v_max"],
+    )
+    return out
+
+
 def _itae_q_pcc(records: List[MultiTSOIterationRecord]) -> float:
-    """Time-weighted absolute Q-PCC tracking error across all DSOs."""
+    """Time-weighted absolute Q-PCC tracking error across all DSOs.
+
+    Returns ``0.0`` when the network simply has no PCC interfaces to track
+    (nothing to get wrong), and ``nan`` only when interfaces *are* present but
+    their values are non-finite (divergence).  Collapsing those two cases would
+    mark a perfectly healthy interface-free run as inadmissible.
+    """
     if not records:
         return 0.0
     t_min = np.array([r.time_s / 60.0 for r in records], dtype=float)
     err_per_step = np.full(len(records), np.nan)
+    any_keys = False
     for i, r in enumerate(records):
         keys = set(r.dso_trafo_q_set_mvar) & set(r.dso_trafo_q_actual_mvar)
         if not keys:
             continue
+        any_keys = True
         e = [abs(r.dso_trafo_q_set_mvar[k] - r.dso_trafo_q_actual_mvar[k])
              for k in keys
              if math.isfinite(r.dso_trafo_q_set_mvar[k])
              and math.isfinite(r.dso_trafo_q_actual_mvar[k])]
         if e:
             err_per_step[i] = float(np.mean(e))
+    if not any_keys:
+        return 0.0
     return _itae(t_min, err_per_step)
 
 
@@ -387,11 +679,16 @@ def _itae_q_tie(records: List[MultiTSOIterationRecord]) -> float:
     of 0 Mvar (no inter-zone reactive exchange) — which matches the
     controller's actual setpoint in the current configuration, so the
     fallback is correct, just not future-proof.
+
+    Returns ``0.0`` when no zone pairs are reported at all (a single-zone or
+    tie-free network has nothing to track); ``nan`` only when pairs are present
+    but non-finite.  See :func:`_itae_q_pcc`.
     """
     if not records:
         return 0.0
     t_min = np.array([r.time_s / 60.0 for r in records], dtype=float)
     err_per_step = np.full(len(records), np.nan)
+    any_pairs = False
     for i, r in enumerate(records):
         pair_q = r.zone_tie_q_mvar
         # Forward-compat: read per-pair setpoint when the runner
@@ -399,6 +696,7 @@ def _itae_q_tie(records: List[MultiTSOIterationRecord]) -> float:
         pair_set = getattr(r, "zone_tie_q_set_mvar", {}) or {}
         if not pair_q:
             continue
+        any_pairs = True
         e: list[float] = []
         for pair, q in pair_q.items():
             if q is None or not math.isfinite(float(q)):
@@ -407,6 +705,8 @@ def _itae_q_tie(records: List[MultiTSOIterationRecord]) -> float:
             e.append(abs(float(q) - sp))
         if e:
             err_per_step[i] = float(np.mean(e))
+    if not any_pairs:
+        return 0.0
     return _itae(t_min, err_per_step)
 
 
@@ -476,14 +776,31 @@ def _rho_emp_percentile(
     return float(np.percentile(vals, pct))
 
 
+def _nanmean_or(arr: NDArray[np.float64], default: float) -> float:
+    """``nanmean`` that returns ``default`` for an all-NaN or empty array.
+
+    ``np.nanmean`` emits ``RuntimeWarning: Mean of empty slice`` in that case,
+    which is a routine occurrence on the divergence path and would otherwise
+    spam every failed trial.
+    """
+    if arr.size == 0 or not bool(np.isfinite(arr).any()):
+        return default
+    return float(np.nanmean(arr))
+
+
 def _normalise(metric: float, scale: float) -> float:
     """Divide by ``scale`` with NaN/inf safety.
 
-    Non-finite metrics are mapped to ``1.0`` (treated as nominal-bad);
-    a non-positive ``scale`` yields ``0.0``.
+    A non-finite metric maps to ``inf`` -- the metric could not be computed, so
+    the run must not be scored as merely "nominal-bad".  The previous mapping to
+    ``1.0`` understated divergence by roughly two orders of magnitude and was
+    the second half of the divergence-discount defect described in
+    :func:`_itae`.
+
+    A non-positive ``scale`` yields ``0.0`` (term disabled).
     """
     if not math.isfinite(metric):
-        return 1.0
+        return float("inf")
     if scale <= 0.0:
         return 0.0
     return float(metric / scale)
@@ -492,6 +809,7 @@ def _normalise(metric: float, scale: float) -> float:
 def cost_components(
     m: TrajectoryMetrics,
     weights: CostWeights | None = None,
+    scales: MetricScales | None = None,
 ) -> dict[str, float]:
     """Per-component weighted contributions to ``J`` for one trajectory.
 
@@ -505,20 +823,16 @@ def cost_components(
     trial.
     """
     weights = weights or CostWeights()
+    scales = scales or MetricScales()
     n_steps = max(m.n_records, 1)
-    # Scales correspond to **physical engineering tolerances** for a
-    # 75-min scenario:
-    #   v_ts:    5.0 mpu sustained → ITAE = 0.005 × 75²/2 = 14 min·pu
-    #   v_ds:   10.7 mpu sustained → 30 min·pu
-    #   q:       5.3 Mvar sustained → 15000 min·Mvar
-    #   q_tie:  19.6 Mvar sustained → 55000 min·Mvar
-    # ``norm = 1`` means "at engineering tolerance"; weights then take
-    # over to encode priority and to size baseline contribution.
-    norm_v_ts          = _normalise(m.itae_v_ts,          scale=14.0)     # min · pu
-    norm_v_ds          = _normalise(m.itae_v_ds,          scale=30.0)     # min · pu
-    norm_q             = _normalise(m.itae_q_pcc,         scale=15000.0)  # min · Mvar
-    norm_q_tie         = _normalise(m.itae_q_tie,         scale=55000.0)  # min · Mvar
-    norm_pcc_underutil = _normalise(m.itae_pcc_underutil, scale=1400.0)   # min · pu · Mvar
+    # ``norm = 1`` means "at engineering tolerance"; weights then take over to
+    # encode priority.  Divisors come from :class:`MetricScales` -- they used to
+    # be duplicated here and in ``extract_metrics`` and drift apart silently.
+    norm_v_ts          = _normalise(m.itae_v_ts,          scales.itae_v_ts)
+    norm_v_ds          = _normalise(m.itae_v_ds,          scales.itae_v_ds)
+    norm_q             = _normalise(m.itae_q_pcc,         scales.q_pcc)
+    norm_q_tie         = _normalise(m.itae_q_tie,         scales.q_tie)
+    norm_pcc_underutil = _normalise(m.itae_pcc_underutil, scales.pcc_underutil)
     norm_osc   = 100.0 * m.osc_rate
     norm_tap   = (m.n_tap_switches_tso + m.n_tap_switches_dso) / 5.0
     norm_viol  = m.voltage_excess_pu / n_steps
@@ -554,32 +868,37 @@ def extract_metrics(
     cfg: MultiTSOConfig,
     weights: CostWeights | None = None,
     floors: NoiseFloors | None = None,
+    scales: MetricScales | None = None,
 ) -> TrajectoryMetrics:
     """Extract all metrics from one closed-loop log.
 
-    On total failure (empty log) returns a high-cost sentinel with
-    ``pf_failures = 1`` so BO drives away from this region.
+    On total failure (empty log) returns :data:`INFEASIBLE_SENTINEL` with
+    ``infeasible_reason`` set, so the run is both maximally costly on the scalar
+    path and identifiable as inadmissible by the constraint path.
     """
     weights = weights or CostWeights()
     floors = floors or NoiseFloors()
+    scales = scales or MetricScales()
     v_set = float(cfg.v_setpoint_pu)
+    v_lo = float(getattr(cfg, "v_min_pu", 0.90))
+    v_hi = float(getattr(cfg, "v_max_pu", 1.10))
 
     pf_fail = _detect_pf_failures(records)
 
     if not records:
-        # Empty log: catastrophe sentinel.  pf_fail capped at 1 (binary)
-        # for J so an early-divergence is the same flat penalty as a
-        # late-divergence — TPE can model "stay out" cleanly.
+        # Empty log: nothing was simulated.  Scored at the sentinel rather than
+        # at ``w_pf`` (=100), which historically sat at only the ~60th
+        # percentile of *converged* costs and therefore rewarded divergence.
         return TrajectoryMetrics(
-            itae_v_ts=1.0, itae_v_ds=1.0, rmsd_v_ts=1.0, rmsd_v_ds=1.0,
-            itae_q_pcc=1.0, itae_q_tie=1.0, itae_pcc_underutil=1.0,
-            n_viol_v_ts=0, n_viol_v_ds=0, voltage_excess_pu=0.0,
-            n_osc_der=0, n_osc_pcc=0, n_osc_v_gen=0,
-            n_tap_switches_tso=0, n_tap_switches_dso=0,
-            osc_rate=0.0,
-            rho_emp_p95=0.0, pf_failures=pf_fail,
-            losses_mean_mw=0.0,
-            cost_J=float(weights.w_pf * min(pf_fail, 1)),
+            itae_v_ts=float("nan"), itae_v_ds=float("nan"),
+            rmsd_v_ts=float("nan"), rmsd_v_ds=float("nan"),
+            itae_q_pcc=float("nan"), itae_q_tie=float("nan"),
+            itae_pcc_underutil=float("nan"),
+            v_rms_ts=float("nan"), v_rms_ds=float("nan"),
+            v_worst_ts=float("nan"), v_worst_ds=float("nan"),
+            pf_failures=pf_fail,
+            cost_J=INFEASIBLE_SENTINEL,
+            infeasible_reason="empty_log",
             n_records=0, n_tso_active=0, n_dso_active=0,
         )
 
@@ -588,9 +907,13 @@ def extract_metrics(
     env_ds  = voltage_envelope_ds(records)
     rmsd_ts = voltage_rmsd_ts(records, v_set)["rmsd_pu"]
     rmsd_ds = voltage_rmsd_ds(records, v_set)["rmsd_pu"]
-    vv_ts   = voltage_violation_counts_ts(records, low=0.9, high=1.1)
-    vv_ds   = voltage_violation_counts_ds(records, low=0.9, high=1.1)
+    vv_ts   = voltage_violation_counts_ts(records, low=v_lo, high=v_hi)
+    vv_ds   = voltage_violation_counts_ds(records, low=v_lo, high=v_hi)
     losses  = loss_series(records)
+
+    # Voltage quality measured against v_set (the discriminating signal), as
+    # opposed to the hard corridor (which is a constraint and near-always slack).
+    vq = _v_quality(records, v_set, scales.v_quality_band)
 
     # ITAE for voltage tracking (mean spatial error per step → time-weighted)
     abs_err_ts = np.abs(env_ts["v_mean"] - v_set)
@@ -605,17 +928,29 @@ def extract_metrics(
         q_ref_mvar=weights.pcc_underutil_q_ref_mvar,
     )
 
-    # oscillations: stack per-actuator commands across steps
+    # oscillations: stack per-actuator commands across steps, then DECIMATE to
+    # the issuing controller's tick grid.  Without decimation the held-command
+    # padding makes `_count_oscillations` return 0 for every trajectory (see
+    # `_decimate_to_ticks`), which is what made this whole term dead.
+    tso_tick = np.array([bool(r.tso_active) for r in records], dtype=bool)
     der_seq  = _stack_dict_arrays([r.zone_q_der     for r in records])
     pcc_seq  = _stack_dict_arrays([r.zone_q_pcc_set for r in records])
     vgen_seq = _stack_dict_arrays([r.zone_v_gen     for r in records])
-    n_osc_der  = _count_oscillations(der_seq,  floors.der_q_mvar)
-    n_osc_pcc  = _count_oscillations(pcc_seq,  floors.pcc_q_mvar)
-    n_osc_vgen = _count_oscillations(vgen_seq, floors.v_gen_pu)
+    der_ticks  = _decimate_to_ticks(der_seq,  tso_tick)
+    pcc_ticks  = _decimate_to_ticks(pcc_seq,  tso_tick)
+    vgen_ticks = _decimate_to_ticks(vgen_seq, tso_tick)
+    n_osc_der  = _count_oscillations(der_ticks,  floors.der_q_mvar)
+    n_osc_pcc  = _count_oscillations(pcc_ticks,  floors.pcc_q_mvar)
+    n_osc_vgen = _count_oscillations(vgen_ticks, floors.v_gen_pu)
+
+    # Horizon length, needed to express switching as a rate.
+    times = [float(r.time_s) for r in records if math.isfinite(float(r.time_s))]
+    duration_s = (max(times) - min(times)) if len(times) >= 2 else 0.0
 
     # tap switches (TSO)
     tso_taps_seq = _stack_dict_arrays([r.zone_oltc_taps for r in records])
     n_tap_tso = _count_tap_switches(tso_taps_seq)
+    tap_ops_tso, tap_rev_tso = _tap_wear(tso_taps_seq, duration_s)
 
     # tap switches (DSO): dict[str, int] → reshape into per-step row
     dso_tap_keys = sorted({k for r in records for k in r.dso_trafo_tap_pos})
@@ -627,15 +962,18 @@ def extract_metrics(
                 if v_int is not None:
                     dso_taps_seq[i, j] = float(v_int)
         n_tap_dso = _count_tap_switches(dso_taps_seq)
+        tap_ops_dso, tap_rev_dso = _tap_wear(dso_taps_seq, duration_s)
     else:
         n_tap_dso = 0
+        tap_ops_dso, tap_rev_dso = 0.0, 0.0
 
     rho_p95 = _rho_emp_percentile(records, pct=95.0)
 
     # ── Soft voltage excess (Issue 2: cliff → ramp) ─────────────────────
     # `voltage_excess_pu` is the sum of per-record band-edge excess in
     # pu·step.  norm_viol divides by step count → mean excess per step.
-    voltage_excess_pu = _voltage_band_excess(records, low=0.9, high=1.1)
+    # Corridor read from the config rather than hard-coded.
+    voltage_excess_pu = _voltage_band_excess(records, low=v_lo, high=v_hi)
 
     # ── Diagnostic violation counts (kept for the report; not in J) ─────
     n_viol_ts = int(np.nansum(vv_ts["n_low"]) + np.nansum(vv_ts["n_high"]))
@@ -655,18 +993,13 @@ def extract_metrics(
     )
 
     # ── Composite cost ──────────────────────────────────────────────────
-    # Scales = physical engineering tolerances (see ``cost_components``
-    # docstring).  MUST stay in sync with ``cost_components()`` above.
-    norm_v_ts  = _normalise(itae_v_ts,  scale=14.0)        # min · pu
-    norm_v_ds  = _normalise(itae_v_ds,  scale=30.0)        # min · pu
-    norm_q     = _normalise(itae_q_pcc, scale=15000.0)     # min · Mvar
-    norm_q_tie = _normalise(itae_q_tie, scale=55000.0)     # min · Mvar
-    # Conditional DSO-underutilisation term.  Scale = 1400 ≈
-    # 0.005 pu × 100 Mvar × 75²/2 min² — i.e. ``norm = 1`` corresponds
-    # to "5 mpu sustained voltage error AND 100 Mvar of DSO PCC slack
-    # for the entire 75-min scenario," matching the engineering-
-    # tolerance philosophy of ``norm_v_ts`` (scale 14 = 5 mpu × 75²/2).
-    norm_pcc_underutil = _normalise(itae_pcc_underutil, scale=1400.0)
+    # Divisors come from ``scales``; the same object drives
+    # ``cost_components()``, so the two can no longer disagree.
+    norm_v_ts  = _normalise(itae_v_ts,  scales.itae_v_ts)
+    norm_v_ds  = _normalise(itae_v_ds,  scales.itae_v_ds)
+    norm_q     = _normalise(itae_q_pcc, scales.q_pcc)
+    norm_q_tie = _normalise(itae_q_tie, scales.q_tie)
+    norm_pcc_underutil = _normalise(itae_pcc_underutil, scales.pcc_underutil)
     norm_osc   = 100.0 * osc_rate                          # percent
     norm_tap   = (n_tap_tso + n_tap_dso) / 5.0
     norm_viol  = voltage_excess_pu / max(len(records), 1)  # mean pu/step
@@ -688,11 +1021,21 @@ def extract_metrics(
         + weights.w_pf * pf_fail_cost
     )
 
+    # Admissibility.  A power-flow failure now makes the run inadmissible and
+    # pins the scalar at the sentinel, instead of scoring it at ``w_pf`` (=100)
+    # -- a value that undercut 35-43 % of *converged* runs and therefore made
+    # divergence a profitable search direction.
+    infeasible_reason = "pf_failure" if pf_fail > 0 else ""
+    if not math.isfinite(J):
+        infeasible_reason = infeasible_reason or "non_finite_metric"
+    if infeasible_reason:
+        J = INFEASIBLE_SENTINEL
+
     return TrajectoryMetrics(
         itae_v_ts=itae_v_ts,
         itae_v_ds=itae_v_ds,
-        rmsd_v_ts=float(np.nanmean(rmsd_ts)) if rmsd_ts.size else 0.0,
-        rmsd_v_ds=float(np.nanmean(rmsd_ds)) if rmsd_ds.size else 0.0,
+        rmsd_v_ts=_nanmean_or(rmsd_ts, 0.0),
+        rmsd_v_ds=_nanmean_or(rmsd_ds, 0.0),
         itae_q_pcc=itae_q_pcc,
         itae_q_tie=itae_q_tie,
         itae_pcc_underutil=itae_pcc_underutil,
@@ -715,4 +1058,16 @@ def extract_metrics(
         n_records=len(records),
         n_tso_active=sum(1 for r in records if r.tso_active),
         n_dso_active=sum(1 for r in records if r.dso_active),
+        v_rms_ts=vq["v_rms_ts"],
+        v_rms_ds=vq["v_rms_ds"],
+        v_worst_ts=vq["v_worst_ts"],
+        v_worst_ds=vq["v_worst_ds"],
+        v_band_excess_ts=vq["v_band_excess_ts"],
+        v_band_excess_ds=vq["v_band_excess_ds"],
+        tap_ops_per_h_tso=tap_ops_tso,
+        tap_ops_per_h_dso=tap_ops_dso,
+        tap_reversals_per_h_tso=tap_rev_tso,
+        tap_reversals_per_h_dso=tap_rev_dso,
+        infeasible_reason=infeasible_reason,
+        duration_s=duration_s,
     )

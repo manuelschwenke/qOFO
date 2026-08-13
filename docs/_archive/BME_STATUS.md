@@ -133,7 +133,7 @@ What is actually implemented (third design iteration, 2026-06-28 redesign):
    - **Sticky-OLTC long-run degradation**: a coordinator transient carries an OLTC
      across a tap threshold; the tap is cooldown-locked and never returns; the
      plant is permanently displaced although the continuous coordination state
-     recovers (`docs/daily_log/2026-07-01_tso_tso_long_run_degradation_investigation.md`).
+     recovers (`docs/daily_log/07_2026/2026-07-01_tso_tso_long_run_degradation_investigation.md`).
 
 **Positioning consequences (for the chapter):**
 - BME's single common objective Φ removes the incommensurability by construction
@@ -1053,7 +1053,7 @@ tests whether the ≈100 % closure survives delay/drop/H-error sweeps.
 Spec §6's three outstanding metrics implemented + the recording
 infrastructure they need; full consistent 120-min ladder re-run (all
 five rungs, final calibration). Daily log:
-`docs/daily_log/2026-07-05_bme_metrics_completion.md`.
+`docs/daily_log/07_2026/2026-07-05_bme_metrics_completion.md`.
 
 **METRIC-objective split (runner).** The recorded Φ/Φ_i came from the
 CONTROL-layer objective, so the oracle recorded single-zone Φ_i
@@ -1132,7 +1132,7 @@ optional extra bound thereafter.
 
 ### 6f — MC campaign (item 6) 🚧 launched 2026-07-06
 
-Daily log: `docs/daily_log/2026-07-06_bme_phase6_mc_campaign.md`.
+Daily log: `docs/daily_log/07_2026/2026-07-06_bme_phase6_mc_campaign.md`.
 (Implementation 2026-07-05, interrupted by a machine restart before
 validation; validated and launched 2026-07-06.)
 

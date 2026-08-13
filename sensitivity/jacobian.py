@@ -127,6 +127,137 @@ def _apply_offdiagonal_scaling(
     return result
 
 
+def _stored_jacobian(net: pp.pandapowerNet):
+    """Return pandapower's internal NR Jacobian, or ``None`` if absent."""
+    if not hasattr(net, "_ppc") or not isinstance(net._ppc, dict):
+        return None
+    internal = net._ppc.get("internal")
+    if not isinstance(internal, dict):
+        return None
+    return internal.get("J")
+
+
+def _kick_warm_start_state(
+    net: pp.pandapowerNet,
+    *,
+    vm_delta_pu: float = 1e-6,
+    va_delta_degree: float = 1e-4,
+) -> Optional[int]:
+    """Perturb one actual NR state variable used by ``init='results'``.
+
+    Perturbing the first pandapower bus is not sufficient: it is commonly the
+    slack bus, whose voltage is fixed and therefore absent from the Newton
+    state vector. Prefer a PQ-bus voltage magnitude; if the network has no PQ
+    bus, perturb the angle of a PV bus. The perturbation affects only the
+    initial guess and is removed by the converged load flow.
+
+    Returns the selected pandapower bus index, or ``None`` when no eligible
+    solved bus exists.
+    """
+    if net.bus.empty or net.res_bus.empty:
+        return None
+
+    internal = net._ppc.get("internal", {})
+    pq_ppc = {int(value) for value in np.asarray(
+        internal.get("pq", []), dtype=int,
+    ).ravel()}
+    pv_ppc = {int(value) for value in np.asarray(
+        internal.get("pv", []), dtype=int,
+    ).ravel()}
+
+    for candidates, field, delta in (
+        (pq_ppc, "vm_pu", vm_delta_pu),
+        (pv_ppc, "va_degree", va_delta_degree),
+    ):
+        for bus_idx in net.bus.index:
+            bus_idx = int(bus_idx)
+            if bus_idx not in net.res_bus.index:
+                continue
+            try:
+                ppc_idx = pp_bus_to_ppc_bus(net, bus_idx)
+            except ValueError:
+                continue
+            if ppc_idx in candidates:
+                net.res_bus.at[bus_idx, field] = (
+                    float(net.res_bus.at[bus_idx, field]) + delta
+                )
+                return bus_idx
+    return None
+
+
+def runpp_with_stored_jacobian(
+    net: pp.pandapowerNet,
+    *,
+    warm_max_iteration: int = 50,
+    flat_max_iteration: int = 200,
+    init_sequence: Optional[Tuple[Tuple[str, int], ...]] = None,
+    **runpp_kwargs,
+) -> None:
+    """Converge with NR and guarantee a non-``None`` internal Jacobian.
+
+    Pandapower may accept an exact results warm start without performing a
+    Newton iteration, leaving ``net._ppc['internal']['J']`` equal to ``None``.
+    A PQ/PV-state kick forces an iteration. A flat-start retry retains the
+    previous convergence fallback; a final stronger results-start retry
+    handles networks whose flat point is itself an exact solution.
+
+    ``init_sequence`` overrides the start strategies as an ordered tuple of
+    ``(init, max_iteration)`` pairs, each tried until one converges. The default
+    is the historical ``results`` -> ``flat`` ladder. Callers whose net has no
+    usable prior solution pass their own order -- see ``build_dso_local_net``,
+    which starts flat and falls back to a DC start.
+    """
+    kwargs = dict(runpp_kwargs)
+    kwargs.pop("init", None)
+    kwargs.pop("max_iteration", None)
+
+    attempts = init_sequence or (
+        ("results", warm_max_iteration),
+        ("flat", flat_max_iteration),
+    )
+
+    _kick_warm_start_state(net)
+    last_exc: Optional[Exception] = None
+    for init, max_iteration in attempts:
+        try:
+            pp.runpp(
+                net,
+                init=init,
+                max_iteration=max_iteration,
+                **kwargs,
+            )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            continue
+    if last_exc is not None:
+        raise last_exc
+
+    if _stored_jacobian(net) is None:
+        _kick_warm_start_state(
+            net,
+            vm_delta_pu=1e-4,
+            va_delta_degree=1e-2,
+        )
+        strict_kwargs = dict(kwargs)
+        strict_kwargs["tolerance_mva"] = min(
+            float(strict_kwargs.get("tolerance_mva", 1e-8)), 1e-12,
+        )
+        pp.runpp(
+            net,
+            init="results",
+            max_iteration=flat_max_iteration,
+            **strict_kwargs,
+        )
+
+    if _stored_jacobian(net) is None:
+        raise ValueError(
+            "Pandapower converged without storing an internal Newton "
+            "Jacobian after PQ/PV-state warm-start retries."
+        )
+
+
 class JacobianSensitivities:
     """
     Jacobian-based sensitivity calculator for OFO controllers.
@@ -191,10 +322,68 @@ class JacobianSensitivities:
         # Store deep copy of network state -> this is the network state all sensitivites are based on
         self.net = copy.deepcopy(net)
 
+        # Freeze the incoming dispatch before dropping distributed slack.
+        #
+        # The re-converge below runs with distributed_slack off (see next
+        # comment).  Without this step every participating machine reverts to
+        # its *scheduled* p_mw and the whole shared imbalance lands on the one
+        # reference machine, which moves the operating point: measured
+        # 2026-07-30 on ``base_410``, max |dV| = 0.0579 pu between the plant
+        # solution and the point the Jacobian was taken at.  The Jacobian is
+        # then a linearisation about a state the plant is not in.  On
+        # ``rural_700`` (2800 MW DSO DER) the same effect demands ~-1.8 GW from
+        # one machine and NR diverges outright, which is what blocked that
+        # scenario at runner step [6].
+        #
+        # Writing each machine's achieved output back into gen.p_mw preserves
+        # the operating point and leaves the reference machine only the loss
+        # residual: max |dV| falls to 0.0000 pu on ``base_410``, and
+        # ``rural_700`` converges.  Machines that hold P and V is exactly the
+        # assumption the sensitivity model makes, so this is the consistent
+        # choice, not merely a convergence patch.
+        #
+        # The reference machine itself is skipped -- it must stay free to
+        # absorb the residual.  For nets already solved single-slack (the
+        # reduced per-zone nets from build_tso_local_net) res_gen equals gen
+        # and this is a no-op.
+        if not self.net.gen.empty and not self.net.res_gen.empty:
+            _has_slack_col = "slack" in self.net.gen.columns
+            for _gi in self.net.gen.index:
+                if _gi not in self.net.res_gen.index:
+                    continue
+                if _has_slack_col and bool(self.net.gen.at[_gi, "slack"]):
+                    continue
+                _p = self.net.res_gen.at[_gi, "p_mw"]
+                if np.isfinite(_p):
+                    self.net.gen.at[_gi, "p_mw"] = float(_p)
+
         # Re-converge without distributed_slack so the internal Jacobian has
         # the standard [P_PV, P_PQ, Q_PQ] structure that the sensitivity code
-        # expects.  The operating point barely changes (only loss redistribution).
-        pp.runpp(self.net, run_control=False, calculate_voltage_angles=True)
+        # expects.  The operating point is preserved by the dispatch freeze
+        # above, so warm-start NR from the stored solution: a cold start with
+        # pandapower's default 10 iterations is not always enough under the
+        # anchored ZIP load model (2026-07-17), which broke the reduced
+        # per-zone nets from build_tso_local_net. The shared helper perturbs a
+        # genuine PQ/PV Newton state (never merely the slack bus), verifies
+        # that J was stored, and retains the flat-start fallback.
+        #
+        # ``enforce_q_lims`` mirrors however the incoming net was solved rather
+        # than taking pandapower's default (False).  Solving the plant with
+        # limits enforced and the Jacobian without them releases any machine
+        # sitting on a Q limit, which again linearises about the wrong state:
+        # measured 2026-07-30 on ``rural_700``, that mismatch alone accounted
+        # for a 0.0357 pu residual once the dispatch freeze was in place, while
+        # ``base_410`` (no machine on a limit) was unaffected.  A saturated
+        # machine no longer regulates voltage, and pandapower reflects that by
+        # moving it PV -> PQ in ``_ppc['internal']``, which the bus-type
+        # extraction below reads -- so the structure follows automatically.
+        _opts = getattr(self.net, "_options", None) or {}
+        runpp_with_stored_jacobian(
+            self.net,
+            run_control=False,
+            calculate_voltage_angles=True,
+            enforce_q_lims=bool(_opts.get("enforce_q_lims", False)),
+        )
 
         # Extract Jacobian from power flow solution
         self.J = np.array(self.net._ppc['internal']['J'].todense()) # ToDo: Dense or Sparse?

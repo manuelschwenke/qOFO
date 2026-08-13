@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 _MEASUREMENT_NOISE_PROFILE_COMPONENTS: Mapping[str, Mapping[str, float]] = {
     "minimum": {
@@ -336,9 +336,6 @@ class MultiTSOConfig:
     to fill the ``s_shunt`` block of the regularisation vector."""
 
     # -- DSO objective tuning --------------------------------------------------
-    dso_g_qi:       float = 0.0
-    dso_lambda_qi:  float = 0.9
-    dso_q_integral_max_mvar: float = 50.0
     dso_gamma_oltc_q: float = 0.0
 
     # -- G_w regularisation weights (DSO) --------------------------------------
@@ -502,7 +499,7 @@ class MultiTSOConfig:
     that file."""
 
     # -- Slack variable penalty (g_z) ------------------------------------------
-    g_z_voltage:   float = 1E-12
+    g_z_voltage:   float = 1E9
     zone_g_z_voltage: Optional[Dict[int, float]] = None
     """Optional per-zone override of :attr:`g_z_voltage`
     ``{zone_id: g_z_voltage}`` (zones not listed fall back to the global
@@ -578,6 +575,54 @@ class MultiTSOConfig:
     """If True, each DSO controller uses a Jacobian built from its own
     reduced HV sub-network only (3W primary as virtual slack-gen).  See
     module docstring of :mod:`sensitivity.network_reduction`."""
+
+    tie_boundary_equivalent: str = "pq"
+    """How a neighbouring TSO area is condensed at the tie-line far-end
+    stub of a reduced zone net.  Only read when
+    ``local_sensitivities_tso=True``.
+
+    * ``"pq"`` (default, historical): constant PQ load at the cached
+      corridor flow -- infinite Thevenin impedance behind the boundary.
+    * ``"pv"``: PV gen at the cached far-end voltage and active in-feed,
+      reactive power free -- zero Thevenin impedance.
+    * ``"z"``: constant admittance matched to the cached flow; falls back
+      to PQ on stubs where the equivalent is a net source.
+    * ``"thevenin"``: voltage source behind ``tie_thevenin_k`` times the
+      tie line's own series impedance, on an auxiliary bus.  The only
+      variant that leaves the far-end bus an ordinary PQ bus, hence the
+      only one under which it has a voltage sensitivity of its own.
+
+    ``"pq"`` and ``"pv"`` bracket the true finite-impedance equivalent, so
+    the spread between them measures the modelling uncertainty this
+    boundary choice introduces.  See
+    :func:`sensitivity.network_reduction.build_tso_local_net`."""
+
+    tie_thevenin_k: Any = 1.0
+    """Boundary impedance for ``tie_boundary_equivalent="thevenin"``, as a
+    multiple of the tie line's own series impedance.  ``k -> 0`` approaches
+    the ``"pv"`` limit, ``k -> inf`` the ``"pq"`` limit.
+
+    Either a float (one value for every corridor) or a dict keyed by
+    ``(line_idx, far_end_bus)`` for per-corridor tuning; unlisted corridors
+    fall back to
+    :data:`sensitivity.network_reduction.THEVENIN_K_DEFAULT`.  The measured
+    per-corridor set for the IEEE 39-bus case is
+    :data:`sensitivity.network_reduction.THEVENIN_K_PER_CORRIDOR`."""
+
+    zone_g_w_scale: Optional[Dict[int, float]] = None
+    """Per-zone multiplier on that TSO controller's whole ``params.g_w``
+    vector, applied once after controller construction and before the main
+    loop.
+
+    The MIQP step goes as ``H / g_w``, so this is the per-area loop-gain knob:
+    below 1 makes that zone more aggressive.  It scales every actuator class in
+    the zone by the same factor, leaving the tuned ratios between classes
+    intact.  Zones absent from the mapping are left unscaled; ``None`` leaves
+    all of them at their tuned values.
+
+    Needed because a change of boundary equivalent changes the magnitude of
+    ``H`` by a different factor in each area, so comparing two boundary models
+    fairly requires re-gaining each area independently."""
 
     numerical_h_closed_loop: bool = True
     """When ``numerical_h=True``, controls the perturbation mode of
@@ -713,11 +758,150 @@ class MultiTSOConfig:
     start_time:   datetime = field(default_factory=lambda: datetime(2016, 6, 10, 0, 0))
     profiles_csv: str = ""
 
+    # -- Provenance ------------------------------------------------------------
+    sensitivity_reduction_rev: int = 2
+    """Generation of the reduced-network (Ward) sensitivity construction.
+
+    Bumped whenever a change alters the cached sensitivities, so runs from
+    either side of the boundary cannot be silently mixed in an analysis. This
+    is a *code*-version marker: nothing else in ``config.json`` distinguishes
+    the generations, which is precisely how a superseded run entered a study
+    once before (see the 2026-07-31 daily log, run 0080).
+
+    * **rev 1** — everything up to and including the 2026-08-01 overnight
+      matrix. The DSO reductions solved on the wrong power-flow branch
+      (0.10–0.36 pu from the combined solution, tertiary buses collapsed to
+      0.0), omitted the sub-network's own ``internal_aux`` buses, and pinned
+      every non-slack boundary coupler at zero active power. TSO zones carried
+      generator *setpoints* instead of actual dispatch under distributed slack.
+    * **rev 2** — 2026-08-01. DSO reductions reproduce the combined solution
+      exactly (0.000000 pu); TSO zone 0 improved up to 5x. Verified by
+      ``tools/check_reduction_fidelity.py``.
+
+    Measured effect on results: at 2016-01-05 08:00, delta = 0.005, the
+    interface-Q metric moved 0.4410 -> 0.4929 Mvar (~12%).
+    """
+
+    # -- Exogenous load step (disturbance-rejection studies) -------------------
+    load_step_time_s: Optional[float] = None
+    """Simulation time [s] at which a step is applied to the load profiles.
+
+    ``None`` disables the feature entirely, which is the default and leaves
+    every existing experiment bit-for-bit unchanged.
+
+    The step multiplies the profile columns named in ``load_step_columns`` by
+    ``load_step_factor`` from this instant onward.  It is applied to the
+    *interpolated* profile DataFrame, i.e. at ``dt_s`` resolution, so it is a
+    genuine step.  Editing the source CSV instead would not work:
+    ``core.profiles.load_profiles`` linearly interpolates the 15-minute source
+    to ``dt_s``, which would smear any step into a 15-minute ramp.
+
+    Because both plants consume the same DataFrame -- the static plant through
+    ``apply_profiles`` and the RMS plant through ``Plant.apply_exogenous``
+    (EvtLod) -- the step reaches both legs through their existing, supported
+    paths.  It is therefore NOT a contingency: no element is switched, and it
+    does not go through the ``contingencies`` machinery, which the RMS plant
+    rejects (``experiments/runners/multi_tso_dso.py``: "non-static plant does
+    not support: contingency events").
+    """
+
+    load_step_factor: float = 1.0
+    """Multiplier applied to the stepped load columns (1.0 = no change)."""
+
+    load_step_columns: Tuple[str, ...] = (
+        "mv_rural_pload", "HS4_pload", "HS5_pload",
+    )
+    """Profile columns the step scales.  Default: every active-load profile,
+    i.e. a system-wide load step.  Reactive-load columns are deliberately
+    excluded -- ``mv_rural_qload`` is signed, so scaling it would deepen a
+    capacitive injection rather than increase a load."""
+
+    load_step_bus: Optional[int] = None
+    """Bus at which to apply a LOCALISED additive load step, instead of scaling
+    every profile column.
+
+    A uniform step is a poor instrument for probing the DER dead zone: it buys
+    local voltage deviation at the price of a system-wide power imbalance.
+    Measured 2026-08-02 at 2016-01-05 08:00, reaching |ΔV| =
+    0.02 pu at the DER terminals required roughly TRIPLING system load
+    (4938 -> 8770 MW), which destabilised the cascade before the threshold was
+    reached. The same deviation at the most sensitive bus (119) needs
+    **43 MW** -- about 90x less disturbance.
+
+    A localised step is also the realistic event (a large consumer connecting, a
+    feeder transferring) and it creates a spatial gradient: nearby parks see a
+    large deviation and distant ones little, so a single run samples
+    |ΔV| across a wide range (0.046 pu spread at bus 119) and
+    probes the threshold park-by-park rather than in aggregate.
+
+    ``None`` disables it and leaves the multiplicative behaviour untouched.
+    Requires ``load_step_time_s``; combine with ``load_step_delta_mw``.
+    """
+
+    load_step_delta_mw: float = 0.0
+    """Additive active-power step [MW] applied at ``load_step_bus``.
+
+    Realised by giving the target load its own synthetic profile column equal to
+    its original profile plus ``delta / base_p_mw`` from the step instant. That
+    reuses the existing exogenous path exactly, so the step reaches the static
+    plant through ``apply_profiles`` and the RMS plant through
+    ``Plant.apply_exogenous`` (EvtLod) with no new plumbing.
+    """
+
     use_zonal_gen_dispatch: bool = True
 
-    scenario: str = "wind_replace"
+    scenario: str = "rural_700"
     """Network scenario registered in :mod:`network.ieee39.scenarios`.
-    ``"base"``, ``"reduced_gen_z2"``, or ``"wind_replace"``."""
+    ``"base_410"`` and ``"rural_700"`` share the transmission-side wind
+    replacement and select 410 or 700 MW installed DER per DSO."""
+
+    dso_der_scale: Dict[str, float] = field(default_factory=dict)
+    """Per-DSO installed-DER multiplier, e.g. ``{"DSO_3": 2.0}``.
+
+    Scenario multiplier, NOT builder state: ``constants.py`` keeps defining the
+    symmetric 410/700 MW networks and this scales one underlay on top.  Scales
+    ``sgen.p_mw``, ``sgen.base_p_mw`` and ``sgen.sn_mva`` of that DSO's DER, so
+    both the profile playback (which reads ``base_p_mw``) and the Q capability
+    (which reads ``sn_mva``) follow.
+
+    Applied straight after ``add_hv_networks`` and before any power flow, so the
+    ZIP load model, droop tagging and the Phase 1/2/3 operating-point init all
+    see the scaled network -- and the RMS snapshot therefore carries it into
+    PowerFactory through ``pf_sync``.  What was applied is recorded in
+    ``net["dso_overrides"]``."""
+
+    dso_load_p_scale: Dict[str, float] = field(default_factory=dict)
+    """Per-DSO active-load multiplier, e.g. ``{"DSO_3": 2.0}``.
+
+    Scales ``load.p_mw`` and ``load.base_p_mw`` and the recorded
+    ``total_ref_p_mw``.  Reactive load is deliberately NOT scaled -- see
+    ``dso_load_q_profile_base_mvar`` for that."""
+
+    dso_load_q_profile_base_mvar: Dict[str, float] = field(
+        default_factory=dict)
+    """Per-DSO aggregate reactive-load profile base [Mvar], e.g.
+    ``{"DSO_3": 500.0}``.  Zeroes the constant-Q rows and rescales the
+    profiled rows so the aggregate becomes ``Q_load(t) = base * profile(t)``."""
+
+    dso_line_std_type: Dict[str, str] = field(default_factory=dict)
+    """Per-DSO HV conductor override, e.g.
+    ``{"DSO_3": "490-AL1/64-ST1A 110.0"}``.  The persistent per-DSO types live
+    in ``constants.DSO_HV_LINE_STD_TYPES``; this is for one-off studies."""
+
+    # -- Plant load model ------------------------------------------------------
+    load_model: str = "zip"
+    """Voltage dependency of every plant load.  ``"zip"`` (default since the
+    2026-07-17 RMS co-simulation decision): exact exponent image
+    (kpu, kqu) = (1, 2) anchored at ``load_zip_anchor_vm_pu`` — realised as
+    100 % constant-current P / 100 % constant-impedance Q with the anchor
+    folded into the base values (:func:`network.ieee39.load_model.
+    apply_zip_load_model`).  ``"const_pq"`` reproduces the pre-2026-07-17
+    constant-power plant (for replaying older experiments)."""
+
+    load_zip_anchor_vm_pu: float = 1.03
+    """Voltage [pu] at which the SimBench-profile powers are served exactly
+    under ``load_model = "zip"``.  1.03 pu (the network voltage setpoint)
+    preserves the pre-ZIP power balance at the operating setpoint."""
 
     # -- Contingencies ---------------------------------------------------------
     contingencies: List = field(default_factory=list)
@@ -726,6 +910,61 @@ class MultiTSOConfig:
     experiment package."""
 
     distributed_slack: bool = True
+
+    der_q_capability_override_pu: Optional[float] = None
+    """TEMPORARY diagnostic: force every DER's Q capability to a symmetric,
+    P-independent box ``[-x*S_n, +x*S_n]``, overriding ``op_diagram``.
+
+    ``None`` (default) = real diagrams (STATCOM circle / VDE-AR-N-4120 box).
+
+    Set 2026-07-21 to 0.5 for the Gate-E co-simulation while establishing
+    whether DER capability saturation causes the DSO's steady-state
+    interface-Q offset and its ~120 s delayed response.  A per-park audit
+    found 12 of 44 parks pinned at an individual limit while *aggregate*
+    headroom still looked ample, and the saturation count tracked the
+    per-DSO tracking error.
+
+    **This is not a physical model and must be reverted.**  ±0.5 pu at rated
+    P implies S = sqrt(1 + 0.25) ~= 1.12 pu, i.e. a converter oversized
+    beyond what the scenario declares.  The runner prints a warning whenever
+    it is active, and the value is recorded in the Gate-E summary so a run
+    made under it cannot be mistaken for one made under real limits.
+
+    Honoured identically by ``ActuatorBounds._compute_single_der_q_capability``
+    (the controller's bounds) and ``der_qv_local_loop._qv_capability`` (the
+    plant's clip).  Those two MUST agree -- a mismatch makes the controller
+    optimise against a plant it does not have."""
+
+    rms_profile_settle_s: float = 0.0
+    """Seconds the RMS plant advances to reflect a new profile *before* the
+    controllers read, per dispatch interval (0 = disabled).
+
+    The static plant applies a profile and re-solves to steady state before
+    the controllers measure; the RMS plant applies it as events that fire
+    during the advance, so at 0 the controllers read the *pre-profile* state
+    -- a one-interval lag that seeded a DSO_4 coupler runaway on the first
+    profiles-on run (2026-07-22).  A non-zero value splits the interval: the
+    plant advances this long first (profile events fire, state partly
+    settles, controllers read it), then the remaining ``dt_s - settle`` after
+    the control commands are issued.  The total per interval stays ``dt_s``,
+    so the plant clock is unchanged.  Ignored by the static plant (its
+    advance is an instant re-solve regardless)."""
+
+    dispatch_slack_gen_v_ref: bool = False
+    """Let the TSO OFO dispatch the AVR setpoint of the slack generator.
+
+    Default ``False`` (changed 2026-07-21).  The IEEE 39-bus slack is the
+    10 GVA 'Rest of USA/Canada' network equivalent: pandapower models it as a
+    slack bus with a settable ``vm_pu``, so the OFO was commanding it, while
+    the PowerFactory RMS model has no AVR block for it (network equivalents
+    ship without controllers) and silently skipped every write.  That made
+    the static plant strictly more capable than the RMS one.  A TSO does not
+    dispatch a neighbouring interconnection's voltage, so the actuator is
+    withdrawn from both plants rather than added to the RMS.
+
+    The machine remains fully observed: its Q still enters the reserve term
+    and the Q_gen soft constraint; only the V-ref column and bounds are
+    frozen.  Set ``True`` to reproduce pre-2026-07-21 results."""
 
     enforce_q_lims_plant: bool = True
     """Pass ``enforce_q_lims=True`` to every plant-side ``pp.runpp`` in the
@@ -823,6 +1062,61 @@ class MultiTSOConfig:
     """Target ``lambda_max(M)`` for :attr:`precondition_g_w` (well-damped at
     ``~0.9``; OFO stable for ``< 2``).  One scalar fixes the closed-loop
     gain once the per-class shape is set by the column norms."""
+
+    precondition_lambda_target_tso: Optional[float] = None
+    """Per-layer override of :attr:`precondition_lambda_target` for the TSO
+    controllers; ``None`` falls back to the shared value.
+
+    Needed because the layers — and in fact the individual zones — sit in
+    qualitatively different regimes.  Measured at the hand-tuned operating point
+    (2026-07-31), the *continuous* curvature is 1.775 in TSO zone 2 (which is
+    PCC-dominated, so ``g_w_pcc`` genuinely is its loop gain) but 0.021 in zone 1
+    (OLTC-dominated), so a single shared target cannot be meaningful for both."""
+
+    precondition_lambda_target_dso: Optional[float] = None
+    """Per-layer override of :attr:`precondition_lambda_target` for the DSO
+    controllers; ``None`` falls back to the shared value.
+
+    Note the DSO was never preconditioned at all before ``objective_curvature_
+    inputs`` was added: :meth:`DSOController.voltage_curvature_inputs` returns
+    ``None`` unless a voltage schedule is active with non-zero weight, and the
+    DSO objective is dominated by interface-Q tracking (~500x in priority terms).
+    Measured over the full objective block, the DSO continuous loop runs at
+    ``lambda = 0.91-1.15``."""
+
+    precondition_mode: str = "cap"
+    """``'cap'`` (default) or ``'set'`` — see
+    :func:`controller.gw_precondition.precondition_g_w`.
+
+    ``'cap'`` only ever *adds* damping and is the right production behaviour: a
+    safety net must not make a stable loop more aggressive.  ``'set'`` makes
+    ``lambda_max`` track the target in both directions, which is required when
+    the target is a **tuning coordinate** — under ``'cap'`` every target above
+    the current ``lambda_max`` collapses to the same no-op, leaving the
+    coordinate flat over much of its range (98 % of it, for TSO zone 1)."""
+
+    precondition_lambda_scope: str = "all"
+    """``'all'`` (default) or ``'preconditioned'`` — which columns
+    :attr:`precondition_lambda_target` refers to.
+
+    ``'all'`` targets the true ``lambda_max(M)``, the right choice for a
+    production safety cap.  ``'preconditioned'`` targets only the columns being
+    scaled, which is the right choice when the target is a *tuning coordinate*:
+    ``M`` treats the integer OLTC columns as continuous per-tick moves, so their
+    contribution is an upper bound rather than a real effect, and under
+    ``'all'`` they can block the target outright (TSO zone 1 reports
+    ``integer_dominated`` at ``lambda_floor = 1.085`` while its continuous loop
+    sits at 0.021)."""
+
+    precondition_class_scales: dict = field(default_factory=dict)
+    """Optional ``{actuator_class: factor}`` multiplying that class's
+    provisional preconditioned weight before ``kappa`` is solved.
+
+    This is the *shape* knob, orthogonal to the gain: with ``kappa`` placing
+    ``lambda_max`` on target, the ratios between classes are the only remaining
+    freedom and express actuator *preference*.  Use gauge-fixed factors
+    (geometric mean 1) so shape and gain stay independent.  Empty = the analytic
+    column-norm preconditioner, i.e. no preference."""
 
     precondition_granularity: str = "class"
     """``'class'`` (one shared ``g_w`` per actuator class, directly
@@ -930,6 +1224,36 @@ class MultiTSOConfig:
 
     der_qv_deadband_pu_overrides: Dict[int, float] = field(default_factory=dict)
     """Per-DER override of the qv deadband half-width."""
+
+    der_qv_deadband_override_pu: Optional[float] = None
+    """Diagnostic blanket override of the DER Q(V) deadband [pu] applied to
+    BOTH the static and RMS plants (see
+    ``core.actuator_bounds.set_der_qv_deadband_override``).  ``0.0`` removes the
+    dead zone so the droop is single-valued -- fixes the deadband-edge
+    multi-equilibrium that makes the RMS DERs settle in a different droop basin
+    from the static plant under profiles (2026-07-24).  ``None`` keeps each
+    park's own deadband."""
+
+    disable_qv_seed: bool = False
+    """Diagnostic: skip ``seed_qv_equilibrium`` (the linear, deadband-ignoring
+    warm-start of the static plant's QVLocalLoops, both at init and each
+    interval).  The static side then relies on ``run_control`` alone, so it
+    settles to the natural (deadband-respecting) droop fixed point instead of
+    the seeded strong-droop one -- the hypothesis being that the seed is what
+    pushes the static into a different droop basin from the RMS at the deadband
+    edge (2026-07-24 option-2 test)."""
+
+    seed_der_anchor_to_local_v: bool = False
+    """Initialise every DER's Q(V) anchor ``qv_vref_anchor_pu`` to its local
+    ``res_bus.vm_pu`` at init, instead of leaving it unset (which cold-starts the
+    static ``QVLocalLoop`` at the nominal ``qv_vref_pu`` = 1.03 on the first
+    profiled re-solve).  The RMS plant already anchors to the local voltage
+    ``v_lf`` at init (``PowerFactoryPlant._anchor_qv_precontrollers``); without
+    this the two plants droop about different anchors on the FIRST profiled step
+    (static ~1.03, RMS ~1.02) -- a one-interval mismatch that seeds the DSO_4
+    static-vs-RMS divergence.  Both plants re-anchor to the common local voltage
+    from the first dispatch onward, so this only affects interval 1
+    (2026-07-24 anchor-seed hypothesis)."""
 
     # -- cosphi parameters (used when q_mode == "cosphi") --------------
     tso_cosphi: float = 1.0
@@ -1060,7 +1384,7 @@ class MultiTSOConfig:
     shunt_int_t_dwell_s: float = 300.0
     """Minimum dwell time between commits of the same bank [s]."""
 
-    shunt_int_daily_budget: int = 8
+    shunt_int_daily_budget: int = 1E3
     """Maximum commits per bank within any rolling 24 h window."""
 
     shunt_int_v_min_pu: float = 0.95

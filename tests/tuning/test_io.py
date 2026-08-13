@@ -66,6 +66,37 @@ def test_save_load_config_roundtrip(
     assert ev.minute == 10
 
 
+def test_roundtrip_preserves_non_string_mapping_keys(
+    baseline_cfg: MultiTSOConfig,
+    tmp_path: Path,
+) -> None:
+    """Tuple / int mapping keys must survive the YAML round-trip.
+
+    ``jsonable`` stringifies every dict key, and every consumer of these
+    mappings looks them up with the original key type and falls back **without
+    raising** on a miss: ``build_tso_local_net._k_for`` silently substitutes
+    ``THEVENIN_K_DEFAULT`` for the measured per-corridor impedance, and the
+    runner's ``zone_g_w_scale.get(int(z), 1.0)`` silently drops the override.
+    A Thevenin-boundary study loaded from YAML would therefore tune a different
+    boundary model than the one its baseline declares.
+    """
+    cfg = dataclasses.replace(
+        baseline_cfg,
+        tie_boundary_equivalent="thevenin",
+        tie_thevenin_k={(14, 8): 2.73, (25, 16): 1.24},
+        zone_g_w_scale={1: 0.3, 2: 0.5},
+        zone_v_setpoints_pu={1: 1.03, 2: 1.02},
+    )
+    path = tmp_path / "cfg.yaml"
+    save_config_yaml(cfg, path)
+
+    loaded = load_config_yaml(path)
+
+    assert loaded.tie_thevenin_k == {(14, 8): 2.73, (25, 16): 1.24}
+    assert loaded.zone_g_w_scale == {1: 0.3, 2: 0.5}
+    assert loaded.zone_v_setpoints_pu == {1: 1.03, 2: 1.02}
+
+
 # ---------------------------------------------------------------------------
 # 2. Tuned-params YAML round-trip
 # ---------------------------------------------------------------------------

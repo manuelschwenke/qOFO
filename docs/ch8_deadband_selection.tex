@@ -1,0 +1,833 @@
+% ---------------------------------------------------------------------------
+% Ch. 8 -- Selection of the DER Q(V) dead-zone half-width.
+%
+% Supersedes docs/ch8_deadband_window_selection.tex, whose results were produced
+% with the rev-1 sensitivity reduction (see Sec. 3).
+%
+% To \input into the thesis, delete from \documentclass down to
+% \tableofcontents, and the final \end{document}.
+%
+% Figures: results/deadband_selection/figures/fig_*.pdf
+% Data:    results/deadband_selection/deadband_{metrics,activity,threshold,
+%          disturbance}.csv
+% ---------------------------------------------------------------------------
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[hidelinks]{hyperref}
+
+\sisetup{detect-weight=true,detect-family=true}
+\graphicspath{{../results/deadband_selection/figures/}%
+              {../results/deadband_n1/figures/}}
+
+\newcommand{\pu}{\ensuremath{\mathrm{p.u.}}}
+\newcommand{\Mvar}{\ensuremath{\mathrm{Mvar}}}
+\newcommand{\qss}{\textsc{qss}}
+\newcommand{\rms}{\textsc{rms}}
+\newcommand{\dz}{\ensuremath{\delta}}
+
+\title{Selection of the DER $Q(V)$ dead-zone half-width}
+\author{}
+\date{2026--08--02}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+%======================================================================
+\section{The parameter and the question}
+
+The distribution-connected DER follow a local reactive-power droop $Q(V)$ with a
+dead zone of half-width $\dz$ about a re-anchored voltage reference: the droop
+is inactive while $|V-V_\mathrm{anchor}| < \dz$ and engages beyond it. $\dz$ is
+therefore an \emph{amplitude threshold on the controller's input}, and it is a
+property of the characteristic rather than of any operating point.
+
+Two effects are asserted to bound it. Too narrow, and the droop answers every
+small variation: the DER move continuously and the outer online feedback
+optimisation (OFO) repeatedly re-anchors against them. Too wide, and the droop
+is inactive between dispatches, so no local support acts and the interface
+reactive power drifts until the next OFO step.
+
+This chapter reports three experiments. The first --- sweeping $\dz$ against
+annual profile windows --- is the obvious design and \textbf{it fails}; why it
+fails is itself a result (\S\ref{sec:sweep}). The second measures the mechanism
+the dead zone governs rather than its consequence (\S\ref{sec:activity}). The
+third measures the threshold directly by controlled excitation
+(\S\ref{sec:threshold}) and yields the design rule of \S\ref{sec:rule}.
+
+\subsection{Plant, actuators, controlled outputs}
+
+\begin{itemize}
+  \item \textbf{Plant.} Modified IEEE~39-bus transmission system, scenario
+    \texttt{rural\_700}, with four \SI{110}{\kilo\volt} distribution underlays.
+    $\mathrm{DSO}_3$ carries $2\times$ installed DER and $2\times$ active-load
+    base; its reactive load is not scaled. Every DSO has zero constant reactive
+    load and follows $Q_\mathrm{load}(t)=\SI{500}{\Mvar}\cdot m_\mathrm{qload}(t)$.
+  \item \textbf{Actuators.} DER reactive power (continuous, $Q(V)$ droop with
+    dead zone), coupler three-winding OLTCs, machine two-winding OLTCs, MSC/MSR
+    switched shunts.
+  \item \textbf{Controlled outputs.} Reactive power at the EHV--HV interfaces,
+    and nodal voltages within their band.
+  \item \textbf{DER capability.} The physical VDE-AR-N-4120 diagrams throughout.
+    Reactive capability is contingent on active power, which matters for window
+    selection: a park at $P=0$ has none (\S\ref{sec:degenerate}).
+  \item \textbf{Controllers see only cached sensitivities} and their own
+    measurements. No controller is given the plant equations.
+\end{itemize}
+
+\subsection{Excitation}
+\label{sec:excitation}
+
+Two disturbance classes are used, and \textbf{no contingency is applied
+anywhere}: every run records \texttt{contingencies = []},
+\texttt{measurement\_noise.enabled = False} and
+\texttt{enable\_reachability\_guard = False}.
+
+\begin{description}
+  \item[Profiled operation.] The annual load/DER time series. This is the
+    small-signal regime the dead zone is meant to filter.
+  \item[Exogenous load step.] A step multiplying every active-load profile from
+    a fixed instant. Applied to the \emph{interpolated} profile frame, so it is
+    a true step at the \SI{20}{\second} dispatch resolution --- perturbing the
+    \SI{15}{\minute} source would have been smeared into a ramp by
+    interpolation. It reaches both plants through paths they already support
+    and is \emph{not} a contingency: no element is switched.
+\end{description}
+
+The absence of measurement noise bounds every conclusion below. A dead zone's
+textbook justification is rejection of noise on the measured voltage; that
+mechanism is absent by construction, so the narrow-side penalty reported here is
+carried by genuine profile variation alone. Adding noise should penalise narrow
+dead bands further, making every $\dz^\star$ reported here a \emph{lower} bound
+on the value appropriate to a noisy plant. The direction is argued, not measured.
+
+%======================================================================
+\section{Provenance: the sensitivity reduction was corrected}
+\label{sec:rev2}
+
+Each controller acts on cached sensitivities derived from a Ward-reduced
+network. On 2026-08-01 that reduction was found to be wrong in three
+independent ways, and every result in this chapter postdates the correction.
+
+Verified with \texttt{tools/check\_reduction\_fidelity.py}, which asks whether
+each reduced network, solved alone, reproduces the combined solution at the
+buses it retains --- the property the reduction claims. Convergence is
+\emph{not} that test: a reduced net with stranded boundary flows converges
+happily to a different operating point.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lll}
+\toprule
+Defect & Effect & Fix \\
+\midrule
+DSO reductions solved on the wrong power-flow branch
+  & \SIrange{0.10}{0.36}{\pu} from the combined solution; tertiary buses
+    collapsed to \SI{0}{\pu}
+  & DC start before flat \\
+Sub-network's own auxiliary buses dropped
+  & \SI{132}{\mega\watt} of the DSO's own injection missing
+  & keep \texttt{internal\_aux} buses \\
+Non-slack boundary couplers pinned at $P=0$
+  & multi-coupler DSOs forced their whole real exchange through one transformer
+  & carry cached $p_\mathrm{hv}$ \\
+TSO zones used generator \emph{setpoints}
+  & \SI{180}{\mega\watt} phantom injection under distributed slack
+  & use cached \texttt{res\_gen} \\
+\bottomrule
+\end{tabular}
+\caption{Defects in the reduced-network sensitivities, corrected 2026-08-01.
+All four inputs are locally measurable: PCC flows, own topology, own machine
+telemetry.}
+\end{table}
+
+After correction all sixteen DSO reductions (4 DSOs $\times$ 4 windows)
+reproduce the combined solution to \textbf{0.000000\,\pu}; the TSO zones improved
+up to $5\times$ and retain a residual of \SIrange{0.012}{0.018}{\pu}, which is a
+linearisation-point offset in a smooth regime and is accepted.
+
+The correction is not cosmetic: at 2016-01-05 08:00, $\dz=0.005$, the
+interface-$Q$ metric moved \SI{0.4410}{\Mvar} $\rightarrow$ \SI{0.4929}{\Mvar}
+($\approx\!12\,\%$). Runs record \texttt{sensitivity\_reduction\_rev}, and the
+admission filter requires rev~2, so pre-correction runs cannot enter these
+curves.
+
+%======================================================================
+\section{Windows}
+\label{sec:windows}
+
+Five live windows spanning net infeed $-117$ to $+\SI{2200}{\mega\watt}$, plus
+one retained as a null result.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lS[table-format=4.1]S[table-format=4.1]S[table-format=+5.1]c}
+\toprule
+Window & {DER $P$} & {Load $P$} & {Net infeed} & Parks with \\
+ & {[\si{\mega\watt}]} & {[\si{\mega\watt}]} & {[\si{\mega\watt}]}
+ & zero $Q$ cap. \\
+\midrule
+2016-02-22 13:00 & 2262.4 & 2379.9 & -117.4 & 16/44 \\
+2016-01-05 08:00 & 2324.5 & 1916.0 &  408.6 & 16/44 \\
+2016-01-15 03:00 & 2605.7 & 1800.7 &  805.0 & 16/44 \\
+2016-12-18 14:00 & 2741.8 & 1374.7 & 1367.1 & 16/44 \\
+2016-05-01 16:00 & 3458.6 & 1258.6 & 2200.0 & {--} \\
+\addlinespace
+2016-07-15 03:00 &   29.2 & 1055.3 & -1026.1 & \textbf{44/44} \\
+\bottomrule
+\end{tabular}
+\caption{Windows characterised by current-topology quantities. The last is
+degenerate (\S\ref{sec:degenerate}).}
+\label{tab:windows}
+\end{table}
+
+Three points of method:
+
+\paragraph{The screening figures that selected the windows are void.} Three
+windows were drawn from a Tier-1 seasonal screening measured on an
+\emph{earlier topology}. That ranking does not transfer: the window it called
+the annual maximum turned out to be the least demanding of the set. The figures
+are recorded as provenance only and are never quoted as properties of these
+runs.
+
+\paragraph{A deep-import window with capable DER does not exist in this data.}
+DER output and load are positively correlated, so the hours with reactive
+capability are the high-generation hours. Screening all $35\,136$ quarter-hours,
+\emph{no} hour combines $P_\mathrm{DER}\geq\SI{2200}{\mega\watt}$ with net
+infeed below $-\SI{300}{\mega\watt}$. The import side of the axis therefore
+stops at $-\SI{117}{\mega\watt}$, and any statement about the voltage-drop
+regime rests on that single window.
+
+\paragraph{Feasibility is empirical.} 2016-05-01 16:00 aborted with a
+non-convergent power flow under rev~1 and converges under rev~2, because
+removing the phantom generation of \S\ref{sec:rev2} gave its reduced net a
+solution. Offline screening did not predict this in either direction.
+
+\subsection{A degenerate window}
+\label{sec:degenerate}
+
+At 2016-07-15 03:00 --- July, 03:00, no photovoltaic infeed and a multi-day wind
+lull --- aggregate DER infeed is \SI{29.2}{\mega\watt}. Under the VDE diagram
+\emph{all} 44 parks report zero reactive capability and both zone PCC capability
+intervals collapse to $[0,0]\,\si{\Mvar}$. With no DER able to move, the $Q(V)$
+characteristic never binds: two dead bands an order of magnitude apart return
+identical results to six digits.
+
+This is a property of the operating point, not a defect, and it bounds the
+design rule: \textbf{dead-band selection presupposes DER reactive headroom.}
+The window is excluded from every optimum and retained as a null result. It also
+serves as a determinism control --- because $\dz$ provably cannot act there,
+its identical outputs prove the pipeline is deterministic, which matters for
+\S\ref{sec:sweep}.
+
+%======================================================================
+\section{Experiment 1: the profiled sweep, and why it fails}
+\label{sec:sweep}
+
+Full factorial, $\dz \in \{0, 0.001, 0.0025, 0.005, 0.0075, 0.01, 0.015, 0.02,
+0.03\}\,\pu$ crossed with the five live windows: 45 closed-loop
+co-simulations against the PowerFactory \rms{} plant, each with a quasi-static
+reference leg.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\textwidth]{fig_tracking.pdf}
+\caption{Interface-$Q$ tracking error against dead-zone half-width, one curve
+per window. Only the mildest window ($+\SI{409}{\mega\watt}$) gives a clean
+interior minimum; the stressed windows are non-monotone.}
+\label{fig:tracking}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\textwidth]{fig_dsvoltage.pdf}
+\caption{DS group voltage deviation against $\dz$. Every exporting window is
+best at $\dz=0$; the importing window ($-\SI{117}{\mega\watt}$) has an interior
+optimum, i.e.\ the trade-off reverses sign with the direction of interface flow.}
+\label{fig:dsv}
+\end{figure}
+
+\subsection{Result: no optimum can be defined}
+
+\begin{itemize}
+  \item \textbf{No $\dz$ is Pareto-optimal in every window} over
+    (interface $Q$, DS voltage) --- the intersection is empty
+    (Fig.~\ref{fig:tradeoff}).
+  \item The interface-$Q$ argmin scatters over $0.0025 \dots 0.03$ with no
+    relation to loading: $\mathrm{CV}=0.715$ across the five windows.
+  \item The stressed windows' curves are non-monotone with \SIrange{20}{25}
+    {\percent} scatter.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\textwidth]{fig_tradeoff.pdf}
+\caption{The two controlled quantities against each other, with $\dz$ as the
+path parameter. A monotone trade-off would trace a simple curve; the stressed
+windows fold back on themselves.}
+\label{fig:tradeoff}
+\end{figure}
+
+\subsection{Why: the metric is not a function of $\dz$}
+
+The scatter is \emph{structural}, not statistical. The degenerate window
+(\S\ref{sec:degenerate}) reproduces to six digits, so the pipeline is
+deterministic; different $\dz$ therefore reach genuinely different equilibria.
+This is the dead-zone multi-equilibrium behaviour --- the same non-uniqueness
+identified between the quasi-static and \rms{} representations --- here
+dominating the stressed operating points rather than appearing as isolated
+anomalies.
+
+Four design flaws compound it: one realisation per cell, so a single trajectory
+samples one basin arbitrarily; a $\dz$-dependent initial condition, because the
+$Q(V)$ seeding uses the dead band; a metric mixing transient with steady state;
+and no measurement of the mechanism the dead band actually governs.
+
+\textbf{Taking an argmin over a bistable metric is not a valid selection
+procedure}, and the remainder of this chapter does not attempt it.
+
+Two findings from this experiment do survive, because they do not depend on
+locating a minimum:
+
+\begin{enumerate}
+  \item \textbf{$\dz$ must be non-zero.} At $\dz=0$ the interface-$Q$ error is
+    roughly $3\times$ its best value in every window. The collapse is abrupt:
+    $\dz=\SI{0.001}{\pu}$ already recovers about \SI{90}{\percent} of it.
+  \item \textbf{The voltage trade-off reverses with the direction of interface
+    flow} (Fig.~\ref{fig:dsv}). Exporting windows want $\dz=0$ for DS voltage;
+    the importing window has an interior optimum at \SI{0.0075}{\pu}.
+\end{enumerate}
+
+%======================================================================
+\section{Experiment 2: measuring the mechanism}
+\label{sec:activity}
+
+The dead zone governs how much the local droop \emph{moves}. Counting actuator
+motion rather than reading a possibly-bistable end state gives a metric that
+cannot be confounded by which equilibrium a run settles into.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\textwidth]{fig_chatter.pdf}
+\caption{Direction reversals of the DER reactive power, per park per dispatch
+interval, against $\dz$. Monotone with a clear knee in every window --- compare
+the same runs in Fig.~\ref{fig:tracking}.}
+\label{fig:chatter}
+\end{figure}
+
+Defining the knee as the smallest $\dz$ within \SI{10}{\percent} of that
+window's floor:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+ & mean & CV \\
+\midrule
+chatter knee & \SI{0.0100}{\pu} & \textbf{0.418} \\
+interface-$Q$ argmin & \SI{0.016}{\pu} & 0.715 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The chatter knee is about twice as well determined, and it measures the quantity
+$\dz$ directly controls. It is still a $3\times$ range rather than a number,
+which motivates \S\ref{sec:threshold}.
+
+\paragraph{A normalisation hypothesis, tested and refuted.} If $\dz$ were simply
+a threshold relative to local voltage variability, normalising by the measured
+$\sigma_V$ (which ranges \SIrange{0.00128}{0.00481}{\pu} across the windows)
+should collapse the curves. It does not: the knee CV goes $0.418 \rightarrow
+0.427$ and the argmin CV $0.715 \rightarrow 0.747$. Both marginally
+\emph{worse}. $\dz$ is not a constant multiple of $\sigma_V$.
+
+%======================================================================
+\section{Experiment 3: the threshold, measured directly}
+\label{sec:threshold}
+
+Rather than infer the threshold from \SI{300}{\second} of uncontrolled
+multi-frequency excitation, apply one disturbance of known amplitude and find
+the $\dz$ at which the droop stops responding. One operating point
+(2016-01-05 08:00 --- the only window whose response is unambiguous, and the
+lowest $\sigma_V$, so the step dominates the background).
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\textwidth]{fig_threshold.pdf}
+\caption{Post-step DER traverse against $\dz$ at two excitation amplitudes.
+Dotted verticals mark each amplitude's open-loop $|\Delta V|$. The response
+collapses to the quiet floor as $\dz$ crosses the excitation.}
+\label{fig:threshold}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+$\dz$ [\pu] & 0.0025 & 0.005 & 0.0075 & 0.01 & 0.015 & 0.02 \\
+\midrule
+$\times1.10$, $|\Delta V| = \SI{0.00255}{\pu}$
+  & 0.113 & \textbf{0.049} & 0.051 & 0.054 & 0.055 & 0.055 \\
+$\times1.25$, $|\Delta V| = \SI{0.00690}{\pu}$
+  & 0.752 & 0.476 & 0.161 & \textbf{0.081} & 0.058 & 0.058 \\
+\bottomrule
+\end{tabular}
+\caption{Post-step DER traverse [\si{\Mvar} per park per interval]. Bold marks
+the first $\dz$ at which the response has essentially reached the quiet floor.
+In both rows that happens as $\dz$ passes the excitation amplitude.}
+\label{tab:threshold}
+\end{table}
+
+At $|\Delta V| = \SI{0.00255}{\pu}$ the response falls to the floor between
+$\dz = 0.0025$ and $0.005$; at $|\Delta V| = \SI{0.00690}{\pu}$ between
+$\dz=0.005$ and $0.0075$. \textbf{In both cases the transition brackets the
+excitation amplitude}, so the engagement threshold satisfies
+\begin{equation}
+  \dz_\mathrm{engage} \;\approx\; |\Delta V|,
+  \qquad k = \dz_\mathrm{engage}/|\Delta V| \approx 1 ,
+  \label{eq:threshold}
+\end{equation}
+at two independent amplitudes differing by a factor of~$2.7$. The dead zone
+behaves as specified: the droop acts when the deviation exceeds $\dz$ and is
+silent when it does not.
+
+\paragraph{The excitation is not independent of $\dz$.} Measured $|\Delta V|$ at
+$\times1.25$ runs from \SI{0.00153}{\pu} at $\dz=0$ to \SI{0.00690}{\pu} at
+$\dz\geq0.015$: a tight dead band makes the droop act, and acting suppresses the
+very deviation it responds to. The open-loop excitation must therefore be read
+at wide $\dz$, where the droop is inactive. \emph{The dead band partly determines
+its own input}, which is a closed-loop property worth stating explicitly.
+
+\paragraph{The threshold is measured on the TS parks.} Equation
+\eqref{eq:threshold} was obtained from the aggregate traverse, which the
+TS-connected parks dominate by a factor of \numrange{10}{40}; it is therefore in
+effect a TS result, and it does not by itself license one $\dz$ for both
+voltage levels. Resolving the excitation per park at wide $\dz$ (open loop,
+$\times1.25$) gives
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+ & $n$ & median $|\Delta V|$ [\pu] & max [\pu] & max/median \\
+\midrule
+TS parks & 4  & 0.00645 & 0.00813 & 1.26 \\
+DS parks & 40 & 0.00673 & 0.00907 & 1.35 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The two populations differ in median by under \SI{4}{\percent}, and
+neither spreads by more than $1.35\times$ about its own median. Referenced to
+the \emph{maximum} park deviation rather than the mean --- the appropriate
+reference, since the dead band must be chosen against the worst park it has to
+keep silent --- $k \approx 1$ holds for both levels. A single uniform $\dz$ is
+therefore justified \emph{for this disturbance class}; whether it survives a
+disturbance that loads one level preferentially is a separate question, taken up
+in \S\ref{sec:rule}.
+
+\paragraph{Large dead bands are unreachable by \emph{uniform} disturbances.} A
+static scan gives the load step needed to induce a given deviation: under a
+uniform increase at all profiled buses, exceeding \SI{0.02}{\pu} requires roughly
+\emph{tripling} system load ($4938 \rightarrow \SI{8770}{\mega\watt}$). That is a
+stress test, not an event.
+
+This conclusion is conditional on the disturbance being uniform, and that
+qualification matters: a load step \emph{concentrated} at a single weak bus is
+far more efficient. At the most severe distribution bus, \SI{43}{\mega\watt}
+suffices for \SI{0.02}{\pu} --- some \num{90} times less energy than the uniform
+step, with a spatial spread of \SI{0.046}{\pu} across the parks. A localised
+event of entirely ordinary size therefore reaches deviations that the uniform
+scan places beyond reach. The claim that should be carried forward is the
+narrower one: \emph{under uniform loading} at this operating point,
+$\dz \gtrsim 0.01$ leaves the local droop effectively disabled. Amplitudes at and beyond $\times1.5$ were attempted and
+proved unusable for a different reason: they destabilise the cascade
+(traverse \num{80.7} against a floor of \num{0.057}, and a settling-gate
+failure), so they measure instability rather than threshold.
+
+%======================================================================
+\section{The design rule}
+\label{sec:rule}
+
+Equation~\eqref{eq:threshold} converts $\dz$ from a tuning parameter into a
+stated design choice:
+
+\begin{quote}
+\textbf{Choose $\dz$ equal to the voltage deviation the local layer should
+ignore. The droop then engages for anything larger and is silent for anything
+smaller.}
+\end{quote}
+
+The performance results then bound the admissible range rather than selecting
+within it:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Bound & From & Value \\
+\midrule
+lower & $\dz=0$ costs $3\times$ in interface-$Q$ tracking & $\dz > 0$ \\
+lower & chatter knee (\S\ref{sec:activity}) & $\dz \gtrsim 0.005$ \\
+upper & DS voltage degrades monotonically (exporting) & as small as tolerable \\
+upper & droop never engages on realistic events & $\dz \lesssim 0.01$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Worked example: a \SI{0.01}{\pu} limit}
+
+Suppose the requirement is that the local layer must act before the deviation
+reaches \SI{0.01}{\pu}. By \eqref{eq:threshold}, engagement occurs when the
+deviation exceeds $\dz$, so the requirement is
+\[
+  \dz \;\leq\; \SI{0.01}{\pu}.
+\]
+$\dz=\SI{0.01}{\pu}$ is the largest admissible value and satisfies the
+requirement exactly at the limit. It also sits at the chatter knee, so it
+captures essentially all of the achievable chatter reduction.
+
+It is, however, the \emph{worst} admissible choice on the other two measures. At
+the reference window, relative to their best values, $\dz=\SI{0.01}{\pu}$ costs
+\SI{18}{\percent} in interface-$Q$ tracking (\num{0.580} against \num{0.493}
+\si{\Mvar}) and \SI{73}{\percent} in step rejection (peak excess \num{0.335}
+against \num{0.194} \si{\Mvar}), and it gives up a factor of $3.6$ in DS voltage
+against $\dz=0$.
+
+\textbf{Recommendation: $\dz = \SI{0.005}{\pu}$.} It satisfies the
+\SI{0.01}{\pu} requirement with a factor-of-two margin, and it is where three
+independent criteria at the reference window already coincide:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Criterion & $\dz$ \\
+\midrule
+profiled interface-$Q$ optimum & 0.005 \\
+step-rejection optimum & 0.005 \\
+chatter knee & 0.0075 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%======================================================================
+\section{The dead band as a detector threshold: N-1 evidence}
+\label{sec:n1}
+
+\begin{quote}\small
+\textbf{Provisional.} Measured on THREE operating windows spanning net infeed
+\SIrange{-117}{+1367}{\mega\watt} (2016-02-22 13:00, 2016-01-05 08:00,
+2016-12-18 14:00), 57 RMS co-simulations run 2026-08-02/04. One cell
+($\dz=0.1$, gen~1, \SI{+409}{\mega\watt}) lost its traces to a failed result
+export and is excluded.
+
+\textbf{Supersedes the single-window draft.} That draft concluded that
+$\dz=\SI{0.005}{\pu}$ was confirmed. Replication \emph{refutes} it: see
+\S\ref{sec:n1choice}.
+\end{quote}
+
+\subsection{Why the earlier sections could not find an optimum}
+
+The Q(V) layer exists to reject \emph{events}. Profile-driven voltage shifts are
+the OFO's business: it re-optimises every \SI{180}{\second} (TSO) or
+\SI{20}{\second} (DSO) and re-anchors each park's $V_\mathrm{ref}$ when it writes
+a setpoint. The droop compares $|V-V_\mathrm{anchor}|$ against $\dz$, so $\dz$
+does not discriminate voltage \emph{levels} --- it discriminates \emph{drift
+since that park's last dispatch}.
+
+That makes $\dz$ a \textbf{detector threshold}, and a detector has no optimum. It
+has an admissible interval, bounded below by the disturbance it must ignore and
+above by the one it must catch:
+
+\begin{equation}
+  \underbrace{\max_{\text{profile}} |\Delta V|}_{\text{OFO's business}}
+  \;\lesssim\; \dz \;\lesssim\;
+  \underbrace{\min_{\text{event}} |\Delta V|}_{\text{droop's business}} .
+  \label{eq:detector}
+\end{equation}
+
+This is why $\dz^\star$ scattered with $\mathrm{CV}=0.715$ across windows in
+\S\ref{sec:sweep}: the argmin was being fitted to a curve whose flat region
+\emph{is} the answer.
+
+\subsection{Method}
+
+The disturbance is a synchronous-machine trip --- a credible N-1 --- delivered to
+the RMS plant as an \texttt{EvtOutage} on the machine and its unit transformer.
+Horizon \SI{600}{\second}; the trip fires at \SI{200}{\second}, i.e.
+\SI{20}{\second} \emph{after} a TSO dispatch, which maximises the droop-only
+exposure to \SI{160}{\second}. Each of the eight dead bands is run three times:
+undisturbed twin, mild trip, severe trip. Every deviation is referenced to the
+same-$\dz$ twin; the pre-trip deviation between a run and its twin is
+\textbf{identically zero}, so the referencing contributes no artefact.
+
+\paragraph{The disturbance is a transient, and that is the point.} The excursion
+is not a sustained offset. At the worst park, with the droop disabled, a gen-7
+trip gives
+
+\begin{center}
+\begin{tabular}{lccccccc}
+\toprule
+$t$ [\si{\second}] & 179 & 190 & 195 & 220 & 260 & 300 & 600 \\
+\midrule
+$V$ [\pu]          & 1.0441 & 0.9132 & 0.8949 & 0.9024 & 1.0052 & 1.0389 & 1.0559 \\
+$|\Delta V|$ [\pu] & 0.0000 & 0.1315 & 0.1497 & 0.1424 & 0.0397 & 0.0060 & 0.0093 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent (the twin holds \SIrange{1.0441}{1.0466}{\pu} throughout, so the
+deviation is attributable to the trip alone; pre-trip $|\Delta V|$ is
+identically zero). The peak of \SI{0.2240}{\pu} occurs \SI{10.5}{\second} after
+the trip; $|\Delta V|$ exceeds \SI{0.05}{\pu} for \SI{90}{\second} and
+\SI{0.01}{\pu} for \SI{118}{\second}, after which the control stack has restored
+the voltage and the \emph{settled} deviation is below \SI{0.01}{\pu}.
+
+That timescale is exactly why the dead band matters. The TSO re-optimises every
+\SI{180}{\second}; the whole excursion opens and closes \emph{inside one TSO
+interval}. Whatever is done about it in that window is done by the DSO layer and
+by the local droop --- which is the inter-OFO-step role the dead band governs.
+
+\paragraph{Quasi-static screening cannot select the severe case.} A static
+outage scan ranks the two machines in the opposite order to the dynamic plant:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+worst-park $|\Delta V|$ [\pu]
+  & static scan & RMS, droop disabled \\
+  & (open loop, settled) & (closed loop, peak) \\
+\midrule
+trip gen 1 (\SI{650}{\mega\watt}) & 0.0854 & 0.1039 \\
+trip gen 7 (\SI{830}{\mega\watt}) & \textbf{0.0122} & \textbf{0.2240} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent \textbf{The two columns are different quantities} and must not be read
+as a ratio: the static scan is an unregulated power flow after the outage, while
+the RMS column is the peak of a closed-loop transient. The comparison that
+matters is the \emph{ordering}. Statically the larger machine looks like the
+milder disturbance --- a distributed slack absorbs its \SI{830}{\mega\watt}
+instantaneously and the post-outage power flow barely moves. Dynamically it
+produces the deeper swing and is the only case reaching an undervoltage
+violation. A severe case selected on the quasi-static plant would therefore have
+been the wrong machine.
+
+This is a concrete instance of the general point of \S\ref{sec:rev2}: the
+controllers may reason on a reduced or quasi-static model, but the
+\emph{evidence} must come from the plant that has the dynamics.
+
+\subsection{The lower bound: what the droop must ignore}
+
+Profile-driven drift is measured on the twins whose dead band is provably never
+crossed ($\dz \geq 0.025$, four runs, $n=48$ TS and $3360$ DS inter-dispatch
+windows). Admission is judged against the \emph{widest} twin's maximum, never
+against a twin's own: a droop that successfully suppresses drift below its own
+threshold would otherwise certify itself as inactive.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lccc}
+\toprule
+ & p90 [\pu] & max [\pu] & windows exceeding $\dz$ \\
+\midrule
+TS parks & 0.00285 & 0.00304 & --- \\
+DS parks & 0.00108 & 0.01101 & --- \\
+\midrule
+$\dz = 0.001$ & & & 28/48 TS,\; 499/3360 DS \\
+$\dz = 0.005$ & & & \textbf{0/48} TS,\; 20/3360 DS (\SI{0.6}{\percent}) \\
+$\dz = 0.01$  & & & 0/48 TS,\; 4/3360 DS (\SI{0.12}{\percent}) \\
+$\dz = 0.025$ & & & 0/48 TS,\; 0/3360 DS \\
+\bottomrule
+\end{tabular}
+\caption{Profile-driven drift and the resulting false-activation rate. The DS
+distribution carries a $10\times$ tail (p90 0.0011, max 0.0110): the DS bound is
+set by rare windows, not by typical operation.}
+\label{tab:n1drift}
+\end{table}
+
+\subsection{The upper bound: what the droop must catch}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+$\dz$ [\pu] & \multicolumn{2}{c}{compensation $1-\hat V/\hat V_{\text{no droop}}$}
+            & \multicolumn{2}{c}{min.\ absolute $V$ [\pu]} \\
+ & gen 1 & gen 7 & gen 1 & gen 7 \\
+\midrule
+0      & 0.78 & 0.55 & 1.006 & 0.935 \\
+0.005  & 0.73 & 0.54 & 1.003 & 0.934 \\
+0.01   & 0.67 & 0.54 & 0.996 & 0.933 \\
+0.025  & 0.49 & 0.57 & 0.972 & 0.939 \\
+0.05   & 0.28 & 0.52 & 0.966 & 0.916 \\
+0.075  & 0.08 & 0.42 & 0.951 & \textbf{0.880} \\
+0.15   & 0.00 & 0.00 & 0.937 & \textbf{0.816} \\
+\bottomrule
+\end{tabular}
+\caption{Event rejection at the TS parks. With the droop disabled a gen-7 trip
+drives a park terminal to \SI{0.816}{\pu}; the Q(V) layer prevents that
+violation, but only while $\dz \lesssim 0.05$.}
+\label{tab:n1reject}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\textwidth]{fig_n1_rejection_gen7_20160105_0800.pdf}
+\caption{Post-trip peak deviation and the residual still standing when the next
+TSO dispatch acts, against $\dz$ (gen 7). The knee lies above
+\SI{0.01}{\pu}.}
+\label{fig:n1rejection}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\textwidth]{fig_n1_admissible_gen1_20160105_0800.pdf}
+\caption{The two competing rates against $\dz$: false activation on profile
+drift (left axis) and compensation effectiveness on the event (right axis). An
+admissible $\dz$ lies where the first has fallen to zero and the second has not
+yet decayed.}
+\label{fig:n1admissible}
+\end{figure}
+
+\subsection{Choice of $\dz$}
+\label{sec:n1choice}
+
+Both bounds of \eqref{eq:detector} are measured at every window, and they do not
+conflict: the admissible interval is non-empty everywhere. Within it, $\dz$ is a
+quantile choice --- and replication is what fixes the quantile.
+
+\paragraph{$\dz = \SI{0.005}{\pu}$ does not survive replication.} On the
+reference window alone it looked ideal: TS false activation \emph{exactly} zero,
+compensation within \SI{94}{\percent} of the ceiling. That zero is not a property
+of the system but of that window. At the net-import window the TS parks drift
+$2.4\times$ further (max \SI{0.0075}{\pu} against \SI{0.0031}{\pu}), and
+$\dz=0.005$ then fires on \SI{13.3}{\percent} of TS inter-dispatch windows.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lccc|ccc}
+\toprule
+& \multicolumn{3}{c|}{TS parks} & \multicolumn{3}{c}{DS parks} \\
+$\dz$ [\pu] & $-117$ & $+409$ & $+1367$ & $-117$ & $+409$ & $+1367$ \\
+\midrule
+0.0025 & 0.450 & 0.167 & 0.083 & 0.060 & 0.030 & 0.046 \\
+0.005  & \textbf{0.133} & 0.000 & 0.000 & 0.009 & 0.006 & 0.014 \\
+0.01   & \textbf{0.000} & \textbf{0.000} & \textbf{0.000} & 0.000 & 0.001 & 0.005 \\
+0.025  & 0.000 & 0.000 & 0.000 & 0.000 & 0.000 & 0.000 \\
+\bottomrule
+\end{tabular}
+\caption{False-activation rate --- the fraction of inter-dispatch windows whose
+open-loop drift exceeds $\dz$ --- at three operating windows labelled by net
+infeed [\si{\mega\watt}]. Zero at the TS parks everywhere requires
+$\dz \geq \SI{0.01}{\pu}$; zero at both levels requires $\dz \geq
+\SI{0.0125}{\pu}$.}
+\label{tab:n1fa}
+\end{table}
+
+\textbf{Recommendation: $\dz \approx \SI{0.01}{\pu}$}, on three grounds:
+
+\begin{enumerate}
+  \item \textbf{It is silent on profiles at every window tested} --- zero TS
+    activation at all three, DS at most \SI{0.5}{\percent}
+    (Table~\ref{tab:n1fa}). No smaller value has this property.
+  \item \textbf{It lies inside the flat region of the rejection curve.}
+    Compensation is flat up to $\dz \approx 0.025$ at every window and only then
+    decays: at $\dz=0.01$ it is \numrange{0.54}{0.70} for the severe outage and
+    \numrange{0.64}{0.67} for the milder one.
+  \item \textbf{The cost of moving from \SI{0.005}{\pu} is small} --- about
+    $0.05$ of compensation --- and it buys a property that holds at every window
+    rather than at one.
+\end{enumerate}
+
+\noindent $\dz = \SI{0.0125}{\pu}$ additionally gives zero false activation at
+the \emph{DS} parks, at slightly more compensation cost; the choice between them
+is the risk preference over a \SI{0.5}{\percent} DS activation rate.
+
+\paragraph{Why a quantile and not the maximum.} Anchoring to the drift
+\emph{maximum} would be anchoring to the observation horizon: the same window
+sampled over \SI{300}{\second} yields a DS maximum of \SI{0.0014}{\pu} against
+\SI{0.0110}{\pu} over \SI{600}{\second}. A quantile is stable under that choice,
+which is why Table~\ref{tab:n1fa} reports rates rather than extrema. Stated in
+those terms:
+
+\begin{quote}
+At $\dz = \SI{0.01}{\pu}$ the local layer ignores \emph{all} profile-driven
+inter-dispatch variation at the TS parks and \SI{99.5}{\percent} at the DS parks,
+across net infeed from $-117$ to $+\SI{1367}{\mega\watt}$, while retaining
+\numrange{0.54}{0.70} of the event compensation achievable at any dead band.
+\end{quote}
+
+\paragraph{What reproduces, and what does not.} The DS drift maximum is stable
+(\num{0.0110}, \num{0.0089}, \num{0.0111}\,\pu, a \SI{24}{\percent} spread) and
+so is the shape of the compensation curve. The TS drift maximum is \emph{not}
+(\num{0.0075} against $\approx\!\num{0.0031}$, a \SI{147}{\percent} spread), and
+that single fact is what moves the recommendation. Three candidate mechanisms
+were tested and all refuted: DER reactive \emph{capability} is identical
+(\SI{901.2}{\Mvar}) at all three windows with $P/S_n$ between \num{0.38} and
+\num{0.60}, far above the \num{0.2} knee of the VDE diagram; $Q$ never
+approaches its limit (peak utilisation \SI{12}{\percent}, no sample above
+\SI{95}{\percent} of capability); and OLTC tap steps are both too rare
+(\numrange{1}{3} per \SI{600}{\second} run) and associated with \emph{lower}
+drift, not higher. The cause is unresolved and is stated as such.
+
+\paragraph{One dead band, not two.} The TS admissible set
+contains the DS set at this operating
+point: the DS parks bind and the TS parks have margin. Separate $\dz_\mathrm{TS}$
+and $\dz_\mathrm{DS}$ are therefore not required by this evidence. The per-level
+machinery exists and a $\dz_\mathrm{TS}\!\times\!\dz_\mathrm{DS}$ sweep is the
+natural follow-up, but the null result stands until it is run.
+
+%======================================================================
+\section{Threats to validity}
+
+\begin{enumerate}
+  \item \textbf{No measurement noise} (\S\ref{sec:excitation}). The mechanism a
+    dead zone classically exists to reject is absent, so every $\dz^\star$ here
+    is expected to be a lower bound for a noisy plant. This is the single change
+    most likely to move the answer.
+  \item \textbf{Equation~\eqref{eq:threshold} is verified at
+    $|\Delta V| = 0.0026$ and \SI{0.0069}{\pu}.} Applying it at
+    \SI{0.01}{\pu} extrapolates by about $1.5\times$. The extrapolation is
+    modest and the relation is linear by construction, but it is unverified at
+    that amplitude, and amplitudes large enough to test it directly destabilise
+    the cascade.
+  \item \textbf{One operating point for the threshold.} Whether $k\approx1$
+    holds across loading is untested; the profiled windows validate the
+    \emph{consequences} of a choice, not the threshold itself. Repeating
+    \S\ref{sec:threshold} at a second window would settle it.
+  \item \textbf{Purposive windows, $n=5$.} No frequency-weighted or
+    annual-average statement is supportable. The set is also asymmetric about
+    zero for the structural reason of \S\ref{sec:windows}.
+  \item \textbf{Contingencies: addressed, at one window
+    (\S\ref{sec:n1}).} A trip changes the topology, and therefore the
+    controllers' cached sensitivities, whereas a load step changes only the
+    operating point. Sections \ref{sec:sweep}--\ref{sec:rule} rest on load
+    steps alone; \S\ref{sec:n1} adds N-1 evidence and reaches the same
+    $\dz=\SI{0.005}{\pu}$ by an independent route. That evidence is
+    \textbf{provisional}: one operating window, two machines.
+  \item \textbf{The N-1 lower bound rests on a tail.} The DS false-activation
+    rate at $\dz=\SI{0.005}{\pu}$ is \SI{0.6}{\percent} --- 20 windows out of
+    3360. A bound set by twenty samples is sensitive to which windows are drawn,
+    which is the strongest single argument for replicating \S\ref{sec:n1} across
+    operating points before quoting the interval as general.
+  \item \textbf{Two machines, not a contingency list.} \S\ref{sec:n1} trips two
+    of six generators; \texttt{gen 9} is excluded because the static screening
+    diverges on it. No N-1 \emph{completeness} claim is made, and line outages
+    --- which the RMS adapter does not yet deliver --- are untested.
+  \item \textbf{Residual TSO reduction error} of \SIrange{0.012}{0.018}{\pu}
+    (\S\ref{sec:rev2}). The sensitivities are linearised once, and measurements
+    come from the combined model, so an offset in a smooth regime is tolerable
+    --- unlike the pre-correction DSO error, which placed the linearisation on
+    the wrong branch of the $P$--$V$ curve.
+  \item \textbf{The multi-equilibrium behaviour is characterised only
+    qualitatively.} An ensemble over perturbed initial conditions per cell would
+    map the basins directly and is the natural next experiment.
+\end{enumerate}
+
+\end{document}

@@ -279,8 +279,23 @@ class MIQPSolver:
     For continuous QP (no integer variables), OSQP or ECOS are efficient.
     """
     
-    # Solver preference order for MIQP problems
-    MIQP_SOLVERS = ['GUROBI'] #['SCIP', 'MOSEK', 'GUROBI', 'ECOS_BB']
+    # Solver preference order for MIQP problems.
+    #
+    # 2026-07-17: 'SCIP' everywhere while the Gurobi licence was missing on
+    # the PF host (GurobiError: HostID mismatch).
+    #
+    # 2026-07-21: Gurobi licensed on this host (academic, verified to solve
+    # 1000 continuous + 100 integer to `optimal`), and SCIP was measured
+    # returning **`optimal_inaccurate` on 54 of 60 DSO solves** at
+    # mip_gap=1e-6 / time_limit=60 s.  That matters beyond solution quality:
+    # an inaccurately solved MIQP makes the map measurement -> u effectively
+    # discontinuous, so two plants agreeing to 1e-5 pu can still take
+    # different *integer* (tap) decisions -- which was corrupting the Gate-E
+    # static-vs-RMS comparison.  SCIP is retained as a fallback so the code
+    # still runs on a host without a licence, but results from the two
+    # solvers are NOT comparable: anything published under the SCIP-only
+    # regime needs re-running.
+    MIQP_SOLVERS = ['GUROBI', 'SCIP']  # ['SCIP', 'MOSEK', 'GUROBI', 'ECOS_BB']
 
     # Solver preference order for QP problems (continuous only)
     QP_SOLVERS = ['OSQP', 'ECOS', 'SCS', 'CVXOPT']

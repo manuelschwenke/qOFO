@@ -66,14 +66,11 @@ contingencies:
   q_mvar: 150
   time_s: null
 distributed_slack: true
-dso_g_qi: 0
 dso_g_v: 20000.0
 dso_gamma_oltc_q: 0.0
-dso_lambda_qi: 0.9
 dso_mode: ofo
 dso_oltc_init_tol_pu: 0.01
 dso_period_s: 10.0
-dso_q_integral_max_mvar: 50.0
 dt_s: 60.0
 enable_avr_saturation_mode: false
 g_q: 200
@@ -117,7 +114,7 @@ oltc_init_v_target_pu: 1.03
 profiles_csv: ''
 result_dir: results
 run_stability_analysis: false
-scenario: wind_replace
+scenario: base_410
 sensitivity_update_interval: 1000000
 stability_analysis_at_s: 0.0
 start_time: '2016-04-15T08:00:00'

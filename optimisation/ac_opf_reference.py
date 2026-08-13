@@ -38,6 +38,7 @@ from sensitivity.index_helper import (
 from core.actuator_bounds import (
     GeneratorParameters,
     compute_generator_q_limits,
+    generator_parameters_for_type,
 )
 
 
@@ -351,6 +352,7 @@ def extract_network_data(
         sn = float(net.gen.at[g, "sn_mva"])
         p_mw = float(net.gen.at[g, "p_mw"])
         vm = float(net.gen.at[g, "vm_pu"])
+        gen_type = net.gen.at[g, "type"] if "type" in net.gen.columns else ""
         q_mvar = float(net.res_gen.at[g, "q_mvar"]) if g in net.res_gen.index else 0.0
         gens.append(GenInfo(
             pp_gen_idx=int(g),
@@ -358,10 +360,12 @@ def extract_network_data(
             ppc_bus=pp_to_ppc[pp_bus],
             p_mw=p_mw, q_mvar=q_mvar,
             sn_mva=sn, vm_pu=vm,
-            params=GeneratorParameters(
-                s_rated_mva=sn, p_max_mw=p_mw,
-                xd_pu=1.2, i_f_max_pu=2.65,
-                beta=0.15, q0_pu=0.4,
+            # Must match the capability curve the controller sees, otherwise
+            # the AC-OPF reference optimises against a different feasible set.
+            # The former xd=1.2 / i_f_max=2.65 pairing left the rotor limit
+            # non-binding, giving this reference an unbounded field capability.
+            params=generator_parameters_for_type(
+                gen_type, s_rated_mva=sn, p_max_mw=p_mw,
             ),
         ))
 

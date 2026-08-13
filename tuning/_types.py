@@ -11,6 +11,7 @@ without a circular import.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 
 @dataclass(frozen=True)
@@ -44,15 +45,23 @@ class BOParam:
 
 @dataclass(frozen=True)
 class Ceilings:
-    """Per-actuator-class LMI ceilings extracted from
+    """Per-actuator-class LMI thresholds extracted from
     :class:`analysis.stability_analysis.MultiZoneStabilityResult`.
 
-    Each field is the smallest ``g_w`` (or, for ``g_v``, the largest
-    weight) that satisfies the corresponding stability condition.  BO
-    uses these as upper bounds: above the ceiling the system is
-    sufficient-but-sluggish (for ``g_w_*``) or unstable per the
-    certificate (for ``g_v``); the practically interesting search region
-    lies below.
+    .. warning::
+       **The fields do not all point the same way.**  For every ``g_w_*`` the
+       value is a stability *floor* -- the smallest weight at which the
+       contraction certificate holds -- whereas for ``g_v`` it is a genuine
+       *ceiling*.  See :attr:`DIRECTION`.
+
+       Both are nevertheless used as BO *upper* bounds, which for the ``g_w_*``
+       fields is deliberate: above the floor the loop is sufficient-but-sluggish,
+       so the budget is spent below it, in the region where the certificate is
+       silent but the controller is more responsive.  The consequence is that
+       **every sampled point is non-certified**, and the empirical contraction
+       ``rho_emp_p95 < 1`` is then the only stability evidence the procedure
+       has.  See ``tuning/ceilings.py`` and ``docs/tuning/tuning_strategy.md``
+       Sec. 1 (the conservatism gap).
 
     Values are ``np.inf`` when the condition cannot be evaluated (e.g.
     a zone has no actuators of that class, or the analytical bound is
@@ -67,6 +76,20 @@ class Ceilings:
     g_w_dso_oltc: float
     g_v: float
     notes: str = ""
+
+    #: Which side of the stability boundary each field sits on.  ``"floor"``
+    #: means "certificate holds at or above this value"; ``"ceiling"`` means
+    #: "certificate holds at or below it".  Consult this before using any
+    #: field as a search bound.
+    DIRECTION: ClassVar[dict[str, str]] = {
+        "g_w_der":       "floor",
+        "g_w_pcc":       "floor",
+        "g_w_tso_oltc":  "floor",
+        "g_w_tso_shunt": "floor",
+        "g_w_dso_der":   "floor",
+        "g_w_dso_oltc":  "floor",
+        "g_v":           "ceiling",
+    }
 
     def as_dict(self) -> dict[str, float]:
         return {

@@ -153,6 +153,12 @@ class SensitivityUpdater:
                 v_measured_sq[i] = self._v_cached_sq[i]
 
         ratios = v_measured_sq / self._v_cached_sq  # shape (n_shunt,)
+        # Repeated Newton-Raphson solves can leave round-off-level voltage
+        # differences even when the physical operating point is unchanged.
+        # Preserve exact identity in that case so H is not needlessly changed.
+        # A 1e-10 relative V^2 threshold is far below measurement/model
+        # resolution while covering solver repeatability noise.
+        ratios[np.isclose(ratios, 1.0, rtol=1e-10, atol=0.0)] = 1.0
 
         col_start = self._col_shunt_start
         col_end = col_start + self._n_shunt

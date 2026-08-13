@@ -315,6 +315,7 @@ def check_reachability(
                 run_control=False,
                 calculate_voltage_angles=True,
                 distributed_slack=False,
+                max_iteration=100,
             )
         except Exception as exc:  # noqa: BLE001 - re-raise with context
             raise ValueError(

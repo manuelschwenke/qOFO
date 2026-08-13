@@ -24,9 +24,10 @@ Zone 3:  G5 (term 33) + G6 (term 34) removed.
 Each replacement wind park sgen is sized as:
   - P_n = WIND_REPLACE_SCALE * P_removed_gen  (default 1.0 → full
     removed-gen P; tune via the module-level ``WIND_REPLACE_SCALE``)
-  - S_n = P_n  (no converter oversize; 'STATCOM' op-diagram still
-    provides the full Q-circle from S_n)
-  - op_diagram = 'STATCOM'  (full-circle capability, no dead zone at P=0)
+  - S_n = P_n  (no converter oversize)
+  - op_diagram = 'VDE-AR-N-4120-v2'  (grid-code box −0.33/+0.41·S_n above
+    P/S_n = 0.2).  This was 'STATCOM' until 2026-07-21; with S_n = P_n the
+    circular diagram collapses to Q = 0 at rated P.
   - profile = 'WP10'
 
 A temporary PV-generator trick seeds the STATCOM Q injection at the
@@ -45,6 +46,13 @@ from typing import Dict, List, Tuple
 
 import pandapower as pp
 
+from network.ieee39.aux_load_buses import (
+    AUX_LOAD_LINK_LENGTH_KM,
+    AUX_LOAD_LINK_MAX_I_KA,
+    AUX_LOAD_LINK_R_OHM,
+    AUX_LOAD_LINK_X_OHM,
+    separate_colocated_zip_loads,
+)
 from network.ieee39.helpers import remove_generators
 from network.ieee39.meta import IEEE39NetworkMeta
 
@@ -55,7 +63,21 @@ from network.ieee39.meta import IEEE39NetworkMeta
 # convention).  Increase to oversize wind parks for additional zonal
 # headroom; decrease to study under-replacement scenarios.
 WIND_REPLACE_SCALE: float = 1
-
+def _separate_colocated_wind_and_tn_loads(
+    net: pp.pandapowerNet,
+    replacement_sgen_indices: List[int],
+) -> Tuple[List[int], List[int], List[int]]:
+    """Move TN ZIP loads off buses carrying fixed-power wind injections."""
+    tn_load_indices = [
+        int(i) for i in net.load.index
+        if str(net.load.at[i, "subnet"]) == "TN"
+    ]
+    return separate_colocated_zip_loads(
+        net,
+        load_indices=tn_load_indices,
+        injection_sgen_indices=replacement_sgen_indices,
+        aux_subnet="TN_AUX",
+    )
 
 def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     """Apply the *wind_replace* scenario.
@@ -86,8 +108,8 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     # slack anchor) as synchronous anchors — only G8 is replaced by a
     # STATCOM wind park.  Zone 2 keeps G3 (pandapower gen_idx 1, term 31,
     # grid 9, 650 MW) as the synchronous anchor; G2 (ex-slack) is replaced.
-    _z1_gens_to_remove_term = {36}       # G8 only — G10 (term 29, Hydro) retained + 37 maybe?
-    _z2_gens_to_remove_term = {30}       # G2 (ex-slack); keep G3 at term 31 + 32 maybe?
+    _z1_gens_to_remove_term = {36}       # G8 only — G10 (term 29, Hydro) retained (decision 2026-07-17)
+    _z2_gens_to_remove_term = {30}       # G2 (ex-slack); G3 (term 31) retained
     _z3_gens_to_remove_term = {33, 34}   # G5 (grid 18, shares with G4) + G6 (grid 21)
 
     # Classify each generator and decide whether to remove it
@@ -113,9 +135,17 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     # Create replacement wind park sgens at the same grid buses.
     # All zones: P_wp = WIND_REPLACE_SCALE * P_removed_gen   (default 1.0 →
     # full removed-gen P, restoring the docstring convention; tune via the
-    # module-level ``WIND_REPLACE_SCALE``).  S_n = P_wp (the STATCOM
-    # op-diagram exposes the full Q-circle from S_n alone, no extra
-    # converter oversize).
+    # module-level ``WIND_REPLACE_SCALE``).  S_n = P_wp (no converter
+    # oversize).
+    #
+    # op_diagram: VDE-AR-N-4120-v2, NOT 'STATCOM' (changed 2026-07-21).
+    # With S_n = P_n the circular STATCOM diagram gives
+    # Q = ±sqrt(S_n² − P²) = 0 at rated P, i.e. the park supplies no
+    # reactive power at all whenever P is not profile-scaled below rated
+    # (e.g. a Gate-E replay with ``use_profiles=False``).  The grid-code
+    # box −0.33/+0.41·S_n is P-independent above P/S_n = 0.2 and therefore
+    # well-defined at rated P.  See
+    # docs/daily_log/07_2026/2026-07-21_rms_gate_e_qv_rollout_and_capability_finding.md
     _wp_sgen_indices: List[int] = []
     _wp_sgen_buses: List[int] = []
     _wp_info: List[Tuple[int, int, float, float]] = []  # (sgen_idx, bus, p, sn)
@@ -130,12 +160,16 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
             sn_mva=wp_sn,
             name=f"WP_STATCOM|grid_bus{gb}",
             subnet='TN',
-            op_diagram='STATCOM',
+            op_diagram='VDE-AR-N-4120-v2',
         )
         net.sgen.at[idx, "profile"] = "WP10"
         _wp_sgen_indices.append(int(idx))
         _wp_sgen_buses.append(gb)
         _wp_info.append((int(idx), gb, wp_p, wp_sn))
+
+    _aux_bus_indices, _aux_parent_buses, _aux_line_indices = (
+        _separate_colocated_wind_and_tn_loads(net, _wp_sgen_indices)
+    )
 
     # ── Seed STATCOM Q via temporary PV generators ──────────────────────
     # This is a *seed* so downstream base PFs converge; the caller
@@ -170,6 +204,15 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
         gen_grid_bus_indices  = meta.gen_grid_bus_indices,
         machine_trafo_indices = meta.machine_trafo_indices,
         machine_trafo_gen_map = meta.machine_trafo_gen_map,
+        internal_aux_bus_indices = tuple(
+            list(meta.internal_aux_bus_indices) + _aux_bus_indices
+        ),
+        internal_aux_parent_buses = tuple(
+            list(meta.internal_aux_parent_buses) + _aux_parent_buses
+        ),
+        internal_aux_line_indices = tuple(
+            list(meta.internal_aux_line_indices) + _aux_line_indices
+        ),
         tso_der_indices       = tuple(list(meta.tso_der_indices) + _wp_sgen_indices),
         tso_der_buses         = tuple(list(meta.tso_der_buses) + _wp_sgen_buses),
         dso_pcc_trafo_indices = meta.dso_pcc_trafo_indices,

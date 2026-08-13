@@ -15,11 +15,28 @@ __pycache__/
 results/
 
 # ---------------------------------------------------------------------------
+# Patch / merge leftovers and agent scratch files
+# ---------------------------------------------------------------------------
+*.orig
+*.rej
+*.patch
+.codex_tmp_*
+
+# ---------------------------------------------------------------------------
 # IDE / editor / local tooling
 # ---------------------------------------------------------------------------
 .idea/
 .vscode/
-.claude/
+# `.claude/*` (contents), not `.claude/` (the directory): git cannot re-include
+# a path inside an excluded directory, so an exclude on the directory itself
+# would make the negation below dead.
+.claude/*
+# The project instructions are part of the codebase; local machine state
+# (settings*.json, *.lock) is not.  Both spellings are listed because the file
+# is `claude.md` on disk and only matches `CLAUDE.md` while `core.ignorecase`
+# is true -- which it is on Windows but not on a Linux clone.
+!.claude/CLAUDE.md
+!.claude/claude.md
 
 # ---------------------------------------------------------------------------
 # OS

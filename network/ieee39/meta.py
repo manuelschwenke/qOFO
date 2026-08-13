@@ -74,6 +74,20 @@ class IEEE39NetworkMeta:
     machine_trafo_gen_map: Tuple[int, ...] = field(default_factory=tuple)
     """For each machine trafo, the ``net.gen`` index of its generator
     (same order as machine_trafo_indices)."""
+    # ── Internal numerical representation nodes ─────────────────────────────
+    internal_aux_bus_indices: Tuple[int, ...] = field(default_factory=tuple)
+    """Internal TN/DSO auxiliary buses used only to separate co-located
+    voltage-dependent loads and constant-PQ injections. These buses belong
+    to the numerical plant representation, not to a controller's physical
+    voltage-output set."""
+
+    internal_aux_parent_buses: Tuple[int, ...] = field(default_factory=tuple)
+    """Physical parent bus for each internal auxiliary bus (same order
+    as ``internal_aux_bus_indices``)."""
+
+    internal_aux_line_indices: Tuple[int, ...] = field(default_factory=tuple)
+    """Very-low-impedance parent link for each internal auxiliary bus
+    (same order as ``internal_aux_bus_indices``)."""
 
     # ── DSO feeders (populated by add_dso_feeders) ────────────────────────────
     dso_pcc_trafo_indices: Tuple[int, ...] = field(default_factory=tuple)
@@ -181,6 +195,15 @@ class HVNetworkInfo:
     """20 kV tertiary bus index for each entry in ``coupling_trafo_indices``.
     Populated by ``_create_hv_subnetwork``; used by ``add_hv_networks``
     to attach TSO-owned bipolar shunts at the first tertiary."""
+
+    internal_aux_bus_indices: Tuple[int, ...] = field(default_factory=tuple)
+    """Internal load-separation buses owned by this DSO."""
+
+    internal_aux_parent_buses: Tuple[int, ...] = field(default_factory=tuple)
+    """Physical DSO parent bus for each internal auxiliary bus."""
+
+    internal_aux_line_indices: Tuple[int, ...] = field(default_factory=tuple)
+    """Near-zero-impedance parent link for each auxiliary bus."""
 
     zone: int = 0
     """IEEE zone this sub-network belongs to."""

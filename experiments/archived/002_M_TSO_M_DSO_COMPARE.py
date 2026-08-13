@@ -114,9 +114,6 @@ def make_base_config() -> MultiTSOConfig:
         # ── DSO objective tuning ──
         # DER actuator: w-shift (q_set + V_ref reanchoring).
         dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
-        dso_g_qi=0,  # integral Q-tracking (0 = off)
-        dso_lambda_qi=0.95,  # leaky integrator decay
-        dso_q_integral_max_mvar=200.0,  # anti-windup clamp
         dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
         # ── TSO weights — re-tuned for Q_cor closed-loop curvature ──
         # Under Q_cor the H matrix is post-multiplied by T'=(I+R*S_VQ)^-1,

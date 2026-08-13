@@ -69,12 +69,14 @@ empirically reasonable value
 $g_q^{\min} = 1$) so that BO can probe the high-aggressiveness
 regime where the certificate is silent.
 
-The integral Q-tracking parameters
-(`dso_g_qi`, `dso_lambda_qi`, `dso_q_integral_max_mvar`) are excluded
-from this thesis configuration, as is the generator-AVR weight
-$g_{w,\mathrm{gen}}$, which is pinned at a deliberately conservative
-$10^{7}$ (the AVR is locally stable by construction; this thesis does
-not tune it).
+The generator-AVR weight $g_{w,\mathrm{gen}}$ is excluded from the
+search and pinned at a deliberately conservative $10^{7}$ (the AVR is
+locally stable by construction; this thesis does not tune it).
+
+The integral Q-tracking parameters (`dso_g_qi`, `dso_lambda_qi`,
+`dso_q_integral_max_mvar`) were pinned off in every trial and the
+mechanism itself was removed from the DSO controller on 2026-07-31, so
+they no longer exist as config fields.
 
 ## 3. Stage one: LMI ceiling extraction
 

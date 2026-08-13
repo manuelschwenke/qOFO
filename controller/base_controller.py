@@ -1206,6 +1206,33 @@ class BaseOFOController(ABC):
         """
         return None
 
+    def objective_curvature_inputs(
+        self,
+    ) -> Optional[Tuple[NDArray[np.float64], NDArray[np.float64]]]:
+        """Return ``(H_y, g_y_vec)`` over **every weighted objective row**.
+
+        :meth:`voltage_curvature_inputs` only exposes the voltage block, which
+        is the governing curvature only when voltage tracking dominates the
+        objective.  For a controller whose objective is dominated by another
+        output — the DSO's interface-Q tracking, for instance — the voltage
+        block is the *wrong* block, and preconditioning against it either
+        mis-scales ``g_w`` or (as the DSO does today) declines to act at all.
+
+        Stacking all weighted rows gives the curvature that actually governs
+        the loop::
+
+            M = H_y G_w^-1 H_y^T diag(g_y)
+
+        The rank-1 decomposition of ``gw_precondition`` Eq. (3) is unchanged;
+        only the definition of ``a_i`` widens.  This is the generalisation that
+        module's docstring records as its documented next step.
+
+        The default delegates to :meth:`voltage_curvature_inputs`, so
+        controllers that have not overridden it keep their current behaviour
+        exactly.
+        """
+        return self.voltage_curvature_inputs()
+
     def apply_preconditioned_g_w(
         self,
         g_w_vec: NDArray[np.float64],

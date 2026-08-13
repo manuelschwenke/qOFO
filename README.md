@@ -65,8 +65,11 @@ the feasible set.
 - Python >= 3.10
 - NumPy
 - SciPy
-- CVXPY (with SCIP solver)
+- CVXPY (with SCIP solver; GUROBI is used when licensed — the two are **not**
+  comparable, so the solver and version are recorded in each run's metadata)
 - pandapower
+- PowerFactory with its Python API — required only for the RMS co-simulation;
+  every quasi-static path runs without it
 
 ## Installation
 
@@ -74,22 +77,78 @@ the feasible set.
 pip install -r requirements.txt
 ```
 
+PowerFactory permits **one** session at a time. A second `connect()` terminates
+the first, so a co-simulation in flight will be killed by any other process that
+attaches to PowerFactory. Quasi-static runs and all analyses are unaffected and
+can be run concurrently.
+
+## Running a simulation
+
+Every experiment is a wrapper around one call,
+`run_multi_tso_dso(config, plant_factory=...)`, where `plant_factory` decides
+which plant the *same* controller stack faces:
+
+| Entry point | Static (QSS) leg | PowerFactory RMS leg | Results directory |
+|---|---|---|---|
+| `experiments/run_multi_system_ofo.py` | yes | no | `results/multi_system_ofo/` |
+| `experiments/run_rms_cosim.py` | no | yes | `results/rms_cosim/` |
+| `experiments/run_comparison_rms_cosim_qss.py` | yes | yes | `results/rms_phase6_replay/` |
+| `experiments/run_openloop_qss_to_rms.py` | records | replays | — |
+
+The quasi-static plant solves an algebraic power flow after every actuator
+write, so it answers *which operating point the cascade reaches*; the RMS
+co-simulation drives PowerFactory and additionally shows *how it gets there*.
+The controllers cannot tell the difference: they act only on cached
+sensitivities and their own measurements.
+
+**Step-by-step description of all three:
+[`docs/architecture/simulation_workflows.md`](docs/architecture/simulation_workflows.md)**,
+including the structure of the shared runner and the constraints the RMS plant
+imposes (features that mutate the pandapower network directly are rejected,
+because for that plant the network is only a measurement mirror).
+
 ## Project Structure
 
 ```
 qOFO_GH/
-├── configs/              # Multi-system and cascade configuration
-├── core/                 # Measurements, messages, and cached state
+├── configs/              # MultiTSOConfig / CascadeConfig — also the run provenance record
+├── core/                 # Plant interface, measurements, messages, profiles
 ├── controller/           # TSO/DSO OFO controllers
-├── network/              # Transmission and distribution test systems
-├── sensitivity/          # Cached-model Jacobians and sensitivities
-├── experiments/          # Three active entry points plus CIGRE_2026
+├── optimisation/         # MIQP solver layer
+├── network/              # IEEE 39-bus build, HV underlays, scenarios
+├── sensitivity/          # Cached-model Jacobians — the only plant model a controller has
+├── experiments/          # Entry points; runners/ holds the shared closed-loop driver
+├── pf/                   # PowerFactory integration (untracked in git)
+├── analysis/             # Post-processing of stored runs
+├── tuning/               # Offline Bayesian optimisation of controller weights
 ├── sbx_h/                # Horizontal scheduled-boundary coordination
 ├── sbx_v/                # Vertical band/request/grant coordination
 ├── visualisation/        # Live and publication plotting
-├── docs/                 # Architecture, status, tuning, archive, daily log
+├── tools/                # Repository utilities (documentation audit)
+├── docs/                 # Architecture, packages, status, tuning, daily log
 └── tests/                # Maintained regression and unit tests
 ```
+
+Per-package overviews:
+[`docs/architecture/packages/`](docs/architecture/packages/README.md).
+Documentation coverage:
+[`docs/architecture/doc_coverage.md`](docs/architecture/doc_coverage.md)
+(regenerate both with `python tools/doc_audit.py && python tools/gen_package_docs.py`).
+
+## Comparing runs
+
+Results from different configurations are **not** interchangeable, and the
+codebase treats this as a correctness concern rather than a convention. Each run
+serialises its full configuration to `config.json`, and each analysis carries an
+explicit admission filter over that block — scenario, DER capability model,
+profile use, droop slope, per-DSO scenario multipliers, and whether a
+disturbance was injected. `analysis/deadband_selection.py` is the worked
+example; its `ADMIT` dictionary documents why each key is present, several of
+them added after a mismatched run was found in a study.
+
+In particular `base_410` and `rural_700` (410 vs 700 MW installed DER per DSO)
+share the transmission-side build but their results are not comparable, and the
+scenario is always passed explicitly rather than relying on a default.
 
 The supported horizontal coordination comparison is **none versus SBX-H**.
 Tie-line Q remains a measured/recorded controlled-system output. Removed

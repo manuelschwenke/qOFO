@@ -20,7 +20,7 @@ so the voltage error evolves as ``e_{k+1} = (I - M) e_k`` with the
     M = H_V G_w^{-1} H_V^T diag(g_v).                                  (1)
 
 OFO is stable iff ``eig(M) ⊂ (0, 2)`` and well-damped for
-``lambda_max(M) ≲ 1`` (see ``docs/daily_log/2026-06-22_v5_central_tuning.md``).
+``lambda_max(M) ≲ 1`` (see ``docs/daily_log/06_2026/2026-06-22_v5_central_tuning.md``).
 Because (1) is similar to the symmetric PSD matrix
 
     M_sym = D_v^{1/2} H_V G_w^{-1} H_V^T D_v^{1/2},   D_v = diag(g_v),  (2)
@@ -60,7 +60,7 @@ Public API
   actuator classes and (ii) solving for the global ``kappa`` that drives
   ``lambda_max(M)`` to a target.  Integer classes are left untouched by
   design (their cost is switching frequency, not curvature — a different
-  tuning primitive; see ``docs/daily_log/2026-06-22_shunt_integrator.md``).
+  tuning primitive; see ``docs/daily_log/06_2026/2026-06-22_shunt_integrator.md``).
 
 Scope of this prototype
 -----------------------
@@ -77,7 +77,7 @@ References
 [1] Zagorowska, Ortmann, Belgioioso, Imsland. "Adaptive Tuning of Online
     Feedback Optimization for Process Control Applications." IFAC WC 2026,
     arXiv:2604.12863, Eqs. (15)-(16).
-[2] docs/daily_log/2026-06-22_v5_central_tuning.md (M, kappa derivation).
+[2] docs/daily_log/06_2026/2026-06-22_v5_central_tuning.md (M, kappa derivation).
 
 Author: Manuel Schwenke (with Claude Code)
 Date: 2026-06-23
@@ -85,6 +85,7 @@ Date: 2026-06-23
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
@@ -211,16 +212,19 @@ class PreconditionResult:
         columns alone — the lower bound that scaling the preconditioned
         columns cannot beat.
     status
-        Outcome of the **cap-only** rule (preconditioning may only *add*
-        damping, never raise a loop's ``lambda_max``):
+        Outcome.  Under ``mode='cap'`` (default) preconditioning may only
+        *add* damping, never raise a loop's ``lambda_max``; under
+        ``mode='set'`` it moves in both directions.
 
         * ``"reduced"`` — the loop was hotter than the target
           (``lambda_max_before > lambda_target > lambda_floor``); ``g_w``
           was reshaped and scaled down in gain to ``lambda_max_after ==
           lambda_target``.
-        * ``"within_margin"`` — the loop was already at or below the
-          target (``lambda_max_before <= lambda_target``); left at its
-          config ``g_w`` (no-op), since acting could only make it more
+        * ``"raised"`` — ``mode='set'`` only: the loop was *cooler* than the
+          target and was scaled up to meet it.
+        * ``"within_margin"`` — ``mode='cap'`` only: the loop was already at
+          or below the target (``lambda_max_before <= lambda_target``); left
+          at its config ``g_w`` (no-op), since acting could only make it more
           aggressive.
         * ``"integer_dominated"`` — the fixed (integer/OLTC) curvature
           already exceeds the target (``lambda_floor >= lambda_target``);
@@ -229,8 +233,9 @@ class PreconditionResult:
           Tier-2' concern, not ``g_w``).
         * ``"no_class"`` — no preconditionable class present.
     applied
-        ``True`` only when ``status == "reduced"`` (``g_w`` actually
-        changed).
+        ``True`` when ``g_w`` actually changed, i.e. ``status`` is
+        ``"reduced"`` or ``"raised"``.  (``"raised"`` only occurs in
+        ``mode='set'``; ``mode='cap'`` never increases ``lambda_max``.)
     kappa
         Global scalar applied to the preconditioned columns so that
         ``lambda_max_after == lambda_target`` (when ``applied``); ``1.0``
@@ -348,6 +353,9 @@ def precondition_g_w(
     lambda_target: float = 0.9,
     granularity: str = "class",
     floor_frac: float = 1e-6,
+    mode: str = "cap",
+    class_scale_overrides: Optional[Mapping[str, float]] = None,
+    lambda_scope: str = "all",
 ) -> PreconditionResult:
     """Derive a curvature-preconditioned ``g_w`` vector from cached
     sensitivities.
@@ -391,6 +399,42 @@ def precondition_g_w(
         Columns with ``||a_i||^2`` below ``floor_frac * max_j ||a_j||^2``
         are floored (near-uncontrollable directions) so their ``g_w``
         never collapses toward zero (which would mean infinite gain).
+    mode
+        ``'cap'`` (default) — the historical **cap-only** rule: act only when
+        the loop is *hotter* than ``lambda_target``, never raise
+        ``lambda_max``.  Correct for production, where preconditioning is a
+        safety net that must not make a stable loop more aggressive.
+
+        ``'set'`` — solve ``kappa`` in both directions so ``lambda_max``
+        *equals* ``lambda_target`` whether the loop starts hotter or cooler.
+        Required when ``lambda_target`` is a **tuning coordinate**: under
+        ``'cap'`` every target above the current ``lambda_max`` collapses to
+        the same no-op, so the coordinate would be flat over half its range
+        and the optimiser could learn nothing from it.
+    class_scale_overrides
+        Optional ``{class_name: factor}`` multiplying that class's provisional
+        weight before ``kappa`` is solved.  This is the *shape* knob: with
+        ``kappa`` fixing the overall gain, the ratios between classes are the
+        only remaining freedom, so a gauge-fixed set of factors (geometric mean
+        1) spans exactly the actuator-preference directions.  Unknown class
+        names are ignored; the analytic preconditioner corresponds to all
+        factors equal to 1.
+    lambda_scope
+        Which columns ``lambda_target`` refers to.
+
+        ``'all'`` (default) — the full ``lambda_max(M)``, i.e. the real
+        worst-case contraction mode.  Correct for a production safety cap.
+
+        ``'preconditioned'`` — only the columns actually being scaled.  ``M``
+        treats the integer OLTC columns as continuous per-tick moves, but they
+        step at most one tap per wall-clock cooldown, so their rank-1 term
+        ``||a||^2 / g_w`` is an *upper bound* on their real effect rather than
+        the effect itself.  Measured 2026-07-31 at the hand-tuned operating
+        point, that bound alone puts TSO zone 1 at ``lambda_floor = 1.085``
+        (and so ``integer_dominated``) while its continuous loop sits at 0.021
+        — and the controller demonstrably works.  Use this scope whenever
+        ``lambda_target`` is a tuning coordinate, so the target refers to
+        something the tuned weights can actually move.
 
     Returns
     -------
@@ -403,6 +447,13 @@ def precondition_g_w(
     if granularity not in ("class", "column"):
         raise ValueError(
             f"granularity must be 'class' or 'column', got {granularity!r}"
+        )
+    if mode not in ("cap", "set"):
+        raise ValueError(f"mode must be 'cap' or 'set', got {mode!r}")
+    if lambda_scope not in ("all", "preconditioned"):
+        raise ValueError(
+            f"lambda_scope must be 'all' or 'preconditioned', "
+            f"got {lambda_scope!r}"
         )
     if not (0.0 < lambda_target < 2.0):
         raise ValueError(
@@ -440,6 +491,20 @@ def precondition_g_w(
             prov[idx] = max(rep, floor)
         else:  # column
             prov[idx] = np.maximum(c, floor)
+        # Shape override: with kappa fixing the overall gain, the per-class
+        # factors are the only remaining freedom and span exactly the
+        # actuator-preference directions.  Applied before kappa is solved so
+        # the resulting lambda_max still lands on the target.
+        if class_scale_overrides:
+            factor = class_scale_overrides.get(cls)
+            if factor is not None:
+                factor = float(factor)
+                if not (math.isfinite(factor) and factor > 0.0):
+                    raise ValueError(
+                        f"class_scale_overrides[{cls!r}] must be finite and "
+                        f"positive, got {factor}"
+                    )
+                prov[idx] = prov[idx] * factor
         used.append(cls)
         pre_idx_parts.append(idx)
 
@@ -457,7 +522,7 @@ def precondition_g_w(
             lambda_max_after=spec_after.lambda_max,
             lambda_floor=float(lambda_floor),
             status=status,
-            applied=(status == "reduced"),
+            applied=(status in ("reduced", "raised")),
             kappa=float(kappa),
             class_scales=class_scales,
             preconditioned_classes=tuple(used),
@@ -471,14 +536,29 @@ def precondition_g_w(
 
     pre_idx = np.concatenate(pre_idx_parts)
 
+    # Which columns the target refers to.  Under 'preconditioned' the fixed
+    # columns are out of scope entirely, so there is no floor to be blocked by.
+    keep_cols = pre_idx if lambda_scope == "preconditioned" else None
+
     # Curvature floor: what the FIXED (non-preconditioned) columns produce
     # on their own — the lower bound scaling the others cannot beat.
     g_inf = g_w_current.copy()
     g_inf[pre_idx] = np.inf
-    lambda_floor = curvature_spectrum(H_v, g_v, g_inf).lambda_max
+    lambda_floor = (
+        0.0 if lambda_scope == "preconditioned"
+        else curvature_spectrum(H_v, g_v, g_inf).lambda_max
+    )
+
+    # lambda as currently seen *in scope* — this is what the target is compared
+    # against, and what the cap-only rule tests.
+    lambda_in_scope = _lambda_max_with(H_v, g_v, g_w_current, keep_cols)
 
     # ── Cap-only rule: never raise a loop's lambda_max ──────────────────
-    if spec_before.lambda_max <= lambda_target:
+    # Skipped in mode='set', where lambda_target is a tuning coordinate and
+    # must bite in both directions -- otherwise every target above the current
+    # lambda_max collapses to the same no-op and the coordinate is flat over
+    # half its range.
+    if mode == "cap" and lambda_in_scope <= lambda_target:
         # Already at/below the cap: acting could only make it hotter.
         # Leave at config (the conditioning gain is not worth the risk of
         # increasing the worst-case contraction mode).
@@ -488,13 +568,26 @@ def precondition_g_w(
         # The fixed (integer/OLTC) curvature alone exceeds the target;
         # continuous g_w cannot pull lambda_max below the floor.  Binding
         # constraint is OLTC switching cadence (Tier-2'), not g_w.
+        #
+        # Caveat measured 2026-07-31: M treats the integer OLTC columns as
+        # continuous per-tick moves, but they step at most one tap per
+        # wall-clock cooldown, so their rank-1 term is an UPPER BOUND on the
+        # real effect.  An `integer_dominated` verdict is therefore weak
+        # evidence -- at the hand-tuned operating point TSO zone 1 reports
+        # lambda_floor = 1.085 from the OLTC columns alone while its continuous
+        # loop sits at 0.021, and the controller demonstrably works.  Prefer
+        # passing a continuous-only class map when lambda is a tuning
+        # coordinate.
         return _result(g_w_current, 1.0, "integer_dominated", lambda_floor)
 
-    # Hotter than the target and reachable: reshape + scale DOWN in gain so
-    # lambda_max(M) == lambda_target (strictly reduces the worst-case mode).
+    # Reachable: reshape + solve kappa so lambda_max(M) == lambda_target.  In
+    # mode='cap' this only ever scales the gain DOWN (the branch above has
+    # already returned otherwise); in mode='set' it moves in both directions.
     kappa = _solve_kappa(
-        H_v, g_v, g_w_current, pre_idx, prov, lambda_target, keep_cols=None,
+        H_v, g_v, g_w_current, pre_idx, prov, lambda_target,
+        keep_cols=keep_cols,
     )
     g_w_new = g_w_current.copy()
     g_w_new[pre_idx] = prov[pre_idx] * kappa
-    return _result(g_w_new, kappa, "reduced", lambda_floor)
+    status = "reduced" if lambda_in_scope > lambda_target else "raised"
+    return _result(g_w_new, kappa, status, lambda_floor)

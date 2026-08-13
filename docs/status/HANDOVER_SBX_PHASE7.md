@@ -206,4 +206,4 @@ seeds/scenario pairing exactly as 012 does.
   pre-existing uncommitted BME work is intermixed — do not commit or
   revert anything without his say-so).
 - Status ledger: `STATUS_SBX.md`; daily logs
-  `docs/daily_log/2026-07-07_sbx_phase*.md`.
+  `docs/daily_log/07_2026/2026-07-07_sbx_phase*.md`.

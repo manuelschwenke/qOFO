@@ -97,7 +97,7 @@ from numpy.typing import NDArray
 #
 # Zone 2 (pink/south-west): Buses 03,04,05,06,07,08,09,10,11,12,13,14,31,32
 #   Generators: ex-slack PV gen (bus 30, grid_bus=5), G3 (bus 31, grid_bus=9)
-#   In scenario "reduced_gen_z2", the bus-30 gen is removed.
+#   The active base_410/rural_700 scenarios use the same wind-replaced TN.
 #
 # Zone 3 (green/south-east): Buses 15,16,17,18,19,20,21,22,23,24,33,34,35,36
 #   Generators: G4 (bus 32), G5 (bus 33), G6 (bus 34), G7 (bus 35)

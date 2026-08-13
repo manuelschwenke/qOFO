@@ -10,6 +10,11 @@ The active entry points are deliberately small and descriptive:
 - `CIGRE_2026/005_CIGRE_MULTI.py` — V1-V5 control-architecture ladder.
 - `CIGRE_2026/006_CIGRE_MONTECARLO.py` — paired Monte-Carlo extension.
 
+- `ch_9_parameter_selection/ch_9_1_timescale_seperation.py` — open-loop RMS
+  settling battery producing Table 9.1 of the thesis (the dispatch periods
+  `T_DS`, `T_TS`). Needs a PowerFactory seat; `--dry-run` and `--self-test`
+  do not. See that folder's `README.md`.
+
 `helpers/` and `runners/` contain shared implementation infrastructure.
 `results_io.py` creates immutable numbered run directories with exact and
 human-readable configuration snapshots. `archived/` contains frozen

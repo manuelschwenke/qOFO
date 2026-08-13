@@ -69,6 +69,7 @@ from experiments.results_io import new_run_dir
 from experiments.runners import run_multi_tso_dso
 from network.ieee39 import build_ieee39_net
 from network.zone_partition import fixed_zone_partition_ieee39
+from sensitivity.network_reduction import THEVENIN_K_PER_CORRIDOR
 from sbx_h.config import SBXConfig
 
 
@@ -94,9 +95,6 @@ def main_comparison() -> None:
         g_v=150000.0,  # TSO voltage tracking; drives PCC Q dispatch
         # ── DSO objective tuning ──
         dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
-        dso_g_qi=0,  # integral Q-tracking (0 = off)
-        dso_lambda_qi=0.9,  # leaky integrator decay
-        dso_q_integral_max_mvar=50.0,  # anti-windup clamp
         dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
         # ── TSO weights (alpha=1, spectral rho(C)/2) ──
         g_w_der=10,   # single-DER zones; rho~C_jj=396 -> min 198
@@ -117,7 +115,7 @@ def main_comparison() -> None:
             # Example: trip line 0 at t=30 min, restore at t=60 min
             # ContingencyEvent(minute=100, element_type="line", element_index=8, action="trip"),
             # ContingencyEvent(minute=150, element_type="line", element_index=8, action="restore"),
-            ContingencyEvent(minute=90, element_type="gen", element_index=5, action="trip"),
+            ContingencyEvent(minute=10, element_type="gen", element_index=5, action="trip"),
             ContingencyEvent(minute=180, element_type="gen", element_index=5, action="restore"),
             ContingencyEvent(minute=120, element_type="load", bus=5, p_mw=400, q_mvar=200, action="connect"),
             ContingencyEvent(minute=300, element_type="load", bus=5, p_mw=400, q_mvar=200, action="trip"),
@@ -261,19 +259,21 @@ def make_config() -> MultiTSOConfig:
     keeps its own paired config.
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 6,      # 36-hour (2160-min) simulation
+        n_total_s=60.0 * 60 * 5,      # 36-hour (2160-min) simulation
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
         dso_period_s=20.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
         dt_s=20.0,
         g_v=1E7,                      # TSO voltage tracking; drives PCC Q dispatch
-        g_q=200,                      # DSO Q-tracking
+        g_q=250,                      # DSO Q-tracking
         tso_g_res_sg=0,
         tso_g_loss=0,
         # ── DSO objective tuning ──
-        dso_g_v=1E5,              # reduced to avoid competing with Q tracking
-        dso_g_qi=0,                   # integral Q-tracking (0 = off)
-        dso_lambda_qi=0.95,           # leaky integrator decay
-        dso_q_integral_max_mvar=200.0,
+        # BO-tuned: dso_v_priority = 0.7641326900293102 x the 1E5 reference.
+        # This is the 4th reparam coordinate -- the only one written as a plain
+        # field rather than through the preconditioner.  Note it is the one
+        # coordinate the study did NOT identify (Spearman -0.149, p = 0.113),
+        # so treat the 0.76 factor as unresolved rather than optimal.
+        dso_g_v=1E5,#1E5,#76413.26900293102,  # was 1E5; avoid competing with Q tracking
         dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
         coordination_mode="sbx_h",
         sbx_config=SBXConfig(
@@ -289,27 +289,75 @@ def make_config() -> MultiTSOConfig:
         ),
         zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},
         # ── TSO weights (w-shift closed-loop curvature) ──
-        g_w_der=50,
-        g_w_gen=5e9,
-        g_w_pcc=80, # 200
-        g_w_tso_oltc=5E3, #5E3, # 1E4
+        # 2026-08-13: the uniform ``zone_g_w_scale = {1: 0.3, 2: 0.3, 3: 0.3}``
+        # was FOLDED INTO these values (x 0.3) and the knob set to None.  The
+        # runner applies the zone scale to the whole TSO ``params.g_w`` vector
+        # after controller construction, so for a *uniform* factor the two are
+        # algebraically identical in the cascaded path -- this is a rename, not
+        # a re-tuning; the run reproduces
+        # ``results/007_tie_boundary/BEST_SO_FAR_2026-08-13.params.json``.
+        #
+        # Why remove it: a uniform g_w factor f scales lambda_max(M) by 1/f, so
+        # it is the *same* direction as the BO coordinate ``tso_lambda`` (which
+        # sets g_w through the curvature preconditioner).  Carrying both means
+        # the coordinate does not mean what it says: with the scale in place a
+        # search over lambda in [0.05, 1.20] actually explores an effective
+        # [0.167, 4.0], i.e. past the hard OFO bound of 2.  Kept only for a
+        # genuinely PER-ZONE (non-uniform) re-gain, which is what the field is
+        # for; see 00_daily_log/2026-08-13_bo_thevenin_study_setup.md.
+        g_w_der=15,          # 50   x 0.3
+        g_w_gen=1.5e9,       # 5e9  x 0.3
+        g_w_pcc=45,          # 150  x 0.3
+        # KEPT at the hand-tuned value.  The 2026-08-03 switching calibration
+        # recommended 2287.57 (median 5.625 tap ops/h, 6.2 % off its 6 ops/h
+        # target) and it was written here, then reverted on measurement:
+        #
+        #   g_w_tso_oltc   worst ops/h   worst REVERSALS/h
+        #   5000 (this)        6.429           0.804
+        #   2287.57            8.036           6.429      <- 8x hunting
+        #
+        # calibrate_switching targets ``tap_ops_per_h`` only and is blind to
+        # ``tap_reversals_per_h``, so it traded reversals for operation count.
+        # Constraint g5b limits reversals to max(worst)*1.5 = 1.206 derived from
+        # this reference, which 2287.57 violates 5.3x.  Since g_w_tso_oltc is
+        # NOT a BO dimension it is fixed for the whole study, so that would have
+        # made every trial infeasible -- observed in the Stage 4 smoke, where
+        # g5a and g5b were both violated by 100 % of trials.
+        #
+        # 5000 gives 1.206 ops/h median (~1.5 real ops/day), far inside the
+        # 20-30 ops/day maintenance ceiling, and is essentially reversal-free.
+        # (x 0.3 with the rest of the TSO g_w block -- see the fold note above;
+        # 5000 x 0.3 = 1500 is the same operating point, not a new calibration,
+        # so the measured ops/h figures quoted here still apply.)
+        g_w_tso_oltc=1.5E3, # 5E3 x 0.3
         # shunt
         install_tso_tertiary_shunts=True,
         shunt_dispatch="integrator", #"integrator"
-        g_w_tso_shunt=12000,
+        # Inert while shunt_dispatch="integrator" (read only on the MIQP path);
+        # folded x 0.3 with the rest of the block so the record stays consistent.
+        g_w_tso_shunt=3600,  # 12000 x 0.3
         tso_shunt_kind="msc_msr",  # one capacitor + one reactor bank per DSO
         tso_shunt_msc_n_levels=2,  # MSC steps 0..N
         tso_shunt_msr_n_levels=2,  # MSR steps 0..N
         tso_shunt_msc_q_step_mvar=25.0,  # Mvar per MSC step
         tso_shunt_msr_q_step_mvar=25.0,  # Mvar per MSR step
         # integrator tuning
-        shunt_int_g_w=150,  # step = g_H/(2*g_w); SMALLER = bigger step — TUNE THIS
+        shunt_int_g_w=10,  # step = g_H/(2*g_w); SMALLER = bigger step — TUNE THIS
         shunt_int_delta_mvar=10.0,  # hysteresis half-width (must be < q_step/2 = 25)
         shunt_int_t_dwell_s=30*60.0,  # min seconds between commits per bank (anti-chatter)
         shunt_int_v_min_pu=0.90,  # HV feasibility band (overshoot guard)
         shunt_int_v_max_pu=1.10,
         # ── DSO weights ──
         g_w_dso_der=800, # 1000
+        # NOT calibrated -- deliberately left at the hand-tuned value.  The
+        # 2026-08-03 bisection returned g_w=54.74 but only reached 4.821 ops/h,
+        # 19.6 % off the 6 ops/h target at --tol-rel 0.1, because the DSO
+        # response *skips* the target band: g_w 52.33 -> 7.232 (9 ops) drops
+        # straight to 54.74 -> 4.821 (6 ops), and 7 ops (5.625) / 8 ops (6.429)
+        # are the only achievable values inside [5.4, 6.6].  The ladder is also
+        # locally non-monotone there (62.64 -> 3.616 but 74.99 -> 4.018), so the
+        # bisection's premise does not hold at this resolution.  150 gives
+        # 1.206 ops/h ~ 1.5 real ops/day.
         g_w_dso_oltc=150, #200
         # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
         # max_step=1 (default) + wall-clock cooldown per OLTC type:
@@ -324,18 +372,77 @@ def make_config() -> MultiTSOConfig:
         sensitivity_update_interval=1E6,
         verbose=1,
         # Live plotting on (controller + cascade); system overview off.
-        live_plot_controller=False,
-        live_plot_cascade=False,
+        live_plot_controller=True,
+        live_plot_cascade=True,
         live_plot_system=False,
         live_plot_tracking=False,
         live_plot_sbx=False,
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
-        # Preconditioning of g_w
-        precondition_g_w = False,  # turn it on
-        precondition_lambda_target = 0.5,  # target λ_max(M); 0.9 = well-damped, <2 stable
-        # optional:
-        precondition_granularity = "class", # or "column"
+        # ── Boundary equivalent for neighbouring TS areas ───────────────────
+        # Each neighbouring area is condensed either as a constant PQ injection
+        # ("pq", the shipped default behind every published result) or as a
+        # voltage source behind the measured per-corridor impedance
+        # ("thevenin"; THEVENIN_K_PER_CORRIDOR is keyed by
+        # (line_idx, far_end_bus), measured in 007f).
+        #
+        # The two settings below MUST be changed together.  The Thevenin H is
+        # smaller, so at the PQ gain the loop is under-driven; re-gained, the
+        # two boundaries land within ~3% of each other on the tuning objective
+        # (007p).  PQ stays the reference because it needs no per-corridor
+        # impedance agreed with the neighbour, not because it controls better.
+        # Evidence: 00_daily_log/2026-08-11_tie_boundary_equivalent.md
+        #
+        # The Thevenin re-gain used to live in ``zone_g_w_scale`` as a uniform
+        # 0.3 across all three zones.  It is now folded into the ``g_w_*`` block
+        # above (2026-08-13) and the knob is None: a uniform factor is exactly
+        # the loop-gain direction, so carrying it separately double-counts the
+        # gain and de-calibrates the BO coordinate ``tso_lambda``.  Reinstate
+        # ``zone_g_w_scale`` only for a genuinely per-zone (non-uniform) re-gain.
+        #
+        # For the record, the 007* per-zone scales were tuned against
+        # ``make_cigre_config``, whose step weights are heavier (g_w_der 100 vs
+        # 50, g_w_pcc 200 vs 80, g_w_tso_oltc 10000 vs 5000 -- pre-fold values
+        # here), so applying 007p's raw 0.07/0.07/0.15 lands on an absolute gain
+        # 2-2.5x too high and the loop oscillates.  The translation is
+        # ``scale_here = scale_007p * (g_w_cigre / g_w_here)`` -> ~0.15, and
+        # zone 3 -> ~0.3.  Reproduce 007p exactly by running against
+        # make_cigre_config + VARIANTS["V4"] with
+        # zone_g_w_scale={1: 0.07, 2: 0.07, 3: 0.15}.
+        #
+        # Shipped, known-good behaviour: tie_boundary_equivalent="pq" with the
+        # PRE-fold weights (g_w_der 50, g_w_pcc 150, g_w_tso_oltc 5000) and no
+        # zone scale.
+        #
+        tie_boundary_equivalent="thevenin",
+        zone_g_w_scale=None,
+        tie_thevenin_k=THEVENIN_K_PER_CORRIDOR,
+        # ── Preconditioning of g_w ──────────────────────────────────────────
+        # BO-tuned point, study v5_reparam_v2 trial 173 (2026-08-05).  All SIX
+        # fields below are required together: the tuned point is *defined* in
+        # terms of the preconditioner, because lambda has no scalar realisation
+        # (kappa depends on the cached sensitivity H).  See
+        # docs/tuning/RESULTS_bo_retuning_2026-08.md.
+        #
+        # Two of these fail SILENTLY if left at their old values -- no error,
+        # just reference behaviour:
+        #   * mode='cap' only ever *reduces* g_w to meet the target.  The tuned
+        #     lambda (1.1975) is ABOVE the reference 0.5, so 'cap' cannot raise
+        #     the gain and the coordinate stays inert.  'set' binds both ways.
+        #   * scope='all' lets the integer OLTC columns block the target
+        #     outright (TSO zone 1 reads integer_dominated at 1.085 while its
+        #     continuous loop sits at 0.021), which also leaves it inert.
+        precondition_g_w = False,
+        precondition_mode = "set",                 # NOT "cap" -- see above
+        precondition_lambda_scope = "preconditioned",   # NOT "all"
+        precondition_granularity = "column",       # NOT "class"
+        precondition_lambda_target_tso = 0.9, #1.1975421798462904,
+        precondition_lambda_target_dso = 0.9, #1.0964048871681646,
+        # tau_der_pcc = 0.01618211331204804, carried as (sqrt(tau), 1/sqrt(tau)).
+        # The geometric mean is pinned at 1 so this moves only the DER/PCC ratio
+        # and leaves the loop gain to lambda.  PCC weight ends up ~62x the DER
+        # weight -- the coordinate with the strongest signal (Spearman +0.794).
+        precondition_class_scales = {"der": 1.0, "pcc": 1.0}, #{"der": 0.12721, "pcc": 7.86102},
         precondition_exclude_classes = ("gen",),  # AVR setpoint left at config
         # ── Profile & contingency settings ──
         start_time=datetime(2016, 1, 5, 8, 0),
@@ -348,8 +455,8 @@ def make_config() -> MultiTSOConfig:
             # ContingencyEvent(minute=20, element_type="load", bus=9,
             #                  p_mw=0, q_mvar=400, action="connect"),
             # --- further examples (disabled) ---
-            ContingencyEvent(minute=60, element_type="gen",  element_index=2,  action="trip"),
-            ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
+            #ContingencyEvent(minute=10, element_type="gen",  element_index=2,  action="trip"),
+            #ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
             ContingencyEvent(minute=90, element_type="load", bus=11, p_mw=0, q_mvar=300, action="connect"),
             ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=0, q_mvar=300, action="trip"),
             # ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),

@@ -48,11 +48,14 @@ Author: Manuel Schwenke / Claude Code
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from datetime import datetime, timedelta
 from time import perf_counter
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+import dataclasses
 
 import numpy as np
 import pandas as pd
@@ -70,7 +73,15 @@ from controller.dso_controller import DSOController, DSOControllerConfig
 from controller.multi_tso_coordinator import MultiTSOCoordinator, ZoneDefinition
 from controller.tso_controller import TSOController, TSOControllerConfig
 from controller.shunt_integrator import ShuntBankConfig, ShuntIntegrator
-from core.actuator_bounds import ActuatorBounds, GeneratorParameters
+from core.actuator_bounds import (
+    ActuatorBounds,
+    GeneratorParameters,
+    generator_parameters_for_type,
+    set_der_q_capability_override,
+    set_der_qv_deadband_by_sgen,
+    set_der_qv_slope_by_sgen,
+    set_der_qv_deadband_override,
+)
 from core.measurement import (
     Measurement,
     measure_zone_tso,
@@ -85,6 +96,8 @@ from core.profiles import (
     load_profiles,
     snapshot_base_values,
 )
+from network.ieee39.dso_overrides import apply_dso_overrides
+from network.ieee39.load_model import apply_zip_load_model
 from network.ieee39.zonal_balancing import apply_gen_dispatch, compute_zonal_gen_dispatch
 from network.ieee39 import (
     add_hv_networks,
@@ -105,12 +118,17 @@ from experiments.helpers import (
     MultiTSOIterationRecord,
     _apply_contingency,
     _network_state,
-    apply_central_controls,
-    apply_dso_controls,
-    apply_zone_tso_controls,
     prepare_load_contingencies,
 )
-from experiments.helpers.plant_io import apply_shunt_commit
+from core.plant import (
+    ActuatorWrites,
+    PandapowerStaticPlant,
+    Plant,
+    shunt_steps_for_buses,
+    writes_from_central,
+    writes_from_dso,
+    writes_from_zone_tso,
+)
 from sensitivity.jacobian import JacobianSensitivities
 from sensitivity.network_reduction import (
     build_dso_local_net,
@@ -217,7 +235,12 @@ def _apply_gw_preconditioning(
     Returns the :class:`PreconditionResult` or ``None`` when skipped (no
     voltage curvature, no actuator classes, or no continuous class).
     """
-    vci = controller.voltage_curvature_inputs()
+    # Full weighted objective block, not the voltage rows alone.  For a
+    # DSO the voltage block carries under 1 % of the objective (interface-Q
+    # dominates ~500x in priority terms), so preconditioning against it either
+    # mis-scales g_w or -- as was the case -- declines to act at all.  Falls
+    # back to voltage_curvature_inputs() for controllers that do not override.
+    vci = controller.objective_curvature_inputs()
     if vci is None:
         if verbose >= 1:
             print(f"  [precond:{label}] skipped (no voltage curvature)")
@@ -252,21 +275,40 @@ def _apply_gw_preconditioning(
             print(f"  [precond:{label}] skipped (no continuous classes)")
         return None
 
+    # Per-layer lambda target, falling back to the shared one.  The layers sit
+    # in different regimes (TSO zone 2 continuous-lambda 1.775 vs zone 1 0.021),
+    # so a single shared target cannot be meaningful for both.
+    _is_dso = label.startswith("DSO")
+    _lam_override = (
+        config.precondition_lambda_target_dso if _is_dso
+        else config.precondition_lambda_target_tso
+    )
+    lambda_target = float(
+        _lam_override if _lam_override is not None
+        else config.precondition_lambda_target
+    )
+
     res = precondition_g_w(
         H_v=H_v,
         g_v=g_v_vec,
         g_w_current=g_w_cur,
         class_index_map=class_map,
         preconditionable_classes=cont_classes,
-        lambda_target=float(config.precondition_lambda_target),
+        lambda_target=lambda_target,
         granularity=str(config.precondition_granularity),
         floor_frac=float(config.precondition_floor_frac),
+        mode=str(getattr(config, "precondition_mode", "cap")),
+        class_scale_overrides=(
+            getattr(config, "precondition_class_scales", None) or None
+        ),
+        lambda_scope=str(getattr(config, "precondition_lambda_scope", "all")),
     )
     controller.apply_preconditioned_g_w(res.g_w_new)
 
     if verbose >= 1:
         tag = {
             "reduced":           "REDUCED",
+            "raised":            "RAISED (mode='set')",
             "within_margin":     "within margin (no-op)",
             "integer_dominated": "INTEGER-DOMINATED (no-op; OLTC binds - tune cadence)",
             "no_class":          "no continuous class (no-op)",
@@ -274,7 +316,7 @@ def _apply_gw_preconditioning(
         print(
             f"  [precond:{label}] {tag}: lambda_max {res.lambda_max_before:.3g} "
             f"-> {res.lambda_max_after:.3g} (target "
-            f"{config.precondition_lambda_target:g}, floor={res.lambda_floor:.3g}), "
+            f"{lambda_target:g}, floor={res.lambda_floor:.3g}), "
             f"kappa={res.kappa:.3g}"
         )
         if res.applied:
@@ -296,6 +338,7 @@ def _apply_gw_preconditioning(
 def run_multi_tso_dso(
     config: MultiTSOConfig,
     pre_loop_hook: Optional[Callable[[Dict[str, Any]], Any]] = None,
+    plant_factory: Optional[Callable[..., Plant]] = None,
 ) -> List[MultiTSOIterationRecord]:
     """
     Execute the multi-TSO / multi-DSO OFO simulation.
@@ -312,6 +355,19 @@ def run_multi_tso_dso(
         returns a truthy value, the runner returns immediately with an
         empty log -- used by diagnostic scripts that only need the
         post-init state.
+    plant_factory : optional
+        ``(net, *, meta, zone_map) -> Plant`` constructor for the plant
+        the main loop acts on (RMS build plan, Phase 6); ``meta`` /
+        ``zone_map`` are passed as keywords so a co-simulation factory
+        can snapshot-sync its external model.  Default ``None`` = the
+        quasi-static
+        :class:`core.plant.PandapowerStaticPlant` on the runner-built
+        ``net`` -- bit-for-bit the legacy behaviour
+        (tests/runner_refactor_regression.py).  A non-static plant (e.g.
+        ``pf.plant.PowerFactoryPlant``) must keep ``net`` as its mirror /
+        measurement image; features that still act on the net directly
+        (contingencies, OLTC tap-rate limiter, time-series profiles) are
+        rejected up front for such plants.
 
     Returns
     -------
@@ -320,6 +376,31 @@ def run_multi_tso_dso(
     """
     v_set = config.v_setpoint_pu
     verbose = config.verbose
+
+    # DER capability override, applied before anything reads a capability:
+    # the controller's ActuatorBounds and the plant's Q(V) clip both consult
+    # the module-level value, so it must be set once, up front, for the two
+    # to stay in lockstep.  Always announced -- a run under an artificial
+    # capability must never be mistaken for a physical one.
+    set_der_q_capability_override(config.der_q_capability_override_pu)
+    if config.der_q_capability_override_pu is not None:
+        print(f"  [!] DER capability OVERRIDDEN to "
+              f"+-{config.der_q_capability_override_pu:g} pu of S_n "
+              f"(P-independent, ignores op_diagram). "
+              f"TEMPORARY DIAGNOSTIC -- not a physical model.")
+    # DER Q(V) deadband override -- read by the RMS QVPRE anchor pass; the
+    # static side is driven through tso_/dso_qv_deadband_pu into net.sgen by
+    # tag_der_q_modes below.  Both must share one value or the plants settle in
+    # different droop basins at the deadband edge (2026-07-24).
+    # Clear any map left behind by a previous run in this process; step [4]
+    # republishes it once net.sgen has been tagged.
+    set_der_qv_deadband_by_sgen(None)
+    set_der_qv_slope_by_sgen(None)
+    set_der_qv_deadband_override(config.der_qv_deadband_override_pu)
+    if config.der_qv_deadband_override_pu is not None:
+        print(f"  [!] DER Q(V) deadband OVERRIDDEN to "
+              f"{config.der_qv_deadband_override_pu:g} pu on both plants "
+              f"(removes the deadband-edge multi-equilibrium).")
 
     measurement_noise_model = MeasurementNoiseModel(config.measurement_noise)
 
@@ -461,11 +542,57 @@ def run_multi_tso_dso(
             verbose=(verbose >= 2),
         )
 
+    # ── Per-DSO scenario multipliers ─────────────────────────────────────
+    # Applied here, before ANY power flow / load model / droop tagging /
+    # operating-point init, because they rewrite p_mw, base_p_mw, sn_mva and
+    # the reactive-load base that all of those read.  Scenario multipliers,
+    # not builder state: constants.py keeps the symmetric networks and this
+    # scales one underlay on top.  The RMS snapshot is taken downstream of
+    # this, so pf_sync carries the scaled ratings into PowerFactory.
+    if (config.dso_der_scale or config.dso_load_p_scale
+            or config.dso_load_q_profile_base_mvar
+            or config.dso_line_std_type):
+        apply_dso_overrides(
+            net, meta.hv_networks,
+            dso_der_scale=config.dso_der_scale or None,
+            dso_load_p_scale=config.dso_load_p_scale or None,
+            dso_load_q_profile_base_mvar=(
+                config.dso_load_q_profile_base_mvar or None),
+            dso_line_std_type=config.dso_line_std_type or None,
+        )
+        if verbose >= 1:
+            _applied = net["dso_overrides"]
+            print(f"  [dso-override] applied {_applied} -- scenario "
+                  f"multiplier on top of scenario={config.scenario!r}; "
+                  f"results are NOT comparable with an unscaled run")
+
     # add_hv_networks() may remove buses (e.g. bus 11/0-idx = IEEE bus 12).
     # Purge any removed buses from zone_map so downstream logic stays consistent.
     existing_buses = set(net.bus.index)
     for z in zone_map:
         zone_map[z] = [b for b in zone_map[z] if b in existing_buses]
+
+    # =========================================================================
+    # STEP 3b: Plant load model (constant-PQ vs anchored ZIP)
+    # =========================================================================
+    # Decision 2026-07-17 (RMS co-simulation): default "zip" gives every load
+    # P ~ V^1 / Q ~ V^2 anchored at load_zip_anchor_vm_pu, matching the
+    # PowerFactory load model exactly.  Contingency stress loads (created in
+    # step [9]) deliberately stay constant-PQ.
+    if config.load_model == "zip":
+        if verbose >= 1:
+            print()
+            print("[3b] Applying anchored ZIP load model ...")
+        apply_zip_load_model(
+            net,
+            anchor_vm_pu=config.load_zip_anchor_vm_pu,
+            verbose=(verbose >= 1),
+        )
+    elif config.load_model != "const_pq":
+        raise ValueError(
+            f"config.load_model must be 'zip' or 'const_pq', "
+            f"got {config.load_model!r}"
+        )
 
     # =========================================================================
     # STEP 4: tag every DER with its q_mode (Soleimani §III-B Q_cor path)
@@ -501,6 +628,46 @@ def run_multi_tso_dso(
         verbose=(verbose >= 1),
     )
 
+    # Publish the tagged per-park deadbands for the RMS plant.  Its QVPRE
+    # anchor pass otherwise reads the exported snapshot, which carries the
+    # MultiTSOConfig() DEFAULT deadband rather than this run's -- so without
+    # this the two plants disagree whenever tso_/dso_qv_deadband_pu is not the
+    # default, and delta_TS != delta_DS cannot be represented at all.
+    if "qv_deadband_pu" in net.sgen.columns:
+        _db_by_sgen = {
+            int(s): float(net.sgen.at[s, "qv_deadband_pu"])
+            for s in net.sgen.index
+            if not pd.isna(net.sgen.at[s, "qv_deadband_pu"])
+        }
+        set_der_qv_deadband_by_sgen(_db_by_sgen)
+        if verbose >= 1:
+            _ts = sorted({round(float(net.sgen.at[s, "qv_deadband_pu"]), 6)
+                          for s in meta.tso_der_indices})
+            _ds = sorted({round(float(net.sgen.at[s, "qv_deadband_pu"]), 6)
+                          for s in meta.dso_der_indices})
+            print(f"[4a] Q(V) deadband published to both plants: "
+                  f"TS={_ts} DS={_ds} pu ({len(_db_by_sgen)} parks)")
+
+    # Same for the DROOP.  Without this --der-slope moves only the static
+    # plant: the RMS anchor pass reads qv_slope_pu from the exported snapshot,
+    # which carries MultiTSOConfig() defaults, so a droop sweep would have
+    # compared a static plant at the swept value against an RMS plant pinned
+    # at 0.06.
+    if "qv_slope_pu" in net.sgen.columns:
+        _sl_by_sgen = {
+            int(s): float(net.sgen.at[s, "qv_slope_pu"])
+            for s in net.sgen.index
+            if not pd.isna(net.sgen.at[s, "qv_slope_pu"])
+        }
+        set_der_qv_slope_by_sgen(_sl_by_sgen)
+        if verbose >= 1:
+            _ts = sorted({round(float(net.sgen.at[s, "qv_slope_pu"]), 6)
+                          for s in meta.tso_der_indices})
+            _ds = sorted({round(float(net.sgen.at[s, "qv_slope_pu"]), 6)
+                          for s in meta.dso_der_indices})
+            print(f"[4a] Q(V) droop published to both plants: "
+                  f"TS={_ts} DS={_ds} pu ({len(_sl_by_sgen)} parks)")
+
     # NB: install_der_q_loops is deferred to step [10.3], AFTER the
     # Phase 1/2 OLTC init.  If we install now, the plant-side QVLocalLoops
     # (one per TSO + DSO DER) would run during Phase 1 alongside the
@@ -534,6 +701,24 @@ def run_multi_tso_dso(
                 zone_gen_indices[z].append(g)
                 zone_gen_buses[z].append(g_bus)  # terminal bus for sensitivity
                 break
+
+    # ── Generators the OFO must not dispatch ──────────────────────────────────
+    # The slack machine is the network equivalent for the rest of the
+    # interconnection (IEEE 39-bus: G 01, 10 GVA at bus 40).  A TSO does not
+    # set a neighbouring system's voltage, and the PowerFactory RMS model has
+    # no AVR block for it, so dispatching it made the static plant strictly
+    # more capable than the RMS one.  Removed on both sides (2026-07-21);
+    # the machine stays observed -- only its V-ref actuator is withdrawn.
+    if config.dispatch_slack_gen_v_ref:
+        _non_dispatchable_gens: Set[int] = set()
+    else:
+        _non_dispatchable_gens = {
+            int(g) for g in net.gen.index
+            if bool(net.gen.get("slack", pd.Series(dtype=bool)).get(g, False))
+        }
+    if _non_dispatchable_gens:
+        print(f"  [actuators] AVR V-ref withheld from slack/equivalent "
+              f"gen(s): {sorted(_non_dispatchable_gens)}")
 
     # ── Partition TSO DER indices per zone ────────────────────────────────────
     zone_der_indices: Dict[int, List[int]] = {z: [] for z in zone_map}
@@ -641,6 +826,29 @@ def run_multi_tso_dso(
         for hv in meta.hv_networks:
             _z_hv = hv_zone_of(hv)
             zmap[_z_hv] = sorted(set(zmap[_z_hv]) | set(hv.bus_indices))
+        aux_lengths = {
+            len(meta.internal_aux_bus_indices),
+            len(meta.internal_aux_parent_buses),
+            len(meta.internal_aux_line_indices),
+        }
+        if len(aux_lengths) != 1:
+            raise ValueError(
+                "Internal auxiliary metadata lists have different lengths"
+            )
+        for aux_bus, parent_bus in zip(
+            meta.internal_aux_bus_indices, meta.internal_aux_parent_buses,
+        ):
+            owners = [
+                z for z, buses in zmap.items() if parent_bus in set(buses)
+            ]
+            if len(owners) != 1:
+                raise ValueError(
+                    f"Auxiliary bus {aux_bus} parent {parent_bus} belongs to "
+                    f"{len(owners)} zones; expected exactly one"
+                )
+            zmap[owners[0]] = sorted(
+                set(zmap[owners[0]]) | {int(aux_bus)}
+            )
         for tidx, gidx in zip(meta.machine_trafo_indices,
                               meta.machine_trafo_gen_map):
             if gidx < 0:
@@ -817,7 +1025,39 @@ def run_multi_tso_dso(
     # deep-copy + pp.runpp + dense-inversion calls inside the construction
     # loops.
     _t_jac_initial = perf_counter()
-    shared_jac = JacobianSensitivities(net)
+    try:
+        shared_jac = JacobianSensitivities(net)
+    except LoadflowNotConverged:
+        # The un-profiled build state is only a bootstrap: this object is
+        # REPLACED by the post-Phase-2 rebuild below before any control is
+        # computed, and every controller's H cache is invalidated with it.
+        # Letting a divergence here abort the whole run therefore kills a
+        # scenario for the sake of a value that is thrown away.
+        #
+        # Reachable whenever the nameplate (un-profiled) operating point is
+        # heavier than the profiled one the run actually starts from -- e.g.
+        # a per-DSO DER multiplier: DSO_3 x2 diverges here at 5698 MW of sgen
+        # while the 2016-01-05 08:00 profiled point (2325 MW) converges under
+        # both slack conventions (measured 2026-07-30).
+        #
+        # Fall back to the profiled operating point on a COPY, so ``net``
+        # keeps its documented pre-profile state for steps [6]-[8] and every
+        # run that converges today is bit-for-bit unaffected.
+        if not config.use_profiles:
+            raise
+        if verbose >= 1:
+            print("  [6] bootstrap Jacobian diverged at the un-profiled build "
+                  "point; retrying at the profiled start instant (this object "
+                  "is replaced post-Phase-2 and never used for control)")
+        _probe_net = copy.deepcopy(net)
+        _probe_profiles = load_profiles(
+            config.profiles_csv or DEFAULT_PROFILES_CSV,
+            timestep_s=config.dt_s,
+        )
+        snapshot_base_values(_probe_net)
+        apply_profiles(_probe_net, _probe_profiles, config.start_time)
+        shared_jac = JacobianSensitivities(_probe_net)
+        del _probe_net, _probe_profiles
     if verbose >= 1:
         print(f"  [T] initial shared JacobianSensitivities: {perf_counter() - _t_jac_initial:.2f} s")
 
@@ -880,6 +1120,7 @@ def run_multi_tso_dso(
             g_v=zd.g_v,
             gen_indices=zd.gen_indices,
             gen_bus_indices=zd.gen_bus_indices,
+            non_dispatchable_gen_indices=_non_dispatchable_gens,
             gen_oltc_map=_gen_oltc_map,
             enable_saturation_mode=config.enable_avr_saturation_mode,
             g_q_tso=config.tso_g_q_pcc,
@@ -917,16 +1158,15 @@ def run_multi_tso_dso(
         for g in zd.gen_indices:
             sn       = float(net.gen.at[g, "sn_mva"])
             p_max_mw = float(net.gen.at[g, "max_p_mw"])
+            # Machine type comes from GEN_NAMEPLATE via network.ieee39.build
+            # (net.gen["type"]): "Hydro" -> salient pole, everything else
+            # (Nuclear / Coal / the aggregated "Equivalent" anchor) -> round
+            # rotor.  Missing column falls back to round rotor.
+            gen_type = (
+                net.gen.at[g, "type"] if "type" in net.gen.columns else ""
+            )
             gen_params.append(
-                GeneratorParameters(
-                    s_rated_mva=sn,
-                    p_max_mw=p_max_mw,
-                    p_min_mw=0.0,
-                    xd_pu=1.8,       # Milano: 1.0-1.8 for turbo-gen
-                    i_f_max_pu=2.7,  # Milano eq. 12.10: 2.6-2.73
-                    beta=0.15,       # Milano p. 293
-                    q0_pu=0.4,       # Milano p. 293
-                )
+                generator_parameters_for_type(gen_type, sn, p_max_mw)
             )
 
         # Read per-DER operating diagram type (STATCOM vs VDE-AR-N-4120-v2)
@@ -1118,9 +1358,6 @@ def run_multi_tso_dso(
             current_line_indices=hv_lines,
             current_line_max_i_ka=hv_line_max if hv_lines else None,
             g_q=config.g_q,
-            g_qi=config.dso_g_qi,
-            lambda_qi=config.dso_lambda_qi,
-            q_integral_max_mvar=config.dso_q_integral_max_mvar,
             v_setpoints_pu=np.full(len(v_buses), v_set),
             g_v=config.dso_g_v,
             gamma_oltc_q=config.dso_gamma_oltc_q,
@@ -1358,11 +1595,10 @@ def run_multi_tso_dso(
         c_gen_params = []
         for g in c_gen_indices:
             c_gen_params.append(
-                GeneratorParameters(
-                    s_rated_mva=float(net.gen.at[g, "sn_mva"]),
-                    p_max_mw=float(net.gen.at[g, "max_p_mw"]),
-                    p_min_mw=0.0,
-                    xd_pu=1.8, i_f_max_pu=2.7, beta=0.15, q0_pu=0.4,
+                generator_parameters_for_type(
+                    net.gen.at[g, "type"] if "type" in net.gen.columns else "",
+                    float(net.gen.at[g, "sn_mva"]),
+                    float(net.gen.at[g, "max_p_mw"]),
                 )
             )
         central_bounds = ActuatorBounds(
@@ -1432,10 +1668,28 @@ def run_multi_tso_dso(
     # =========================================================================
     use_profiles = config.use_profiles
     start_time = config.start_time
-    contingencies = list(config.contingencies) if config.contingencies else []
+    # Deep copy, not ``list(...)``: ``prepare_load_contingencies`` *resolves*
+    # events by writing ``ev.element_index`` back into them (contingency.py:161).
+    # A shallow list copy shares the ``ContingencyEvent`` objects with
+    # ``config.contingencies``, so that resolution leaks into the caller's
+    # config -- and any caller that reuses one config for several runs (every
+    # tuning driver: it builds the scenario set once and runs it repeatedly)
+    # then re-enters with ``action='connect'`` *and* an explicit index, which
+    # the contradiction guard at contingency.py:70 correctly rejects. The run
+    # died with an empty log from the second use onward, and only for scenarios
+    # using mode-3 ``connect`` load events.
+    contingencies = (
+        [copy.deepcopy(ev) for ev in config.contingencies]
+        if config.contingencies else []
+    )
 
     profiles = None
     gen_dispatch = None
+
+    # Start the init-timing clock before the profile branch: the total is
+    # reported unconditionally further down, but profiles are optional
+    # (a Gate E replay runs with use_profiles=False).
+    _t_init_total = perf_counter()
 
     if use_profiles:
         profiles_csv = config.profiles_csv or DEFAULT_PROFILES_CSV
@@ -1444,13 +1698,84 @@ def run_multi_tso_dso(
             print(f"[9] Loading profiles from {profiles_csv}")
             print(f"     start_time = {start_time:%d.%m.%Y %H:%M}")
 
-        _t_init_total = perf_counter()
-
         _t = perf_counter()
         profiles = load_profiles(profiles_csv, timestep_s=config.dt_s)
         snapshot_base_values(net)
         if verbose >= 1:
             print(f"  [T] load_profiles + snapshot_base_values: {perf_counter() - _t:.2f} s")
+
+        # ── Exogenous load step (disturbance-rejection studies) ───────────
+        # Applied HERE, to the already-interpolated DataFrame, so the step is
+        # exact at dt_s resolution.  Stepping the source CSV instead would be
+        # smeared into a 15-minute ramp by load_profiles' linear interpolation.
+        # Both plants read this same frame -- static via apply_profiles, RMS
+        # via Plant.apply_exogenous (EvtLod) -- so the disturbance reaches both
+        # legs identically and through supported paths only.  Inert unless
+        # load_step_time_s is set.
+        _step_t = getattr(config, "load_step_time_s", None)
+        _step_bus = getattr(config, "load_step_bus", None)
+        if _step_t is not None and _step_bus is not None:
+            # LOCALISED additive step: give the target load its own synthetic
+            # profile column equal to its original profile plus delta/base_p
+            # from the step instant. Both plants consume profile columns
+            # per-load, so this reaches the RMS plant through the same EvtLod
+            # path as any other profile change -- no new plumbing.
+            _dp = float(getattr(config, "load_step_delta_mw", 0.0))
+            _cand = [int(i) for i in net.load.index
+                     if int(net.load.at[i, "bus"]) == int(_step_bus)
+                     and pd.notna(net.load.at[i, "profile_p"])]
+            if not _cand:
+                raise ValueError(
+                    f"load_step_bus={_step_bus} has no profiled load row")
+            # largest load at the bus, so the step lands on the dominant row
+            _row = max(_cand, key=lambda i: float(net.load.at[i, "base_p_mw"]))
+            _base = float(net.load.at[_row, "base_p_mw"])
+            if abs(_base) < 1e-9:
+                raise ValueError(
+                    f"load row {_row} at bus {_step_bus} has base_p_mw = 0, "
+                    "so an additive step cannot be expressed as a profile "
+                    "multiplier")
+            _src = str(net.load.at[_row, "profile_p"])
+            if _src not in profiles.columns:
+                raise ValueError(f"profile column {_src!r} not in the data")
+            _t_step = start_time + timedelta(seconds=float(_step_t))
+            _mask = profiles.index >= _t_step
+            if not _mask.any():
+                raise ValueError(
+                    f"load step at t={_step_t:g}s ({_t_step}) lies beyond the "
+                    f"profile horizon (ends {profiles.index.max()})")
+            _newcol = f"STEP_BUS_{int(_step_bus)}"
+            profiles = profiles.copy()
+            profiles[_newcol] = profiles[_src]
+            profiles.loc[_mask, _newcol] = (
+                profiles.loc[_mask, _src] + _dp / _base)
+            net.load.at[_row, "profile_p"] = _newcol
+            if verbose >= 1:
+                print(f"  [load-step] LOCALISED {_dp:+g} MW at bus "
+                      f"{int(_step_bus)} (load row {_row}, base "
+                      f"{_base:.2f} MW, profile {_src} -> {_newcol}) from "
+                      f"t={_step_t:g}s ({_t_step:%Y-%m-%d %H:%M:%S})")
+        elif _step_t is not None:
+            _f = float(getattr(config, "load_step_factor", 1.0))
+            _cols = [c for c in getattr(config, "load_step_columns", ())
+                     if c in profiles.columns]
+            if not _cols:
+                raise ValueError(
+                    "load_step_time_s is set but none of load_step_columns "
+                    f"{tuple(getattr(config, 'load_step_columns', ()))} exist "
+                    f"in the profile data (have: {list(profiles.columns)})")
+            _t_step = start_time + timedelta(seconds=float(_step_t))
+            _mask = profiles.index >= _t_step
+            if not _mask.any():
+                raise ValueError(
+                    f"load step at t={_step_t:g}s ({_t_step}) lies beyond the "
+                    f"profile horizon (ends {profiles.index.max()})")
+            profiles = profiles.copy()
+            profiles.loc[_mask, _cols] = profiles.loc[_mask, _cols] * _f
+            if verbose >= 1:
+                print(f"  [load-step] x{_f:g} on {_cols} from t={_step_t:g}s "
+                      f"({_t_step:%Y-%m-%d %H:%M:%S}); "
+                      f"{int(_mask.sum())} of {len(profiles)} samples affected")
 
         # Pre-create dormant loads for load-contingency events (must be
         # after snapshot_base_values so base columns exist).
@@ -1667,20 +1992,37 @@ def run_multi_tso_dso(
     dso_sgens = [int(s) for s in meta.dso_der_indices
                  if int(s) in net.sgen.index]
     # Reset the w-shift actuator state (the OFO has not commanded yet)
-    # before the analytical seed.  ``q_set_mvar`` starts at 0; the
+    # before the analytical seed.  ``q_set_mvar`` starts at 0.  By default
     # ``qv_vref_anchor_pu`` is left as the apply-step's responsibility
     # — until the first apply, the local QVLocalLoop falls back to the
-    # nominal ``qv_vref_pu``.
+    # nominal ``qv_vref_pu`` (1.03).  The RMS plant, however, anchors to the
+    # local voltage ``v_lf`` at init, so the two plants droop about different
+    # anchors on the FIRST profiled re-solve.  ``seed_der_anchor_to_local_v``
+    # closes that one-interval mismatch by anchoring the static side to the
+    # same local operating-point voltage at init (2026-07-24 anchor-seed test).
+    _n_anchor_seeded = 0
     for s in tso_sgens + dso_sgens:
         if "q_set_mvar" in net.sgen.columns:
             net.sgen.at[s, "q_set_mvar"] = 0.0
+        if (config.seed_der_anchor_to_local_v
+                and "qv_vref_anchor_pu" in net.sgen.columns
+                and hasattr(net, "res_bus") and net.res_bus is not None):
+            bus = int(net.sgen.at[s, "bus"])
+            if bus in net.res_bus.index:
+                net.sgen.at[s, "qv_vref_anchor_pu"] = float(
+                    net.res_bus.at[bus, "vm_pu"])
+                _n_anchor_seeded += 1
+    if config.seed_der_anchor_to_local_v and verbose >= 1:
+        print(f"  [anchor-seed] initialised {_n_anchor_seeded} DER Q(V) anchors "
+              f"to local res_bus.vm_pu (matches RMS v_lf at init)")
     # Seed using a fresh Jacobian at the post-Phase-2 operating
     # point so S_VQ matches the network state we'll iterate from.
-    _seed_jac = JacobianSensitivities(net)
-    seed_qv_equilibrium(
-        net, tso_sgens + dso_sgens, _seed_jac,
-        verbose=(verbose >= 1),
-    )
+    if not config.disable_qv_seed:
+        _seed_jac = JacobianSensitivities(net)
+        seed_qv_equilibrium(
+            net, tso_sgens + dso_sgens, _seed_jac,
+            verbose=(verbose >= 1),
+        )
     # TSO STATCOMs have R*S_VQ ~ 8 vs DSO ~ 0.7, so cap TSO damping
     # to 0.03 to keep the per-DER contraction stable under multi-DER
     # coupling (commit e2746fe rationale; previously documented in
@@ -1720,6 +2062,71 @@ def run_multi_tso_dso(
              enforce_q_lims=config.enforce_q_lims_plant)
     if verbose >= 1:
         print(f"  [T] final re-converge pp.runpp: {perf_counter() - _t:.2f} s")
+
+    # ── Converge the plant-side Q(V) loops before the seam ────────────────
+    # The solve above deliberately runs run_control=False, so the state it
+    # leaves is NOT a fixed point of the plant's own DER Q(V) law: the
+    # QVLocalLoops were installed at a single-pass linear seed and still
+    # carry a pending correction.  Historically they absorbed it inside the
+    # first main-loop runpp, which is harmless for a static plant but not
+    # for a substituted one:
+    #
+    #   * PandapowerStaticPlant removes the residual on its first advance();
+    #   * PowerFactoryPlant instead ANCHORS its QVPRE blocks to this state
+    #     (qset = q_lf, Vanchor = v_lf in pf.plant._anchor_qv_precontrollers),
+    #     freezing the residual in permanently.
+    #
+    # The two plants then hold Q(V) characteristics offset by exactly that
+    # residual for the whole run.  Measured on rural_700 (2026-07-30): the
+    # first advance moved DER Q by +17.7 Mvar and the bus voltages by 2.3 mpu
+    # mean / 27 mpu worst, which reappeared as a flat -1.8 mpu TS zone-voltage
+    # offset held until the TSO's next dispatch 180 s later.
+    #
+    # Converging here makes the seam a genuine fixed point, so both plants
+    # start on the same characteristic.  Applied unconditionally, not only
+    # for a substituted plant: the seam state should satisfy the plant law
+    # regardless of which plant reads it, and a quasi-static run should not
+    # spend its first interval relaxing an initialisation artefact either.
+    #
+    # ``max_iter`` is the run_control iteration cap and MUST be raised: the
+    # 44 coupled DER loops do not converge within pandapower's default 30
+    # (ControllerNotConverged after 31 calls on rural_700).  300 is what
+    # PandapowerStaticPlant.advance already uses, so this is the same
+    # iteration budget the first main-loop solve would have had.
+    _t = perf_counter()
+    pp.runpp(net, run_control=True, calculate_voltage_angles=True,
+             max_iteration=50, max_iter=300,
+             distributed_slack=config.distributed_slack,
+             enforce_q_lims=config.enforce_q_lims_plant)
+    if verbose >= 1:
+        print(f"  [T] Q(V) fixed-point solve at the plant seam: "
+              f"{perf_counter() - _t:.2f} s")
+
+    # ── Plant seam (RMS build plan, Phase 6) ──────────────────────────────
+    # From here on every standard-loop plant interaction -- actuator
+    # writes, plant response, measurement-image refresh -- goes through
+    # the Plant interface.  The static default reproduces the legacy
+    # behaviour bit-for-bit; a substituted RMS plant keeps ``net`` as its
+    # mirror, so the direct ``net`` *reads* throughout this function
+    # remain valid for both.
+    if plant_factory is not None:
+        configure_profiles = getattr(
+            plant_factory, "configure_exogenous_profiles", None)
+        if (use_profiles and profiles is not None
+                and callable(configure_profiles)):
+            configure_profiles(
+                profiles,
+                start_time=start_time,
+                dt_s=config.dt_s,
+                duration_s=config.n_total_s,
+            )
+        plant = plant_factory(net, meta=meta, zone_map=zone_map)
+    else:
+        plant = PandapowerStaticPlant(
+            net,
+            distributed_slack=config.distributed_slack,
+            enforce_q_lims=config.enforce_q_lims_plant,
+        )
 
     # ── Slack bus diagnostic after OLTC init ──────────────────────────────
     if verbose >= 1:
@@ -1842,6 +2249,8 @@ def run_multi_tso_dso(
             hv_networks_in_zone=zone_hv_networks.get(z, []),
             tso_shunt_buses_in_zone=zd.shunt_bus_indices,
             tso_shunt_q_steps_mvar_in_zone=zd.shunt_q_steps_mvar,
+            tie_boundary=getattr(config, "tie_boundary_equivalent", "pq"),
+            tie_thevenin_k=getattr(config, "tie_thevenin_k", 1.0),
             verbose=verbose,
         )
         return (
@@ -2469,6 +2878,24 @@ def run_multi_tso_dso(
                       f"{_b.q_raise_mvar:.1f} / lowering "
                       f"{_b.q_lower_mvar:.1f} Mvar")
 
+    # ── Per-zone loop-gain scaling ────────────────────────────────────────────
+    # Applied here, after every controller exists and before the first step, so
+    # the whole run sees one consistent gain.  ``OFOParameters`` is frozen, so
+    # the vector is rebuilt rather than mutated.  A change of boundary
+    # equivalent rescales H by a different factor in each area, and this is the
+    # knob that lets each area be re-gained to match.
+    if getattr(config, "zone_g_w_scale", None):
+        for _z, _ctrl in tso_controllers.items():
+            _s = float(config.zone_g_w_scale.get(int(_z), 1.0))
+            _gw = getattr(getattr(_ctrl, "params", None), "g_w", None)
+            if _s == 1.0 or _gw is None:
+                continue
+            _scaled = (np.asarray(_gw, dtype=float) * _s
+                       if np.ndim(_gw) else float(_gw) * _s)
+            _ctrl.params = dataclasses.replace(_ctrl.params, g_w=_scaled)
+            if verbose >= 1:
+                print(f"  [zone_g_w_scale] zone {_z}: g_w x {_s:g}")
+
     if pre_loop_hook is not None:
         _hook_state = {
             "net": net,
@@ -2549,9 +2976,46 @@ def run_multi_tso_dso(
             print(f"  [shunt-integrator] built {_n_banks} MSC/MSR banks "
                   f"across {len(zone_integrators)} zone(s).")
 
+    # Features below that still act on ``net`` directly (recovery ladders
+    # included) are only correct for the quasi-static plant; fail fast for
+    # any other plant rather than run a silently inconsistent co-simulation.
+    if not isinstance(plant, PandapowerStaticPlant):
+        # Contingencies are no longer wholesale unsupported: a non-static plant
+        # that can translate an event into a simulation event may run it.  Only
+        # the event TYPES the plant cannot deliver are refused, so an N-1
+        # machine trip works while a line trip or a restore -- which would put
+        # the mirror and the simulator on different topologies -- still fails
+        # fast.
+        _supports_ctg = getattr(plant, "supports_contingency", None)
+        _bad_ctg = sorted({
+            f"{ev.element_type}/{ev.action}" for ev in contingencies
+            if _supports_ctg is None or not _supports_ctg(ev)
+        })
+        _unsupported = [
+            label for cond, label in (
+                (bool(_bad_ctg),
+                 "contingency events of type " + ", ".join(_bad_ctg)),
+                (_oltc_limiter_active, "local OLTC tap-rate limiter"),
+                # Profiles are supported since 2026-07-21 via
+                # Plant.apply_exogenous (EvtLod for loads, EvtParam on the
+                # WECC Pref_in for DER P), so they are no longer listed here.
+                (gen_dispatch is not None,
+                 "zonal generator dispatch schedule (still writes net "
+                 "directly)"),
+            ) if cond
+        ]
+        if _unsupported:
+            raise NotImplementedError(
+                "non-static plant does not support: " + ", ".join(_unsupported)
+            )
+
     for step in range(1, n_steps + 1):
         _t_step = perf_counter()
         time_s  = step * config.dt_s
+        # Seconds already advanced this interval by the RMS profile pre-settle
+        # (see the profile branch); subtracted from the end-of-step advance so
+        # the total stays dt_s.  0 unless profiles + a non-static plant.
+        _profile_settle_s = 0.0
         run_tso = (step == 1) or _is_period_hit(time_s, config.tso_period_s)
         run_dso = _is_period_hit(time_s, config.dso_period_s)
         run_central = _central and (
@@ -2600,7 +3064,11 @@ def run_multi_tso_dso(
         # ── Apply time-series profiles ────────────────────────────────────────
         if use_profiles and profiles is not None:
             t_now = start_time + timedelta(seconds=time_s)
-            apply_profiles(net, profiles, t_now)
+            # Through the plant, not the net: a non-static plant must turn
+            # the profile step into simulation events (PF reads element
+            # input data only at initialisation).  The static plant's
+            # implementation is exactly the previous apply_profiles(net,...).
+            plant.apply_exogenous(profiles, t_now)
             if gen_dispatch is not None:
                 apply_gen_dispatch(net, gen_dispatch, t_now)
             # Converge PF so that measurements (q_pcc, voltages) reflect the
@@ -2615,11 +3083,25 @@ def run_multi_tso_dso(
             #     list(meta.tso_der_indices) + list(meta.dso_der_indices),
             #     shared_jac,
             # )
-            pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
-                     max_iteration=50,
-                     max_iter=300,
-                     distributed_slack=config.distributed_slack,
-                     enforce_q_lims=config.enforce_q_lims_plant)
+            # Make the profile visible to the controllers before they read.
+            # Static plant: advance() is an instant re-solve, so this settles
+            # to the profiled steady state.  RMS plant: advance() is real
+            # time, and apply_exogenous scheduled the profile as events at
+            # t+eps -- advancing ``rms_profile_settle_s`` here fires them and
+            # lets the state settle so the controllers read POST-profile;
+            # the end-of-step advance below then runs the remaining
+            # ``dt_s - settle`` (total = dt_s, clock unchanged).  At settle=0
+            # the RMS controllers read the pre-profile state (the one-interval
+            # lag that seeded the DSO_4 runaway, 2026-07-22).  Running the
+            # full dt_s here would advance the RMS plant TWICE (2x clock).
+            if isinstance(plant, PandapowerStaticPlant):
+                plant.advance(config.dt_s)   # re-solve to reflect the profile
+                plant.read_y()               # refresh the measurement image
+            elif config.rms_profile_settle_s > 0.0:
+                _profile_settle_s = min(config.rms_profile_settle_s,
+                                        config.dt_s - config.dt_s * 0.1)
+                plant.advance(_profile_settle_s)
+                plant.read_y()
             if _oltc_limiter_active:
                 _moved = _oltc_limiter.clamp(net, time_s)
                 if _moved:
@@ -2664,6 +3146,14 @@ def run_multi_tso_dso(
                 for ev in fired:
                     _apply_contingency(net, ev, verbose,
                                        gen_trafo_map=gen_trafo_map)
+                    # Mirror updated above; now the plant itself.  For the
+                    # quasi-static plant ``net`` IS the plant and this is a
+                    # no-op; a non-static plant must translate the event,
+                    # because PowerFactory reads element input attributes only
+                    # at initialisation -- without this the simulator would
+                    # stay on the pre-contingency topology while the mirror
+                    # showed the new one.
+                    plant.apply_contingency(ev, gen_trafo_map=gen_trafo_map)
 
                 # Re-converge PF with new topology so measurements
                 # reflect the post-contingency operating point.
@@ -2692,11 +3182,20 @@ def run_multi_tso_dso(
                     # asymmetry preserves the legacy retry path below
                     # (which adds enforce_q_lims=True as a recovery
                     # action when this unclipped attempt diverges).
-                    pp.runpp(net, run_control=_run_control,
-                             calculate_voltage_angles=True,
-                             max_iteration=50,
-                             max_iter=300,
-                             distributed_slack=config.distributed_slack)
+                    # Only the quasi-static plant may be re-solved here.  For a
+                    # non-static plant ``net`` is the measurement MIRROR: a
+                    # pandapower solve would overwrite the PowerFactory
+                    # measurements with a static solution, and every reading
+                    # afterwards would silently be from the wrong plant.  The
+                    # RMS plant has been handed an EvtOutage instead, and the
+                    # next advance()/read_y() produces the post-contingency
+                    # measurements from the simulator itself.
+                    if isinstance(plant, PandapowerStaticPlant):
+                        pp.runpp(net, run_control=_run_control,
+                                 calculate_voltage_angles=True,
+                                 max_iteration=50,
+                                 max_iter=300,
+                                 distributed_slack=config.distributed_slack)
                     pf_converged = True
                 except LoadflowNotConverged:
                     pf_converged = False
@@ -2809,7 +3308,7 @@ def run_multi_tso_dso(
         # only for recording.
         if run_central and central_controller is not None:
             meas_central = _feedback_measurement(
-                measure_central(net, central_cfg, step),
+                measure_central(plant.read_y(), central_cfg, step),
                 sample_id=("control", step),
             )
             tso_plot_measurements = {z: meas_central for z in zone_defs}
@@ -2824,7 +3323,9 @@ def run_multi_tso_dso(
             # the discrete DER jumps and poor tracking otherwise observed.
             central_controller.apply_qw_reset(meas_central)
             central_out = central_controller.step(meas_central, sim_time_s=time_s)
-            apply_central_controls(net, central_cfg, central_out)
+            plant.apply_u(writes_from_central(
+                plant.read_y(), central_cfg, central_out.u_new,
+            ))
             if verbose >= 1:
                 _n_int = len(central_out.u_integer)
                 print(f"  [central t={int(time_s/60):3d} min] "
@@ -2889,7 +3390,7 @@ def run_multi_tso_dso(
             # Build per-zone measurements from plant network
             measurements: Dict[int, Measurement] = {
                 z: _feedback_measurement(
-                    measure_zone_tso(net, zd, step),
+                    measure_zone_tso(plant.read_y(), zd, step),
                     sample_id=("control", step),
                 )
                 for z, zd in zone_defs.items()
@@ -3088,11 +3589,16 @@ def run_multi_tso_dso(
                             f"[{tag}]"
                         )
 
-            # Apply TSO controls to plant network
+            # Apply TSO controls to the plant.  The pre-write shunt steps
+            # are captured first (apply_zone_tso_controls' legacy return
+            # contract) so shunt switches can be detected below.
             for z, tso_out in tso_outputs.items():
-                prev_shunt_steps = apply_zone_tso_controls(
-                    net, zone_defs[z], tso_out,
+                prev_shunt_steps = shunt_steps_for_buses(
+                    plant.read_y(), zone_defs[z].shunt_bus_indices,
                 )
+                plant.apply_u(writes_from_zone_tso(
+                    plant.read_y(), zone_defs[z], tso_out.u_new,
+                ))
 
                 # Record per-zone results.
                 # Q_cor mode actuator order on u (TSOControllerConfig._continuous_block):
@@ -3350,7 +3856,9 @@ def run_multi_tso_dso(
                     )
                     for commit in commits:
                         # (i) Toggle the physical bank (ground truth, plant net).
-                        apply_shunt_commit(net, commit.shunt_idx, commit.pp_step_new)
+                        plant.apply_u(ActuatorWrites(shunt_step={
+                            int(commit.shunt_idx): int(commit.pp_step_new),
+                        }))
                         # (ii) Step the DSO interface feedforward from the DSO's
                         #      OWN 3W model at the current (pre-switch) operating
                         #      point — atomically with the toggle.
@@ -3467,7 +3975,7 @@ def run_multi_tso_dso(
                 # This is the correct basis for the capability message: it tells the TSO
                 # what the DSO can still do from its present dispatch, not what it just did.
                 meas_dso = _feedback_measurement(
-                    measure_zone_dso(net, dso_ctrl.config, step),
+                    measure_zone_dso(plant.read_y(), dso_ctrl.config, step),
                     sample_id=("control", step),
                 )
                 dso_plot_measurements[dso_id] = meas_dso
@@ -3561,14 +4069,28 @@ def run_multi_tso_dso(
                 if hasattr(dso_ctrl, "apply_qw_reset"):
                     dso_ctrl.apply_qw_reset(meas_dso)
                 dso_out = dso_ctrl.step(meas_dso, sim_time_s=time_s)
-                # Pass the live JacobianSensitivities handle so the
-                # Q+shim apply step can read the **full** per-DSO S_VQ
-                # block (cross-DER coupling included) directly off the
-                # cached ``dV_dQ_reduced`` — no recompute, no extra PF.
-                apply_dso_controls(
-                    net, dso_ctrl.config, dso_out,
-                    sensitivities=getattr(dso_ctrl, "sensitivities", None),
+                # Record the MIQP diagnostics.  ``dso_objective``/
+                # ``dso_status`` existed on the record but were never
+                # assigned, so a DSO that declines to act was
+                # indistinguishable from one that solved and chose a zero
+                # step (Gate E, 2026-07-21: the RMS DSO answered a 31 Mvar
+                # setpoint change with ~1e-4 Mvar steps for 6 iterations and
+                # there was no logged quantity that could explain it).
+                rec.dso_objective[dso_id] = (
+                    float(dso_out.objective_value)
+                    if dso_out.objective_value is not None else None
                 )
+                rec.dso_status[dso_id] = str(dso_out.solver_status)
+                rec.dso_sigma_norm[dso_id] = float(
+                    np.linalg.norm(np.asarray(dso_out.sigma, dtype=float))
+                )
+                rec.dso_z_slack_max[dso_id] = (
+                    float(np.max(np.abs(np.asarray(dso_out.z_slack,
+                                                   dtype=float))))
+                    if dso_out.z_slack is not None
+                    and np.size(dso_out.z_slack) else 0.0
+                )
+                plant.apply_u(writes_from_dso(dso_ctrl.config, dso_out.u_new))
 
         # ── End-of-step Power flow ─────────────────────────────────────
         # Skip when nothing wrote new actuator commands this step: the
@@ -3583,9 +4105,12 @@ def run_multi_tso_dso(
             or run_central
         )
         _needs_end_pf = _miqp_acted or _contingency_fired_this_step
-        if _needs_end_pf:
+        if (_needs_end_pf and isinstance(plant, PandapowerStaticPlant)
+                and not config.disable_qv_seed):
             # Warm-start QVLocalLoops from the linear closed-loop
-            # equilibrium so run_control only refines residuals.
+            # equilibrium so run_control only refines residuals.  This
+            # writes the quasi-static DER ``q_mvar`` state directly and
+            # must therefore never run against an external RMS plant.
             seed_qv_equilibrium(
                 net,
                 list(meta.tso_der_indices) + list(meta.dso_der_indices),
@@ -3594,11 +4119,14 @@ def run_multi_tso_dso(
         try:
             if _needs_end_pf:
                 try:
-                    pp.runpp(net, run_control=_run_control, calculate_voltage_angles=True,
-                             max_iteration=50,
-                             max_iter=300,
-                             distributed_slack=config.distributed_slack,
-                             enforce_q_lims=config.enforce_q_lims_plant)
+                    # Propagate the new commands over the rest of this
+                    # dispatch interval.  The static plant ignores the
+                    # duration (one re-solve, legacy behaviour); the RMS
+                    # plant advances real time -- ``dt_s`` minus whatever the
+                    # profile pre-settle already consumed, so the interval
+                    # totals dt_s and the clock stays 1x.
+                    plant.advance(config.dt_s - _profile_settle_s)
+                    plant.read_y()
                 except LoadflowNotConverged:
                     # End-of-step PF with enforce_q_lims=True can fail to
                     # converge on stressful events (e.g., a heavy load
@@ -3611,6 +4139,8 @@ def run_multi_tso_dso(
                     # profile, post-contingency, or the next end-of-step PF
                     # itself) re-attempt with the clamp on a more relaxed
                     # operating point.
+                    if not isinstance(plant, PandapowerStaticPlant):
+                        raise
                     if verbose >= 1:
                         print(f"  [Step {step}] end-of-step PF with "
                               f"enforce_q_lims={config.enforce_q_lims_plant} "
@@ -3622,6 +4152,11 @@ def run_multi_tso_dso(
                              distributed_slack=config.distributed_slack,
                              enforce_q_lims=False,
                              init='flat')
+            elif not isinstance(plant, PandapowerStaticPlant):
+                # No MIQP acted this step, but RMS time must still flow
+                # (the static plant's operating point is already final).
+                plant.advance(config.dt_s - _profile_settle_s)
+                plant.read_y()
             if _oltc_limiter_active and _needs_end_pf:
                 _moved = _oltc_limiter.clamp(net, time_s)
                 if _moved:
@@ -3642,6 +4177,8 @@ def run_multi_tso_dso(
                         enforce_q_lims=config.enforce_q_lims_plant,
                     )
         except Exception as e:
+            if not isinstance(plant, PandapowerStaticPlant):
+                raise
             print(f"  [Step {step}] Power flow failed: {e}")
             log.append(rec)
             continue
@@ -3712,6 +4249,11 @@ def run_multi_tso_dso(
                     rec.dso_group_v_min_pu[hv.net_id]  = float(vm_hv.min())
                     rec.dso_group_v_max_pu[hv.net_id]  = float(vm_hv.max())
                     rec.dso_group_v_mean_pu[hv.net_id] = float(vm_hv.mean())
+                    # Per-bus DSO voltages for the Gate-E comparison.
+                    for b in hv.bus_indices:
+                        if b in net.res_bus.index:
+                            rec.bus_vm_pu[int(b)] = float(
+                                net.res_bus.at[b, "vm_pu"])
                 rec.dso_controller_group[hv.net_id] = hv.net_id
 
                 # DER reactive power per HV group (post-PF measurement of
@@ -3765,6 +4307,10 @@ def run_multi_tso_dso(
                 rec.zone_v_min[z]  = float(vm_zone.min())
                 rec.zone_v_max[z]  = float(vm_zone.max())
                 rec.zone_v_mean[z] = float(vm_zone.mean())
+                # Per-bus values too: the envelope alone cannot support a
+                # bus-by-bus static-vs-RMS comparison (Gate E, 2026-07-21).
+                for b, v in zip(vm_bus_ids, vm_zone):
+                    rec.bus_vm_pu[int(b)] = float(v)
                 # Spatial RMS of the voltage error to the setpoint across the
                 # zone's observed EHV buses (CIGRE per-zone tracking figure).
                 cfg_v = tso_controllers[z].config

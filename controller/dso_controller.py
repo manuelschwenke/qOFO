@@ -104,20 +104,6 @@ class DSOControllerConfig:
     """Per-line thermal rating [kA]. Must have the same length as
     ``current_line_indices``. If ``None``, limits are not enforced."""
     g_q: float = 1.0
-    g_qi: float = 0.0
-    """Weight for integral Q-tracking term.  When > 0, a leaky integrator
-    accumulates Q-interface errors over iterations, building pressure for
-    discrete switching actions (OLTC, shunts) when continuous DERs cannot
-    satisfy the setpoint.  The integral gradient contribution is
-    ``2 · g_qi · integral^T · ∂Q/∂u``.  Default 0.0 (disabled)."""
-    lambda_qi: float = 0.9
-    """Decay factor for the leaky integrator (0 ≤ λ ≤ 1).  Controls how
-    fast past errors are forgotten.  1.0 = pure integration (no decay),
-    0.9 = gradual decay.  Only used when *g_qi* > 0."""
-    q_integral_max_mvar: float = 50.0
-    """Anti-windup clamp for the integral accumulator [Mvar].  Limits each
-    element of the integral to ``[-max, +max]`` to prevent excessive
-    buildup when Q-capability limits are hit."""
     v_setpoints_pu: Optional[NDArray[np.float64]] = None
     g_v: float = 1.0
     gamma_oltc_q: float = 0.0
@@ -207,17 +193,6 @@ class DSOControllerConfig:
                     f"must match current_line_indices length "
                     f"({len(self.current_line_indices)})"
                 )
-        if self.g_qi < 0:
-            raise ValueError(f"g_qi must be non-negative, got {self.g_qi}")
-        if not (0.0 <= self.lambda_qi <= 1.0):
-            raise ValueError(
-                f"lambda_qi must be in [0, 1], got {self.lambda_qi}"
-            )
-        if self.q_integral_max_mvar <= 0:
-            raise ValueError(
-                f"q_integral_max_mvar must be positive, got "
-                f"{self.q_integral_max_mvar}"
-            )
         if not (0.0 <= self.gamma_oltc_q <= 1.0):
             raise ValueError(
                 f"gamma_oltc_q must be in [0, 1], got {self.gamma_oltc_q}"
@@ -298,9 +273,6 @@ class DSOController(BaseOFOController):
         # Initialise Q setpoints to zero (no tracking until TSO sends message)
         n_interfaces = len(config.interface_trafo_indices)
         self.q_setpoint_mvar = np.zeros(n_interfaces)
-
-        # Integral Q-error accumulator (leaky integrator for PI-like behaviour)
-        self._q_error_integral = np.zeros(n_interfaces)
 
         # Shunt bound overrides from Reserve Observer.
         # Keys: shunt index (0-based within shunt vector).
@@ -389,10 +361,6 @@ class DSOController(BaseOFOController):
             msg_idx = list(message.interface_transformer_indices).index(trafo_idx)
             self.q_setpoint_mvar[i] = message.q_setpoints_mvar[msg_idx]
     
-    def reset_integral(self) -> None:
-        """Reset the Q-error integral accumulator to zero."""
-        self._q_error_integral[:] = 0.0
-
     def receive_disturbance_message(
         self,
         message: ShuntDisturbanceMessage,
@@ -766,6 +734,56 @@ class DSOController(BaseOFOController):
         )
         g_v_vec = np.full(n_v, float(self.config.g_v), dtype=np.float64)
         return H_v, g_v_vec
+
+    def objective_curvature_inputs(
+        self,
+    ) -> Optional[Tuple[NDArray[np.float64], NDArray[np.float64]]]:
+        """Interface-Q **and** voltage rows, each with its own weight.
+
+        Output ordering is ``[ Q_interface | V_bus | ... ]``.  Stacking both
+        blocks gives the curvature that actually governs this loop, whereas
+        :meth:`voltage_curvature_inputs` returns only the voltage block and
+        declines entirely when no voltage schedule is active.
+
+        This matters here specifically.  In priority terms (``pi = g * sigma^2``
+        with ``sigma_q = 5 Mvar``, ``sigma_v = 10 mpu``) the baseline weights
+        give ``pi_q = 200 * 25 = 5000`` against ``pi_v = 1e5 * 1e-4 = 10`` — the
+        interface-Q objective dominates by ~500x.  So a voltage-only curvature
+        measures a block that carries under 1 % of the objective, and any
+        conclusion drawn from it about the DSO DER weight is unfounded.
+
+        Returns ``None`` only when *neither* block is active.
+        """
+        n_interfaces = len(self.config.interface_trafo_indices)
+        n_v = len(self.config.voltage_bus_indices)
+
+        g_q = float(self.config.g_q)
+        g_v = float(self.config.g_v)
+        use_q = n_interfaces > 0 and g_q > 0.0
+        use_v = (
+            n_v > 0
+            and g_v > 0.0
+            and self.config.v_setpoints_pu is not None
+        )
+        if not use_q and not use_v:
+            return None
+
+        H = self._expand_H_to_der_level(self._build_sensitivity_matrix())
+        blocks: list[NDArray[np.float64]] = []
+        weights: list[NDArray[np.float64]] = []
+        if use_q:
+            blocks.append(np.asarray(H[:n_interfaces, :], dtype=np.float64))
+            weights.append(np.full(n_interfaces, g_q, dtype=np.float64))
+        if use_v:
+            blocks.append(
+                np.asarray(H[n_interfaces:n_interfaces + n_v, :],
+                           dtype=np.float64)
+            )
+            weights.append(np.full(n_v, g_v, dtype=np.float64))
+
+        H_y = np.ascontiguousarray(np.vstack(blocks), dtype=np.float64)
+        g_y = np.concatenate(weights)
+        return H_y, g_y
 
     def _extract_control_values(
         self,
@@ -1207,21 +1225,6 @@ class DSOController(BaseOFOController):
             dQ_du_q = dQ_du
 
         grad_f += 2.0 * self.config.g_q * (q_error @ dQ_du_q)
-
-        # --- Integral Q-tracking component (leaky integrator) ---
-        if self.config.g_qi > 0.0:
-            # Leaky integrator: s_{k+1} = lambda * s_k + e_k
-            self._q_error_integral = (
-                self.config.lambda_qi * self._q_error_integral + q_error
-            )
-            # Anti-windup: clamp accumulator
-            np.clip(
-                self._q_error_integral,
-                -self.config.q_integral_max_mvar,
-                self.config.q_integral_max_mvar,
-                out=self._q_error_integral,
-            )
-            grad_f += 2.0 * self.config.g_qi * (self._q_error_integral @ dQ_du_q)
 
         # --- Component 2: Voltage-schedule tracking (optional) ---
         if self.config.v_setpoints_pu is not None:

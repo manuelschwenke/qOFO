@@ -97,7 +97,7 @@ def test_apply_to_config_applies_fixed_overrides(baseline_cfg: MultiTSOConfig) -
     diverging = dataclasses.replace(
         baseline_cfg,
         g_w_gen=42.0,
-        dso_g_qi=99.0,
+        dso_gamma_oltc_q=0.9,
         int_cooldown=9,
         verbose=2,
         live_plot_controller=True,

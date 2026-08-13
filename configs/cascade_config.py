@@ -115,18 +115,6 @@ class CascadeConfig:
     g_q: float = 1.0
     """DSO interface Q tracking penalty:  g_q · Σ(Q − Q_set)²."""
 
-    g_qi: float = 0.0
-    """DSO integral Q-tracking weight (leaky integrator).  When > 0,
-    accumulates Q-interface errors over iterations, building pressure
-    for discrete switching actions (OLTC, shunts).  Default 0.0 (disabled)."""
-
-    lambda_qi: float = 0.9
-    """Decay factor for the DSO leaky integrator (0 ≤ λ ≤ 1).
-    1.0 = pure integration (no decay), 0.9 = gradual decay."""
-
-    q_integral_max_mvar: float = 50.0
-    """Anti-windup clamp for the DSO integral accumulator [Mvar]."""
-
     dso_g_v: float = 100.0
     """DSO voltage tracking weight (soft secondary objective)."""
 
@@ -219,11 +207,15 @@ class CascadeConfig:
     gu_dso_shunt: float = 0.0
 
     # ── Generator capability curve parameters (Milano §12.2.1) ────────────
-    gen_xd_pu: float = 1.2
-    """Direct-axis synchronous reactance [p.u.]."""
+    gen_xd_pu: float = 1.8
+    """Direct-axis synchronous reactance [p.u.] (round rotor).
 
-    gen_i_f_max_pu: float = 2.65
-    """Maximum field current [p.u.] (turbo-generator)."""
+    Must satisfy ``gen_xd_pu > gen_i_f_max_pu - 1``, else the rotor limit of
+    the capability curve never binds; ``GeneratorParameters`` enforces this.
+    The former 1.2 paired with 2.65 violated it."""
+
+    gen_i_f_max_pu: float = 2.7
+    """Maximum field current [p.u.] (turbo-generator, Milano eq. 12.10)."""
 
     gen_beta: float = 0.15
     """Under-excitation limit slope."""
@@ -447,9 +439,6 @@ class CascadeConfig:
         # Objective weights
         d["g_v"] = self.g_v
         d["g_q"] = self.g_q
-        d["g_qi"] = self.g_qi
-        d["lambda_qi"] = self.lambda_qi
-        d["q_integral_max_mvar"] = self.q_integral_max_mvar
         d["dso_g_v"] = self.dso_g_v
 
         # OFO

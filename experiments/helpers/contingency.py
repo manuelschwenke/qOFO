@@ -113,6 +113,31 @@ def prepare_load_contingencies(
                 print(f"  Resolved load contingency by name {ev.name!r}: "
                       f"idx={ev.element_index} (bus {bus})")
 
+        if not used_existing and ev.action == "q_step":
+            # A Q step addresses an EXISTING load; there is no dormant-load
+            # mode for it.  Allow bus addressing as a convenience, since the
+            # IEEE 39 loads carry no names in this net.
+            if ev.bus is None:
+                raise ValueError(
+                    f"Load contingency at minute {ev.minute}: action='q_step' "
+                    f"needs element_index, name or bus to address an existing "
+                    f"load.")
+            matches = net.load.index[
+                (net.load["bus"] == ev.bus) & net.load["in_service"]
+            ].tolist()
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Load contingency at minute {ev.minute}: bus {ev.bus} "
+                    f"has {len(matches)} in-service loads ({matches}); "
+                    f"q_step needs exactly one -- address it by "
+                    f"element_index instead.")
+            ev.element_index = int(matches[0])
+            used_existing = True
+            if verbose > 0:
+                print(f"  Resolved q_step load contingency at bus {ev.bus}: "
+                      f"idx={ev.element_index}, "
+                      f"dQ={float(ev.q_mvar):+.1f} Mvar")
+
         if not used_existing:
             legacy_events.append(ev)
 
@@ -250,6 +275,20 @@ def _apply_contingency(
         bus = int(net.ext_grid.at[ev.element_index, "bus"])
         desc = f"SETPOINT-CHANGE ext_grid {ev.element_index} ({name}): old {old_setpoint} -> new {ev.new_setpoint}"
         short_label = f"[S] ExtGrid {bus}"
+    elif ev.element_type == "load" and ev.action == "q_step":
+        # Reactive-power step on an EXISTING load: the disturbance used by the
+        # dead-band x droop study.  Deliberately not a dormant-load connect --
+        # the RMS plant is built from the snapshot, so a row created here in
+        # ``net`` would have no PowerFactory counterpart and the RMS leg could
+        # not deliver the step.  Stepping an element both plants already own
+        # avoids that, and keeps the topology unchanged so Gate E stays valid.
+        old_q = float(net.load.at[ev.element_index, "q_mvar"])
+        net.load.at[ev.element_index, "q_mvar"] = old_q + float(ev.q_mvar)
+        bus = int(net.load.at[ev.element_index, "bus"])
+        desc = (f"Q-STEP load {ev.element_index} @ bus {bus}: "
+                f"{old_q:.1f} -> {old_q + float(ev.q_mvar):.1f} Mvar "
+                f"({float(ev.q_mvar):+.1f})")
+        short_label = f"[Q] Load bus {bus} {float(ev.q_mvar):+.0f} Mvar"
     elif ev.element_type == "load":
         # "connect" is functionally identical to "restore" (in_service=True)
         connect = ev.action == "connect"

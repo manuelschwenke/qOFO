@@ -1,0 +1,7 @@
+{
+  "corridor_excess_pu": 0.0001,
+  "rho_emp_p95": 1.5654187303538771,
+  "settling_s": 1500.0,
+  "tap_ops_per_h": 6.0267857142857135,
+  "tap_reversals_per_h": 1.2053571428571428
+}

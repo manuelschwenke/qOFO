@@ -49,6 +49,107 @@ _FINGERPRINT_KEY = "search_space_fingerprint"
 #: ``study.user_attrs`` key holding the objective's weight-profile name.
 _PERF_PROFILE_KEY = "perf_weights_profile"
 
+#: ``study.user_attrs`` key holding the constraint limits actually enforced.
+_LIMITS_KEY = "constraint_limits"
+
+#: ``study.user_attrs`` key holding the reparameterised decision space.
+_REPARAM_SPACE_KEY = "reparam_space"
+
+
+def _guard_reparam_space(study: optuna.Study) -> None:
+    """Refuse to resume a ``--reparam`` study whose coordinates have changed.
+
+    :func:`tuning.parameters.search_space_fingerprint` digests the *legacy*
+    ``BO_DIMS``, so it does not see ``BO_DIMS_V2`` at all -- adding
+    ``shunt_int_gain`` (2026-08-13) changed the reparameterised space without
+    changing that digest.  Optuna would then happily continue a 4-coordinate
+    study with 5-coordinate trials, and the older trials would carry no value
+    for the new dimension.
+    """
+    from tuning.reparam import reparam_search_space
+
+    current = {
+        name: [float(lo), float(hi), bool(log)]
+        for name, (lo, hi, log) in reparam_search_space().items()
+    }
+    recorded = study.user_attrs.get(_REPARAM_SPACE_KEY)
+    if recorded is None:
+        if study.trials:
+            raise SystemExit(
+                f"[tune] REFUSING TO RESUME: study {study.study_name!r} has "
+                f"{len(study.trials)} trials but no recorded reparameterised "
+                f"space, so it cannot be shown to match the current "
+                f"coordinates {sorted(current)}. Use a new --study-name."
+            )
+        study.set_user_attr(_REPARAM_SPACE_KEY, current)
+        return
+    if {k: list(v) for k, v in recorded.items()} != current:
+        raise SystemExit(
+            f"[tune] REFUSING TO RESUME: study {study.study_name!r} was run "
+            f"over coordinates {sorted(recorded)} with bounds {recorded}; the "
+            f"current space is {current}. Resuming would mix incomparable "
+            f"trials. Use a new --study-name."
+        )
+
+
+def _load_limits(path: Path | None):
+    """Build :class:`ConstraintLimits` from a JSON file, or take the defaults.
+
+    The defaults were calibrated 2026-08-04 against a *specific* plant (PQ tie
+    boundary, the weights of the day).  Change the plant and they stop being
+    anchored: on the Thevenin boundary the reference itself measures
+    ``rho_emp_p95 = 2.95`` against the default limit of 1.0.  A limit that
+    rejects the one operating point known to control well empties the feasible
+    set -- which is exactly how ``tap_ops_per_h = 6.0`` came to reject 100 % of
+    draws in the previous campaign.  So they are re-derivable per plant, and
+    the values in force are stamped on the study.
+    """
+    import json
+
+    from tuning.objectives_v2 import ConstraintLimits
+
+    if path is None:
+        return ConstraintLimits()
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    known = {f.name for f in dataclasses.fields(ConstraintLimits)}
+    unknown = set(data) - known
+    if unknown:
+        raise SystemExit(
+            f"[tune] --limits {path}: unknown field(s) {sorted(unknown)}; "
+            f"known: {sorted(known)}"
+        )
+    return ConstraintLimits(**{k: float(v) for k, v in data.items()})
+
+
+def _guard_limits(study: optuna.Study, limits) -> None:
+    """Refuse to resume a study whose feasible set was defined differently.
+
+    Feasibility partitions the trials the sampler learns from, so two limit
+    sets make two different studies, not one.
+    """
+    current = dataclasses.asdict(limits)
+    recorded = study.user_attrs.get(_LIMITS_KEY)
+    if recorded is None:
+        if study.trials:
+            raise SystemExit(
+                f"[tune] REFUSING TO RESUME: study {study.study_name!r} has "
+                f"{len(study.trials)} trials but no recorded constraint "
+                f"limits. Use a new --study-name."
+            )
+        study.set_user_attr(_LIMITS_KEY, current)
+        return
+    differing = {
+        k: (recorded.get(k), v) for k, v in current.items()
+        if recorded.get(k) != v
+    }
+    if differing:
+        raise SystemExit(
+            f"[tune] REFUSING TO RESUME: study {study.study_name!r} was run "
+            f"under different constraint limits {differing} (recorded, "
+            f"requested). Feasibility would differ between trials of one "
+            f"study. Use a new --study-name."
+        )
+
 
 def _guard_perf_profile(study: optuna.Study, profile: str) -> None:
     """Refuse to resume a study under a different objective weight profile.
@@ -265,10 +366,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Named objective weight profile (--reparam only). "
             "'calibrated_2026_08' reproduces the 2026-08 campaign; "
-            "'ts_voltage_primary' makes TS voltage tracking ~66 %% of the "
-            "scalar and demotes interface-Q to the coupling term it is. "
+            "'ts_voltage_primary' makes TS voltage tracking ~73 %% of the "
+            "scalar by weight and demotes interface-Q to the coupling term "
+            "it is (note realised shares differ -- each term is scaled by its "
+            "own p90 tolerance). "
             "Recorded on the study; resuming under a different profile is "
             "refused, because the two are different objectives."
+        ),
+    )
+    p.add_argument(
+        "--limits", type=Path, default=None,
+        help=(
+            "JSON file of ConstraintLimits fields (corridor_excess_pu, "
+            "rho_emp_p95, settling_s, tap_ops_per_h, tap_reversals_per_h). "
+            "Omit for the 2026-08-04 defaults, which are anchored to the "
+            "PQ-boundary plant. Recorded on the study; a resume under "
+            "different limits is refused."
         ),
     )
     p.add_argument(
@@ -380,6 +493,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         perf_weights = PERF_WEIGHT_PROFILES[args.perf_weights]
         _guard_perf_profile(study, args.perf_weights)
+        limits = _load_limits(args.limits)
+        _guard_limits(study, limits)
+        _guard_reparam_space(study)
+        print(
+            f"[tune] Constraint limits"
+            f"{f' from {args.limits}' if args.limits else ' (defaults)'}: "
+            f"{dataclasses.asdict(limits)}",
+            flush=True,
+        )
 
         gauge = Gauge.from_config(baseline_cfg)
         print(
@@ -414,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
             scenarios=scenarios,
             fixed_overrides=FIXED_OVERRIDES,
             weights=perf_weights,
+            limits=limits,
             cvar_pct=args.cvar_pct,
             perf_exclude=perf_exclude,
         )
@@ -546,6 +669,7 @@ def main(argv: list[str] | None = None) -> int:
         meta["perf_weights"] = dataclasses.asdict(perf_weights)
         meta["perf_exclude"] = sorted(perf_exclude)
         meta["scenario_set"] = which
+        meta["constraint_limits"] = dataclasses.asdict(limits)
     save_tuned_params(best.params, meta, args.output)
     print(f"[tune] Wrote tuned params -> {args.output}", flush=True)
 

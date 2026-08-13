@@ -222,18 +222,27 @@ class PerfWeights:
 PERF_WEIGHT_PROFILES: dict[str, PerfWeights] = {
     # As calibrated 2026-08-04; keeps the 2026-08 campaign reproducible.
     "calibrated_2026_08": PerfWeights(),
-    # Shares of the scalar: TS voltage 66.7 %, DS voltage 16.0 %,
-    # interface-Q 13.3 %, PCC utilisation 4.0 % (weights sum to 7.5).
-    # Relative to ``calibrated_2026_08`` this is TS x2 and DS-V x4 at unchanged
+    # Nominal shares of the scalar: TS voltage 73.2 %, DS voltage 10.5 %,
+    # interface-Q 12.5 %, PCC utilisation 3.8 % (weights sum to 5.7).
+    # Relative to ``calibrated_2026_08`` this is TS x2 and DS-V x2 at unchanged
     # interface-Q, i.e. interface-Q falls from 24 % to 13 % of the objective by
     # being out-weighted rather than by being suppressed -- it must stay a live
     # term, since it is the only place the cascade's inter-layer coupling is
     # scored at all.
+    #
+    # CAUTION, measured 2026-08-13: nominal weight shares are NOT the realised
+    # contribution shares.  Each term is a weight times "fraction of its own p90
+    # tolerance", and on the reference run this plant sits at 26 % of the TS
+    # voltage tolerance but 65 % of the DS one, so the DS term is amplified ~2.5x
+    # relative to its weight.  ``w_v_rms_ds`` is therefore held at 0.6: at 1.2
+    # the *realised* split on ``v2_quiet_spring`` was TS 48 % / DS 42 %, i.e. DS
+    # voltage co-dominant, which contradicts the stated "DS voltage is looser".
+    # Read the ``perf__<scenario>__<term>`` trial attributes before changing it.
     "ts_voltage_primary": PerfWeights(
         w_v_rms_ts=2.0,
         w_v_worst_ts=1.0,
         w_v_band_ts=2.0,
-        w_v_rms_ds=1.2,
+        w_v_rms_ds=0.6,
         w_q_pcc=1.0,
         w_pcc_underutil=0.3,
     ),

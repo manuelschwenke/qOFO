@@ -240,7 +240,110 @@ def add_thevenin_boundary(
         min_q_mvar=-1e6, max_q_mvar=1e6,
         name=f"{name}_SRC_{int(bus)}",
     ))
+
+    # Seed the auxiliary bus in ``res_bus`` with its EXACT solution -- ``e_pu``
+    # IS the aux-bus voltage phasor by construction.  Mandatory, not cosmetic:
+    # the reduced net inherits the plant's cached ``res_bus``, and the caller
+    # converges it with an ``init="results"`` warm start.  A bus with no result
+    # row makes that start incomplete; pandapower neither raises nor warns, and
+    # Newton can then land on the SPURIOUS LOW-VOLTAGE ROOT -- V=0 satisfies the
+    # mismatch equation identically at a zero-injection bus, and the reduced net
+    # is full of those (tertiary stubs stripped of their load in step 6).
+    #
+    # Measured 2026-08-13 before this seed, zone 2 at 2016-01-05 08:00: the net
+    # reported ``converged=True`` with TN buses at 0.44-0.66 pu and the tertiary
+    # stubs at ~1e-62 pu, so every H entry was linearised at a fictitious
+    # operating point and ``compute_dV_dQ_shunt`` (which scales by V_pu^2)
+    # returned ~1e-127 -- a structurally dead shunt column.  See
+    # 00_daily_log/2026-08-13_thevenin_spurious_root.md.
+    if net.res_bus is not None and not net.res_bus.empty:
+        seed = {c: 0.0 for c in net.res_bus.columns}
+        seed["vm_pu"] = float(np.abs(e_pu))
+        seed["va_degree"] = float(np.rad2deg(np.angle(e_pu)))
+        net.res_bus.loc[aux] = [seed[c] for c in net.res_bus.columns]
+        net.res_bus.sort_index(inplace=True)
+
     return aux, br, gi
+
+
+#: Default tolerance of the reduced-net operating-point guard [pu].  A
+#: gross-failure detector, NOT an accuracy check: the reduction reproduces the
+#: cached state to ~1e-10 pu where the zone holds the system slack, and to
+#: ~1.7e-2 pu where the slack had to be promoted (the reduced net solves with
+#: distributed_slack=False, so the promoted machine absorbs a mismatch the
+#: plant spread over all machines).  0.1 pu sits ~6x above the worst healthy
+#: case and ~4x below the spurious low-voltage root it exists to catch.
+_OP_POINT_TOL_PU: float = 0.1
+
+
+def _assert_reproduces_cached_state(
+    sub: pp.pandapowerNet,
+    net: pp.pandapowerNet,
+    *,
+    exclude_buses: Iterable[int] = (),
+    tol_pu: float = _OP_POINT_TOL_PU,
+    label: str = "",
+) -> None:
+    """Fail fast if the reduced net did not converge to the cached state.
+
+    The entire premise of the reduction is that every boundary equivalent
+    reproduces the cached operating point by construction and differs only in
+    the *derivative*.  If the solved voltage profile does not match the plant's
+    cached one, the extracted H is a linearisation about a fictitious state and
+    every downstream number -- sensitivities, MIQP steps, the shunt
+    integrator's projected gradient -- is silently wrong.
+
+    This is not hypothetical.  ``pp.runpp`` reports ``converged=True`` on the
+    spurious low-voltage root, which a reduced net is unusually prone to: the
+    stripped tertiary and far-end stubs carry zero injection, and V=0 satisfies
+    their mismatch equation identically.  Measured 2026-08-13 (see
+    ``00_daily_log/2026-08-13_thevenin_spurious_root.md``): TSO zones 2 and 3
+    under ``tie_boundary="thevenin"`` solved at 0.44-0.66 pu on the TN with
+    tertiaries at ~1e-62 pu, and nothing anywhere raised.
+
+    Parameters
+    ----------
+    sub, net
+        Reduced net (already converged) and the plant net holding the cached
+        ``res_bus``.
+    exclude_buses
+        Buses to skip -- the auxiliary buses created by boundary equivalents,
+        which have no counterpart in the plant.  NOTE: ``pp.create_bus``
+        assigns them ``max(index) + 1`` of the *reduced* net, so their indices
+        can coincide with plant buses that this zone dropped; comparing them
+        against ``net.res_bus`` would be meaningless.
+    tol_pu
+        Maximum tolerated ``|vm_reduced - vm_cached|`` [pu].
+    label
+        Prefix for the error message (e.g. the zone).
+    """
+    skip = {int(b) for b in exclude_buses}
+    bad: List[Tuple[int, float, float]] = []
+    for b in sub.bus.index:
+        b = int(b)
+        if b in skip or b not in net.res_bus.index:
+            continue
+        v_cached = float(net.res_bus.at[b, "vm_pu"])
+        if not np.isfinite(v_cached):
+            continue
+        v_red = (
+            float(sub.res_bus.at[b, "vm_pu"])
+            if b in sub.res_bus.index else float("nan")
+        )
+        if not np.isfinite(v_red) or abs(v_red - v_cached) > tol_pu:
+            bad.append((b, v_red, v_cached))
+    if bad:
+        shown = ", ".join(
+            f"bus {b}: {v:.4g} vs cached {vc:.4f}" for b, v, vc in bad[:8]
+        )
+        raise ValueError(
+            f"{label}reduced net did not reproduce the cached operating point: "
+            f"{len(bad)}/{len(sub.bus)} bus(es) deviate by more than "
+            f"{tol_pu} pu ({shown}"
+            f"{', ...' if len(bad) > 8 else ''}).  The power flow reports "
+            f"convergence but has landed on a different root, so any H "
+            f"extracted from this net is linearised about a fictitious state."
+        )
 
 
 #: Measured physical Thevenin stiffness per corridor, k = |Z_th| / |Z_line|,
@@ -299,6 +402,7 @@ def build_tso_local_net(
     *,
     tie_boundary: str = "pq",
     tie_thevenin_k: float = 1.0,
+    op_point_tol_pu: float = _OP_POINT_TOL_PU,
     verbose: int = 0,
 ) -> TSOLocalNetResult:
     """Build the reduced TSO network for one zone.
@@ -390,6 +494,11 @@ def build_tso_local_net(
         zones which look into different external systems through
         different terminals, so one line carries two values.
         :data:`THEVENIN_K_PER_CORRIDOR` holds the measured set.
+    op_point_tol_pu : float
+        Tolerance [pu] of the post-solve guard that checks the reduced net
+        actually landed on the cached operating point rather than on another
+        root of the power flow equations.  See
+        :func:`_assert_reproduces_cached_state`.
 
     Returns
     -------
@@ -701,6 +810,7 @@ def build_tso_local_net(
     # that bus responds when the zone's own actuators move, which is what
     # the extracted H matrix is made of.
     n_tie_z_fallback = 0
+    boundary_aux_buses: List[int] = []
     for far, p_inj, q_inj, v_far, va_far, li_tie in tie_load_specs:
         if far not in sub.bus.index:
             continue
@@ -719,12 +829,13 @@ def build_tso_local_net(
                 # bus base rather than divide by zero.
                 vn = float(sub.bus.at[far, "vn_kv"])
                 z_line = complex(0.0, 0.01 * vn ** 2 / _S_BASE_MVA)
-            add_thevenin_boundary(
+            aux_b, _, _ = add_thevenin_boundary(
                 sub, int(far), p_inj, q_inj,
                 complex(_k_for(li_tie, far)) * z_line,
                 vm_pu=v_far, va_degree=va_far,
                 slack=False, name="WARD_TIE_TH",
             )
+            boundary_aux_buses.append(int(aux_b))
             continue
 
         if tie_boundary == "pv":
@@ -934,6 +1045,19 @@ def build_tso_local_net(
         calculate_voltage_angles=True,
         enforce_q_lims=False,
     )
+
+    # ── 10b. Operating-point guard ────────────────────────────────────────
+    # Every boundary variant matches the cached state by construction, so a
+    # converged reduced net that does NOT is on the wrong root and its H is
+    # linearised about a fictitious state.  Fail here rather than let the
+    # controllers cache it (see the helper's docstring for the 2026-08-13 case).
+    _assert_reproduces_cached_state(
+        sub, net,
+        exclude_buses=boundary_aux_buses,
+        tol_pu=op_point_tol_pu,
+        label=f"[build_tso_local_net] tie_boundary={tie_boundary!r}: ",
+    )
+
     if verbose >= 2:
         print(f"  [build_tso_local_net] reduced net: "
               f"{len(sub.bus)} buses, {len(sub.line)} lines, "

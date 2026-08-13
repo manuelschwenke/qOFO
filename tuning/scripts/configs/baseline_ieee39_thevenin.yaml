@@ -7,6 +7,26 @@ adapt_g_w_tso_oltc: false
 central_dso_g_v: 20000.0
 central_period_s: null
 contingencies:
+- action: trip
+  bus: null
+  element_index: 2
+  element_type: gen
+  minute: 30
+  name: null
+  new_setpoint: .nan
+  p_mw: .nan
+  q_mvar: .nan
+  time_s: null
+- action: restore
+  bus: null
+  element_index: 2
+  element_type: gen
+  minute: 180
+  name: null
+  new_setpoint: .nan
+  p_mw: .nan
+  q_mvar: .nan
+  time_s: null
 - action: connect
   bus: 11
   element_index: -1
@@ -15,7 +35,7 @@ contingencies:
   name: null
   new_setpoint: .nan
   p_mw: 0
-  q_mvar: 300
+  q_mvar: 250
   time_s: null
 - action: trip
   bus: 11
@@ -25,7 +45,27 @@ contingencies:
   name: null
   new_setpoint: .nan
   p_mw: 0
-  q_mvar: 300
+  q_mvar: 250
+  time_s: null
+- action: connect
+  bus: 11
+  element_index: -1
+  element_type: load
+  minute: 150
+  name: null
+  new_setpoint: .nan
+  p_mw: 150
+  q_mvar: 100
+  time_s: null
+- action: trip
+  bus: 11
+  element_index: -1
+  element_type: load
+  minute: 360
+  name: null
+  new_setpoint: .nan
+  p_mw: 150
+  q_mvar: 100
   time_s: null
 - action: trip
   bus: null
@@ -93,12 +133,12 @@ g_w_adapt_t_max: 1000000.0
 g_w_adapt_t_max_per_class: {}
 g_w_adapt_t_min: 0.01
 g_w_adapt_t_min_per_class: {}
-g_w_der: 15
+g_w_der: 20
 g_w_dso_der: 800
 g_w_dso_oltc: 150
-g_w_gen: 1500000000.0
-g_w_pcc: 45
-g_w_tso_oltc: 1500.0
+g_w_gen: 1000000000.0
+g_w_pcc: 60
+g_w_tso_oltc: 5000.0
 g_w_tso_shunt: 3600
 g_z_current: 0.0
 g_z_interface: 0.0
@@ -107,7 +147,7 @@ g_z_q_pcc: 0.01
 g_z_voltage: 1000000000.0
 g_z_warmup_s: 0.0
 g_z_warmup_value: 1.0e-12
-install_tso_tertiary_shunts: false
+install_tso_tertiary_shunts: true
 int_cooldown: 6
 int_max_step: 1
 live_plot_cascade: true
@@ -152,7 +192,7 @@ measurement_noise:
   profile: minimum
   sample_noise_fraction: 0.1
   seed: 20260717
-n_total_s: 18000.0
+n_total_s: 28800.0
 numerical_h: false
 numerical_h_closed_loop: true
 oltc_cooldown_s: 30.0
@@ -207,10 +247,10 @@ scenario: rural_700
 seed_der_anchor_to_local_v: false
 sensitivity_reduction_rev: 2
 sensitivity_update_interval: 1000000.0
-shunt_dispatch: 'off'
+shunt_dispatch: integrator
 shunt_int_daily_budget: 1000.0
 shunt_int_delta_mvar: 10.0
-shunt_int_g_w: 10
+shunt_int_g_w: 100
 shunt_int_t_dwell_s: 1800.0
 shunt_int_v_max_pu: 1.1
 shunt_int_v_min_pu: 0.9

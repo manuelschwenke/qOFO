@@ -74,23 +74,36 @@ where the tuned λ lives.
 Reinstate `zone_g_w_scale` only for a genuinely **per-zone** (non-uniform)
 re-gain — that is what the field is for.
 
-## 3. Shunts excluded from the tuned plant
+## 3. Shunts: first excluded, then tuned (`shunt_int_gain`, 5th coordinate)
 
-The MSC/MSR banks are dispatched by `controller.shunt_integrator`, outside the
-MIQP, on a 1800 s dwell; they are not a tuning degree of freedom. Baseline
-therefore built with `--shunts off`.
+Initially the baseline was built with `--shunts off`, on the grounds that the
+MSC/MSR banks are dispatched by `controller.shunt_integrator` outside the MIQP
+and are therefore not a MIQP tuning degree of freedom. Revised the same day:
+the integrator **gain** is tunable even though the dispatch is not, so
+`shunt_int_g_w` is now searched.
 
-**Trap:** `shunt_dispatch='off'` alone is *not* enough. The runner
-(`multi_tso_dso.py`, "Resolve the effective switched-shunt dispatch mode")
-reinterprets `'off'` as the legacy `'miqp'` mode whenever
-`install_tso_tertiary_shunts=True` — which would put shunt **integers back into
-the MIQP**, the opposite of the intent. `save_baseline.py --shunts off` sets
-both fields together and documents why.
+**Trap found and kept documented:** `shunt_dispatch='off'` alone does *not*
+remove the shunts. The runner (`multi_tso_dso.py`, "Resolve the effective
+switched-shunt dispatch mode") reinterprets `'off'` as the legacy `'miqp'` mode
+whenever `install_tso_tertiary_shunts=True` — which puts shunt **integers back
+into the MIQP**, the opposite of the intent. `save_baseline.py --shunts off`
+sets both fields together; the shipped baseline uses the default
+`--shunts as-configured`, i.e. `integrator` with the banks installed.
 
-Consequence to carry into the report: the tuned point is optimal for a plant
-**without** tertiary shunts. Shunt engagement is inherited from the reference
-when it ships, and `shunt_int_g_w` (currently being hand-tuned) is not
-identified by this study.
+The new coordinate is a **ratio** to the reference `shunt_int_g_w`
+(±1.5 decades, log), like the other non-gain coordinates. The integrator step
+is `delta = g_H / (2 g_w)`, so smaller commits sooner and in larger increments.
+`shunt_int_g_w` is a member of the exact-scaling group, but that statement is
+about the *common factor* only: its ratio to the rest of the weights is a
+genuine, identifiable degree of freedom — it decides how much of a persistent
+reactive imbalance is absorbed by the discrete banks rather than by continuous
+DER/PCC authority. `g_w_tso_shunt` remains inert (MIQP path only).
+
+**Risk to check in the results:** if the banks never commit across the tune
+set, the coordinate carries no signal — the same structural inertness
+`tau_der_pcc` had on `v2_undervoltage_ramp`. `TrajectoryMetrics` has no shunt
+activity field, so this must be read from `zone_tso_shunt_states` in the
+records, not from the objective.
 
 ## 4. Objective weight profile — TS voltage primary
 
@@ -121,6 +134,86 @@ OLTC behaviour stays where it belongs — constraints `g5a` (tap operations per
 hour, per transformer) and `g5b` (reversals per hour, the hunting mode).
 Folding wear back into the scalar is the failure mode `objectives_v2` exists to
 avoid.
+
+## 5. Constraint limits re-anchored on this plant
+
+The `ConstraintLimits` defaults were calibrated 2026-08-04 against the
+PQ-boundary plant. The reference was therefore re-measured here on all four
+`tune_v2` scenarios (`--limits` was added to `tune.py`, with a resume guard —
+two limit sets define two different feasible sets, hence two different
+studies).
+
+Reference at the analytic point (λ_tso = λ_dso = 0.9, τ = 1, all ratios 1),
+all four scenarios feasible:
+
+| scenario | `rho_emp_p95` | ops/h TSO | ops/h DSO | rev/h TSO | rev/h DSO | excess/step |
+|---|---|---|---|---|---|---|
+| `v2_quiet_spring` | 1.0132 | 0.000 | 3.214 | 0.000 | 0.000 | 0 |
+| `v2_gen_trip` | 1.0132 | 0.000 | 4.018 | 0.000 | 0.804 | 8.2e-6 |
+| `v2_undervoltage_ramp` | 1.0436 | 2.411 | 2.411 | 0.000 | 0.000 | 0 |
+| `v2_overvoltage_rural` | 1.0093 | 0.804 | 0.000 | 0.000 | 0.000 | 0 |
+
+Limits at margin 1.5 (`tuning/scripts/configs/limits_thevenin_2026-08-13.json`):
+
+| limit | 2026-08-04 default | reference worst | new |
+|---|---|---|---|
+| `corridor_excess_pu` | 1e-4 | 8.2e-6 | 1e-4 (floor) |
+| `rho_emp_p95` | 1.0 | 1.0436 | **1.5654** |
+| `tap_ops_per_h` | 9.643 | 4.018 | **6.027** |
+| `tap_reversals_per_h` | 1.2054 | 0.804 | 1.2054 |
+| `settling_s` | 1500 | inactive | 1500 |
+
+Two notes:
+
+* `rho_emp_p95` had to move. Its docstring keeps it at 1.0 "regardless"
+  because "the reference passes it on its own merits (measured 0.929)" — that
+  premise is false on this plant, where the reference measures 1.0436. The
+  quantity is the coordinator's `alpha*(lambda_max(M_ii) + sum_j ||M_ij||)`,
+  which adds a rank-1 term per integer OLTC column and so over-counts a
+  per-tick effect the tap cooldown bounds; gating it *relative to* the
+  known-good point is the honest reading. Keeping 1.0 would have rejected the
+  reference and probably emptied the box — the same defect that made
+  `tap_ops_per_h = 6.0` reject 100 % of draws in the last campaign.
+* Switching gets **tighter**, not looser: 9.64 → 6.03 ops/h. That matches the
+  stated requirement that OLTCs not switch excessively. The reversal limit is
+  unchanged at 1.205/h and the reference is nearly reversal-free (0.804/h
+  worst, DSO, on `v2_gen_trip`).
+
+A separate measurement worth recording: an earlier configuration (no tertiary
+shunts, `g_w_tso_oltc = 1500`) measured `rho_emp_p95 = 2.95` on
+`v2_quiet_spring`. Installing the shunts and pricing the OLTCs at 5000 brings
+it to ~1.01. The contraction diagnostic is strongly sensitive to the integer
+weights and to the shunt presence, and **not at all** to `tso_lambda` at init
+(measured identical at λ = 0.05 and 0.10) — it only separates during the run.
+
+## 6. All four scenarios stay in the performance aggregate
+
+The 2026-08 campaign excluded `v2_undervoltage_ramp` from the aggregate
+because, under CVaR-25 over four scenarios (which *is* the maximum), its
+scalar was ~85x the others and it became the entire objective. Re-measured
+here under the recalibrated p90 scales and the `ts_voltage_primary` weights:
+
+| scenario | perf scalar | share of the mean |
+|---|---|---|
+| `v2_quiet_spring` | 1.4614 | 12.5 % |
+| `v2_gen_trip` | 1.4374 | 12.3 % |
+| `v2_overvoltage_rural` | 1.2138 | 10.4 % |
+| `v2_undervoltage_ramp` | 7.5444 | **64.7 %** |
+
+The ratio to the next scenario is **5.2x, not 85x**, and with `cvar_pct=100`
+(the mean) the degenerate max-aggregator is gone. Since the ramp is the only
+case in the set where TS voltage is genuinely stressed — `v_band_ts` 2.59 and
+`v_rms_ts` 2.31 of its 7.54, against 0.52 and 0.001 on the quiet case — and TS
+voltage tracking is the stated objective, excluding it would remove the very
+condition being optimised for. It is therefore **retained**.
+
+Carried risk, unchanged from the earlier finding: PV-based TS-DER have zero
+reactive capability at that winter-evening start, so `tau_der_pcc` is
+structurally inert *within* that scenario and now gets ~35 % of the aggregate
+signal instead of 100 %. Check `tau_der_pcc`'s marginal identifiability
+per scenario (`tuning.scripts.identifiability`, plus the
+`perf__<scenario>__<term>` trial attributes) before reading its posterior; if
+it comes out unidentified, re-run with `--perf-exclude v2_undervoltage_ramp`.
 
 ---
 

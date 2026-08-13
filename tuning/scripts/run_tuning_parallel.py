@@ -70,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="Forwarded to tuning.tune: named objective weight "
                         "profile. Every worker must pass the same one; the "
                         "study records it and refuses a mismatched resume.")
+    p.add_argument("--limits", type=Path, default=None,
+                   help="Forwarded to tuning.tune: JSON of ConstraintLimits "
+                        "fields. Omit for the 2026-08-04 defaults.")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args(argv)
 
@@ -128,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         ]
         if args.perf_exclude:
             cmd += ["--perf-exclude", args.perf_exclude]
+        if args.limits:
+            cmd += ["--limits", str(args.limits)]
         if w > 0:
             # Only worker 0 enqueues the reference; the others would duplicate
             # it and waste ~15 min each on an identical evaluation.

@@ -16,6 +16,11 @@ Two facts, both measured rather than assumed (2026-07-31):
 
        {g_v, tso_g_q_pcc, g_q, dso_g_v} u {g_w_*} u {g_z_*} u {shunt_int_g_w}
 
+   Note this is a statement about the *common factor* only.  Individual
+   members of the group -- ``dso_g_v`` and ``shunt_int_g_w`` -- are searched
+   below as ratios to the reference, which is a different direction and is
+   identifiable.
+
 2. **The box excluded the only known-good point.**  The hand-tuned
    configuration has ``g_v = 1e7`` against a box of ``[1e2, 1e5]`` and
    ``g_w_pcc = 80`` against a ceiling of ``30`` — unreachable by any trial.
@@ -163,6 +168,27 @@ BO_DIMS_V2: tuple[BOParam, ...] = (
     # as a multiple of the reference ``dso_g_v``.  1.0 = the reference.
     BOParam("dso_v_priority", log=True,
             low=10.0 ** -_WINDOW_DECADES, high=10.0 ** _WINDOW_DECADES),
+
+    # Switched-shunt engagement, as a multiple of the reference
+    # ``shunt_int_g_w`` (added 2026-08-13).  The MSC/MSR banks are dispatched
+    # by the integrator OUTSIDE the MIQP, and its step is
+    # ``delta = g_H / (2 g_w)``, so SMALLER commits sooner and in bigger
+    # increments; ``g_w_tso_shunt`` is inert on this path.
+    #
+    # This is a *relative* factor for the same reason as the others: raw
+    # ``shunt_int_g_w`` belongs to the exact-scaling group, so only its ratio
+    # to the rest of the weights is identifiable.  Moving that ratio is a
+    # genuine degree of freedom -- it decides how much of a persistent
+    # reactive imbalance is absorbed by the discrete banks instead of by
+    # continuous DER/PCC authority -- and it is what the common-factor
+    # redundancy does *not* cover.
+    #
+    # Watch for inertness: if the banks never commit across the tune set, the
+    # coordinate carries no signal, exactly as ``tau_der_pcc`` was structurally
+    # inert on ``v2_undervoltage_ramp``.  Check the per-trial shunt activity
+    # before reading anything into its posterior.
+    BOParam("shunt_int_gain", log=True,
+            low=10.0 ** -_WINDOW_DECADES, high=10.0 ** _WINDOW_DECADES),
 )
 
 # Deliberately absent, with reasons:
@@ -232,6 +258,10 @@ def apply_reparam_to_config(
         # DSO objective trade-off, as a multiple of the reference.
         "dso_g_v": float(coords["dso_v_priority"]) * gauge.dso_g_v,
 
+        # Shunt-integrator engagement, as a multiple of the reference.  Only
+        # read when ``shunt_dispatch='integrator'``; harmless otherwise.
+        "shunt_int_g_w": float(coords["shunt_int_gain"]) * gauge.shunt_int_g_w,
+
         # Loop gain + shape, applied by the preconditioner at controller init.
         "precondition_g_w": True,
         "precondition_mode": "set",
@@ -276,12 +306,17 @@ def coords_from_config(cfg: MultiTSOConfig, gauge: Gauge) -> dict[str, float]:
     v_priority = (
         float(cfg.dso_g_v) / gauge.dso_g_v if gauge.dso_g_v > 0 else 1.0
     )
+    shunt_gain = (
+        float(getattr(cfg, "shunt_int_g_w", 0.0) or 0.0) / gauge.shunt_int_g_w
+        if gauge.shunt_int_g_w > 0 else 1.0
+    )
 
     return {
         "tso_lambda": _clamp("tso_lambda", float(lam_tso or shared)),
         "dso_lambda": _clamp("dso_lambda", float(lam_dso or shared)),
         "tau_der_pcc": 1.0,          # analytic preconditioner = no preference
         "dso_v_priority": _clamp("dso_v_priority", v_priority),
+        "shunt_int_gain": _clamp("shunt_int_gain", shunt_gain),
     }
 
 

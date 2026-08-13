@@ -259,7 +259,7 @@ def make_config() -> MultiTSOConfig:
     keeps its own paired config.
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 5,      # 36-hour (2160-min) simulation
+        n_total_s=60.0 * 60 * 8,      # 36-hour (2160-min) simulation
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
         dso_period_s=20.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
         dt_s=20.0,
@@ -305,9 +305,9 @@ def make_config() -> MultiTSOConfig:
         # [0.167, 4.0], i.e. past the hard OFO bound of 2.  Kept only for a
         # genuinely PER-ZONE (non-uniform) re-gain, which is what the field is
         # for; see 00_daily_log/2026-08-13_bo_thevenin_study_setup.md.
-        g_w_der=15,          # 50   x 0.3
-        g_w_gen=1.5e9,       # 5e9  x 0.3
-        g_w_pcc=45,          # 150  x 0.3
+        g_w_der=20,          # 50   x 0.3
+        g_w_gen=1e9,       # 5e9  x 0.3
+        g_w_pcc=60,          # 150  x 0.3
         # KEPT at the hand-tuned value.  The 2026-08-03 switching calibration
         # recommended 2287.57 (median 5.625 tap ops/h, 6.2 % off its 6 ops/h
         # target) and it was written here, then reverted on measurement:
@@ -329,7 +329,7 @@ def make_config() -> MultiTSOConfig:
         # (x 0.3 with the rest of the TSO g_w block -- see the fold note above;
         # 5000 x 0.3 = 1500 is the same operating point, not a new calibration,
         # so the measured ops/h figures quoted here still apply.)
-        g_w_tso_oltc=1.5E3, # 5E3 x 0.3
+        g_w_tso_oltc=5E3, # 5E3 x 0.3
         # shunt
         install_tso_tertiary_shunts=True,
         shunt_dispatch="integrator", #"integrator"
@@ -342,7 +342,7 @@ def make_config() -> MultiTSOConfig:
         tso_shunt_msc_q_step_mvar=25.0,  # Mvar per MSC step
         tso_shunt_msr_q_step_mvar=25.0,  # Mvar per MSR step
         # integrator tuning
-        shunt_int_g_w=10,  # step = g_H/(2*g_w); SMALLER = bigger step — TUNE THIS
+        shunt_int_g_w=100,  # step = g_H/(2*g_w); SMALLER = bigger step — TUNE THIS
         shunt_int_delta_mvar=10.0,  # hysteresis half-width (must be < q_step/2 = 25)
         shunt_int_t_dwell_s=30*60.0,  # min seconds between commits per bank (anti-chatter)
         shunt_int_v_min_pu=0.90,  # HV feasibility band (overshoot guard)
@@ -455,12 +455,12 @@ def make_config() -> MultiTSOConfig:
             # ContingencyEvent(minute=20, element_type="load", bus=9,
             #                  p_mw=0, q_mvar=400, action="connect"),
             # --- further examples (disabled) ---
-            #ContingencyEvent(minute=10, element_type="gen",  element_index=2,  action="trip"),
-            #ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
-            ContingencyEvent(minute=90, element_type="load", bus=11, p_mw=0, q_mvar=300, action="connect"),
-            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=0, q_mvar=300, action="trip"),
-            # ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
-            # ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=30, element_type="gen",  element_index=2,  action="trip"),
+            ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
+            ContingencyEvent(minute=90, element_type="load", bus=11, p_mw=0, q_mvar=250, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=0, q_mvar=250, action="trip"),
+            ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
             ContingencyEvent(minute=210, element_type="line", element_index=25, action="trip"),
             ContingencyEvent(minute=300, element_type="line", element_index=25, action="restore"),
         ],

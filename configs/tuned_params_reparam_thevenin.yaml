@@ -1,0 +1,53 @@
+meta:
+  baseline_path: tuning\scripts\configs\baseline_ieee39_thevenin.yaml
+  best_trial_number: 196
+  best_value: 2.790853333230605
+  ceilings:
+    g_v: 10051761.482479239
+    g_w_der: 19.89701012589791
+    g_w_dso_der: 795.8804050359165
+    g_w_dso_oltc: .inf
+    g_w_pcc: 59.691030377693735
+    g_w_tso_oltc: 7058.561313443179
+    g_w_tso_shunt: .inf
+  ceilings_notes: 'continuous via isotropic 1/g_w scaling, rho(M_full^c)=0.9949 at
+    baseline; g_w_tso_oltc from C3.g_min_required (max over 7 OLTCs); g_w_tso_shunt:
+    no shunt actuators in stability result; g_w_dso_oltc: no analytical bound (DSO
+    OLTCs settle finitely by Prop. 1.3); ceiling=inf, BO uses fallback_high'
+  constraint_limits:
+    corridor_excess_pu: 0.0001
+    rho_emp_p95: 1.5654187303538771
+    settling_s: 1500.0
+    tap_ops_per_h: 6.0267857142857135
+    tap_reversals_per_h: 1.2053571428571428
+  constraints:
+    g1_diverged: 0.0
+    g2_corridor: -0.0001
+    g3_contraction: -0.5218062434512925
+    g4_settling: -300.0
+    g5a_tap_ops: -3.616071428571428
+    g5b_tap_reversals: -0.4017857142857142
+  cvar_pct: 100.0
+  n_trials: 250
+  perf_exclude: []
+  perf_weights:
+    w_pcc_underutil: 0.3
+    w_q_pcc: 1.0
+    w_v_band_ts: 2.0
+    w_v_rms_ds: 0.6
+    w_v_rms_ts: 2.0
+    w_v_worst_ts: 1.0
+  perf_weights_profile: ts_voltage_primary
+  scenario_set: tune_v2
+  search_space_fingerprint: 28e4a48605e74730
+  search_space_version: 2
+  solver: GUROBI ?
+  space: reparam
+  study_name: thevenin_tsv_2026-08-13
+  timestamp: '2026-08-14T02:48:09.917343'
+params:
+  dso_lambda: 0.850904775867869
+  dso_v_priority: 1.0850887486559435
+  shunt_int_gain: 0.4197448970872783
+  tau_der_pcc: 0.017489627804386346
+  tso_lambda: 0.5012421263778098

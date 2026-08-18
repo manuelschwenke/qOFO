@@ -2878,6 +2878,63 @@ def run_multi_tso_dso(
                       f"{_b.q_raise_mvar:.1f} / lowering "
                       f"{_b.q_lower_mvar:.1f} Mvar")
 
+    # ── Per-area, per-class g_w overrides ─────────────────────────────────────
+    # Absolute weights, one level finer than ``zone_g_w_scale``: that knob has a
+    # single number per area and cannot express an area whose classes want to
+    # move in opposite directions, which is what the analytic per-column design
+    # actually asks for (``tuning_mc.stage_0_preconditioning --per-area``).
+    #
+    # Applied BEFORE ``zone_g_w_scale`` so the scale, if also set, multiplies
+    # these rather than being overwritten by them.
+    #
+    # Both ``params.g_w`` and ``_g_w_vector_cache`` are written.  This is not
+    # belt-and-braces: ``build_miqp_problem`` takes ``g_w_vector`` in preference
+    # to ``g_w`` whenever the cache is non-None, so writing only ``params.g_w``
+    # (which is all ``zone_g_w_scale`` below does) is silently ignored on any
+    # controller that has a DER mapping.  Mirrors
+    # ``BaseOFOController.apply_preconditioned_g_w``.
+    def _apply_class_g_w(_ctrl, _spec: dict, _tag: str) -> None:
+        _gw = getattr(getattr(_ctrl, "params", None), "g_w", None)
+        if _gw is None or not _spec:
+            return
+        _vec = np.broadcast_to(np.asarray(_gw, dtype=float),
+                               (_ctrl.n_controls,)).copy()
+        _cls_map = _ctrl._actuator_class_indices()
+        _hit, _miss = [], []
+        for _cls, _val in _spec.items():
+            _idx = _cls_map.get(str(_cls))
+            if _idx is None or np.size(_idx) == 0:
+                _miss.append(str(_cls))
+                continue
+            _v = float(_val)
+            if not (_v > 0.0):
+                raise ValueError(
+                    f"g_w must be strictly positive; {_tag} class "
+                    f"{_cls!r} got {_v!r}"
+                )
+            _vec[np.asarray(_idx, dtype=int)] = _v
+            _hit.append(f"{_cls}={_v:g}")
+        _ctrl.params = dataclasses.replace(_ctrl.params, g_w=_vec)
+        if getattr(_ctrl, "_g_w_vector_cache", None) is not None:
+            _ctrl._g_w_vector_cache = _vec.copy()
+        if verbose >= 1 and _hit:
+            print(f"  [g_w_class] {_tag}: {'  '.join(_hit)}")
+        if _miss:
+            print(f"  [g_w_class] WARNING {_tag}: no such actuator class "
+                  f"{_miss} -- override ignored (known: "
+                  f"{sorted(_cls_map)})")
+
+    if getattr(config, "zone_g_w_class", None):
+        for _z, _ctrl in tso_controllers.items():
+            _spec = config.zone_g_w_class.get(int(_z))
+            if _spec:
+                _apply_class_g_w(_ctrl, _spec, f"zone {_z}")
+    if getattr(config, "dso_g_w_class", None):
+        for _d, _ctrl in dso_controllers.items():
+            _spec = config.dso_g_w_class.get(str(_d))
+            if _spec:
+                _apply_class_g_w(_ctrl, _spec, f"{_d}")
+
     # ── Per-zone loop-gain scaling ────────────────────────────────────────────
     # Applied here, after every controller exists and before the first step, so
     # the whole run sees one consistent gain.  ``OFOParameters`` is frozen, so
@@ -2893,6 +2950,13 @@ def run_multi_tso_dso(
             _scaled = (np.asarray(_gw, dtype=float) * _s
                        if np.ndim(_gw) else float(_gw) * _s)
             _ctrl.params = dataclasses.replace(_ctrl.params, g_w=_scaled)
+            # Same reason as _apply_class_g_w above: a non-None cache shadows
+            # params.g_w inside build_miqp_problem, so the scale would be a
+            # silent no-op on a controller with a DER mapping.
+            if getattr(_ctrl, "_g_w_vector_cache", None) is not None:
+                _ctrl._g_w_vector_cache = np.broadcast_to(
+                    np.asarray(_scaled, dtype=float),
+                    (_ctrl.n_controls,)).copy()
             if verbose >= 1:
                 print(f"  [zone_g_w_scale] zone {_z}: g_w x {_s:g}")
 
@@ -3923,6 +3987,13 @@ def run_multi_tso_dso(
                         # Add the persistent switched-shunt feedforward offset to
                         # the interface setpoints so the DSO does not counteract a
                         # committed switch (it rejects only the residual).
+                        #
+                        # PAIRED WITH the capability-band shift in the DSO step
+                        # above: this moves the setpoint, that moves the bound
+                        # the setpoint has to satisfy.  Changing one without the
+                        # other puts the dispatched value outside the DSO's
+                        # reported capability by exactly the offset — the
+                        # 2026-08-13 fault.
                         if _shunt_mode == "integrator" and q_itf_sh_offset:
                             q_adj = msg.q_setpoints_mvar.copy()
                             for _ii, _t in enumerate(
@@ -3986,6 +4057,40 @@ def run_multi_tso_dso(
                     target_controller_id=tso_id,
                     measurement=meas_dso,
                 )
+                # ── Switched-shunt feedforward: shift the capability band ─────
+                # PAIRED WITH the ``q_adj`` block in the TSO setpoint dispatch
+                # below — keep the two together, they must move as one.
+                #
+                # The DSO is dispatched ``u_pcc + q_itf_sh_offset``, but the
+                # MIQP bounds ``u_pcc`` itself against this band.  Without the
+                # matching shift the quantity actually REQUESTED escapes the
+                # band by exactly the offset.  Requiring the emitted setpoint
+                # to be reachable:
+                #
+                #   u_pcc + off ∈ [q_now + dmin,       q_now + dmax]
+                #  ⟺ u_pcc      ∈ [q_now + dmin - off, q_now + dmax - off]
+                #
+                # so the offset comes off the reported deltas here.
+                #
+                # Measured 2026-08-13 without this (6 h, IEEE 39 + 4 HV nets):
+                # DSO_2 settled at ``rail + offset`` — setpoint -137.46 against
+                # a reported rail of -89.5 with a cumulative offset of -48.23 —
+                # leaving a -57.7 Mvar interface gap that no actuator could
+                # close and that was insensitive to g_q, g_z_q_pcc and the
+                # sensitivity model.  With the shift: -57.7 -> +1.7 Mvar, and
+                # the setpoint tracks the reported rail to ~0.1 Mvar.
+                # See 00_daily_log/2026-08-13_capability_open_loop.md.
+                if _shunt_mode == "integrator" and q_itf_sh_offset:
+                    _cap_min = np.asarray(cap_msg.q_min_mvar, dtype=np.float64).copy()
+                    _cap_max = np.asarray(cap_msg.q_max_mvar, dtype=np.float64).copy()
+                    for _ci, _ct in enumerate(
+                        cap_msg.interface_transformer_indices
+                    ):
+                        _off = q_itf_sh_offset.get(int(_ct), 0.0)
+                        _cap_min[_ci] -= _off
+                        _cap_max[_ci] -= _off
+                    cap_msg.q_min_mvar = _cap_min
+                    cap_msg.q_max_mvar = _cap_max
                 # Deliver to the responsible TSO controller.
                 target_tso = next(
                     ctrl for ctrl in tso_controllers.values()

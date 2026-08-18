@@ -42,6 +42,7 @@ Author: Manuel Schwenke / Claude Code
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import pickle
 import sys
@@ -259,7 +260,7 @@ def make_config() -> MultiTSOConfig:
     keeps its own paired config.
     """
     cfg = MultiTSOConfig(
-        n_total_s=60.0 * 60 * 8,      # 36-hour (2160-min) simulation
+        n_total_s=60.0 * 60 * 24,      # 36-hour (2160-min) simulation
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
         dso_period_s=20.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
         dt_s=20.0,
@@ -305,9 +306,9 @@ def make_config() -> MultiTSOConfig:
         # [0.167, 4.0], i.e. past the hard OFO bound of 2.  Kept only for a
         # genuinely PER-ZONE (non-uniform) re-gain, which is what the field is
         # for; see 00_daily_log/2026-08-13_bo_thevenin_study_setup.md.
-        g_w_der=20,          # 50   x 0.3
+        g_w_der=15,          # 50   x 0.3
         g_w_gen=1e9,       # 5e9  x 0.3
-        g_w_pcc=60,          # 150  x 0.3
+        g_w_pcc=50,          # 150  x 0.3
         # KEPT at the hand-tuned value.  The 2026-08-03 switching calibration
         # recommended 2287.57 (median 5.625 tap ops/h, 6.2 % off its 6 ops/h
         # target) and it was written here, then reverted on measurement:
@@ -358,7 +359,7 @@ def make_config() -> MultiTSOConfig:
         # locally non-monotone there (62.64 -> 3.616 but 74.99 -> 4.018), so the
         # bisection's premise does not hold at this resolution.  150 gives
         # 1.206 ops/h ~ 1.5 real ops/day.
-        g_w_dso_oltc=150, #200
+        g_w_dso_oltc=200, #200
         # ── Local-mode OLTC tap-rate limits (V1/V2 MT+NC, V3 NC) ──
         # max_step=1 (default) + wall-clock cooldown per OLTC type:
         #   MT (machine 2W gen-trafo) -> 1 tap / 180 s = once per TS interval.
@@ -468,6 +469,291 @@ def make_config() -> MultiTSOConfig:
     return cfg
 
 
+def make_config_tuned() -> MultiTSOConfig:
+    """Run configuration for the default multi-TSO / multi-DSO run (edit here).
+
+    Single place to change the horizon, objective weights, OFO timing,
+    profile and contingency schedule for ``main()``.  ``main_comparison()``
+    keeps its own paired config.
+    """
+    cfg = MultiTSOConfig(
+        # time
+        n_total_s=60.0 * 60 * 24,      # 36-hour (2160-min) simulation
+        tso_period_s=60.0 * 3,        # TS-OFO every 3 min
+        dso_period_s=20.0,            # DSO-OFO each plant step (dt_s=60 >= 10)
+        dt_s=20.0,
+        # objective weights
+        g_v=1E7,                      # TSO voltage tracking; drives PCC Q dispatch
+        g_q=250,                      # DSO Q-tracking
+        dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
+        dso_g_v=150000,#1E5,
+        # tso weights
+        g_w_der=5.8,  # was 20
+        g_w_pcc = 22.1,  # was 60
+        g_w_gen=1e9,
+        # ── DSO weights ──
+        g_w_dso_der=617,  # was 800
+        # zeroing to be sure
+        tso_g_res_sg=0,
+        tso_g_loss=0,
+        # shunt
+        install_tso_tertiary_shunts=True,
+        shunt_dispatch="integrator", #"integrator"
+        tso_shunt_kind="msc_msr",  # one capacitor + one reactor bank per DSO
+        tso_shunt_msc_n_levels=2,  # MSC steps 0..N
+        tso_shunt_msr_n_levels=2,  # MSR steps 0..N
+        tso_shunt_msc_q_step_mvar=25.0,  # Mvar per MSC step
+        tso_shunt_msr_q_step_mvar=25.0,  # Mvar per MSR step
+        shunt_int_g_w=100,  # step = g_H/(2*g_w); SMALLER = bigger step — TUNE THIS
+        shunt_int_delta_mvar=10.0,  # hysteresis half-width (must be < q_step/2 = 25)
+        shunt_int_t_dwell_s=30*60.0,  # min seconds between commits per bank (anti-chatter)
+        shunt_int_v_min_pu=0.90,  # HV feasibility band (overshoot guard)
+        shunt_int_v_max_pu=1.10,
+        # OLTC weights and settings
+        g_w_tso_oltc = 4740,  # unchanged — see note
+        g_w_dso_oltc = 183,  # was 150
+        local_oltc_max_step_per_dt=1,
+        oltc_cooldown_s_mt=180.0,
+        oltc_cooldown_s_nc=60.0,
+        # preconditioning
+        precondition_g_w=False,
+        precondition_mode="set",  # NOT "cap" -- see above
+        precondition_lambda_scope="preconditioned",  # NOT "all"
+        precondition_granularity="column",  # NOT "class"
+        precondition_lambda_target_tso=0.5012,  # 1.1975421798462904,
+        precondition_lambda_target_dso=0.8509,  # 1.0964048871681646,
+        precondition_class_scales={'der': 0.13225, 'pcc': 7.5617},
+        precondition_exclude_classes=("gen",),  # AVR setpoint left at config
+        # H update
+        sensitivity_update_interval=1E6,
+        # verbosity
+        verbose=1,
+        # Live plotting on (controller + cascade); system overview off.
+        live_plot_controller=True,
+        live_plot_cascade=True,
+        live_plot_system=False,
+        live_plot_tracking=False,
+        live_plot_sbx=False,
+        # Local Sensitivities
+        local_sensitivities_tso=True,
+        local_sensitivities_dso=True,
+        # ── Boundary equivalent for neighbouring TS areas ───────────────────
+        tie_boundary_equivalent="thevenin",
+        tie_thevenin_k=THEVENIN_K_PER_CORRIDOR,
+        zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},
+        coordination_mode="sbx_h",
+        sbx_config=SBXConfig(
+            k_sched=2,
+            q_band_mvar=10.0,
+            p_support_eur_per_mvarh=5.0,
+            v_hold_tolerance_pu=0.005,
+            v_sag_threshold_pu=0.01,
+            n_need=2,
+            release_threshold_pu=0.001,
+            escalation_cycles=4,
+            w_track_factor=1.0,
+        ),
+        # ── Profile & contingency settings ──
+        start_time=datetime(2016, 5, 3, 8, 0),
+        use_profiles=True,
+        use_fixed_zones=True,
+        use_zonal_gen_dispatch=True,
+        contingencies=[
+            # 400 Mvar reactive load step at the zone-2 / L14 boundary bus (bus 9)
+            # at t=120 min: stresses zone 2's boundary voltage so the TSO-TSO
+            # coordinator must act (zone 1, slack-rich, supports across L14).
+            # ContingencyEvent(minute=20, element_type="load", bus=9,
+            #                  p_mw=0, q_mvar=400, action="connect"),
+            # --- further examples (disabled) ---
+            ContingencyEvent(minute=30, element_type="gen",  element_index=2,  action="trip"),
+            ContingencyEvent(minute=180, element_type="gen",  element_index=2,  action="restore"),
+            ContingencyEvent(minute=90, element_type="load", bus=11, p_mw=0, q_mvar=250, action="connect"),
+            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=0, q_mvar=250, action="trip"),
+            # ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
+            # ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=210, element_type="line", element_index=25, action="trip"),
+            ContingencyEvent(minute=300, element_type="line", element_index=25, action="restore"),
+        ],
+    )
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+#  Gauge normalisation of the weight group
+# ---------------------------------------------------------------------------
+#  ``tuning/reparam.py`` establishes (measured 2026-07-31, trajectory reproduced
+#  to ~4e-10 including the integer tap sequence) that scaling
+#
+#      {g_v, tso_g_q_pcc, g_q, dso_g_v} u {g_w_*} u {g_z_*} u {shunt_int_g_w}
+#
+#  by a COMMON factor changes nothing: the MIQP feasible set contains no weight,
+#  so the minimiser of ``w'G_w w + grad_f'w + z'G_z z`` is invariant when every
+#  term scales together.  The common factor is therefore a gauge, and the only
+#  quantities that mean anything are the RATIOS inside the group.
+#
+#  Consequence for "normalising g_v, g_q and dso_g_v": they cannot be normalised
+#  independently.  Their ratios are identifiable (they are the objective
+#  trade-off) and must be preserved; only the one common factor is free.  What
+#  a normalisation can do is fix that factor at a value with a stated meaning,
+#  and then report the other two in interpretable terms.
+#
+#  The convention used here is the project's own priority reading from
+#  ``tuning.reparam.PriorityScales``: a weight becomes dimensionless as
+#  ``pi = g * sigma^2`` with ``sigma`` the engineering tolerance on that output.
+#  Fixing ``pi_v_ts = 1`` gives
+#
+#      g_v := 1 / sigma_v_ts^2 ,
+#
+#  i.e. "one unit of weighted objective = one TSO voltage tolerance squared",
+#  and every other weight in the group is then read against that unit.  With the
+#  hand-tuned ``g_v = 1e7`` this is a factor 4e-3.
+#
+#  Side benefit, and the only legitimate criterion for the gauge itself: the
+#  G_w diagonal moves from [13, 1e9] (~1e8 spread, entirely above 1) to
+#  [0.05, 4e6], which straddles 1 and is better conditioned for the solver.
+SIGMA_V_TS_PU = 0.005
+"""TSO voltage tolerance [pu] that fixes the gauge (``reparam.PriorityScales``)."""
+
+_G_REF_G_V = 1e7
+"""Hand-tuned ``g_v`` the un-normalised weights below are quoted against."""
+
+GAUGE = 1.0 / (SIGMA_V_TS_PU ** 2) / _G_REF_G_V     # = 4e-3
+
+
+def _gauged(**weights: float) -> Dict[str, float]:
+    """Scale every member of the exact-scaling group by :data:`GAUGE`.
+
+    Applied programmatically rather than by hand-multiplying literals so the
+    un-normalised values stay visible and readable at the call site, and so the
+    invariance cannot drift if one number is later edited.
+    """
+    return {k: v * GAUGE for k, v in weights.items()}
+
+
+def _gauged_area(spec: Dict[Any, Dict[str, float]]) -> Dict[Any, Dict[str, float]]:
+    """:func:`_gauged` for the nested per-area ``{area: {class: g_w}}`` maps."""
+    return {a: {c: v * GAUGE for c, v in d.items()} for a, d in spec.items()}
+
+
+def make_config_per_area() -> MultiTSOConfig:
+    """``make_config_tuned`` with the weight gauge normalised and the per-area,
+    per-class ``g_w`` design applied.
+
+    Two changes against :func:`make_config_tuned`, both derived rather than
+    hand-tuned:
+
+    1. **Gauge normalised** — every member of the exact-scaling group is scaled
+       by :data:`GAUGE` so that ``g_v = 1/sigma_v_ts^2``.  This is a no-op on the
+       trajectory by construction (see the note above ``GAUGE``); it only makes
+       the weights readable as priorities and improves the ``G_w`` conditioning.
+       The un-normalised values are the literals passed to :func:`_gauged`, so
+       the diff against ``make_config_tuned`` stays auditable.
+
+    2. **Per-area ``g_w``** — ``zone_g_w_class`` / ``dso_g_w_class`` carry the
+       per-column analytic design aggregated per control area, instead of one
+       scalar per class for the whole system.  Needed because a single scalar
+       per area (``zone_g_w_scale``) cannot express an area whose classes want
+       to move in opposite directions: measured at this operating point, TSO
+       zone 1 wants ``der`` well below and ``tso_oltc`` well above the global
+       value, a spread no single factor absorbs.
+
+    Regenerate the per-area block after any change to the boundary equivalent,
+    the zone partition or the start time — all three change ``H``, and the
+    design is a function of ``H``::
+
+        python -m tuning_mc.stage_0_preconditioning \\
+            --from-runner make_config_per_area --per-area
+
+    and paste the ``zone_g_w_class`` / ``dso_g_w_class`` blocks it prints.  The
+    global ``g_w_<class>`` scalars are kept as the fallback for any area or
+    class the per-area block does not list.
+    """
+    cfg = make_config_tuned()
+    return dataclasses.replace(
+        cfg,
+        # ── Gauge-normalised weight group ───────────────────────────────────
+        # Objective (output) weights.  Ratios preserved exactly; only the
+        # common factor moves.  pi = g*sigma^2 with the reparam tolerances
+        # (sigma_v_ts=0.005, sigma_v_ds=0.010, sigma_q=5.0 pu/pu/Mvar):
+        #   pi_v_ts = 1.0     (the unit, by construction)
+        #   pi_q    = 25.0    interface-Q priced 25x the TSO voltage unit
+        #   pi_v_ds = 0.04    the DSO voltage schedule, 625x below its own Q
+        # That 625x is the "interface-Q dominates the DSO objective" statement
+        # in defensible form; change it by moving g_q/dso_g_v, never by moving
+        # the gauge.
+        **_gauged(
+            g_v=1e7,
+            g_q=250.0,
+            dso_g_v=1e5,
+            # ── TSO g_w ────────────────────────────────────────────────────
+            # FALLBACKS ONLY.  zone_g_w_class / dso_g_w_class below cover every
+            # area and class that exists at this operating point, so nothing
+            # reads these unless a zone or DSO is added.  They are set to the
+            # SAME design's global aggregate (geometric mean per class; max for
+            # gen, which is a bound) rather than left at the hand-tuned values
+            # of make_config_tuned -- a new zone should inherit the design's
+            # regime, not a value from a different shape.  Hand-tuned values
+            # for reference: der 13, pcc 20, gen 1e9, tso_oltc 5e3,
+            # dso_der 1200, dso_oltc 180.
+            g_w_der=13,
+            g_w_pcc=20,
+            g_w_gen=9.6e8,
+            g_w_tso_oltc=8732,
+            g_w_tso_shunt=1e4,      # inert under shunt_dispatch="integrator"
+            # ── DSO g_w ────────────────────────────────────────────────────
+            g_w_dso_der=1653,
+            g_w_dso_oltc=224,
+            # ── Shunt integrator: step = g_H/(2 g_w), g_H is linear in g_v ──
+            shunt_int_g_w=150,#42.0,
+            # ── Output-slack weights.  In the group: G_z must scale with G_w
+            # and grad_f or the tracking/violation trade-off shifts. ──
+            g_z_voltage=1e9,
+            g_z_q_gen=1e2,
+            g_z_q_pcc=1e6,
+            # g_z_current / g_z_interface are 0.0 -> gauge-invariant, omitted.
+        ),
+        # ── Per-area, per-class g_w ─────────────────────────────────────────
+        # Generated 2026-08-14 by
+        #   python -m tuning_mc.stage_0_preconditioning \
+        #       --from-runner make_config_per_area --per-area
+        # at start_time 2016-01-05 08:00, tie_boundary_equivalent="thevenin",
+        # local_sensitivities_tso/dso=True.  Quoted in the REFERENCE gauge
+        # (g_v = 1e7) like every other weight above, so _gauged_area keeps them
+        # consistent with the globals if SIGMA_V_TS_PU ever moves.
+        #
+        # Where each number comes from -- three different rules, not one:
+        #   der / pcc  : curvature rule, per column, at the config's own
+        #                lambda_target_tso=0.5012 and class_scales
+        #                {der: 0.13225, pcc: 7.5617} (= tau 0.017484).
+        #   gen        : per-step move budget, |du| <= 1e-3 pu at a 2 % per-bus
+        #                reference error -- the AVR is excluded from the
+        #                curvature rule, so this is its only rule.
+        #   tso_oltc   : commit-threshold rule at a 1.5 % systematic offset.
+        #
+        # READ THIS BEFORE RUNNING.  The der/pcc numbers are a SUBSTANTIVE
+        # re-gain, not a refinement.  ``make_config_tuned`` declares BO-tuned
+        # precondition_* fields but sets ``precondition_g_w=False``, so the
+        # tuned DER/PCC shape (~57x PCC over DER) is currently INERT and the
+        # run actually uses g_w_der=13 / g_w_pcc=20, a ratio of 1.5.  Writing
+        # the design into zone_g_w_class applies that tuned shape statically,
+        # which is the point -- but it means DER gets ~5-19x more authority and
+        # PCC ~7-10x less than the run does today.  To keep the analytic shape
+        # instead of the BO-tuned one, regenerate with ``--tau 1.0``.
+        zone_g_w_class=_gauged_area({
+            1: {"der": 0.39,                  "gen": 4.9e8, "tso_oltc": 6420.0},
+            2: {"der": 12.6, "pcc": 11.12,    "gen": 9.6e8, "tso_oltc": 1467.0},
+            3: {"der": 2.62, "pcc": 5.05,     "gen": 5.9e8, "tso_oltc": 8732.0},
+        }),
+        dso_g_w_class=_gauged_area({
+            "DSO_1": {"dso_der": 1057.0, "dso_oltc": 185.0},
+            "DSO_2": {"dso_der": 1128.0, "dso_oltc": 181.0},
+            "DSO_3": {"dso_der": 997.0, "dso_oltc": 189.0},
+            "DSO_4": {"dso_der": 1219.0, "dso_oltc": 178.0},
+        }),
+        zone_g_w_scale=None,        # superseded by zone_g_w_class
+    )
+
+
 def main() -> None:
     """
     Run the multi-TSO-DSO simulation with default settings and print results.
@@ -476,7 +762,7 @@ def main() -> None:
         python experiments/000_M_TSO_M_DSO.py
     """
 
-    cfg = make_config()
+    cfg = make_config_tuned()
     run_dir = new_run_dir("run_multi_system_ofo", cfg)
     log = run_multi_tso_dso(cfg)
     with (run_dir.root / "records.pkl").open("wb") as handle:

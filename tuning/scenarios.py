@@ -332,8 +332,8 @@ def validation_set(seed: int, n: int = 200) -> List[ScenarioSpec]:
 # Thursday instead.  Enforced by `test_tune_and_holdout_calendars_are_disjoint`.
 _T_WINTER_V2 = datetime(2016, 1, 21, 18, 0)  # ISO week 3, winter evening peak
 _T_SUMMER = datetime(2016, 7, 10, 3, 0)      # ISO week 27, summer night minimum
-_T_SPRING = datetime(2016, 4, 15, 12, 0)     # ISO week 15, spring noon mid-load
-
+# _T_SPRING = datetime(2016, 4, 15, 12, 0)     # ISO week 15, spring noon mid-load
+_T_SPRING = datetime(2016, 1, 5, 8, 0)     # ISO week 15, spring noon mid-load
 
 def _load_ramp(
     bus: int,
@@ -373,7 +373,7 @@ def tune_set_v2() -> List[ScenarioSpec]:
         # cannot drift toward a controller that only behaves well under stress.
         ScenarioSpec(
             name="v2_quiet_spring", start_time=_T_SPRING,
-            duration_s=total_s, scenario="base_410",
+            duration_s=total_s, scenario="rural_700",
         ),
         # Impulsive: the classic contingency pair, absorbable by the continuous
         # actuators.

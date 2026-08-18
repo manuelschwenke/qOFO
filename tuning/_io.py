@@ -75,7 +75,8 @@ _TUPLE_FIELDS: frozenset[str] = frozenset({"precondition_exclude_classes"})
 #: raising, so an unrelated hand-written YAML cannot be made unloadable by this.
 _INT_KEY_FIELDS: frozenset[str] = frozenset({
     "zone_v_setpoints_pu", "zone_v_min_pu", "zone_v_max_pu", "zone_g_v",
-    "zone_g_z_voltage", "zone_g_w_scale", "zone_tso_g_res_sg",
+    "zone_g_z_voltage", "zone_g_w_scale", "zone_g_w_class",
+    "zone_tso_g_res_sg",
     "zone_tso_g_res_der", "zone_tso_g_loss",
     "der_q_mode_overrides", "der_qv_vref_pu_overrides",
     "der_qv_slope_pu_overrides", "der_qv_deadband_pu_overrides",

@@ -624,6 +624,40 @@ class MultiTSOConfig:
     ``H`` by a different factor in each area, so comparing two boundary models
     fairly requires re-gaining each area independently."""
 
+    zone_g_w_class: Optional[Dict[int, Dict[str, float]]] = None
+    """Per-zone, per-actuator-class **absolute** ``g_w`` override
+    ``{zone_id: {class_name: g_w}}``, applied once after controller construction
+    and before the main loop.
+
+    The refinement level between the global ``g_w_<class>`` scalars and
+    :attr:`zone_g_w_scale`.  The scalars carry no area information at all; the
+    scale carries one number per area and so cannot express an area whose
+    classes want to move in *opposite* directions — measured 2026-08-14 on the
+    Thevenin baseline, TSO zone 1's analytic design wants ``g_w_der`` at 0.61x
+    the global value but ``g_w_tso_oltc`` at 1.70x, a spread no single factor
+    absorbs (residual 11.8x).  This field expresses that design directly.
+
+    Class names are the keys of
+    :meth:`controller.tso_controller.TSOController._actuator_class_indices`
+    (``"der"``, ``"pcc"``, ``"gen"``, ``"tso_oltc"``, ``"tso_shunt"``).  Classes
+    and zones not listed keep the value the global scalar gave them.  Values are
+    absolute weights, not factors, and they REPLACE the class block of that
+    zone's ``params.g_w`` vector; :attr:`zone_g_w_scale`, if also set, is applied
+    *after* this and multiplies the result.
+
+    Derive with ``python -m tuning_mc.stage_0_preconditioning --per-area``."""
+
+    dso_g_w_class: Optional[Dict[str, Dict[str, float]]] = None
+    """Per-DSO-area, per-actuator-class absolute ``g_w`` override
+    ``{dso_id: {class_name: g_w}}`` — the DSO counterpart of
+    :attr:`zone_g_w_class`, keyed by ``HVNetworkInfo.net_id`` (e.g. ``"DSO_2"``).
+
+    Class names are the keys of
+    :meth:`controller.dso_controller.DSOController._actuator_class_indices`
+    (``"dso_der"``, ``"dso_oltc"``, ``"dso_shunt"``).  There is no
+    ``dso_g_w_scale`` counterpart to :attr:`zone_g_w_scale`, so this is the only
+    per-area ``g_w`` hook on the DSO layer."""
+
     numerical_h_closed_loop: bool = True
     """When ``numerical_h=True``, controls the perturbation mode of
     :func:`sensitivity.numerical_h.compute_numerical_h_tso` /
@@ -1460,7 +1494,7 @@ class MultiTSOConfig:
     ``Q_PCC_set`` as in the legacy formulation.  Recommended ``True``
     when ``install_tso_tertiary_shunts`` is True."""
 
-    g_z_q_pcc: float = 1e-2
+    g_z_q_pcc: float = 1e6
     """Soft-constraint penalty for Q_PCC capability output bound.
     Mirrors ``g_z_q_gen``.  Engages when a shunt switch (or any other
     actuator move) would push physical Q_PCC outside the DSO-reported

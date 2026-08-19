@@ -657,6 +657,85 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
 
 
 # =====================================================================
+#  Re-aggregation of a completed run
+# =====================================================================
+
+def reaggregate(run_dir: Path, out_dir: Path, *, v_min_pu: float,
+                v_max_pu: float) -> int:
+    """Rebuild the aggregate and the summary from a finished run's rows.
+
+    ``intervals.csv`` stores the raw per-interval quantities -- ``rho_k``,
+    ``n_k``, the censoring flag, and the voltage extremes -- so a correction to
+    a *derived* column can be applied exactly without re-simulating. Used after
+    the voltage band was found to be hardcoded rather than read from the
+    config: the 60 scenario runs behind the rows are unaffected by that defect,
+    and re-running them would consume an hour of a shared machine to reproduce
+    numbers that are already on disk.
+
+    Writes to a NEW directory and records the source, so the corrected result
+    never overwrites the run it was derived from.
+    """
+    src = run_dir / "intervals.csv"
+    if not src.exists():
+        print(f"[reaggregate] no intervals.csv under {run_dir}")
+        return 1
+
+    rows: List[Dict[str, Any]] = []
+    with src.open(newline="", encoding="utf-8") as fh:
+        for raw in csv.DictReader(fh):
+            r: Dict[str, Any] = dict(raw)
+            for k in ("tso_period_s", "t_start_s", "q_set_mvar", "delta_mvar",
+                      "r_k_mvar", "rho_k", "cair_width_mvar",
+                      "lockout_occupancy", "z_slack_max", "sigma_norm_max",
+                      "v_min_pu", "v_max_pu"):
+                try:
+                    r[k] = float(raw[k])
+                except (KeyError, TypeError, ValueError):
+                    r[k] = float("nan")
+            for k in ("k", "n_samples", "n_k", "n_inner_cap", "tap_moves"):
+                try:
+                    r[k] = int(float(raw[k]))
+                except (KeyError, TypeError, ValueError):
+                    r[k] = 0
+            r["n_k_censored"] = str(raw.get("n_k_censored")) == "True"
+            r["delta_below_floor"] = str(raw.get("delta_below_floor")) == "True"
+            # The one derived column being corrected.
+            r["v_violation"] = bool(r["v_min_pu"] < v_min_pu
+                                    or r["v_max_pu"] > v_max_pu)
+            rows.append(r)
+
+    agg = aggregate(rows)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    meta = None
+    src_meta = run_dir / "run_meta.json"
+    if src_meta.exists():
+        meta = json.loads(src_meta.read_text(encoding="utf-8"))
+        meta.setdefault("constants", {})
+        meta["constants"]["v_min_pu"] = v_min_pu
+        meta["constants"]["v_max_pu"] = v_max_pu
+        meta["reaggregated_from"] = str(run_dir)
+        meta["reaggregation_note"] = (
+            "Derived columns recomputed from the stored per-interval rows; the "
+            "scenario runs themselves are those of the source directory and "
+            "were not repeated. Only the voltage-violation flag changed: it "
+            "was evaluated against a hardcoded 0.95/1.05 band instead of the "
+            "configured v_min_pu/v_max_pu.")
+        (out_dir / "run_meta.json").write_text(
+            json.dumps(meta, indent=2, default=str), encoding="utf-8")
+
+    write_outputs(out_dir, rows, agg, failures=[], meta=meta)
+    print(f"[reaggregate] {len(rows)} rows from {run_dir}")
+    print(f"[reaggregate] band {v_min_pu}-{v_max_pu} pu -> {out_dir}")
+    for a in [x for x in agg if x["group"] == "__pooled__"]:
+        print(f"  T_TS {a['tso_period_s']:5.0f}  rho med {a['rho_median']:.3f}"
+              f"  cens {a['censoring_fraction']:.2f}"
+              f"  n_k(unc) med {a['n_k_uncensored_median']:.1f}"
+              f"  p95 {a['n_k_uncensored_p95']:.1f}"
+              f"  V viol frac {a['v_violation_fraction']:.3f}")
+    return 0
+
+
+# =====================================================================
 #  Offline self-test (no simulation)
 # =====================================================================
 
@@ -841,10 +920,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          f"read the CAIR widths before spending the full grid")
     ap.add_argument("--self-test", action="store_true",
                     help="check the post-processing offline; no simulation")
+    ap.add_argument("--reaggregate", type=Path, default=None,
+                    help="rebuild the aggregate and summary from a finished "
+                         "run's intervals.csv, without re-simulating")
     a = ap.parse_args(argv)
 
     if a.self_test:
         return self_test()
+
+    if a.reaggregate is not None:
+        from _ch9_selected_design import build_selected_config
+        cfg, _d = build_selected_config()
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return reaggregate(
+            a.reaggregate, a.reaggregate.parent / f"{a.reaggregate.name}_reagg_{stamp}",
+            v_min_pu=float(getattr(cfg, "v_min_pu", V_MIN_PU)),
+            v_max_pu=float(getattr(cfg, "v_max_pu", V_MAX_PU)))
 
     from _ch9_selected_design import build_selected_config
     from tuning_mc.scenarios_mc_v2 import WINDOW_META, tier1_design_set

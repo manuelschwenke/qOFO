@@ -88,3 +88,73 @@ prints `gen[1] -> G 03`, `gen[7] -> G 09`). Battery launched from this commit.
 - `tests/pf/test_screening_event_pool.py::test_persistent_pool_grows_admits_and_retires_events`
   fails **at HEAD**, independently of this change (`created == 2`, expected 3,
   while `pending_admission == 3` passes). Not touched here; flagged separately.
+
+---
+
+# Addendum, 2026-08-19 ~15:45 — the battery run FAILED, and why
+
+Launched from clean commit `705b017` at 13:09. Aborted after ~30 min:
+
+```
+File "pf/screening.py", line 769, in initialise
+    raise PFSessionError("ComInc (RMS init) failed")
+```
+
+**Not a defect in the battery, and not a licence problem.** A read-only
+diagnostic (`ComLdf` then `ComInc`, modifying nothing) localised it:
+
+```
+[diag] connect + activate: 23.7 s
+[diag] ComLdf.Execute() -> 1  (1.4 s)   DID NOT CONVERGE
+[diag] ComInc.Execute() -> 2  (0.0 s)   FAILED
+```
+
+The PowerFactory output window gives the cause — every profile source in the
+study case cannot open its data file:
+
+```
+err - Grid\qOFO RMS Profile DER Source 0.ElmFile:
+      Cannot open measurement-file
+      "...\results\rms_phase6_replay\0543_2026-08-07_142902\snapshot\rms_profiles_elmfile.txt"
+```
+
+repeated for every `ElmFile` (DER sources 0-3, load sources 21, 22, ...).
+
+**The referenced run does not exist.** `results/rms_phase6_replay/` now begins
+at `0559_2026-08-07_195513`; run `0543` has been deleted. With every profile
+source dead the load flow does not converge, and `ComInc` cannot initialise
+from a non-converged operating point.
+
+## Why it worked on 2026-08-07 and not now
+
+The run of record is `20260807-085455` — 08:54. Replay run `0543` is from
+14:29 the **same day**, i.e. *after* it. `pf/profile_playback.py:365` writes an
+absolute path into each `ElmFile`:
+
+```python
+source.SetAttribute("f_name", str(Path(file_path).resolve()))
+```
+
+So every replay run repoints the shared `02_RMS_CoSim` study case at its own
+results snapshot, and the study case then breaks as soon as that snapshot is
+cleaned up. The battery did not change; the study case was silently left
+pointing at a transient directory by a later, unrelated run.
+
+**This is a latent fragility, not a one-off.** Any future use of
+`02_RMS_CoSim` breaks the same way after the next results prune.
+
+## Options (author decision — the PF project was not modified)
+
+1. Repoint the `ElmFile` sources at a surviving snapshot (earliest is `0559`)
+   — only valid if that profile matches the intended operating point.
+2. Regenerate the snapshot for the battery's operating point.
+3. Give the battery its own study case, or have it re-point the sources itself,
+   so a replay run cannot leave it broken.
+4. Deactivate the profile sources for the open-loop battery: it holds a fixed
+   operating point (preflight drift `1.4e-10` pu in the run of record), so
+   time-varying playback may not be needed at all — but the run of record did
+   have them active, so this changes what is measured.
+
+**Nothing in the PF project was modified by this session.** The `--self-test`
+and `--dry-run` paths both pass on the reworked code, so Task A's code changes
+are verified as far as they can be without a seat-side model that initialises.

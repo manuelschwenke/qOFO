@@ -414,10 +414,30 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
     # Order must match HVNetworkInfo.coupling_trafo_indices, which is the order
     # the transformer keys sort in.
     mine_sorted = sorted(mine)
-    # A step smaller than the settling band is not a measurement: the loop is
-    # already inside the band before it starts, and N_inner would come back 0
-    # for a step that never happened.
-    degenerate = [t for t in mine_sorted
+
+    # ONE interface is stepped; its siblings are held at their current flow.
+    #
+    # Stepping every transformer of a DSO to its own band edge at once is NOT
+    # an admissible traversal: the reported capability is per interface, but
+    # the DER reactive power backing it is shared across the sub-network, so
+    # the per-interface bands are individually feasible and jointly are not.
+    # Measured 2026-08-19: driving all three interfaces of DSO_4 to their edges
+    # left trafo_9 87-101 Mvar from a 37-44 Mvar setpoint while its siblings
+    # tracked, i.e. the subordinate MIQP allocated the shared capability and
+    # starved one interface. Every such case came back censored, and the
+    # resulting "N_inner" measured the infeasibility, not the loop.
+    #
+    # This is the same defect class as the known voltage-blind over-reporting
+    # of the capability message; here it shows up as non-additivity across the
+    # interfaces of one DSO.
+    focus = job.get("trafo")
+    if focus is not None and focus not in targets:
+        return {**job, "rows": [], "targets": targets,
+                "wall_s": res_p.wall_time_s,
+                "failure": f"no usable capability band for {focus}"}
+    stepped = [focus] if focus is not None else mine_sorted
+
+    degenerate = [t for t in stepped
                   if abs(targets[t][key] - targets[t]["q_now"])
                   < float(job["band_mvar"])]
     if degenerate:
@@ -427,7 +447,8 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
                             f"settling band for {degenerate}: no admissible "
                             f"traversal at this operating point")}
     q_hold = [targets[t]["q_now"] for t in mine_sorted]
-    q_step = [targets[t][key] for t in mine_sorted]
+    q_step = [targets[t][key] if t in stepped else targets[t]["q_now"]
+              for t in mine_sorted]
 
     cfg_run = dataclasses.replace(base, q_pcc_setpoint_schedule_per_dso={
         job["dso"]: [{"t_s": 0.0, "q_mvar": q_hold},
@@ -441,7 +462,8 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
     rows = measure_n_inner(records, step_time_s=SETTLE_S,
                            sts_period_s=STS_PERIOD_S,
                            band_mvar=float(job["band_mvar"]))
-    rows = [r for r in rows if r["group"] == job["dso"]]
+    rows = [r for r in rows if r["group"] == job["dso"]
+            and (focus is None or r["trafo"] == focus)]
     for r in rows:
         r.update({"window": job["window"], "dso": job["dso"],
                   "direction": job["direction"], "variant": job["variant"],
@@ -450,6 +472,23 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
                   "band_width_mvar": targets[r["trafo"]]["width"]})
     return {**job, "failure": "", "rows": rows, "targets": targets,
             "wall_s": res.wall_time_s + res_p.wall_time_s}
+
+
+def _trafo_indices(dso: str, n_per_dso: int) -> List[int]:
+    """Global interface-transformer indices belonging to ``dso``.
+
+    The record keys are ``DSO_<n>|trafo_<i>`` with ``i`` running across ALL
+    interfaces of the plant, not restarting per DSO: DSO_1 owns 0-2, DSO_2
+    owns 3-5, DSO_3 6-8 and DSO_4 9-11 in the four-sub-network benchmark.
+    A job naming ``DSO_4|trafo_0`` would simply never match, and the case
+    would be reported as "no usable capability band" for a transformer that
+    does not exist -- so the mapping is computed rather than assumed.
+    """
+    try:
+        k = int(str(dso).split("_")[-1]) - 1
+    except ValueError:
+        return list(range(n_per_dso))
+    return [k * n_per_dso + i for i in range(n_per_dso)]
 
 
 # =====================================================================
@@ -472,6 +511,7 @@ def aggregate(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """``N_inner`` distributions by (DSO, direction) and pooled."""
     out: List[Dict[str, Any]] = []
     keys = sorted({(r["dso"], r["direction"]) for r in rows})
+
     for dso, direction in keys + [("__pooled__", "both")]:
         sub = (list(rows) if dso == "__pooled__"
                else [r for r in rows
@@ -674,6 +714,11 @@ def self_test() -> int:
     check("the last NON-degenerate report is used when the latest is degenerate",
           "T1" in mt and mt["T1"]["width"] >= 100.0, f"got {mt}")
 
+    check("interface indices do not restart per DSO",
+          _trafo_indices("DSO_1", 3) == [0, 1, 2]
+          and _trafo_indices("DSO_4", 3) == [9, 10, 11],
+          f"got {_trafo_indices('DSO_4', 3)}")
+
     # RunResult accessors, checked offline (see the sweep module).
     try:
         import dataclasses as _dc
@@ -743,6 +788,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--windows", default="")
     ap.add_argument("--dsos", default="",
                     help="comma-separated DSO ids; default every DSO present")
+    ap.add_argument("--trafos-per-dso", type=int, default=3,
+                    help="interface transformers per DSO in this benchmark")
     ap.add_argument("--include-dead-zone", action="store_true",
                     help="also run windows whose stratum has structurally "
                          "zero DER reactive capability; they have no "
@@ -792,6 +839,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if a.dsos else [f"DSO_{i}" for i in range(1, 5)])
     if a.probe:
         names, dsos = names[:1], dsos[:1]
+        a.trafos_per_dso = 1
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir = a.out / a.label / stamp
@@ -803,14 +851,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     (out_dir / "run_meta.json").write_text(
         json.dumps(meta, indent=2, default=str), encoding="utf-8")
 
+    # One job per (window, DSO, interface transformer, direction): the step is
+    # applied to a single interface at a time, see _run_case.
+    n_trafo = int(a.trafos_per_dso)
     jobs = [{"window": w, "dso": d, "direction": dirn, "variant": a.variant,
-             "band_mvar": a.band_mvar, "band_fraction": a.band_fraction}
-            for w in names for d in dsos for dirn in ("up", "down")]
+             "band_mvar": a.band_mvar, "band_fraction": a.band_fraction,
+             "trafo": f"{d}|trafo_{i}"}
+            for w in names for d in dsos
+            for i in _trafo_indices(d, n_trafo)
+            for dirn in ("up", "down")]
     with (out_dir / "cases.csv").open("w", newline="", encoding="utf-8") as fh:
         wr = csv.writer(fh)
-        wr.writerow(["window", "dso", "direction", "variant"])
+        wr.writerow(["window", "dso", "trafo", "direction", "variant"])
         for j in jobs:
-            wr.writerow([j["window"], j["dso"], j["direction"], j["variant"]])
+            wr.writerow([j["window"], j["dso"], j["trafo"], j["direction"],
+                         j["variant"]])
 
     print(f"[ninner] -> {out_dir}")
     print(f"[ninner] {len(jobs)} steps = {len(names)} windows x {len(dsos)} "

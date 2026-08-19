@@ -170,15 +170,42 @@ INSTRUMENT_ONLY: Tuple[str, ...] = ("tap_+2seq",)
 #: cases than the table has rows (the machine-transformer tap, the further
 #: load steps); those are reported under "measured but not tabulated" in the
 #: summary rather than silently dropped.
+#: *Reworked 2026-08-19.* The emitter and the thesis table had diverged: the
+#: emitter carried one lumped AVR row and no machine-transformer row, while the
+#: table split AVR by machine and did carry the machine transformer. The table
+#: was therefore filled by hand, and a hand-transcription error came with it
+#: (the coupler-tap row read 11.13 s against a measured 16.28 s, and the
+#: location column read "STS 1 B00", an unfilled placeholder). The fix is
+#: structural: the emitter now produces exactly the thesis rows, one row per
+#: emitted line, and the location column is taken from the measured worst
+#: signal -- never typed. If a row is wanted in the thesis, it is added HERE.
+#:
+#: The two-step tap cases stay OUT of the table (the thesis dropped that row)
+#: but stay IN the battery: they are what separates ``T_mech`` from
+#: ``T_elec``, per tap class, in ``derive``.
 TABLE_ROWS: Tuple[Tuple[Tuple[str, ...], str, bool], ...] = (
-    (("der_q_", "WP_TSO"), r"Reactive-power step, \gls{TSO} park",      False),
-    (("der_q_", "DER_"),   r"Reactive-power step, \gls{DSO} \gls{DER}", False),
-    (("avr_vref",),        r"\gls{AVR} voltage-reference step",         False),
-    (("tap_+1_NC3W",),     r"\gls{OLTC} tap, one step",                 False),
-    (("tap_+2seq",),       r"\gls{OLTC} tap, two steps (instrument only)", False),
-    (("shunt_+1",),        r"\gls{MSC} switch-in",                      False),
-    (("outage_",),         r"Synchronous-machine outage",               True),
-    (("load_",),           r"Load step",                                True),
+    (("der_q_", "WP_TSO"),
+     r"Reactive-power step, $+60$\,Mvar, \gls{TSO} park",            False),
+    (("der_q_", "DER_"),
+     r"Reactive-power step, $+20$\,Mvar, \gls{DSO} \gls{DER}",       False),
+    (("avr_vref_+0.02", "G09"),
+     r"\gls{AVR} voltage-reference step, $+0.02$\,pu, G\,09",        False),
+    (("avr_vref_+0.02", "G10"),
+     r"\gls{AVR} voltage-reference step, $+0.02$\,pu, G\,10",        False),
+    (("avr_vref_+0.001", "G09"),
+     r"\gls{AVR} voltage-reference step, $+0.001$\,pu, G\,09",       False),
+    (("avr_vref_+0.001", "G10"),
+     r"\gls{AVR} voltage-reference step, $+0.001$\,pu, G\,10",       False),
+    (("tap_+1_NC3W",),
+     r"\gls{OLTC} coupling transformer, one step",                    False),
+    (("tap_+1_MT",),
+     r"\gls{OLTC} machine transformer, one step",                     False),
+    (("shunt_+1",),
+     r"\gls{MSC} switch-in",                                          False),
+    (("outage_",),
+     r"Synchronous-machine outage",                                    True),
+    (("load_",),
+     r"Load step",                                                     True),
 )
 
 
@@ -413,6 +440,51 @@ def run_case(ctx: ScreeningContext, sd: Any, mons: List[Tuple[Any, str, str]],
 #  Derived design quantities
 # =====================================================================
 
+def _tap_split(disp: List[Dict[str, Any]], one_sub: str, two_sub: str,
+               ) -> Dict[str, Any]:
+    r"""Separate mechanical travel from electrical transient for ONE tap class.
+
+    A completed tap is a step change in transformer ratio and excites the
+    network like any other step, so a ``|dtau|``-step command settles in
+
+        T_s(|dtau|) = T_mech * |dtau| + T_elec
+
+    and two measured points separate the terms exactly, ``T_elec`` being
+    common to both and cancelling in the difference::
+
+        T_mech = T_s(2) - T_s(1)
+        T_elec = T_s(1) - T_mech = 2*T_s(1) - T_s(2)
+
+    Both substrings are class-qualified by the caller (``tap_+1_NC3W`` /
+    ``tap_+2seq_NC3W``), because a coupler tap and a machine-transformer tap
+    have different splits: the coupler is seen largely as an algebraic change
+    in the interface flow, whereas the machine transformer acts against the
+    excitation control and can leave a tail comparable to the travel itself.
+    """
+    one = next((r for r in disp if one_sub in r["case"]), None)
+    two = next((r for r in disp if two_sub in r["case"]), None)
+    if one and two:
+        t_mech = two["t_settle_s"] - one["t_settle_s"]
+        return {"t_tap": one["t_settle_s"], "t_mech": t_mech,
+                "t_elec": one["t_settle_s"] - t_mech,
+                "one_case": one["case"], "two_case": two["case"],
+                "source": ("T_mech from the 2-step minus 1-step difference; "
+                           "T_elec = T_s(1) - T_mech")}
+    if one:
+        # Cannot separate the two with one point. Attributing all of it to
+        # the mechanism would understate the per-step cost and inflate any
+        # step cap, so the conservative split is taken and flagged.
+        return {"t_tap": one["t_settle_s"], "t_mech": one["t_settle_s"],
+                "t_elec": 0.0, "one_case": one["case"], "two_case": None,
+                "source": ("single-step case only -- T_mech and T_elec NOT "
+                           "separable; all settling attributed to the "
+                           "mechanism (conservative, but the split is "
+                           "unmeasured)")}
+    return {"t_tap": float("nan"), "t_mech": float("nan"),
+            "t_elec": float("nan"), "one_case": None, "two_case": None,
+            "source": "no tap case ran"}
+
+
 def derive(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     r"""Turn the measured rows into the design quantities of eq. (9.1).
 
@@ -462,24 +534,20 @@ def derive(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     t_cont = max((r["t_settle_s"] for r in cont), default=float("nan"))
     cont_worst = max(cont, key=lambda r: r["t_settle_s"])["case"] if cont else None
 
-    one = next((r for r in disp if "tap_+1_NC3W" in r["case"]), None)
-    two = next((r for r in disp if "tap_+2seq" in r["case"]), None)
-    if one and two:
-        t_mech = two["t_settle_s"] - one["t_settle_s"]
-        t_elec = one["t_settle_s"] - t_mech
-        t_tap_src = ("T_mech from the 2-step minus 1-step difference; "
-                     "T_elec = T_s(1) - T_mech")
-    elif one:
-        # Cannot separate the two with one point. Attributing all of it to
-        # the mechanism would understate the per-step cost and inflate any
-        # step cap, so the conservative split is taken and flagged.
-        t_mech, t_elec = one["t_settle_s"], 0.0
-        t_tap_src = ("single-step case only -- T_mech and T_elec NOT separable; "
-                     "all settling attributed to the mechanism (conservative, "
-                     "but the split is unmeasured)")
-    else:
-        t_mech, t_elec, t_tap_src = float("nan"), float("nan"), "no tap case ran"
-    t_tap = one["t_settle_s"] if one else float("nan")
+    # The split is per TAP CLASS and the classes do not share it. Matching
+    # ``tap_+2seq`` alone was safe only while the coupler owned the single
+    # two-step case; the machine transformer got one on 2026-08-19, and an
+    # unqualified substring would then pair a coupler one-step with whichever
+    # two-step case the catalogue happened to emit first -- silently, and
+    # producing a T_mech that belongs to neither transformer.
+    splits = {cls: _tap_split(disp, f"tap_+1_{sub}", f"tap_+2seq_{sub}")
+              for cls, sub in (("coupler", "NC3W"), ("machine_trafo", "MT"))}
+
+    # The thesis text names T_s^tap / T_mech / T_elec for the COUPLER; the
+    # machine-transformer split is reported alongside it, not folded into it.
+    cpl = splits["coupler"]
+    t_tap, t_mech, t_elec = cpl["t_tap"], cpl["t_mech"], cpl["t_elec"]
+    t_tap_src = cpl["source"]
 
     realisable = [r for r in disp if not r["instrument_only"]]
     binding_row = (max(realisable, key=lambda r: r["t_settle_s"])
@@ -497,7 +565,8 @@ def derive(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     dist = [r for r in results if r["disturbance"]]
     censored = [r["case"] for r in results if r["censored"]]
-    return {"t_cont": t_cont, "t_cont_case": cont_worst, "t_tap": t_tap,
+    return {"tap_splits": splits,
+            "t_cont": t_cont, "t_cont_case": cont_worst, "t_tap": t_tap,
             "t_mech": t_mech, "t_elec": t_elec, "t_tap_source": t_tap_src,
             "binding": binding, "binding_kind": binding_kind,
             "binding_case": binding_row["case"] if binding_row else None,
@@ -572,10 +641,11 @@ def write_outputs(out_dir: Path, results: List[Dict[str, Any]],
            f"- worst continuous dispatch `T_s^cont` = **{d['t_cont']:.2f} s** "
            f"(`{d['t_cont_case']}`)",
            f"- single-tap settling `T_s^tap` = **{d['t_tap']:.2f} s** "
-           f"= `T_mech` {d['t_mech']:.2f} s (mechanical travel) + `T_elec` "
-           f"{d['t_elec']:.2f} s (electrical transient the completed tap "
-           f"excites -- a tap is a step change in ratio like any other, so "
-           f"this ADDS rather than being covered by the mechanical time)",
+           f"(coupling transformer) = `T_mech` {d['t_mech']:.2f} s "
+           f"(mechanical travel) + `T_elec` {d['t_elec']:.2f} s (electrical "
+           f"transient the completed tap excites -- a tap is a step change in "
+           f"ratio like any other, so this ADDS rather than being covered by "
+           f"the mechanical time)",
            f"  ({d['t_tap_source']})",
            f"- **binding row: {d['binding_kind']}** (`{d['binding_case']}`) at "
            f"{d['binding']:.2f} s -- the worst over EVERY realisable dispatch, "
@@ -593,6 +663,29 @@ def write_outputs(out_dir: Path, results: List[Dict[str, Any]],
            f"measured `N_inner` of eq. (9.2): that is a closed-loop property "
            f"of the isolated DSO-OFO and this open-loop battery does not "
            f"measure it. Do not quote this line as evidence for `N_inner`."]
+
+    # Both tap classes, side by side. The thesis caption asserts the
+    # mechanical block parameter (5 s) is what a tap costs; whether that
+    # holds is a measurement, and it is reported per class because the two
+    # classes do not share a split.
+    md += ["", "## Tap split by class (T_mech / T_elec)", "",
+           "`T_mech = T_s(2) - T_s(1)`, `T_elec = 2*T_s(1) - T_s(2)`, from "
+           "the one-step and the sequential two-step case of the SAME "
+           "transformer. The two-step case is an instrument: the controller "
+           "caps taps at one step per iteration and then locks the changer "
+           "out, so it is never a dispatch and never enters the bound.", "",
+           "| class | T_s(1) [s] | T_s(2) [s] | T_mech [s] | T_elec [s] |",
+           "|:--|--:|--:|--:|--:|"]
+    for cls, sp in d.get("tap_splits", {}).items():
+        two_t = next((r["t_settle_s"] for r in results
+                      if sp["two_case"] and r["case"] == sp["two_case"]),
+                     float("nan"))
+        md.append(f"| {cls} | {sp['t_tap']:.2f} | {two_t:.2f} | "
+                  f"{sp['t_mech']:.2f} | {sp['t_elec']:.2f} |")
+    for cls, sp in d.get("tap_splits", {}).items():
+        if sp["two_case"] is None:
+            md.append("")
+            md.append(f"- **{cls}: {sp['source']}**")
 
     if d["worst_disturbance"]:
         wd = d["worst_disturbance"]
@@ -668,9 +761,20 @@ def _synthetic_results() -> List[Dict[str, Any]]:
         row("der_q_+60Mvar_WP_TSO_1", "param", False, 3.10),
         row("der_q_+15Mvar_DER_DSO_1_b3", "param", False, 2.40),
         row("avr_vref_+0.02_G09", "param", False, 6.80),
+        row("avr_vref_+0.02_G10", "param", False, 5.40),
+        # The realistic-magnitude rows settle faster than the 0.02 pu worst
+        # case, which is the expected ordering; the self-test asserts the
+        # bound does not come from them.
+        row("avr_vref_+0.001_G09", "param", False, 1.90),
+        row("avr_vref_+0.001_G10", "param", False, 1.60),
         row("tap_+1_NC3W_DSO_1_t0", "tap", False, 7.20),
         row("tap_+2seq_NC3W_DSO_1_t0", "tap", False, 11.90),
         row("tap_+1_MT_g0_t0", "tap", False, 8.30),
+        # Deliberately a DIFFERENT split from the coupler (T_mech = 3.40 s
+        # against the coupler's 4.70 s): if the two classes were ever paired
+        # by an unqualified ``tap_+2seq`` match, this row would leak into the
+        # coupler split and the test below would catch it.
+        row("tap_+2seq_MT_g0_t0", "tap", False, 11.70),
         row("shunt_+1_MSC_TN_bus16_0", "tap", False, 9.10),
         row("outage_G03", "outage", True, 240.0, horizon=600.0),
         row("load_+25pct_TN_load15", "load", True, 95.0, horizon=600.0),
@@ -699,18 +803,37 @@ def self_test() -> int:
     check("every Table 9.1 row is filled", not missing, f"missing: {missing}")
     check("no '[not run]' in the emitted body",
           not any("[not run]" in line for line in tex))
-    check("row count = 8 cases + 2 group headers + 1 midrule",
+    check("row count = one line per table row + 2 group headers + 1 midrule",
           len(tex) == len(TABLE_ROWS) + 3, f"got {len(tex)}")
     check("the '+' in tap names is matched literally",
-          any("tap" in line and "11.90" in line for line in tex))
+          any("7.20" in line for line in tex))
+    check("the two-step instruments are NOT tabulated",
+          not any("11.90" in line or "11.70" in line for line in tex))
+    check("AVR rows are split by machine AND magnitude (4 rows)",
+          sum(1 for line in tex if "voltage-reference" in line) == 4,
+          f"got {[l for l in tex if 'voltage-reference' in l]}")
+    check("the machine-transformer tap has its own table row",
+          any("machine transformer" in line and "8.30" in line
+              for line in tex))
+    check("the coupler row carries the MEASURED value, not a typed one",
+          any("coupling transformer" in line and "7.20" in line
+              for line in tex))
 
     d = derive(res)
     check("T_s^cont is the worst *param* row (AVR, 6.80 s)",
           abs(d["t_cont"] - 6.80) < 1e-9, f"got {d['t_cont']}")
-    check("T_mech = T_s(2) - T_s(1) = 4.70 s",
+    check("coupler T_mech = T_s(2) - T_s(1) = 4.70 s",
           abs(d["t_mech"] - 4.70) < 1e-9, f"got {d['t_mech']}")
-    check("T_elec = 2*T_s(1) - T_s(2) = 2.50 s",
+    check("coupler T_elec = 2*T_s(1) - T_s(2) = 2.50 s",
           abs(d["t_elec"] - 2.50) < 1e-9, f"got {d['t_elec']}")
+    mt = d["tap_splits"]["machine_trafo"]
+    check("machine-trafo split uses ITS OWN two-step case (T_mech = 3.40 s)",
+          abs(mt["t_mech"] - 3.40) < 1e-9, f"got {mt['t_mech']}")
+    check("machine-trafo T_elec = 4.90 s",
+          abs(mt["t_elec"] - 4.90) < 1e-9, f"got {mt['t_elec']}")
+    check("the two tap classes are paired within their own class",
+          d["tap_splits"]["coupler"]["two_case"] == "tap_+2seq_NC3W_DSO_1_t0"
+          and mt["two_case"] == "tap_+2seq_MT_g0_t0")
     check("the bound sees the MSC row (9.10 s binds, not the 6.80 s AVR)",
           abs(d["binding"] - 9.10) < 1e-9, f"got {d['binding']}")
     check("the 2-step instrument is excluded from the bound",
@@ -720,9 +843,13 @@ def self_test() -> int:
     check("disturbances do not enter the bound", d["binding"] < 95.0)
     check("worst disturbance is the outage",
           d["worst_disturbance"]["case"] == "outage_G03")
-    check("the machine-transformer tap is flagged as not tabulated",
-          any(r["case"] == "tap_+1_MT_g0_t0" and not r["tabulated"]
+    check("the machine-transformer tap is now tabulated",
+          any(r["case"] == "tap_+1_MT_g0_t0" and r["tabulated"]
               for r in res))
+    check("the two-step instruments are the untabulated cases",
+          {r["case"] for r in res if not r["tabulated"]}
+          == {"tap_+2seq_NC3W_DSO_1_t0", "tap_+2seq_MT_g0_t0"},
+          f"got {sorted(r['case'] for r in res if not r['tabulated'])}")
 
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
@@ -731,8 +858,10 @@ def self_test() -> int:
                      "timescale_table.tex"):
             check(f"{name} written", (out / name).exists())
         body = (out / "timescale_summary.md").read_text(encoding="utf-8")
-        check("summary lists the untabulated MT tap",
-              "tap_+1_MT_g0_t0" in body)
+        check("summary lists the untabulated two-step instruments",
+              "tap_+2seq_MT_g0_t0" in body)
+        check("summary reports the split for BOTH tap classes",
+              "machine_trafo" in body and "coupler" in body)
         check("summary refuses to sell T_TS/T_DS as N_inner",
               "does not measure it" in body)
 

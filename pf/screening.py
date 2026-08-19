@@ -1098,6 +1098,26 @@ def _reec_of(app, park_name: str):
     return reec, gen
 
 
+#: AVR V-reference step magnitudes offered by the catalogue, largest first.
+#:
+#: ``0.02`` pu is the worst-case row that has always been measured: it is far
+#: larger than anything the tuned controller issues and therefore bounds the
+#: actuator class rather than describing it.
+#:
+#: ``0.001`` pu is added because the chapter states the tuned TS-OFO moves an
+#: AVR reference by less than 0.001 pu per iteration. Without a row at the
+#: realistic magnitude the table bounds a dispatch the controller never makes,
+#: and the reader cannot tell whether the 0.02 pu settling is representative
+#: of tuned operation or an artefact of an oversized step. Both are kept: the
+#: large one bounds, the small one describes.
+#:
+#: Added 2026-08-19 (handoff Ch 9 sec 9.1, task A.2 item 1).
+AVR_VREF_MAGNITUDES: Tuple[Tuple[float, str, str], ...] = (
+    (0.02, "0.02", "worst case, far above tuned controller action"),
+    (0.001, "0.001", "the magnitude the tuned TS-OFO actually issues"),
+)
+
+
 def _qvpre_of(app, park_name: str):
     """The ``QVPRE`` block of a park's WECC composite, or ``None``.
 
@@ -1124,10 +1144,14 @@ def default_catalogue(app) -> List[StepDef]:
       wind-park command observed in the controller run (0024).
       Representative parks: one large TSO wind park and one DSO DER.
     * **Machine AVR V-ref** via ``EvtParam`` on the AVR DSL's ``usetp``
-      signal (largest AVR-equipped plant; G 01 has no AVR).
+      signal (largest AVR-equipped plant; G 01 has no AVR), at both
+      magnitudes of ``AVR_VREF_MAGNITUDES`` -- the 0.02 pu worst case and the
+      0.001 pu step the tuned controller actually issues.
     * **OLTC taps** via ``EvtTap`` with the 5 s mechanical delay: coupler-3W
-      single tap, the sequential 2-tap case (Gate D), and one machine
-      trafo.
+      single tap and the sequential 2-tap case (Gate D), and the machine
+      trafo single tap and its own sequential 2-tap case. Both classes carry
+      a 2-tap instrument so ``T_mech``/``T_elec`` can be separated for each;
+      the two classes do not share a split.
     * **MSC shunt** switch-in via ``EvtTap`` (no mechanical delay).
     """
     steps: List[StepDef] = []
@@ -1183,13 +1207,14 @@ def default_catalogue(app) -> List[StepDef]:
         ranked = sorted(avrs, key=_plant_mva, reverse=True)
         for sym in ranked[1:3]:
             mva = _plant_mva(sym)
-            steps.append(StepDef(
-                name=f"avr_vref_+0.02_{sym.loc_name.replace(' ', '')}",
-                target=avrs[sym], variable="usetp", delta=0.02, unit="pu",
-                note=f"+0.02 pu AVR V-ref on {sym.loc_name} "
-                     f"(plant {mva:.0f} MVA; rank "
-                     f"{ranked.index(sym) + 1} of {len(ranked)} by rating, "
-                     f"the largest being excluded as a network equivalent)"))
+            for delta, label, why in AVR_VREF_MAGNITUDES:
+                steps.append(StepDef(
+                    name=f"avr_vref_+{label}_{sym.loc_name.replace(' ', '')}",
+                    target=avrs[sym], variable="usetp", delta=delta, unit="pu",
+                    note=f"+{label} pu AVR V-ref on {sym.loc_name} "
+                         f"({why}; plant {mva:.0f} MVA; rank "
+                         f"{ranked.index(sym) + 1} of {len(ranked)} by rating, "
+                         f"the largest being excluded as a network equivalent)"))
 
     # Coupler-3W OLTC: single tap and the sequential 2-tap case (plan
     # Phase 5 step 3 / Gate D) -- physical moves at t_event + 5 s (+ 10 s).
@@ -1221,6 +1246,18 @@ def default_catalogue(app) -> List[StepDef]:
             tap_times=(TAP_MECH_DELAY_S,),
             note=f"+1 machine-trafo tap on {mt.loc_name} "
                  f"({TAP_MECH_DELAY_S:.0f} s mech delay)"))
+        # Instrument only, mirroring the coupler case above: without a second
+        # point T_mech and T_elec cannot be separated for the MACHINE
+        # transformer, and the two classes do not share a split -- a coupler
+        # tap is seen largely as an algebraic change in the interface flow,
+        # a machine-transformer tap acts against the excitation control.
+        # Added 2026-08-19 (handoff Ch 9 sec 9.1, task A.2 item 2).
+        steps.append(StepDef(
+            name=f"tap_+2seq_{mt.loc_name}", target=mt, variable="ntap",
+            delta=1.0, unit="tap", kind="tap",
+            tap_times=(TAP_MECH_DELAY_S, 2 * TAP_MECH_DELAY_S),
+            note=f"+2 sequential machine-trafo taps on {mt.loc_name} "
+                 f"({TAP_MECH_DELAY_S:.0f} s apart)"))
 
     # MSC switch-in (breaker action, no mechanical tap delay).
     msc = next(iter(sorted((s for s in get_all(app, "ElmShnt")

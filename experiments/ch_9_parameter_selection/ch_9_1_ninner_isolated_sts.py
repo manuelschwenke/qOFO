@@ -224,30 +224,65 @@ def measure_n_inner(records: Sequence[Any], *, step_time_s: float,
 
 
 def band_edge_targets(records: Sequence[Any], *, at_time_s: float,
-                      fraction: float) -> Dict[str, Dict[str, float]]:
+                      fraction: float, min_width_mvar: float = 1.0,
+                      ) -> Dict[str, Dict[str, float]]:
     """Per-transformer ``{q_now, cap_min, cap_max, target_up, target_down}``.
 
-    Read from the capability the subordinate layer *reports* at ``at_time_s``,
-    which is what the supervisory layer would have to work with. Targets are
-    placed a ``fraction`` of the way from the current flow to each band edge.
+    Read from the capability the subordinate layer *reports*, which is what the
+    supervisory layer would have to work with. Targets are placed a
+    ``fraction`` of the way from the current flow to each band edge.
+
+    **The reported band collapses to zero width at a non-trivial fraction of
+    instants** -- ``cap_min == cap_max == q_now``, i.e. "nothing is available
+    from here" -- at every interface, and with a live supervisory layer as well
+    as a frozen one (measured 2026-08-19; the T_TS sweep's own per-interval
+    widths have median 67-181 Mvar but minimum 0.00 for all twelve
+    transformers). Reading a single instant therefore lands on a degenerate
+    band often enough to matter, and a degenerate band silently produces
+    ``target == q_now``: a step of zero, which then "settles" in zero
+    iterations and reports ``N_inner = 0`` for a step that never happened.
+    That is exactly the shape of failure this measurement must not have, and
+    it is what the first probe returned.
+
+    So the band is taken from the LAST sample at or before ``at_time_s`` whose
+    reported width is at least ``min_width_mvar``, and a transformer with no
+    such sample is omitted -- which the caller turns into an explicit skipped
+    case rather than a zero-step measurement.
     """
-    snap = None
-    for r in records:
-        if float(getattr(r, "time_s", -1.0)) >= at_time_s:
-            snap = r
-            break
-    if snap is None:
-        return {}
     out: Dict[str, Dict[str, float]] = {}
-    for t, q_now in (getattr(snap, "dso_trafo_q_actual_mvar", {}) or {}).items():
-        lo = getattr(snap, "dso_trafo_q_cap_min_mvar", {}).get(t)
-        hi = getattr(snap, "dso_trafo_q_cap_max_mvar", {}).get(t)
-        if lo is None or hi is None:
+    usable = [r for r in records
+              if float(getattr(r, "time_s", -1.0)) <= at_time_s]
+    if not usable:
+        return out
+    trafos = {t for r in usable
+              for t in (getattr(r, "dso_trafo_q_actual_mvar", {}) or {})}
+    for t in sorted(trafos):
+        snap = None
+        for r in reversed(usable):
+            lo = (getattr(r, "dso_trafo_q_cap_min_mvar", {}) or {}).get(t)
+            hi = (getattr(r, "dso_trafo_q_cap_max_mvar", {}) or {}).get(t)
+            if lo is None or hi is None:
+                continue
+            if float(hi) - float(lo) >= min_width_mvar:
+                snap = r
+                break
+        if snap is None:
             continue
-        q_now, lo, hi = float(q_now), float(lo), float(hi)
+        # Band from the last non-degenerate report; operating point from the
+        # step instant, which is where the step actually starts.
+        last = usable[-1]
+        q_now = (getattr(last, "dso_trafo_q_actual_mvar", {}) or {}).get(t)
+        if q_now is None:
+            continue
+        lo = float((getattr(snap, "dso_trafo_q_cap_min_mvar", {}) or {})[t])
+        hi = float((getattr(snap, "dso_trafo_q_cap_max_mvar", {}) or {})[t])
+        q_now = float(q_now)
+        # A band read earlier may no longer bracket the current flow.
+        lo, hi = min(lo, q_now), max(hi, q_now)
         out[t] = {
             "q_now": q_now, "cap_min": lo, "cap_max": hi,
             "width": hi - lo,
+            "band_read_at_s": float(getattr(snap, "time_s", float("nan"))),
             "target_up": q_now + fraction * (hi - q_now),
             "target_down": q_now - fraction * (q_now - lo),
         }
@@ -364,6 +399,18 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
     # Order must match HVNetworkInfo.coupling_trafo_indices, which is the order
     # the transformer keys sort in.
     mine_sorted = sorted(mine)
+    # A step smaller than the settling band is not a measurement: the loop is
+    # already inside the band before it starts, and N_inner would come back 0
+    # for a step that never happened.
+    degenerate = [t for t in mine_sorted
+                  if abs(targets[t][key] - targets[t]["q_now"])
+                  < float(job["band_mvar"])]
+    if degenerate:
+        return {**job, "rows": [], "targets": targets,
+                "wall_s": res_p.wall_time_s,
+                "failure": (f"reported capability gives a step below the "
+                            f"settling band for {degenerate}: no admissible "
+                            f"traversal at this operating point")}
     q_hold = [targets[t]["q_now"] for t in mine_sorted]
     q_step = [targets[t][key] for t in mine_sorted]
 
@@ -590,6 +637,18 @@ def self_test() -> int:
     tg95 = band_edge_targets(recs, at_time_s=100.0, fraction=0.95)
     check("a fraction below 1 backs off from the edge",
           tg95["T1"]["target_up"] < tg["T1"]["target_up"])
+
+    # A degenerate reported band must be REFUSED, not turned into a zero step
+    # that "settles" in 0 iterations. This is what the first probe returned.
+    degen = [_R(0.0, 0.0, 5.0, cap=(5.0, 5.0)),
+             _R(20.0, 0.0, 5.0, cap=(5.0, 5.0))]
+    check("a zero-width reported band yields no target at all",
+          band_edge_targets(degen, at_time_s=20.0, fraction=0.95) == {})
+    mixed = [_R(0.0, 0.0, 5.0, cap=(-100.0, 100.0)),
+             _R(20.0, 0.0, 5.0, cap=(5.0, 5.0))]
+    mt = band_edge_targets(mixed, at_time_s=20.0, fraction=1.0)
+    check("the last NON-degenerate report is used when the latest is degenerate",
+          "T1" in mt and mt["T1"]["width"] >= 100.0, f"got {mt}")
 
     # RunResult accessors, checked offline (see the sweep module).
     try:

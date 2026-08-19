@@ -253,6 +253,38 @@ class TrajectoryMetrics:
     n_viol_v_ds:         int = 0
     voltage_excess_pu:   float = 0.0   # smooth hard-corridor excess
 
+    # ── Guard band: "stay off the bound", not "do not cross it" ──────────
+    guard_deficit_ds_pu: float = 0.0
+    """Mean per-step excess of the DSO-group envelope beyond a corridor
+    shrunk by :data:`DS_GUARD_HEADROOM_PU` at both ends [pu/step].
+
+    ``voltage_excess_pu`` is a zero-margin barrier: it is exactly ``0`` for a
+    controller that rides the bound at 1.0999, which is precisely the
+    "feasible but undesired" state a cascaded DSO settles into (the MIQP output
+    constraint holds V at the bound and the OLTC then has no gradient left --
+    see docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md).  This field
+    is the same smooth ramp evaluated against ``[v_lo + h, v_hi - h]``, so it
+    starts charging *before* the bound is reached and can express a headroom
+    requirement.
+
+    Deliberately an integral over time rather than ``min_t headroom``: a
+    worst-case statistic has between-bank variability larger than its in-sample
+    margin (the lambda* transfer defect, docs/tuning/METHOD_weight_selection.md).
+
+    The ramp shape matters for the *current* search too, though not for the
+    reason ``_voltage_band_excess`` gives -- that docstring predates
+    ``tuning_mc`` and argues from TPE's Parzen kernels.  ``tuning_mc`` uses a
+    compass search under an Audet-Dennis filter, where a step function is bad
+    for a different reason: a poll would flip between "no signal at all" and a
+    discontinuous jump, so a direction reads as dead until it suddenly is not,
+    and the dominance test inherits the discontinuity.  A ramp gives every poll
+    a usable gradient in the criterion."""
+
+    ds_headroom_min_pu:  float = float("nan")
+    """``min over time and DSO groups of min(v_hi - V_max, V_min - v_lo)`` [pu].
+    Negative means the corridor was left.  Reported diagnostic only -- the
+    scored quantity is :attr:`guard_deficit_ds_pu`, for the reason above."""
+
     # actuator activity
     n_osc_der:           int = 0
     n_osc_pcc:           int = 0
@@ -523,10 +555,46 @@ def _detect_pf_failures(records: List[MultiTSOIterationRecord]) -> int:
     return n
 
 
+DS_GUARD_HEADROOM_PU: float = 0.02
+"""Required headroom to each hard bound for :attr:`TrajectoryMetrics.guard_deficit_ds_pu`.
+
+The corridor is [0.90, 1.10]; at ``h = 0.02`` the guard band is [0.92, 1.08], so
+an HV network is charged as soon as any of its buses comes within 2 % of a bound.
+
+**Not calibratable from the hand-tuned reference.**  ``ConstraintLimits`` derives
+``corridor_excess_pu`` via ``from_reference`` (measure the reference, add margin),
+but that procedure is unavailable here: measured 2026-08-18, the reference has
+*negative* headroom on two of four DSOs (DSO_2 -0.0012, DSO_4 -0.0010 pu), so
+calibrating from it would enshrine the defect.  This value is a design intent --
+2 % of nominal is the usual planning margin on a 110 kV network -- and must be
+justified as such, not fitted.
+"""
+
+
+def _ds_headroom_min(
+    records: List[MultiTSOIterationRecord],
+    low: float = 0.9,
+    high: float = 1.1,
+) -> float:
+    """``min`` over time and DSO groups of the distance to the nearer bound."""
+    worst = math.inf
+    for r in records:
+        for group, v_max in r.dso_group_v_max_pu.items():
+            v_min = r.dso_group_v_min_pu.get(group)
+            if v_max is None or v_min is None:
+                continue
+            if not (math.isfinite(v_max) and math.isfinite(v_min)):
+                continue
+            worst = min(worst, high - float(v_max), float(v_min) - low)
+    return worst if math.isfinite(worst) else float("nan")
+
+
 def _voltage_band_excess(
     records: List[MultiTSOIterationRecord],
     low: float = 0.9,
     high: float = 1.1,
+    *,
+    groups: str = "all",
 ) -> float:
     """Sum over time and zones/groups of the smooth band-edge excess.
 
@@ -548,19 +616,23 @@ def _voltage_band_excess(
     :func:`_v_quality`.
     """
     excess = 0.0
+    want_ts = groups in ("all", "ts")
+    want_ds = groups in ("all", "ds")
     for r in records:
-        for v_max in r.zone_v_max.values():
-            if v_max is not None and math.isfinite(v_max):
-                excess += max(float(v_max) - high, 0.0)
-        for v_min in r.zone_v_min.values():
-            if v_min is not None and math.isfinite(v_min):
-                excess += max(low - float(v_min), 0.0)
-        for v_max in r.dso_group_v_max_pu.values():
-            if v_max is not None and math.isfinite(v_max):
-                excess += max(float(v_max) - high, 0.0)
-        for v_min in r.dso_group_v_min_pu.values():
-            if v_min is not None and math.isfinite(v_min):
-                excess += max(low - float(v_min), 0.0)
+        if want_ts:
+            for v_max in r.zone_v_max.values():
+                if v_max is not None and math.isfinite(v_max):
+                    excess += max(float(v_max) - high, 0.0)
+            for v_min in r.zone_v_min.values():
+                if v_min is not None and math.isfinite(v_min):
+                    excess += max(low - float(v_min), 0.0)
+        if want_ds:
+            for v_max in r.dso_group_v_max_pu.values():
+                if v_max is not None and math.isfinite(v_max):
+                    excess += max(float(v_max) - high, 0.0)
+            for v_min in r.dso_group_v_min_pu.values():
+                if v_min is not None and math.isfinite(v_min):
+                    excess += max(low - float(v_min), 0.0)
     return excess
 
 
@@ -975,6 +1047,16 @@ def extract_metrics(
     # Corridor read from the config rather than hard-coded.
     voltage_excess_pu = _voltage_band_excess(records, low=v_lo, high=v_hi)
 
+    # ── Guard band (headroom): same ramp, corridor shrunk by h at both ends ──
+    # DS groups only: this exists to score the subordinate layer's own margin,
+    # which is the quantity the filter was blind to.  Normalised per record so
+    # it is comparable across horizons, like norm_viol below.
+    _h = DS_GUARD_HEADROOM_PU
+    guard_deficit_ds_pu = _voltage_band_excess(
+        records, low=v_lo + _h, high=v_hi - _h, groups="ds",
+    ) / max(len(records), 1)
+    ds_headroom_min_pu = _ds_headroom_min(records, low=v_lo, high=v_hi)
+
     # ── Diagnostic violation counts (kept for the report; not in J) ─────
     n_viol_ts = int(np.nansum(vv_ts["n_low"]) + np.nansum(vv_ts["n_high"]))
     n_viol_ds = int(np.nansum(vv_ds["n_low"]) + np.nansum(vv_ds["n_high"]))
@@ -1042,6 +1124,8 @@ def extract_metrics(
         n_viol_v_ts=n_viol_ts,
         n_viol_v_ds=n_viol_ds,
         voltage_excess_pu=float(voltage_excess_pu),
+        guard_deficit_ds_pu=float(guard_deficit_ds_pu),
+        ds_headroom_min_pu=float(ds_headroom_min_pu),
         n_osc_der=n_osc_der,
         n_osc_pcc=n_osc_pcc,
         n_osc_v_gen=n_osc_vgen,

@@ -1,0 +1,312 @@
+% ---------------------------------------------------------------------------
+% Ch. 9 -- Selection of the controller weights.
+%
+% To \input into the thesis: delete from \documentclass down to \maketitle,
+% and the final \end{document}.
+%
+% Conventions: en dashes "--" (never "---"); \section + \subsection only;
+% British spelling.  Labels: sec:wsel:*, tab:wsel:*, eq:wsel:*.
+%
+% CITATIONS STILL NEEDED -- search for "CITE":
+%   [CITE-1]  the contraction theorem rho(M) < 2 for distributed OFO
+%   [CITE-2]  the curvature / preconditioning rule (Ch. 8, or its source)
+%   [CITE-3]  VDE-AR-N-4120 reactive capability diagram
+%   [CITE-4]  the tap-changer maintenance budget (operator statement)
+%
+% Numbers: results/tuning_mc/campaign_0815/, daily logs 2026-08-14/15/17.
+% ---------------------------------------------------------------------------
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[british]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[hidelinks]{hyperref}
+\sisetup{detect-weight=true,detect-family=true}
+
+\newcommand{\pu}{\ensuremath{\mathrm{p.u.}}}
+\newcommand{\lamts}{\ensuremath{\lambda_{\mathrm{TS}}}}
+\newcommand{\lamds}{\ensuremath{\lambda_{\mathrm{DS}}}}
+\newcommand{\fts}{\ensuremath{f_{\mathrm{TS}}}}
+\newcommand{\fq}{\ensuremath{f_{Q}}}
+\newcommand{\fds}{\ensuremath{f_{\mathrm{DS}}}}
+\newcommand{\gwoltc}{\ensuremath{g_{w}^{\mathrm{OLTC}}}}
+\newcommand{\CITE}[1]{\textbf{[CITE-#1]}}
+
+\title{Selection of the controller weights}
+\author{}
+\date{2026--08--17}
+\begin{document}
+\maketitle
+
+%======================================================================
+\section{Notation}
+\label{sec:wsel:notation}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Symbols used in this chapter.}
+  \label{tab:wsel:symbols}
+  \begin{tabular}{ll}
+    \toprule
+    symbol & meaning \\
+    \midrule
+    \multicolumn{2}{l}{\emph{Plant and controller}} \\
+    $H_{ij}$ & sensitivity of area $i$'s controlled outputs to area $j$'s actuators \\
+    $Q_i$ & diagonal weight matrix on area $i$'s controlled outputs \\
+    $G_{w,i}$ & diagonal actuator move penalty of area $i$; these are the weights being chosen \\
+    $M_{ij}$ & contraction block, $G_{w,i}^{-1/2} H_{ii}^{\mathsf{T}} Q_i H_{ij} G_{w,j}^{-1/2}$ \\
+    $M$ & the assembled operator, blocks $M_{ij}$ over all area pairs \\
+    $\rho(M)$ & spectral radius of $M$: the contraction factor of the closed loop \\
+    $\rho_0$ & contraction floor: the value $\rho(M)$ approaches as the continuous weights grow \\
+    \midrule
+    \multicolumn{2}{l}{\emph{Design coordinates}} \\
+    $v_e$ & TS tap commit threshold [\pu]: voltage error tolerated before a tap moves \\
+    $v_{e,\mathrm{DS}}$ & the same for the DS layer [\pu] \\
+    \lamts, \lamds & loop gains: target $\lambda_{\max}$ over the continuous columns, TS and DS \\
+    $\tau$ & split of effort between DER and PCC actuators, gauge-fixed to geometric mean $1$ \\
+    $r_v$ & DS objective price: multiple of the baseline weight $g_v^{\mathrm{DS}}$ \\
+    \gwoltc & OLTC move penalty, generated from $v_e$ by the rule of Ch.~8 \\
+    \midrule
+    \multicolumn{2}{l}{\emph{Costs, all minimised}} \\
+    \fts & TS voltage cost: RMS deviation, worst bus, band excess \\
+    \fq & interface reactive power tracking error \\
+    \fds & DS voltage cost \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+%======================================================================
+\section{The idea}
+\label{sec:wsel:idea}
+
+The weights $G_w$ are not searched. They are \emph{generated} by the curvature
+rule of Ch.~8 \CITE{2} from six coordinates, and only those six are chosen.
+
+Three of the six ($v_e$, \lamts, \lamds) set the loop's contraction. They follow
+from a stated stability budget, and the admissible values can be written in
+closed form. The other three ($\tau$, $v_{e,\mathrm{DS}}$, $r_v$) are trade-offs
+with no value the plant supplies, and are settled by a grid search inside the
+admissible region.
+
+The procedure is therefore short: fix a budget, derive the admissible region,
+search inside it, then confirm on unseen data.
+
+%======================================================================
+\section{The stability budget}
+\label{sec:wsel:budget}
+
+Distributed online feedback optimisation converges when the closed loop is a
+contraction, $\rho(M) < 2$ \CITE{1}. That is the entire budget.
+
+A quarter of it is reserved before any weight is chosen:
+\begin{equation}
+  \label{eq:wsel:budget}
+  \rho(M) \;\leq\; 0.75 \cdot 2 \;=\; 1.5 .
+\end{equation}
+
+The reservation is a design choice, and it covers what this chapter does not
+quantify: the bound is asymptotic where the loop is sampled, the plant is
+non-linear where the design is a linearisation, and the cached sensitivities age
+between updates.
+
+Two points of care.
+
+\paragraph{$\rho(M)$ is evaluated on the coupled model.}
+Each controller acts on local sensitivities, but the criterion is formed on the
+full $M$, off-diagonal blocks included. Evaluating it on the block-diagonal part
+alone understates the contraction by a factor of $1.22$ to $1.29$, measured over
+the design range, so the coupled operator is used throughout.
+
+\paragraph{$\rho(M)$ is the spectral radius, not the block bound.}
+The sufficient condition
+$\lambda_{\max}(M_{ii}) + \sum_{j \neq i} \lVert M_{ij} \rVert_2$ \CITE{1} is
+obtained by a triangle inequality and is loose here by a consistent factor of
+about $1.28$. Using it in place of $\rho(M)$ would discard roughly a quarter of
+the admissible range without adding safety.
+
+%======================================================================
+\section{The admissible region in closed form}
+\label{sec:wsel:region}
+
+Two measured relations reduce the contraction to a formula in the two TS
+coordinates.
+
+\paragraph{The tap penalty is linear in the commit threshold.}
+The rule of Ch.~8 generates \gwoltc{} from $v_e$, and over the range of interest
+\begin{equation}
+  \label{eq:wsel:gwoltc}
+  \gwoltc(v_e) \;=\; \num{318844}\,v_e \;-\; \num{999} ,
+\end{equation}
+with a maximum residual of $0.37$ over six values, i.e.\ \SI{0.006}{\percent}.
+
+\paragraph{The contraction is a floor plus a gain.}
+The discrete columns cannot be scaled away by any continuous weight and so
+impose a floor, which falls as the taps are priced more dearly; the continuous
+gain then adds to it linearly:
+\begin{equation}
+  \label{eq:wsel:rho}
+  \rho(M) \;=\; \frac{\num{5498}}{\gwoltc(v_e)} \;+\; 1.5254 \,\lamts .
+\end{equation}
+Fitted over nine points spanning $v_e \in [0.015, 0.025]\,\pu$ and
+$\lamts \in [0.15, 0.50]$, maximum residual $0.0133$, or \SI{1.1}{\percent} of
+the range covered.
+
+Equations~\eqref{eq:wsel:gwoltc} and \eqref{eq:wsel:rho} are properties of the
+network, its area partition and the boundary model. They must be re-measured if
+any of those changes.
+
+\paragraph{Allowance for the operating point.}
+Both relations are evaluated on sensitivities cached at one operating point.
+Across five operating points spanning the profile year, $\rho(M)$ at fixed
+coordinates varied from $1.678$ to $1.756$, the worst lying \SI{2.2}{\percent}
+above the mean. That allowance is carried, giving the design target
+\begin{equation}
+  \label{eq:wsel:target}
+  \rho(M) \;\leq\; \frac{1.5}{1.022} \;=\; 1.468 .
+\end{equation}
+
+Combining, the admissible region is
+\begin{equation}
+  \label{eq:wsel:region}
+  \lamts \;\leq\; \frac{1}{1.5254}
+    \left( 1.468 - \frac{\num{5498}}{\num{318844}\,v_e - \num{999}} \right) .
+\end{equation}
+
+\begin{table}[htbp]
+  \centering
+  \caption{The admissible region, from Eq.~\eqref{eq:wsel:region}.}
+  \label{tab:wsel:region}
+  \begin{tabular}{ccc}
+    \toprule
+    $v_e$ [\pu] & \gwoltc & \lamts{} admissible \\
+    \midrule
+    0.015 & 3783 & $\leq 0.010$ \\
+    0.017 & 4421 & $\leq 0.147$ \\
+    0.020 & 5378 & $\leq 0.292$ \\
+    0.025 & 6972 & $\leq 0.445$ \\
+    0.030 & 8566 & $\leq 0.541$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The table states the design trade plainly: \textbf{a larger commit threshold
+buys loop gain.} Allowing the tap changers to tolerate a wider voltage error before they
+act prices them more dearly, which lowers the contraction floor and releases
+budget for the continuous actuators. At $v_e = \SI{0.015}{\pu}$ almost no gain is
+admissible; at $\SI{0.030}{\pu}$ the loop may run more than fifty times faster.
+
+%======================================================================
+\section{The procedure}
+\label{sec:wsel:procedure}
+
+\paragraph{Step 1 -- the TS coordinates.}
+Every $(v_e, \lamts)$ pair on the boundary of Eq.~\eqref{eq:wsel:region} spends
+the whole stability budget, so the choice between them is made on cost, not on
+stability. Simulate the boundary and take the pair minimising \fts.
+
+\paragraph{Step 2 -- the DS gain.}
+Sweep \lamds{} at the chosen TS coordinates and take the interior minimum of
+\fq. Two checks: $\rho(M)$ must come out constant across the sweep, which is what
+allows the two gains to be fixed in sequence rather than jointly; and the minimum
+must not lie at an end of the swept range.
+
+\paragraph{Step 3 -- the three trade-offs.}
+$\tau$, $v_{e,\mathrm{DS}}$ and $r_v$ have no plant-derived values. Sweep them
+and report the non-dominated set on \fts, \fq{} and \fds{} together. All three
+are controlled outputs, so all three belong in the comparison: omitting \fds{}
+allows the search to spend DS voltage regulation, measured at \SI{-47}{\percent}
+for a \SI{15}{\percent} gain in interface tracking.
+
+\paragraph{Step 4 -- confirmation.}
+Re-evaluate the chosen point and the analytic baseline on a bank of windows
+drawn from the same distribution but disjoint in time. Carry forward only
+improvements that survive.
+
+\paragraph{Step 5 -- switching wear.}
+Measure tap operations per transformer on \SI{12}{\hour} profile-driven windows,
+against the maintenance budget \CITE{4}. A shorter window cannot be used: taps
+are integers, so in a \SI{90}{\minute} window one operation is
+\SI{0.667}{\per\hour} and a budget of \SI{1.25}{\per\hour} falls between two
+adjacent achievable values.
+
+\subsection{Search ranges}
+\label{sec:wsel:ranges}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Ranges swept, and what bounds them.}
+  \label{tab:wsel:ranges}
+  \begin{tabular}{lll}
+    \toprule
+    coordinate & range & bounded by \\
+    \midrule
+    $v_e$ & \SIrange{0.017}{0.040}{\pu} & below: Eq.~\eqref{eq:wsel:region} admits no useful gain \\
+    \lamts & boundary of Eq.~\eqref{eq:wsel:region} & the stability budget \\
+    \lamds & \numrange{0.15}{1.90} & above: the preconditioner requires a target below $2$ \\
+    $\tau$ & \numrange{0.25}{4} & gauge symmetry: $\tau$ and $1/\tau$ exchange the two classes \\
+    $v_{e,\mathrm{DS}}$ & \SIrange{0.0125}{0.065}{\pu} & below: DS tap hunting; above: taps never commit \\
+    $r_v$ & \numrange{0.25}{4} & spans the DS voltage / interface-$Q$ frontier end to end \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Steps 1 to 3 require about twenty simulated candidates in total.
+
+%======================================================================
+\section{Result}
+\label{sec:wsel:result}
+
+% ---------------------------------------------------------------------
+% PLACEHOLDER -- to be completed when the boundary sweep, the DS re-pick,
+% the confirmation run and the wear audit finish.  Structure:
+%   Table 1: chosen coordinates and the weights they generate, against shipped
+%   Table 2: costs on the confirmation bank, chosen point against baseline
+%   Table 3: tap operations per day per transformer, quiet and disturbed windows
+% ---------------------------------------------------------------------
+
+\emph{To be completed.}
+
+%======================================================================
+\section{What the criterion does and does not establish}
+\label{sec:wsel:limits}
+
+\paragraph{Evidence, not a certificate.}
+Equation~\eqref{eq:wsel:rho} is fitted to a linearised model at cached operating
+points. It supports a design choice; it does not certify stability. The
+underlying bound \CITE{1} is sufficient rather than necessary, so exceeding it
+would not prove divergence, and meeting it does not prove convergence. No
+candidate diverged in any of the roughly \num{130} simulations behind this
+chapter.
+
+\paragraph{The reserved quarter is a choice.}
+Nothing measured here fixes the factor in Eq.~\eqref{eq:wsel:budget} at $0.75$.
+A reader who prefers a different reservation may substitute it; the procedure
+and Eq.~\eqref{eq:wsel:region} are unchanged, and only the admissible region
+moves.
+
+\paragraph{A local search will not find the design point.}
+A compass search over all six coordinates, run twice, moved only $r_v$. That is
+a property of the search: polling one coordinate at a time cannot find a move
+requiring two to change together. Raising $v_e$ alone worsens \fts; raising
+\lamts{} alone breaches the budget; raising both improves \fts{} and \fq{}
+together. The coordinates a local search leaves alone are the ones that need a
+sweep of their own.
+
+\paragraph{The wear budget's scope is an operator statement.}
+\SI{94}{\percent} of measured tap activity falls in windows carrying a
+contingency; quiet days produce two to four operations per transformer. Whether
+the budget \CITE{4} is meant as a routine figure or as an envelope covering
+contingency days changes the verdict on a candidate, and this procedure cannot
+settle it.
+
+\paragraph{Reactive capability is not uniform over the year.}
+Below \SI{10}{\percent} of rated power the applicable capability diagram
+\CITE{3} gives exactly zero reactive range, which holds for \SI{18.6}{\percent}
+of the profile year. In those windows $\tau$, \lamds{} and $r_v$ have nothing to
+allocate. The scenario bank samples all three capability strata in proportion,
+and costs are reported per stratum as well as in aggregate.
+
+\end{document}

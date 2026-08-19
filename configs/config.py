@@ -10,6 +10,7 @@ different experiments to re-use or override subsets of the configuration.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -657,6 +658,31 @@ class MultiTSOConfig:
     (``"dso_der"``, ``"dso_oltc"``, ``"dso_shunt"``).  There is no
     ``dso_g_w_scale`` counterpart to :attr:`zone_g_w_scale`, so this is the only
     per-area ``g_w`` hook on the DSO layer."""
+
+    dso_g_v_per_area: Optional[Dict[str, float]] = None
+    """Per-DSO-area override of the voltage-tracking weight
+    ``{dso_id: dso_g_v}``, keyed by ``HVNetworkInfo.net_id`` like
+    :attr:`dso_g_w_class`.  DSOs not listed keep the global :attr:`dso_g_v`.
+    Applied to ``DSOControllerConfig.g_v`` once after controller construction
+    and before the main loop, alongside :attr:`dso_g_w_class`.
+
+    Needed because a weak, long-line HV network needs more voltage authority on
+    its DER block than a compact one, and ``dso_g_v`` was global-only.  Measured
+    2026-08-18 on DSO_4 (586 km, X = 1.84 p.u.): its internal voltage spread is
+    0.147 p.u., 73 % of the whole [0.90, 1.10] band, which pins ``V_max`` on the
+    upper bound for 58 % of the day.
+
+    **Raise this together with that area's ``dso_oltc`` entry in
+    :attr:`dso_g_w_class`, by the same factor.**  With
+    ``dso_gamma_oltc_q = 0.0`` the DSO OLTC is driven *only* by the voltage
+    gradient, so ``dso_g_v / g_w_dso_oltc`` is the OLTC loop gain; raising
+    ``dso_g_v`` alone pushes the integer commit threshold into a limit cycle
+    (measured: 50.5 tap reversals/h at x6.7, against 0.00 at baseline).  Holding
+    the ratio moves the extra authority onto the *continuous* DER block, where
+    it reshapes which DER injects — shrinking the spread at unchanged aggregate
+    Q_DER — and the tap rate falls *below* baseline.
+
+    See ``docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md``."""
 
     numerical_h_closed_loop: bool = True
     """When ``numerical_h=True``, controls the perturbation mode of
@@ -1708,3 +1734,60 @@ class MultiTSOConfig:
                 deadband_rel=self.g_w_adapt_deadband_rel,
             )
         return out
+
+
+# ---------------------------------------------------------------------------
+#  Per-DSO voltage relief
+# ---------------------------------------------------------------------------
+
+def apply_dso_v_relief(
+    cfg: "MultiTSOConfig",
+    factors: Mapping[str, float],
+) -> "MultiTSOConfig":
+    """Give each listed DSO ``factor`` x more voltage authority at UNCHANGED
+    OLTC loop gain.
+
+    Lives here rather than in an experiment module because two independent
+    callers need it: the experiment entry point
+    (``experiments/run_multi_system_ofo.py``) and the Stage-1 config builder
+    (``tuning_mc/stage_1_search.build_config``).  The tuning path is the reason
+    the factor is applied to ``cfg``'s *own* weights instead of being written as
+    absolute numbers: ``dso_g_v_ratio`` is a search coordinate, so ``dso_g_v``
+    moves from trial to trial, and an absolute relief would silently change the
+    OLTC loop gain ``dso_g_v / g_w_dso_oltc`` as the search walked.
+
+    With ``dso_gamma_oltc_q = 0`` that OLTC is voltage-driven only, so the ratio
+    *is* its loop gain: raising ``dso_g_v`` alone drives the integer tap into a
+    limit cycle (measured 2026-08-18, 50.5 tap reversals/h at factor 6.7 against
+    0.00 at baseline).  Scaling both by the same factor moves the extra
+    authority onto the continuous DER block instead, where it reshapes which DER
+    injects and shrinks the network's internal voltage spread.
+
+    Merges into any existing :attr:`MultiTSOConfig.dso_g_w_class` /
+    :attr:`MultiTSOConfig.dso_g_v_per_area` rather than replacing them, so a
+    per-area design for the other areas survives.  Entries with factor ``1.0``
+    are skipped; an empty or all-unity mapping returns ``cfg`` unchanged.
+
+    See ``docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md``.
+    """
+    active = {d: float(f) for d, f in (factors or {}).items() if float(f) != 1.0}
+    if not active:
+        return cfg
+
+    gv = dict(cfg.dso_g_v_per_area or {})
+    gw = {k: dict(v) for k, v in (cfg.dso_g_w_class or {}).items()}
+
+    for dso_id, factor in active.items():
+        if not (factor > 0.0):
+            raise ValueError(
+                f"voltage-relief factor for {dso_id!r} must be > 0, got {factor!r}"
+            )
+        gv[dso_id] = float(cfg.dso_g_v) * factor
+        # Base the OLTC weight on this area's own per-area value when a per-area
+        # design is present, else on the global scalar -- otherwise the factor
+        # would be measured against the wrong reference and the loop gain would
+        # move.
+        oltc_base = gw.get(dso_id, {}).get("dso_oltc", float(cfg.g_w_dso_oltc))
+        gw.setdefault(dso_id, {})["dso_oltc"] = float(oltc_base) * factor
+
+    return dataclasses.replace(cfg, dso_g_v_per_area=gv, dso_g_w_class=gw)

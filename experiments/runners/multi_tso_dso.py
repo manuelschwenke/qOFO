@@ -2935,6 +2935,47 @@ def run_multi_tso_dso(
             if _spec:
                 _apply_class_g_w(_ctrl, _spec, f"{_d}")
 
+    # ── Per-DSO voltage-tracking weight ──────────────────────────────────────
+    # Applied here, next to dso_g_w_class, because the two are a pair: with
+    # dso_gamma_oltc_q = 0 the DSO OLTC sees only the voltage gradient, so
+    # dso_g_v / g_w_dso_oltc is that area's OLTC loop gain and the two must be
+    # moved together (see MultiTSOConfig.dso_g_v_per_area).  Warn if a caller
+    # raises g_v without matching the OLTC weight -- that is the configuration
+    # that limit-cycles the tap.
+    if getattr(config, "dso_g_v_per_area", None):
+        for _d, _ctrl in dso_controllers.items():
+            _gv = config.dso_g_v_per_area.get(str(_d))
+            if _gv is None:
+                continue
+            _gv = float(_gv)
+            if not (_gv >= 0.0):
+                raise ValueError(
+                    f"dso_g_v_per_area[{_d!r}] must be >= 0, got {_gv!r}"
+                )
+            _gv_old = float(_ctrl.config.g_v)
+            _ctrl.config.g_v = _gv
+            # Invalidate any cached objective/curvature state derived from g_v.
+            _ctrl._H_cache = getattr(_ctrl, "_H_cache", None)
+            if verbose >= 1:
+                print(f"  [dso_g_v] {_d}: {_gv_old:g} -> {_gv:g}")
+            # Loop-gain check against this area's OLTC weight.
+            _ratio_gv = _gv / _gv_old if _gv_old > 0 else float("inf")
+            _spec = (config.dso_g_w_class or {}).get(str(_d)) or {}
+            _oltc_new = _spec.get("dso_oltc")
+            _oltc_old = float(config.g_w_dso_oltc)
+            _ratio_gw = (float(_oltc_new) / _oltc_old
+                         if _oltc_new and _oltc_old > 0 else 1.0)
+            if _ratio_gv > 1.0 and not (0.8 <= _ratio_gw / _ratio_gv <= 1.25):
+                print(
+                    f"  [dso_g_v] WARNING {_d}: g_v raised x{_ratio_gv:.2f} but "
+                    f"g_w_dso_oltc only x{_ratio_gw:.2f}.  With "
+                    f"dso_gamma_oltc_q={config.dso_gamma_oltc_q:g} the OLTC is "
+                    f"voltage-driven only, so this raises its loop gain "
+                    f"x{_ratio_gv / _ratio_gw:.2f} and the integer tap may "
+                    f"limit-cycle.  Set dso_g_w_class[{_d!r}]['dso_oltc'] = "
+                    f"{_oltc_old * _ratio_gv:.0f} to hold it."
+                )
+
     # ── Per-zone loop-gain scaling ────────────────────────────────────────────
     # Applied here, after every controller exists and before the first step, so
     # the whole run sees one consistent gain.  ``OFOParameters`` is frozen, so

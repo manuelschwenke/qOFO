@@ -47,7 +47,7 @@ import os
 import pickle
 import sys
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -64,7 +64,7 @@ pd.set_option('display.max_colwidth', None)
 # ── Ensure project root is on sys.path ────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from configs.config import MultiTSOConfig
+from configs.config import MultiTSOConfig, apply_dso_v_relief
 from experiments.helpers import ContingencyEvent
 from experiments.results_io import new_run_dir
 from experiments.runners import run_multi_tso_dso
@@ -469,6 +469,47 @@ def make_config() -> MultiTSOConfig:
     return cfg
 
 
+DSO_V_RELIEF_FACTORS: Dict[str, float] = {"DSO_2": 20.0, "DSO_4": 20.0}
+"""Per-area voltage-authority factors applied by :func:`_apply_dso_v_relief`.
+
+Each factor scales that area's ``dso_g_v`` **and** its ``dso_oltc`` step weight
+by the same amount, so the OLTC loop gain ``dso_g_v / g_w_dso_oltc`` is
+unchanged and the extra authority lands on the continuous DER block.  Drop an
+area from the mapping (or set its factor to ``1.0``) to leave it untouched.
+
+**Listed areas are the spread-limited ones, and that is the selection rule.**
+An HV network's internal voltage spread ``max_i V_i - min_i V_i`` is the part of
+its profile no tap changer can remove (the OLTC translates the whole profile),
+so an area whose spread is a large fraction of the 0.20 p.u. corridor has almost
+no margin left to place.  Measured 2026-08-18, spread max / min headroom:
+
+    DSO_1  0.015 / +0.048     DSO_2  0.117 / -0.001
+    DSO_3  0.037 / +0.039     DSO_4  0.147 / -0.001
+
+Applying the factor to DSO_1 and DSO_3 as well (run I) bought 0.0016 and 0.0002
+p.u. of ``V_max`` and cost DSO_3 **+53 %** interface-Q RMSE, so they are
+deliberately absent: voltage authority on a network that is not spread-limited
+only competes with interface-Q tracking.  Rule of thumb from that measurement --
+apply above ~0.10 p.u. of spread, leave alone below ~0.04.
+
+Rationale and full measurements:
+``docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md``.
+"""
+
+
+def _apply_dso_v_relief(
+    cfg: MultiTSOConfig,
+    factors: Optional[Dict[str, float]] = None,
+) -> MultiTSOConfig:
+    """:func:`configs.config.apply_dso_v_relief` with this module's defaults.
+
+    The implementation lives in ``configs.config`` because the Stage-1 config
+    builder needs it too and must not import an experiment module.
+    """
+    return apply_dso_v_relief(
+        cfg, DSO_V_RELIEF_FACTORS if factors is None else factors)
+
+
 def make_config_tuned() -> MultiTSOConfig:
     """Run configuration for the default multi-TSO / multi-DSO run (edit here).
 
@@ -512,6 +553,41 @@ def make_config_tuned() -> MultiTSOConfig:
         # OLTC weights and settings
         g_w_tso_oltc = 4740,  # unchanged — see note
         g_w_dso_oltc = 183,  # was 150
+        # ── DSO_4 voltage relief (2026-08-18) ───────────────────────────────
+        # DSO_4 is the long-line area (SUBNET_DEFS scale=2.44 -> 586 km,
+        # X = 222.5 ohm = 1.84 p.u., unreinforced 305 mm2) carrying the same
+        # load and the same 700 MW of DER as the compact ones.  Its INTERNAL
+        # voltage spread (V_max - V_min across its ten HV buses) is 0.147 p.u.
+        # -- 73 % of the whole [0.90, 1.10] band -- so tracking V_set = 1.03
+        # puts the top of the profile on the upper bound by arithmetic
+        # (1.03 + 0.147/2 = 1.103).  Measured: V_max pinned at 1.1001 for 58 %
+        # of a 6 h day.
+        #
+        # The pair below raises DSO_4's voltage-tracking weight x20 while
+        # raising its OLTC step weight by the SAME x20, so the OLTC loop gain
+        # dso_g_v / g_w_dso_oltc is unchanged.  The extra authority therefore
+        # lands on the CONTINUOUS DER block, where it reshapes which of the ten
+        # DERs injects (aggregate Q_DER unchanged, 63.3 -> 60.9 Mvar) and so
+        # shrinks the spread, rather than on the integer tap.
+        #
+        #   V_max  1.1010 -> 1.0629      V_min  0.9531 -> 1.0027
+        #   spread 0.147  -> 0.058       tap    2.33   -> 0.67 ops/h, 0 reversals
+        #   interface-Q RMSE 6.08 -> 6.59 Mvar (+8 %), losses 40.68 -> 39.86 MW
+        #
+        # Zone 1/2/3 EHV envelopes, DSO 1/2/3 voltages, their interface-Q RMSEs
+        # and their tap rates are unchanged to four decimals -- this is local.
+        #
+        # DO NOT raise dso_g_v_per_area without the matching dso_oltc entry:
+        # that configuration (x6.7 on g_v alone) limit-cycles the tap at 50.5
+        # reversals/h.  The runner warns if the two ratios disagree.
+        #
+        # NOT re-measured on the tuning_mc scenario banks yet -- single 6 h
+        # window, 2016-05-03 08:00.  See
+        # docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md.
+        #
+        # The pair itself is applied by _apply_dso_v_relief() below, derived
+        # from this config's own dso_g_v / g_w_dso_oltc, so the loop-gain
+        # invariant survives an edit to either base value.
         local_oltc_max_step_per_dt=1,
         oltc_cooldown_s_mt=180.0,
         oltc_cooldown_s_nc=60.0,
@@ -575,7 +651,7 @@ def make_config_tuned() -> MultiTSOConfig:
             ContingencyEvent(minute=300, element_type="line", element_index=25, action="restore"),
         ],
     )
-    return cfg
+    return _apply_dso_v_relief(cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -668,8 +744,14 @@ def make_config_per_area() -> MultiTSOConfig:
     global ``g_w_<class>`` scalars are kept as the fallback for any area or
     class the per-area block does not list.
     """
-    cfg = make_config_tuned()
-    return dataclasses.replace(
+    # Undo the DSO_4 relief before the gauge/per-area rewrite and re-apply it
+    # afterwards (see the tail of this function).  Applying it first would
+    # leave a raised dso_g_v against the per-area dso_oltc design below, i.e.
+    # the unmatched loop gain that limit-cycles the tap.
+    cfg = dataclasses.replace(
+        make_config_tuned(), dso_g_v_per_area=None, dso_g_w_class=None,
+    )
+    return _apply_dso_v_relief(dataclasses.replace(
         cfg,
         # ── Gauge-normalised weight group ───────────────────────────────────
         # Objective (output) weights.  Ratios preserved exactly; only the
@@ -751,7 +833,7 @@ def make_config_per_area() -> MultiTSOConfig:
             "DSO_4": {"dso_der": 1219.0, "dso_oltc": 178.0},
         }),
         zone_g_w_scale=None,        # superseded by zone_g_w_class
-    )
+    ))
 
 
 def main() -> None:

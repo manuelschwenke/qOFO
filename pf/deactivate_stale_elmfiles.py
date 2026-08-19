@@ -9,11 +9,28 @@ deleted: every source fails to open, the load flow does not converge, and
 when it blocked the Ch. 9.1 settling battery after ~30 min inside ``ComInc``
 (`docs/daily_log/08_2026/2026-08-19_ch9_settling_table_emitter_rework.md`).
 
-**What this does.** Sets the affected sources out of service, having first
-written every prior value to a restore file, then verifies that a load flow and
-``ComInc`` now succeed. If they do not, the prior state is restored
-automatically and the script reports failure: a study case that does not
-initialise is no worse than before, but one silently left half-modified is.
+**Two strategies, and only one of them works.**
+
+``--out-of-service`` disarms the affected sources. It makes ``ComInc``
+succeed -- but it does **not** restore the operating point. Measured
+2026-08-19: the Ch. 9.1 preflight then reported a 60 s drift of
+``1.36e-02`` pu at ``u_DSO_2_bus71`` against ``1.41e-10`` pu in the run of
+record, and refused to measure settling times on a model that is not at
+equilibrium. The battery does not *configure* profile playback, but the load
+and DER models in the study case *consume* it, so a disarmed source leaves
+those inputs undriven and the plant drifts.
+
+``--repoint PATH`` (default) points the stale sources at an existing profile
+file and returns them to service. This is exactly what ``profile_playback.py``
+does on every run, so it is a normal operation for this project rather than an
+exotic mutation.
+
+Either way, every prior value is written to a restore file first and the
+result is verified: a load flow and ``ComInc`` must succeed, or the prior state
+is restored automatically and the script reports failure. A study case that
+does not initialise is no worse than before; one silently left half-modified
+is. **The real acceptance test is the battery's own preflight drift
+assertion**, which is what caught the out-of-service attempt.
 
 **Scope.** Only sources whose ``f_name`` does not resolve to an existing file
 are touched. A source with a live profile is left alone, so a case that is
@@ -22,7 +39,8 @@ genuinely driving profiles is not quietly disarmed.
 Usage::
 
     python pf\deactivate_stale_elmfiles.py --dry-run
-    python pf\deactivate_stale_elmfiles.py
+    python pf\deactivate_stale_elmfiles.py --repoint <profile.txt>
+    python pf\deactivate_stale_elmfiles.py --out-of-service
     python pf\deactivate_stale_elmfiles.py --restore <restore_file.json>
 """
 
@@ -82,6 +100,14 @@ def main(argv=None) -> int:
                     help="report what would change; modify nothing")
     ap.add_argument("--restore", type=Path, default=None,
                     help="restore outserv/f_name from a previous restore file")
+    ap.add_argument("--repoint", type=Path, default=None,
+                    help="point stale sources at this profile file and return "
+                         "them to service (the strategy that preserves the "
+                         "operating point)")
+    ap.add_argument("--out-of-service", action="store_true",
+                    help="disarm stale sources instead of repointing them; "
+                         "makes ComInc succeed but does NOT restore the "
+                         "operating point -- see the module docstring")
     a = ap.parse_args(argv)
 
     from pf.session import connect
@@ -104,8 +130,10 @@ def main(argv=None) -> int:
                 print(f"  [warn] no longer present: {rec['full_name']}")
                 continue
             obj.SetAttribute("outserv", int(rec["outserv"]))
+            if rec.get("f_name"):
+                obj.SetAttribute("f_name", str(rec["f_name"]))
             n += 1
-        print(f"[elmfile] restored outserv on {n} source(s) from {a.restore}")
+        print(f"[elmfile] restored outserv + f_name on {n} source(s) from {a.restore}")
         print(f"[elmfile] check after restore: {_check(app)}")
         return 0
 
@@ -127,6 +155,15 @@ def main(argv=None) -> int:
         print("[elmfile] --dry-run: nothing modified")
         return 0
 
+    if not a.out_of_service and a.repoint is None:
+        print("[abort] choose --repoint <profile.txt> (recommended) or "
+              "--out-of-service; see the module docstring for why they are "
+              "not equivalent")
+        return 1
+    if not a.out_of_service and not Path(a.repoint).exists():
+        print(f"[abort] --repoint target does not exist: {a.repoint}")
+        return 1
+
     before = _check(app)
     print(f"[elmfile] check BEFORE: {before}")
 
@@ -136,9 +173,10 @@ def main(argv=None) -> int:
     restore_file.write_text(json.dumps({
         "timestamp": datetime.now().astimezone().isoformat(),
         "project": a.project, "study_case": a.study_case,
-        "reason": ("stale ElmFile data files blocked ComInc; sources set out "
-                   "of service for the Ch. 9.1 open-loop settling battery, "
-                   "which does not use profile playback"),
+        "reason": ("stale ElmFile data files blocked ComInc on the Ch. 9.1 "
+                   "settling battery; sources were "
+                   + ("disarmed" if a.out_of_service
+                      else f"repointed at {a.repoint}")),
         "check_before": before,
         "sources": [{k: r[k] for k in
                      ("loc_name", "full_name", "f_name", "outserv", "exists")}
@@ -147,13 +185,28 @@ def main(argv=None) -> int:
     print(f"[elmfile] prior state written to {restore_file}")
 
     n = 0
-    for r in stale:
-        try:
-            r["_obj"].SetAttribute("outserv", 1)
-            n += 1
-        except Exception as exc:
-            print(f"  [warn] {r['loc_name']}: {type(exc).__name__}: {exc}")
-    print(f"[elmfile] set {n} source(s) out of service")
+    if a.out_of_service:
+        for r in stale:
+            try:
+                r["_obj"].SetAttribute("outserv", 1)
+                n += 1
+            except Exception as exc:
+                print(f"  [warn] {r['loc_name']}: {type(exc).__name__}: {exc}")
+        print(f"[elmfile] set {n} source(s) out of service")
+        print("[elmfile] NOTE: this makes ComInc succeed but does NOT restore "
+              "the operating point; the consuming load/DER models are left "
+              "undriven. Check the battery preflight drift.")
+    else:
+        target = str(Path(a.repoint).resolve())
+        for r in stale:
+            try:
+                r["_obj"].SetAttribute("f_name", target)
+                r["_obj"].SetAttribute("outserv", 0)
+                n += 1
+            except Exception as exc:
+                print(f"  [warn] {r['loc_name']}: {type(exc).__name__}: {exc}")
+        print(f"[elmfile] repointed {n} source(s) at {target} and returned "
+              f"them to service")
 
     after = _check(app)
     print(f"[elmfile] check AFTER: {after}")
@@ -164,6 +217,7 @@ def main(argv=None) -> int:
         for r in stale:
             try:
                 r["_obj"].SetAttribute("outserv", int(r["outserv"]))
+                r["_obj"].SetAttribute("f_name", str(r["f_name"]))
             except Exception:
                 pass
         print(f"[elmfile] check after restore: {_check(app)}")

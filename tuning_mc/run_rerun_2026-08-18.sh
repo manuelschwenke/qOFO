@@ -15,10 +15,12 @@ cd "Z:/Python_Projekte/qOFO_GH" || exit 1
 
 PY=F:/python_environments/qOFO_clean/python.exe
 OUT=results/tuning_mc/stage1
-LIMITS=tuning_mc/configs/limits_mc_v2_tier1.json
+LIMITS=tuning_mc/configs/limits_mc_v2_tier1_g6.json
 
 export PYTHONIOENCODING=utf-8 PYTHONUTF8=1
-# BLAS=1 per worker, and W = 20 = the physical core count.
+# BLAS=1 per worker, W = 16.  Phase B's poll is 2*live + 2 = 16 points, so 16
+# workers is exactly one batch -- the phase that repeats, and therefore the one
+# to size for.  Phase A (N=29) is 2 batches at any W in 15..28.
 #
 # NOT more.  Workers are single-threaded (BLAS pinned to 1, Gurobi Threads=1),
 # so wall time is  ceil(N/W) * T * max(1, W/20):  past W=20 every worker just
@@ -35,7 +37,7 @@ COMMON=(--scenario-set tier1
         --ds-criterion guard --filter-ds
         --limits "$LIMITS"
         --search-dso-v-authority 20
-        --workers 20)
+        --workers 16)
 
 say() { echo; echo "############ $(date '+%H:%M:%S')  $*"; echo; }
 

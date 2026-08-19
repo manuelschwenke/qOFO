@@ -113,6 +113,26 @@ def main() -> int:
         say(OK, f"limits = {args.limits}  (rho_emp_p95={limits.rho_emp_p95}, "
                 f"tap_ops_per_h={limits.tap_ops_per_h:.3g}, "
                 f"tap_reversals_per_h={limits.tap_reversals_per_h:.3g})")
+        # The two barriers added 2026-08-19.  Both default to inert, and an
+        # inert barrier is exactly what let phase B sell the margin, so a
+        # campaign that means to enforce them must say so explicitly.
+        rm = float(getattr(limits, "rho_margin", 0.0))
+        say(OK if rm > 0 else BAD,
+            f"rho_margin = {rm}"
+            + (f"  -> g3 ceiling {limits.rho_emp_p95 / (1 + rm):.4f}"
+               if rm > 0 else
+               "  BLOCKING: g3 compares against the bare ceiling, so the search "
+               "can spend the transfer margin the calibration set aside "
+               "(measured: lambda_tso walked to 0.2518, rho 1.4771 vs a "
+               "margined 1.4549)"))
+        hd = getattr(limits, "ds_headroom_pu", None)
+        say(OK if hd else BAD,
+            f"ds_headroom_pu = {hd}"
+            + (f" pu required to the nearer DSO bound" if hd else
+               "  BLOCKING: g6 inert, so DS headroom is only a filter criterion "
+               "-- a candidate improving f_ts and f_q while degrading f_ds is "
+               "non-dominated and gets accepted (measured: worst headroom "
+               "+0.0200 -> -0.0003 pu, 1/12 windows outside the corridor)"))
         if limits.rho_emp_p95 < 1.44:
             say(WARN, f"rho_emp_p95 limit {limits.rho_emp_p95} is tight -- the "
                       "design point measured 1.4357 on this bank")

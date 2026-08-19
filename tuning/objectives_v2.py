@@ -66,6 +66,10 @@ CONSTRAINT_NAMES: tuple[str, ...] = (
     "g4_settling",
     "g5a_tap_ops",
     "g5b_tap_reversals",
+    # Appended 2026-08-19, so every existing index is unchanged and the
+    # constraint dict gains a key rather than shifting one.  Inert unless
+    # ``ConstraintLimits.ds_headroom_pu`` is set, so prior studies reproduce.
+    "g6_ds_headroom",
 )
 
 
@@ -91,6 +95,40 @@ class ConstraintLimits:
     #: point carries a certificate, and this is the only stability evidence the
     #: procedure has.
     rho_emp_p95: float = 1.0
+
+    #: g3 — margin applied to the *search*, not just to lambda* selection.
+    #:
+    #: ``phase lam``'s ``--rho-margin`` shrinks the target the CALIBRATION picks
+    #: against and leaves the declared ceiling alone.  Measured 2026-08-19 that
+    #: is not enough: phase B walked ``lambda_tso`` from lambda* = 0.15 to
+    #: 0.2518, giving rho = 1.4771 -- under the declared 1.5 but over the
+    #: margined 1.4549.  g3 is evaluated against ``rho_emp_p95`` alone, so the
+    #: search is free to spend exactly the transfer margin that the calibration
+    #: set aside.  With this field the barrier moves too:
+    #:
+    #:     g3 = worst_rho - rho_emp_p95 / (1 + rho_margin)
+    #:
+    #: Default 0.0 reproduces every earlier study bit-for-bit.  Set it to the
+    #: same value passed to ``--rho-margin`` (0.031 on this plant).
+    rho_margin: float = 0.0
+
+    #: g6 — required headroom from the DSO envelope to the nearer hard bound
+    #: [pu].  ``None`` disables the constraint (g6 = -1, inert).
+    #:
+    #: Added 2026-08-19 after the guard criterion failed to hold the line as a
+    #: *filter* criterion: a candidate that improves f_ts and f_q while
+    #: degrading f_ds is non-dominated, so phase B sold DSO voltage margin until
+    #: a bus left [0.90, 1.10] (worst headroom +0.0200 -> -0.0003 pu, 0/12 ->
+    #: 1/12 windows outside the corridor).  A filter criterion prices margin; a
+    #: barrier forbids selling it.  Both are kept: ``f_ds`` still ranks the
+    #: survivors, g6 stops the trade.
+    #:
+    #: **Not calibratable from the reference.** ``from_reference`` measures the
+    #: hand-tuned point and adds margin, but that point has NEGATIVE headroom on
+    #: two of four DSOs, so calibrating from it would enshrine the defect. This
+    #: is a design intent -- 1 % of nominal on a 110 kV network -- and must be
+    #: justified as such.
+    ds_headroom_pu: float | None = None
 
     #: g4 — worst per-event settling time [s].
     #:
@@ -320,7 +358,10 @@ def feasibility_constraints(
     ])
     g2 = excess - limits.corridor_excess_pu
 
-    g3 = _worst([m.rho_emp_p95 for m in ms]) - limits.rho_emp_p95
+    # The barrier carries the transfer margin too -- see ConstraintLimits.
+    # rho_margin.  At the default 0.0 this is exactly the previous expression.
+    _rho_ceiling = limits.rho_emp_p95 / (1.0 + float(limits.rho_margin))
+    g3 = _worst([m.rho_emp_p95 for m in ms]) - _rho_ceiling
 
     if settling_s_by_scenario is None:
         # No evidence rather than a violation: an absent metric must not make
@@ -338,7 +379,17 @@ def feasibility_constraints(
         + [m.tap_reversals_per_h_dso for m in ms]
     ) - limits.tap_reversals_per_h
 
-    return (g1, g2, g3, g4, g5a, g5b)
+    # g6 -- DSO voltage headroom.  Worst (smallest) margin over every scenario;
+    # a scenario whose metric predates the field contributes nothing rather than
+    # a spurious violation, matching g4's "no evidence is not a violation" rule.
+    if limits.ds_headroom_pu is None:
+        g6 = -1.0                                   # disabled, inert
+    else:
+        heads = [float(m.ds_headroom_min_pu) for m in ms
+                 if math.isfinite(getattr(m, "ds_headroom_min_pu", float("nan")))]
+        g6 = (float(limits.ds_headroom_pu) - min(heads)) if heads else -1.0
+
+    return (g1, g2, g3, g4, g5a, g5b, g6)
 
 
 def performance_scalar(

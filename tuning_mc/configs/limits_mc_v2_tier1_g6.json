@@ -1,0 +1,9 @@
+{
+  "corridor_excess_pu": 0.0001,
+  "rho_emp_p95": 1.5,
+  "rho_margin": 0.031,
+  "ds_headroom_pu": 0.01,
+  "settling_s": 1500.0,
+  "tap_ops_per_h": 4.0,
+  "tap_reversals_per_h": 2.0
+}

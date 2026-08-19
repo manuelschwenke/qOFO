@@ -158,3 +158,93 @@ pointing at a transient directory by a later, unrelated run.
 **Nothing in the PF project was modified by this session.** The `--self-test`
 and `--dry-run` paths both pass on the reworked code, so Task A's code changes
 are verified as far as they can be without a seat-side model that initialises.
+
+---
+
+# Addendum 2 — the ElmFile repair was necessary but not sufficient
+
+After the `ComInc` fix (above), the battery reaches its preflight and is
+refused there. Three ElmFile configurations were tried:
+
+| `ElmFile` state | `ComLdf` | `ComInc` | preflight drift |
+|---|---|---|---|
+| pointing at deleted `0543` | 1 (fail) | 2 (fail) | — never reached |
+| out of service | 0 | 0 | `1.36e-02` pu |
+| repointed at `0566` (a trajectory) | 0 | 0 | `1.42e-02` pu |
+| repointed at a **frozen t0** profile | 0 | 0 | `1.36e-02` pu |
+
+Run of record, 2026-08-07: `1.41e-10` pu. Tolerance: `1e-4`.
+
+**The profile is not the cause.** Frozen and out-of-service give the *same*
+drift to three digits, and the trajectory differs by only 4 %.
+
+## What the drift actually is
+
+Established by read-only diagnostics (all in the session scratchpad, none
+promoted):
+
+1. **`ComInc` initialises exactly on the load flow.** P and Q compared across
+   all 163 injectors and loads: `sum|dP| = 0.000` MW, `sum|dQ| = 0.000` Mvar.
+   The initial condition is not the problem.
+2. **Q(V) anchoring is consistent.** All 44 `QVPRE` blocks carry
+   `Vanchor == V_LF` and `qset == Q_LF/S_n` to machine precision; `|dV|` max
+   `0.000e+00`. Also `db = 0.5` pu, so the droop cannot engage at all.
+3. **No discrete action.** No `ElmTr2`/`ElmTr3`/`ElmShnt` tap or step moves
+   during the flat run.
+4. **The trajectory is a step, not a ramp.** The worst signal moves
+   `1.02194 -> 1.03528` within the first sample and then sits flat
+   (`1.03528 -> 1.03580` over the remaining 54 s).
+5. **Active power redistributes.** Over 60 s the four TSO parks each shed
+   0.43-0.56 MW (`sum|dP| = 5.2` MW over 44 parks) while the synchronous
+   machines gain `7.4` MW, G 01 alone `+5.3` MW, and machine Q *falls*
+   (G 01 `107.4 -> 103.9` Mvar). The voltage-dependent `*_var_*` loads then
+   follow. That is a governor response to a power imbalance, not a controller
+   hunting.
+
+So the plant is released at the load-flow point, discovers a real-power
+imbalance, and relaxes to a different equilibrium `1.4e-2` pu away.
+
+## Leading hypothesis, NOT verified
+
+The frozen profile freezes *`0566`'s* channel values, which encode that run's
+park dispatch — not the dispatch the current static model (and hence the load
+flow) carries. The parks are then driven to a P that the load flow did not
+solve for, and the governors close the gap.
+
+Testing it needs the per-source channel scaling: 97 `ElmFile` sources share a
+single 10-channel file, so the channels are normalised shapes and each source
+applies its own scale. Confirming the hypothesis means resolving that mapping;
+fixing it means **re-exporting a profile from the current model state** rather
+than reusing a recorded one.
+
+**That is a model-data operation and it was deliberately not attempted
+unattended.** It changes what the benchmark *is*, which is an author decision.
+
+## Where the study case was left
+
+Pointing at `pf/profiles/rms_profile_t0_frozen.txt`, all 97 sources in
+service. `ComLdf` and `ComInc` both succeed, so the case is usable — it is
+strictly better than the dead `0543` path it had, and the target is under
+`pf/`, which is not pruned. Three restore files record every prior state, in
+order:
+
+| file | state it restores |
+|---|---|
+| `elmfile_outserv_20260819-185102.json` | original: in service, pointing at the deleted `0543` |
+| `elmfile_outserv_20260819-185508.json` | out of service, still pointing at `0543` |
+| `elmfile_outserv_20260819-191003.json` | in service, pointing at `0566` |
+
+They live under `results/`, which is gitignored and pruned — **copy them
+somewhere durable if the original state matters.**
+
+## Status of Task A
+
+- Code: **done and verified offline.** `--self-test` all-pass (27 checks),
+  `--dry-run` resolves `gen[1] -> G 03` and `gen[7] -> G 09`, 17 pytest cases.
+- Run: **blocked**, and correctly so. Every settling time measured from this
+  model state would carry a `1.4e-2` pu relaxation, which is 14x the `1e-3` pu
+  voltage band the table is measured against. The preflight is the only reason
+  that did not become a table of plausible-looking wrong numbers.
+- The 2026-08-07 numbers in `20260807-085455` remain the best available, with
+  the defect the handoff identified: the thesis prints `11.13` s for the
+  coupler tap against a measured `16.28` s.

@@ -480,7 +480,17 @@ def aggregate(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "lockout_occupancy_mean": (sum(occ) / len(occ)
                                            if occ else float("nan")),
                 "tap_moves_total": sum(r["tap_moves"] for r in sub),
+                "tap_moves_per_interval": (sum(r["tap_moves"] for r in sub)
+                                           / len(sub)),
                 "v_violations": sum(1 for r in sub if r["v_violation"]),
+                # Counts are NOT comparable across periods -- a short T_TS
+                # yields proportionally more intervals, so a raw count of
+                # violating intervals rises with dispatch frequency for the
+                # same physical behaviour. This is the same trap the rho
+                # distribution exists to avoid; the fraction is the comparable
+                # quantity and is what the summary tabulates.
+                "v_violation_fraction": (sum(1 for r in sub
+                                             if r["v_violation"]) / len(sub)),
                 "z_slack_max": max((r["z_slack_max"] for r in sub
                                     if math.isfinite(r["z_slack_max"])),
                                    default=float("nan")),
@@ -536,8 +546,8 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
           "",
           "## Pooled over all interfaces", "",
           "| T_TS [s] | N_inner cfg | intervals | scored | rho med | rho p95 | "
-          "rho max | n_k med | n_k p95 | censored | lockout occ | taps | "
-          "V viol |",
+          "rho max | n_k med | n_k p95 | censored | lockout occ | taps/ival | "
+          "V viol frac |",
           "|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|"]
     for a in [x for x in agg if x["group"] == "__pooled__"]:
         md.append(
@@ -546,25 +556,36 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
             f"{a['rho_median']:.3f} | {a['rho_p95']:.3f} | {a['rho_max']:.3f} | "
             f"{a['n_k_median']:.1f} | {a['n_k_p95']:.1f} | "
             f"{a['censoring_fraction']:.2f} | "
-            f"{a['lockout_occupancy_mean']:.2f} | {a['tap_moves_total']} | "
-            f"{a['v_violations']} |")
+            f"{a['lockout_occupancy_mean']:.2f} | "
+            f"{a['tap_moves_per_interval']:.3f} | "
+            f"{a['v_violation_fraction']:.3f} |")
 
     md += ["", "## Per interface (STS)", "",
            "| T_TS [s] | group | intervals | scored | rho med | rho p95 | "
-           "rho max | n_k med | censored | CAIR width med [Mvar] | "
-           "lockout occ | taps | V viol | max z_slack |",
-           "|--:|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|"]
+           "rho max | n_k med | n_k p95 | censored | CAIR width med [Mvar] | "
+           "lockout occ | taps/ival | V viol frac | max z_slack |",
+           "|--:|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|"]
     for a in [x for x in agg if x["group"] != "__pooled__"]:
         md.append(
             f"| {a['tso_period_s']:.0f} | {a['group']} | {a['n_intervals']} | "
             f"{a['n_intervals_scored']} | {a['rho_median']:.3f} | "
             f"{a['rho_p95']:.3f} | {a['rho_max']:.3f} | "
-            f"{a['n_k_median']:.1f} | {a['censoring_fraction']:.2f} | "
+            f"{a['n_k_median']:.1f} | {a['n_k_p95']:.1f} | "
+            f"{a['censoring_fraction']:.2f} | "
             f"{a['cair_width_median_mvar']:.1f} | "
-            f"{a['lockout_occupancy_mean']:.2f} | {a['tap_moves_total']} | "
-            f"{a['v_violations']} | {a['z_slack_max']:.3g} |")
+            f"{a['lockout_occupancy_mean']:.2f} | "
+            f"{a['tap_moves_per_interval']:.3f} | "
+            f"{a['v_violation_fraction']:.3f} | {a['z_slack_max']:.3g} |")
 
-    md += ["", "## Reading the lockout column", "",
+    md += ["", "## What rho can and cannot show", "",
+           "`rho_k` measures how well the subordinate layer executed the "
+           "correction it was **told** to make. It cannot show whether that "
+           "correction was still the right one by the time it landed, so a "
+           "stale-setpoint cost at long `T_TS` does **not** appear here and "
+           "the absence of a U-shape in `rho` is not evidence against one. "
+           "That cost lives in the supervisory tracking objective (`f_ts`, "
+           "`f_q`), which this script does not compute.", "",
+           "## Reading the lockout column", "",
            "`lockout occ` is the mean fraction of subordinate iterations in a "
            "dispatch interval during which the tap changer was unavailable. It "
            "is **inferred** from observed tap moves and the two cooldown "

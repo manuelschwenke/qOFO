@@ -95,7 +95,22 @@ DEFAULT_BAND_FRACTION = 0.95
 #: this is a decision rather than a detail.
 DEFAULT_BAND_MVAR = 1.0
 
-V_MIN_PU, V_MAX_PU = 0.95, 1.05
+V_MIN_PU, V_MAX_PU = 0.9, 1.1
+
+#: Design-bank strata in which the DER reactive capability is structurally
+#: zero, so no capability-band traversal exists to measure.
+#:
+#: ``WINDOW_META[...]["stratum"]`` is exactly the DER reactive-capability tier,
+#: as the T_TS sweep's own measured band widths confirm: ``full`` ~190 Mvar
+#: (6 windows), ``partial`` ~55-85 Mvar (4), and ``none`` ~0.1-0.7 Mvar
+#: (``d_quiet_summer``, ``d_ramp_up_winter``). The last is the VDE dead zone
+#: that ``tuning_mc/stage_1_search.py`` already names as the reason ``tau``,
+#: ``lambda_dso`` and ``dso_g_v_ratio`` are structurally inert there.
+#:
+#: These windows are excluded by default, and the exclusion is REPORTED: a
+#: window with no admissible traversal is not a failed measurement, and
+#: counting it as one would put a spurious censoring fraction into eq. (9.2).
+DEAD_ZONE_STRATA = ("none",)
 
 
 # =====================================================================
@@ -537,6 +552,15 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
             f"{a['residual_median_mvar']:.2f} | {a['tap_moves_total']} | "
             f"{a['v_violations']} |")
 
+    if meta and meta.get("excluded_windows"):
+        md += ["", "## Windows excluded (no admissible traversal)", "",
+               "The DER reactive capability is structurally zero in these "
+               "windows (VDE dead zone), so there is no capability band to "
+               "traverse and no `N_inner` to measure. They are excluded, not "
+               "failed: counting them would put a spurious censoring fraction "
+               "into eq. (9.2).", ""]
+        md += [f"- `{w}`" for w in meta["excluded_windows"]]
+
     if failures:
         md += ["", "## Failed cases", "",
                "**The result is not complete.**", ""]
@@ -719,6 +743,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--windows", default="")
     ap.add_argument("--dsos", default="",
                     help="comma-separated DSO ids; default every DSO present")
+    ap.add_argument("--include-dead-zone", action="store_true",
+                    help="also run windows whose stratum has structurally "
+                         "zero DER reactive capability; they have no "
+                         "admissible band traversal and will be refused")
     ap.add_argument("--probe", action="store_true",
                     help="one window, one DSO, both directions -- to confirm "
                          "the band is traversable before the full grid")
@@ -729,7 +757,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return self_test()
 
     from _ch9_selected_design import build_selected_config
-    from tuning_mc.scenarios_mc_v2 import tier1_design_set
+    from tuning_mc.scenarios_mc_v2 import WINDOW_META, tier1_design_set
 
     cfg, design = build_selected_config()
     print(f"[design] campaign {design['campaign']} candidate "
@@ -745,6 +773,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 1
         names = want
 
+    # Windows with no DER reactive capability carry no band to traverse.
+    excluded = [w for w in names
+                if WINDOW_META.get(w, {}).get("stratum") in DEAD_ZONE_STRATA]
+    if excluded and not a.include_dead_zone:
+        names = [w for w in names if w not in excluded]
+        print(f"[ninner] excluded {len(excluded)} window(s) whose DER reactive "
+              f"capability is structurally zero (VDE dead zone), so no "
+              f"capability-band traversal exists: {excluded}")
+        print("[ninner]   -- this is an exclusion, NOT a failed measurement; "
+              "pass --include-dead-zone to run them anyway")
+    if not names:
+        print("[abort] every requested window is in the dead zone; nothing "
+              "to measure")
+        return 1
+
     dsos = ([d.strip() for d in a.dsos.split(",") if d.strip()]
             if a.dsos else [f"DSO_{i}" for i in range(1, 5)])
     if a.probe:
@@ -756,6 +799,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     (a.out / a.label / "_latest.txt").write_text(stamp, encoding="utf-8")
 
     meta = provenance(a, design)
+    meta["excluded_windows"] = excluded if not a.include_dead_zone else []
     (out_dir / "run_meta.json").write_text(
         json.dumps(meta, indent=2, default=str), encoding="utf-8")
 

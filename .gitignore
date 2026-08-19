@@ -43,3 +43,17 @@ results/
 # ---------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
+
+# LaTeX build products of the standalone chapter drafts under docs/.
+# The .tex is tracked; everything pdflatex regenerates from it is not.
+docs/*.aux
+docs/*.out
+docs/*.toc
+docs/*.log
+docs/*.synctex.gz
+docs/*.pdf
+
+# PowerFactory project export (4.5 MB binary, regenerated from the PF
+# database). Kept out of history; it is provenance for the RMS runs, not
+# source, and a binary blob in git is a one-way cost.
+*.pfd

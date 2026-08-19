@@ -104,6 +104,10 @@ def main(argv=None) -> int:
                     help="point stale sources at this profile file and return "
                          "them to service (the strategy that preserves the "
                          "operating point)")
+    ap.add_argument("--all", dest="all_sources", action="store_true",
+                    help="act on every ElmFile, not only those whose data "
+                         "file is missing (needed to swap a resolving but "
+                         "wrong profile, e.g. a ramp for a frozen point)")
     ap.add_argument("--out-of-service", action="store_true",
                     help="disarm stale sources instead of repointing them; "
                          "makes ComInc succeed but does NOT restore the "
@@ -138,6 +142,15 @@ def main(argv=None) -> int:
         return 0
 
     stale = [r for r in rows if not r["exists"]]
+    if a.all_sources:
+        # Repointing a source whose file DOES resolve is still a real change,
+        # so it is never the default: the scope rule exists so a case that is
+        # genuinely driving profiles is not quietly redirected. It is wanted
+        # when the current target resolves but is the wrong trajectory -- e.g.
+        # swapping a recorded ramp for a frozen operating point.
+        stale = rows
+        print(f"[elmfile] --all: operating on all {len(rows)} source(s), "
+              f"including those whose file resolves")
     if not stale:
         print("[elmfile] every data file resolves; nothing to do")
         print(f"[elmfile] check: {_check(app)}")

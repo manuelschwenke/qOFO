@@ -145,3 +145,47 @@ of range.
 - The circularity stands as stated: `G_w` was calibrated with `N_inner = 9`
   assumed, so all of this is a check on the guess, not an independent
   measurement.
+
+---
+
+# Addendum — B1 result, 240/240 steps
+
+`results/ch9_ninner/full/20260819-154925`, exit 2 (censoring > 50 %, which is
+the script refusing to call a mostly-censored distribution a measurement).
+
+**88.8 % of band-edge steps (213/240) never settle to 1 Mvar in 45 subordinate
+iterations.** The residual analysis is what makes that interpretable:
+
+| censored-case final residual | Mvar | fraction of commanded step |
+|---|--:|--:|
+| p25 | 5.60 | 0.070 |
+| p50 | 10.98 | 0.226 |
+| p95 | 33.66 | 1.027 |
+
+Widening the band does not rescue it: 2 Mvar recovers 7 %, 5 Mvar 22 %,
+10 Mvar 48 % (upper bounds — "and stays" is not re-checked). **So the band was
+not the binding choice**, which is the concern B.6 raised and this settles.
+
+Uncensored counts are bimodal with an empty gap between 9 and 29:
+`1 1 1 2 2 2 2 3 3 3 4 4 7 8 9 9 | 29 31 33 33 33 34 35 35 43 43 45`.
+16 of 27 settle within **9** iterations, median **8**.
+
+Per area: DSO_3 100 % censored (median residual 15.7 Mvar, median **0** tap
+moves), DSO_4 68 % (2.84 Mvar). Taps are barely used anywhere — 38–53 % of
+cases move no tap in the whole window.
+
+## Conclusion
+
+`N_inner = 9` is **sufficient for reachable setpoints** (measured median 8) and
+is **not the binding quantity**. What fails is reachability: the reported
+capability band overstates deliverable Q by a median 23 % of the commanded step
+at its own edge. That also explains B2's period-independent ~20 % censoring
+floor — the setpoint, not the time budget, is the constraint.
+
+Same defect class as the voltage-blind capability message
+(`2026-08-18_dso4_voltage_relief.md`), measured here per interface.
+
+## Unresolved
+
+- Why the subordinate layer barely taps (DSO_3 median 0 over 45 iterations).
+- The capability over-reporting itself — the actual open item for the chapter.

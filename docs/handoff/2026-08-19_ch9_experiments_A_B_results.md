@@ -24,13 +24,16 @@ projected or carried over from an older run it says so.
   `N_inner = 3` to `15`**. Giving the subordinate layer five times as many
   iterations does not change how often it fails to settle. Whatever fails,
   fails for a reason that is not the iteration count.
-- **Task B1 (isolated `N_inner`) is still running** at the time of writing;
-  every case so far returns the censoring cap. Two design faults were found
-  and fixed along the way, both of which would have produced confident wrong
-  numbers.
-- **`N_inner = 9` is not supported as a *binding* quantity** by what has been
-  measured. It is also not refuted as a *choice*: see the open item on
-  staleness below, which is the half of the argument nothing here measures.
+- **Task B1 (isolated `N_inner`) is complete**, 240/240 steps. 88.8 % of
+  band-edge steps never settle -- but the censored cases end a median
+  **11 Mvar** (23 % of the commanded step) away, so this is reachability, not
+  a tight band. Where the setpoint *is* reachable the loop settles within
+  **9 iterations, median 8**.
+- **`N_inner = 9` is supported, conditionally, and is not the binding
+  quantity.** It is sufficient for reachable setpoints. What limits tracking is
+  that the reported capability band overstates what the subordinate layer can
+  deliver. Recommendation: keep `T_TS = 180 s`; move the defect into the
+  capability-reporting discussion.
 
 ---
 
@@ -219,26 +222,78 @@ This is the same defect class as the known voltage-blind over-reporting of the
 capability message; here it appears as **non-additivity across the interfaces
 of one DSO**. Now one interface steps at a time, siblings held.
 
-### Preliminary observation
+### Result — 240/240 steps, 10 windows x 4 DSOs x 3 interfaces x 2 directions
 
-With that fixed, every case so far still returns `N_inner` = the censoring cap
-(46 iterations = the 900 s observation window). Single-interface steps to 95 %
-of the *reported* band edge are not settling to 1 Mvar within 45 subordinate
-iterations.
+**88.8 % of band-edge steps (213 of 240) never settle to 1 Mvar within 45
+subordinate iterations.**
 
-Taken with B2's period-independent censoring floor, the emerging picture is
-that **the reported capability band is systematically not achievable**, which
-would mean eq. (9.2)'s premise — that the subordinate layer traverses its
-capability band — does not hold at these weights. Final residuals will say how
-far off it is, and therefore whether this is a band-width artefact or a real
-inability. **Not stated as a result until that check is done.**
+The decisive follow-up is *how far off* those censored cases end, because a
+censored case sitting 1.1 Mvar from setpoint would mean the band decided the
+result, while one sitting 30 Mvar away means the setpoint was never reachable.
 
-### The circularity, stated
+| final residual of the censored cases | [Mvar] | as a fraction of the commanded step |
+|---|--:|--:|
+| p05 | 1.84 | 0.031 |
+| p25 | 5.60 | 0.070 |
+| **p50** | **10.98** | **0.226** |
+| p75 | 20.96 | 0.554 |
+| p95 | 33.66 | 1.027 |
 
-`G_w` was calibrated with `N_inner = 9` **assumed**, and this measures
-`N_inner` with those weights in place. That is a fixed-point argument
-evaluated at one iteration. It is a **check on the guess**, not an independent
-measurement.
+**It is not a band artefact.** Widening the band rescues little: at 2 Mvar
+only 7 % of censored cases end inside, at 5 Mvar 22 %, at 10 Mvar 48 %. (These
+are an *upper* bound -- the end-of-window residual does not re-check the "and
+stays" condition.) The median censored case ends **11 Mvar**, i.e. 23 % of the
+correction it was asked to make, away from a setpoint placed at 95 % of the
+capability the subordinate layer itself reported.
+
+**When the loop does settle, it settles fast.** The 27 uncensored counts are
+sharply bimodal, with nothing at all between 9 and 29:
+
+```
+1 1 1 2 2 2 2 3 3 3 4 4 7 8 9 9  |  29 31 33 33 33 34 35 35 43 43 45
+```
+
+16 of 27 settle within **9 iterations** (median 8). The gap is structural, not
+sampling noise.
+
+| | n | censored | residual med [Mvar] | step med [Mvar] | band med [Mvar] |
+|---|--:|--:|--:|--:|--:|
+| DSO_1 | 60 | 0.95 | 10.57 | 49.70 | 102.7 |
+| DSO_2 | 60 | 0.92 | 8.04 | 44.84 | 97.3 |
+| DSO_3 | 60 | **1.00** | 15.70 | 54.51 | 114.6 |
+| DSO_4 | 60 | 0.68 | 2.84 | 45.56 | 96.7 |
+
+Direction is not the discriminator (censored 0.90 down vs 0.88 up). **The tap
+actuator is barely used**: 38-53 % of cases move no tap at all across the whole
+45-iteration window, and DSO_3 -- the worst area, 100 % censored -- has a
+median of **zero** tap moves. Its `trafo_6` recurs in every one of the ten
+worst cases, ending ~35 Mvar from a ~55 Mvar step with no tap action.
+
+### What this means for eq. (9.2)
+
+**`N_inner = 9` is supported, conditionally, and it is not the binding
+quantity.** Where the subordinate layer can reach the commanded setpoint it
+does so within 9 iterations (median 8) -- exactly the guess. What fails is not
+the *speed* of the loop but the *reachability* of the setpoint: the reported
+capability band systematically overstates what is deliverable, by a median
+23 % of the commanded step at the band edge.
+
+That is the same defect as the known voltage-blind over-reporting of the
+capability message, measured here directly and at the interface level. It also
+explains B2's period-independent censoring floor: ~20 % of dispatch intervals
+fail to settle at *every* period because the setpoint, not the time budget, is
+the problem.
+
+**Recommendation for the chapter.** Keep `T_TS = 180 s`. The evidence does not
+support lowering it (the subordinate layer is not iteration-starved) and does
+not support raising it (more iterations do not reduce the censoring floor).
+State `N_inner = 9` as sufficient for reachable setpoints, cite the measured
+median of 8, and put the reachability defect where it belongs -- in the
+capability-reporting discussion, not in the timescale selection.
+
+**The circularity still stands**: `G_w` was calibrated with `N_inner = 9`
+assumed, so this is a check on the guess surviving its own consequence, not an
+independent measurement. On this evidence it survives.
 
 ---
 
@@ -252,6 +307,10 @@ measurement.
    0.00 Mvar for all twelve transformers) while its median is 67–181 Mvar.
 4. **The SBX-H confound** — decide whether the chapter reports the
    hold-`k_sched` reading or the hold-wall-clock one.
-5. **`N_inner` itself.** B2 says the in-situ answer is 0 when it settles at
-   all, with a ~20 % structural non-settling floor that `N_inner` does not
-   move. Whether that supports keeping `T_TS = 180 s` is an author decision.
+5. **Why the subordinate layer barely taps.** 38-53 % of band-edge steps move
+   no tap at all in 45 iterations, and DSO_3 -- 100 % censored -- has a median
+   of zero. If the tap is available and would help, the weights are not buying
+   it; if it is not available, the capability report should not be counting it.
+6. **`N_inner` is answered** (9 is sufficient for reachable setpoints,
+   measured median 8). What remains open is the **capability over-reporting**
+   that makes 89 % of band-edge setpoints unreachable in the first place.

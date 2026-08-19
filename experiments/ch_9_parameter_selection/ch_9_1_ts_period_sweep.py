@@ -336,6 +336,51 @@ def analyse_records(records: Sequence[Any], *, tso_period_s: float,
 #  Worker
 # =====================================================================
 
+def _retime_parent(cfg, tso_period_s: float, sbx_cycle: str = "iterations"):
+    """Set ``tso_period_s`` on the config AND on the nested SBX-H config.
+
+    The handoff said the sweep was ``dataclasses.replace(spec, tso_period_s=X)``
+    "and nothing else". It is not: the selected design runs
+    ``coordination_mode = 'sbx_h'``, and ``SBXConfig`` carries its own
+    ``tso_period_s`` which the runner requires to match
+    (``multi_tso_dso.py:1280``). Leaving it stale raises, which is the right
+    behaviour -- the guard exists because ``k_sched`` is a cycle length counted
+    in *TSO iterations*, so the two periods are not independent.
+
+    **That coupling is a confound, and it is reported rather than hidden.**
+    With ``k_sched = 2`` held fixed, sweeping ``T_TS`` also scales the SBX-H
+    settlement cycle in wall-clock time: 2 min at ``T_TS = 60 s``, 10 min at
+    300 s. Two readings are available:
+
+    * ``iterations`` (default) -- hold ``k_sched``, i.e. hold the *controller's
+      own configuration* fixed and let its wall-clock consequence follow the
+      period. This is what changing ``T_TS`` in service would actually do.
+    * ``wallclock`` -- hold the settlement cycle near its 360 s default by
+      re-deriving ``k_sched = max(1, round(360 / T_TS))``. Cleaner on the SBX
+      axis, but it re-tunes a second mechanism mid-sweep and cannot land
+      exactly (240 s admits no integer giving 360 s).
+
+    Neither is neutral. The default holds the controller fixed because that is
+    the object the chapter is selecting a period for.
+    """
+    import dataclasses
+
+    cfg = dataclasses.replace(cfg, tso_period_s=float(tso_period_s))
+    sbx = getattr(cfg, "sbx_config", None)
+    if sbx is not None and hasattr(sbx, "tso_period_s"):
+        fields = {"tso_period_s": float(tso_period_s)}
+        if sbx_cycle == "wallclock" and hasattr(sbx, "k_sched"):
+            default_cycle_s = float(sbx.k_sched) * float(sbx.tso_period_s)
+            fields["k_sched"] = max(1, round(default_cycle_s / float(tso_period_s)))
+        cfg = dataclasses.replace(cfg, sbx_config=dataclasses.replace(sbx, **fields))
+    sbxv = getattr(cfg, "sbxv_config", None)
+    if sbxv is not None and hasattr(sbxv, "tso_period_s"):
+        cfg = dataclasses.replace(
+            cfg, sbxv_config=dataclasses.replace(
+                sbxv, tso_period_s=float(tso_period_s)))
+    return cfg
+
+
 def _run_point(job: Dict[str, Any]) -> Dict[str, Any]:
     """One (window, ``T_TS``) simulation, post-processed to interval rows.
 
@@ -356,8 +401,10 @@ def _run_point(job: Dict[str, Any]) -> Dict[str, Any]:
     from tuning_mc.scenarios_mc_v2 import tier1_design_set
 
     cfg, _prov = build_selected_config()
+    # The supervisory period lives in TWO places; see _retime_parent.
+    cfg = _retime_parent(cfg, float(job["tso_period_s"]),
+                         job.get("sbx_cycle", "iterations"))
     spec = next(s for s in tier1_design_set() if s.name == job["window"])
-    # The ONLY thing that changes across the sweep.
     spec = dataclasses.replace(spec, tso_period_s=float(job["tso_period_s"]),
                                dso_period_s=STS_PERIOD_S, dt_s=STS_PERIOD_S)
 
@@ -744,6 +791,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="comma-separated T_TS values [s]; default the full grid")
     ap.add_argument("--windows", default="",
                     help="comma-separated window names; default all 12")
+    ap.add_argument("--sbx-cycle", choices=("iterations", "wallclock"),
+                    default="iterations",
+                    help="how the SBX-H settlement cycle follows T_TS: hold "
+                         "k_sched (default, holds the controller fixed) or "
+                         "hold the cycle near 360 s by re-deriving k_sched")
     ap.add_argument("--pilot", action="store_true",
                     help=f"{PILOT_PERIODS_S} on {PILOT_N_WINDOWS} windows, to "
                          f"read the CAIR widths before spending the full grid")
@@ -794,7 +846,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         json.dumps(meta, indent=2, default=str), encoding="utf-8")
 
     jobs = [{"window": w, "tso_period_s": p, "band_mvar": a.band_mvar,
-             "delta_floor_mvar": a.delta_floor_mvar}
+             "delta_floor_mvar": a.delta_floor_mvar,
+             "sbx_cycle": a.sbx_cycle}
             for p in periods for w in names]
     # Written BEFORE the runs, so an aborted campaign still documents what it
     # meant to measure.

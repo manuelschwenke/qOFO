@@ -762,3 +762,81 @@ W=20 -> 2.00 T, W=24 -> **2.40 T**, W=29 -> 1.45 T. Phase B's poll is
 16 to 20 is a single batch and 24 is again 1.2x slower. Measured at W=18:
 CPU/wall = 0.99 per worker — the code's "regresses past 8 (memory-bandwidth
 bound)" does not reproduce once BLAS is pinned; that was thread oversubscription.
+
+## 11. Re-run result (converged 2026-08-19 14:24)
+
+12 polls, converged at `delta = 0.0375`. `lambda* = 0.15`, all seven directions
+live, none dead. Filter: **79 non-dominated points**.
+
+### The search sells the DSO voltage margin, and the filter cannot stop it
+
+| | f_ts | f_q | worst DS headroom | windows outside [0.90, 1.10] |
+| --- | --- | --- | --- | --- |
+| design point (auth 20) | 1.312511 | 0.098606 | **+0.0200 pu** | 0 / 12 |
+| raw incumbent (auth 5.02) | 1.248436 (-4.88 %) | 0.078699 (-20.19 %) | **-0.0003 pu** | **1 / 12** |
+
+The raw incumbent is the search's own answer and it is **not usable**: it buys
+4.9 % of f_ts and 20 % of f_q by spending internal voltage margin until a bus
+leaves the statutory corridor — the exact defect this whole entry exists to fix.
+
+`guard_deficit_ds_pu` is a **filter criterion**, so a candidate that improves
+`f_ts` and `f_q` while degrading `f_ds` is non-dominated and is accepted.
+Nothing in the search bounds how much headroom may be sold. §7 listed
+`g6_ds_headroom` as an open item; this is that item materialising.
+
+**A second safeguard eroded the same way.** The incumbent's `lambda_tso` walked
+to 0.2518 — past the fitted boundary 0.2337 and well past `lambda* = 0.15` —
+giving rho 1.4771: under the *declared* ceiling 1.5 but over the *margined*
+target 1.4549. `--rho-margin 0.031` constrains the calibration's **selection**
+and nothing else; g3 is evaluated against 1.5, so the search is free to spend
+the transfer margin. Same structure: a safeguard applied at one stage and
+unenforced downstream.
+
+### Usable result: select from the filter under a headroom requirement
+
+Every filter point carries `ds_headroom_min_pu` (§9 step 0 — the archive change
+paid for itself here), so the front can be selected under a stated margin
+without re-running anything.
+
+| headroom >= | candidates | f_ts | f_q | auth | lam_tso | lam_dso | gvr |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.020 pu | 1 | 1.308868 | 0.110270 | 20.00 | 0.150 | 1.796 | 1.000 |
+| 0.015 pu | 9 | 1.308610 | 0.095670 | 10.02 | 0.150 | 1.796 | 0.501 |
+| **0.010 pu** | **16** | **1.302146** | **0.089983** | **39.91** | **0.150** | **1.796** | **0.501** |
+| 0.005 pu | 24 | 1.300014 | 0.078717 | 20.00 | 0.150 | 1.796 | 0.501 |
+
+**Recommended (headroom >= 0.010 pu):** f_ts -0.79 %, f_q -8.75 % against the
+design point, worst headroom +0.0126 pu, and `rho_emp_p95 = 1.3256` — which
+respects even the *margined* target 1.4549, so the transfer margin survives too.
+
+Three points about that selection:
+
+* `lambda_dso = 1.796` (2.0x) and `dso_g_v_ratio = 0.501` (0.5x) appear in every
+  headroom-respecting row, so those two moves are robust; only
+  `dso_v_authority` is contested.
+* `lambda_tso` stays at `lambda* = 0.15` in every one of them. The search's move
+  to 0.2518 is exactly the transfer margin being spent, and the headroom
+  constraint incidentally rejects it.
+* **The method wants MORE voltage authority than the hand-picked 20, not less**:
+  the selected point sits at `auth = 39.9`. So §6.2's factor of 20 was
+  conservative, and the number is now located by the procedure rather than
+  chosen — which is what §9 set out to achieve.
+
+The selection was already stable at poll 6 and did not change through poll 12,
+so further polling was not buying a better headroom-respecting answer.
+
+### Cost
+
+lam 55 min, phase A 110 min, phase B 12 polls over ~15 h at `--workers 20`
+(16 points/poll, one batch each, 53-75 min per evaluation). Total ~17.7 h.
+
+### Carried forward
+
+1. **`g6_ds_headroom` as a hard constraint**, not a filter criterion.
+2. **Enforce the rho margin on the search**, not only on the calibration —
+   e.g. evaluate g3 against `rho_target / (1 + rho_margin)`.
+
+Both are edits to `CONSTRAINT_NAMES` / `feasibility_constraints` in the shared
+`tuning/objectives_v2.py`, which changes the constraint-vector shape for every
+existing study and invalidates their archived `hard` fields. Deliberately not
+done unilaterally.

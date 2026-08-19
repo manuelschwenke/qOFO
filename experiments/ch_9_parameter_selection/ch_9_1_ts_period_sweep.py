@@ -92,8 +92,12 @@ DEFAULT_BAND_MVAR = 1.0
 #: report a control failure where there was no command.
 DEFAULT_DELTA_FLOOR_MVAR = 1.0
 
-#: Voltage band for the violation count [pu]. Reported, not enforced.
-V_MIN_PU, V_MAX_PU = 0.95, 1.05
+#: Fallback voltage band [pu], used only if the config carries none. The
+#: limits are READ FROM THE CONFIG (``v_min_pu`` / ``v_max_pu``), which at the
+#: selected design are 0.9 / 1.1 -- not the 0.95 / 1.05 an earlier version of
+#: this script hardcoded, which counted a fifth of all intervals as violating
+#: a band the study does not impose.
+V_MIN_PU, V_MAX_PU = 0.9, 1.1
 
 
 # =====================================================================
@@ -205,6 +209,7 @@ def analyse_records(records: Sequence[Any], *, tso_period_s: float,
                     sts_period_s: float, band_mvar: float,
                     delta_floor_mvar: float, cooldown_s: float,
                     cooldown_s_mt: float, int_cooldown_iters: int,
+                    v_min_pu: float = V_MIN_PU, v_max_pu: float = V_MAX_PU,
                     ) -> List[Dict[str, Any]]:
     """One row per (interface transformer, supervisory dispatch interval).
 
@@ -326,8 +331,8 @@ def analyse_records(records: Sequence[Any], *, tso_period_s: float,
                 "sigma_norm_max": max(sig) if sig else float("nan"),
                 "v_min_pu": min(vmin) if vmin else float("nan"),
                 "v_max_pu": max(vmax) if vmax else float("nan"),
-                "v_violation": bool((vmin and min(vmin) < V_MIN_PU)
-                                    or (vmax and max(vmax) > V_MAX_PU)),
+                "v_violation": bool((vmin and min(vmin) < v_min_pu)
+                                    or (vmax and max(vmax) > v_max_pu)),
             })
     return rows
 
@@ -415,7 +420,9 @@ def _run_point(job: Dict[str, Any]) -> Dict[str, Any]:
         delta_floor_mvar=float(job["delta_floor_mvar"]),
         cooldown_s=float(cfg.oltc_cooldown_s),
         cooldown_s_mt=float(cfg.oltc_cooldown_s_mt or cfg.oltc_cooldown_s),
-        int_cooldown_iters=int(cfg.int_cooldown))
+        int_cooldown_iters=int(cfg.int_cooldown),
+        v_min_pu=float(getattr(cfg, "v_min_pu", V_MIN_PU)),
+        v_max_pu=float(getattr(cfg, "v_max_pu", V_MAX_PU)))
     for r in rows:
         r["window"] = job["window"]
     return {"window": job["window"], "tso_period_s": float(job["tso_period_s"]),
@@ -457,6 +464,14 @@ def aggregate(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 continue
             rho = [r["rho_k"] for r in sub if math.isfinite(r["rho_k"])]
             nk = [float(r["n_k"]) for r in sub]
+            # Censored intervals all report n_k = the cap, so once censoring
+            # exceeds 5 % the p95 IS the cap and carries no information about
+            # how long settling takes -- only that it did not happen. The
+            # uncensored quantiles answer "when it settles, how fast", and the
+            # censoring fraction answers "how often it does not". Reporting
+            # only the pooled p95 conflates the two into a number that looks
+            # like a measurement and is an artefact of the interval length.
+            nk_unc = [float(r["n_k"]) for r in sub if not r["n_k_censored"]]
             n_cens = sum(1 for r in sub if r["n_k_censored"])
             occ = [r["lockout_occupancy"] for r in sub
                    if math.isfinite(r["lockout_occupancy"])]
@@ -474,6 +489,10 @@ def aggregate(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "n_k_median": _quantile(nk, 0.50),
                 "n_k_p95": _quantile(nk, 0.95),
                 "n_k_max": max(nk) if nk else float("nan"),
+                "n_k_uncensored_median": _quantile(nk_unc, 0.50),
+                "n_k_uncensored_p95": _quantile(nk_unc, 0.95),
+                "n_k_uncensored_max": max(nk_unc) if nk_unc else float("nan"),
+                "n_uncensored": len(nk_unc),
                 "censoring_fraction": n_cens / len(sub),
                 "cair_width_median_mvar": _quantile(
                     [r["cair_width_mvar"] for r in sub], 0.50),

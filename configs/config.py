@@ -475,6 +475,44 @@ class MultiTSOConfig:
     Used by ``experiments/003_S_DSO_CIGRE_2026.py`` to focus the
     optimisation on a single distribution system."""
 
+    q_pcc_setpoint_schedule_per_dso: Dict[str, List[Dict[str, Any]]] = field(
+        default_factory=dict
+    )
+    """Time-varying exogenous Q-setpoints at the TSO-DSO interface, keyed by
+    DSO ID: ``[{"t_s": 0.0, "q_mvar": [0.0, 0.0, 0.0]}, ...]``.
+
+    The entry in force at simulation time ``t`` is the last one whose ``t_s``
+    is ``<= t``; entries need not be sorted. ``q_mvar`` carries one value per
+    coupling 3W transformer, in ``HVNetworkInfo.coupling_trafo_indices`` order,
+    exactly like :attr:`q_pcc_setpoints_mvar_per_dso`.
+
+    Added 2026-08-19 for the Sec. 9.1 isolated-STS ``N_inner`` measurement
+    (eq. 9.2), which steps the interface setpoint **across** the reported
+    capability band and needs the subordinate loop to have settled at setpoint
+    A before the step to B. With only a constant setpoint the measurement would
+    start mid-transient at ``t = 0`` and the first iteration count would be an
+    artefact of the initial condition rather than of the step.
+
+    Takes precedence over the constant :attr:`q_pcc_setpoints_mvar_per_dso`
+    for any DSO listed in both. Empty (default) changes nothing."""
+
+    q_pcc_injection_with_ofo_parent: bool = False
+    """Deliver the exogenous interface-Q setpoints while ``tso_mode == 'ofo'``.
+
+    The original injection path is gated on ``tso_mode == 'local'``, which for
+    a *measurement* of the subordinate loop is the wrong baseline: local Q(V)
+    is a different controller from the OFO the thesis studies, and the TS plant
+    then moves in response to the STS, confounding the very loop being isolated.
+
+    With this flag and ``tso_period_s > n_total_s``, the supervisory OFO solves
+    once at ``t = 0`` to establish the operating point and never revises it
+    (``run_tso`` is ``(step == 1) or _is_period_hit(...)``), so the TS actuators
+    hold while the exogenous setpoint drives the subordinate layer. That is the
+    "parent silent" condition eq. (9.2) actually describes.
+
+    Added 2026-08-19; default ``False`` leaves every existing configuration,
+    including ``experiments/003_M_DSO_CIGRE_2026``, bit-identical."""
+
     q_pcc_setpoints_mvar_per_dso: Dict[str, List[float]] = field(
         default_factory=dict
     )

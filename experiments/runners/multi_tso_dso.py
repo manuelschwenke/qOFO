@@ -4080,6 +4080,51 @@ def run_multi_tso_dso(
                 rec.dso_q_set_mvar[dso_id] = float(msg.q_setpoints_mvar.sum())
                 last_dso_q_set_mvar[dso_id] = msg.q_setpoints_mvar.copy()
 
+        # Exogenous Q_PCC injection with a LIVE (but frozen) OFO parent.
+        #
+        # Deliberately a separate block from the ``_local_tso`` one above, and
+        # deliberately not gated on ``run_tso``: with a frozen parent
+        # (``tso_period_s > n_total_s``) ``run_tso`` is true only at step 1, so
+        # folding this into that condition would deliver the schedule once and
+        # never again.  Setpoints persist in the subordinate controller until
+        # replaced, so re-delivering the value in force every step is a no-op
+        # except at a schedule boundary -- which is what makes the boundary
+        # exact rather than dependent on the dispatch grid.
+        #
+        # Used by the Sec. 9.1 isolated-STS measurement of ``N_inner``
+        # (eq. 9.2).  Default-off, so no existing configuration is affected.
+        if config.q_pcc_injection_with_ofo_parent:
+            _sched = config.q_pcc_setpoint_schedule_per_dso or {}
+            _const = config.q_pcc_setpoints_mvar_per_dso or {}
+            for dso_id in set(_sched) | set(_const):
+                if dso_id not in dso_controllers:
+                    continue
+                if dso_id in _sched:
+                    # Last entry whose start time has been reached.  Entries
+                    # need not be sorted; ``max`` over the eligible set is
+                    # order-independent and cheap at these sizes.
+                    eligible = [e for e in _sched[dso_id]
+                                if float(e["t_s"]) <= time_s]
+                    if not eligible:
+                        continue
+                    q_vec = max(eligible, key=lambda e: float(e["t_s"]))["q_mvar"]
+                else:
+                    q_vec = _const[dso_id]
+                dso_ctrl_t = dso_controllers[dso_id]
+                msg = SetpointMessage(
+                    source_controller_id="exogenous",
+                    target_controller_id=dso_id,
+                    iteration=step,
+                    interface_transformer_indices=np.array(
+                        dso_ctrl_t.config.interface_trafo_indices,
+                        dtype=np.int64,
+                    ),
+                    q_setpoints_mvar=np.asarray(q_vec, dtype=np.float64),
+                )
+                dso_ctrl_t.receive_setpoint(msg)
+                rec.dso_q_set_mvar[dso_id] = float(msg.q_setpoints_mvar.sum())
+                last_dso_q_set_mvar[dso_id] = msg.q_setpoints_mvar.copy()
+
         # ── DSO step (all zones) ──────────────────────────────────────────────
         if run_dso and not _local_dso:
             for dso_id, dso_ctrl in dso_controllers.items():

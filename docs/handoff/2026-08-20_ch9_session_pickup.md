@@ -54,6 +54,38 @@ binding row, the margin at `T_STS = 20 s`, and `T_mech`/`T_elec` for BOTH tap
 classes (coupler and machine transformer — each now has its own two-step
 instrument case).
 
+### OPEN — case 2 returned 0.00 s and the actuator did not move
+
+`[2/16] der_q_+20Mvar_DER_DSO_1_s10_b50` returned
+`worst qSTS_NC3W_DSO_1_t0 T_s = 0.00 s`, against `u_TN_bus27 T_s = 1.78 s` in
+the 2026-08-07 run of record. The saved trajectory shows why: over the event at
+`t = 305 s` the interface flow is **dead flat at `-4.60937` Mvar**, and its
+entire `0.033` Mvar range falls in the pre-settle before `t = 300`. The step
+produced no plant response at all.
+
+This is NOT the event-admission problem — case 1 is a parameter event of the
+same kind and fired correctly (11.77 s). The likely cause is that this DSO park
+has **no reactive headroom at this operating point**, so `QVPRE` clips the
+`qset` step: the frozen profile places the plant at replay `0566`'s operating
+point, not the one the run of record used, and B1 found two of twelve design
+windows where DER reactive capability is structurally zero (the VDE dead zone).
+
+**Verify before trusting or discarding the row.** Read `qmin`/`qmax`/`qset` on
+that park's `QVPRE` block at this operating point (`pf.wecc_apply`,
+`QVPRE_PARAM_ORDER`) — a seat-free check is not possible, so do it when the
+battery is not holding the calculation.
+
+- If `qmax ~ 0`: the case is physically inert here. `0.00 s` is honest but it
+  is **not a settling time**, and the thesis row must be marked as
+  unmeasurable at this operating point rather than printed as a number.
+  Consider choosing a DSO park with headroom, or an operating point with DER
+  capability, and say which in the caption.
+- If `qmax` is ample: the step really did not apply and the event path needs
+  investigating for this target specifically.
+
+Either way, **do not paste a `0.00 s` row into Table 9.1.** The whole point of
+the emitter rework was to stop unmeasured values reaching the thesis.
+
 **2. Task B1 — isolated-STS `N_inner`, with convergence correctly defined.**
 
 ```

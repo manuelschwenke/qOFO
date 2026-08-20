@@ -388,11 +388,35 @@ def preflight(ctx: ScreeningContext, duration: float = 60.0,
 
 def run_case(ctx: ScreeningContext, sd: Any, mons: List[Tuple[Any, str, str]],
              t_event: float, horizon: float,
-             out_dir: Path, save_traj: bool) -> Dict[str, Any]:
-    """Run one dispatch or disturbance and return its settling summary."""
+             out_dir: Path, save_traj: bool,
+             pre_settle_s: float = 0.0) -> Dict[str, Any]:
+    """Run one dispatch or disturbance and return its settling summary.
+
+    ``pre_settle_s`` advances the plant to its own equilibrium BEFORE the step
+    is armed. This is not optional cosmetics: ``ctx.initialise()`` runs
+    ``ComInc``, which resets to the load-flow point every case, and the plant
+    does not hold that point -- the anchored ZIP loads are voltage-following,
+    so it relaxes ~1.4e-2 pu over the first seconds (see :func:`preflight`).
+    With the default ``t_event = 5 s`` the step would land inside that
+    relaxation and every settling time would be the relaxation plus the
+    response. A clean preflight does NOT protect against this, because each
+    case re-initialises.
+
+    **Events are armed after the settle, not before.** ``add_param_event``
+    writes an absolute time while ``add_tap_event`` / ``add_outage_event``
+    fold into PowerFactory's 60 s event window using the current calculation
+    clock (``EVENT_WINDOW_S``, established 2026-07-31). Arming after the
+    settle is exactly the case that fold exists for; arming before it and
+    scheduling far ahead would put the tap and outage cases on the untested
+    side of that quirk, whose failure mode is an event that never fires and a
+    settling time of 0.00 s -- a plausible-looking wrong number.
+    """
     ctx.purge_events()
     ctx.set_monitors(mons)
     ctx.initialise()
+    if pre_settle_s > 0:
+        ctx.simulate(float(pre_settle_s))
+    t_event = float(pre_settle_s) + float(t_event)
     if sd.kind == "param":
         cur = _read_scalar(sd.target, sd.variable)
         ctx.add_param_event(sd.target, sd.variable, cur + sd.delta, t_event)
@@ -1022,7 +1046,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"[{i}/{len(cases)}] {sd.name} ({horizon:.0f} s) ...")
             try:
                 r = run_case(ctx, sd, mons, a.t_event, horizon, out_dir,
-                             a.save_trajectories)
+                             a.save_trajectories, pre_settle_s=a.pre_settle_s)
             except Exception as exc:                  # one bad case must not
                 print(f"    FAILED: {exc}")           # lose the whole battery
                 failures.append((sd.name, str(exc)))

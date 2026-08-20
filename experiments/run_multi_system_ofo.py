@@ -527,10 +527,10 @@ def make_config_tuned() -> MultiTSOConfig:
         g_v=1E7,                      # TSO voltage tracking; drives PCC Q dispatch
         g_q=250,                      # DSO Q-tracking
         dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
-        dso_g_v=150000,#1E5,
+        dso_g_v=84140,#1E5,
         # tso weights
-        g_w_der=5.8,  # was 20
-        g_w_pcc = 22.1,  # was 60
+        g_w_der=10.2,  # was 20
+        g_w_pcc = 49.3,  # was 60
         g_w_gen=1e9,
         # ── DSO weights ──
         g_w_dso_der=617,  # was 800
@@ -551,8 +551,8 @@ def make_config_tuned() -> MultiTSOConfig:
         shunt_int_v_min_pu=0.90,  # HV feasibility band (overshoot guard)
         shunt_int_v_max_pu=1.10,
         # OLTC weights and settings
-        g_w_tso_oltc = 4740,  # unchanged — see note
-        g_w_dso_oltc = 183,  # was 150
+        g_w_tso_oltc = 3783,  # unchanged — see note
+        g_w_dso_oltc = 393,  # was 150
         # ── DSO_4 voltage relief (2026-08-18) ───────────────────────────────
         # DSO_4 is the long-line area (SUBNET_DEFS scale=2.44 -> 586 km,
         # X = 222.5 ohm = 1.84 p.u., unreinforced 305 mm2) carrying the same
@@ -749,7 +749,11 @@ def make_config_per_area() -> MultiTSOConfig:
     # leave a raised dso_g_v against the per-area dso_oltc design below, i.e.
     # the unmatched loop gain that limit-cycles the tap.
     cfg = dataclasses.replace(
-        make_config_tuned(), dso_g_v_per_area=None, dso_g_w_class=None,
+        make_config_tuned(),
+        dso_g_v_per_area={"DSO_2": 1_682_790.28, "DSO_4": 1_682_790.28},
+        dso_g_w_class={"DSO_2": {"dso_oltc": 7852.887},
+                       "DSO_4": {"dso_oltc": 7852.887}},
+
     )
     return _apply_dso_v_relief(dataclasses.replace(
         cfg,
@@ -844,7 +848,7 @@ def main() -> None:
         python experiments/000_M_TSO_M_DSO.py
     """
 
-    cfg = make_config_tuned()
+    cfg = make_config_per_area()
     run_dir = new_run_dir("run_multi_system_ofo", cfg)
     log = run_multi_tso_dso(cfg)
     with (run_dir.root / "records.pkl").open("wb") as handle:

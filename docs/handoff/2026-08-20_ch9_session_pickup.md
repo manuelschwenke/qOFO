@@ -41,6 +41,14 @@ or a settling time is censored. **A `T_s = 0.00 s` row means the event did not
 fire** — that is a silent failure, not a fast plant; see the param-fold fix
 below before believing any zero.
 
+**Case 1 already validated the fix.** `der_q_+60Mvar_WP_TSO_s0_b18` returned
+`worst u_TN_bus18 T_s = 11.77 s` against `11.23 s` in the 2026-08-07 run of
+record — same worst signal, within 5 %. Events fire correctly at the
+pre-settled clock, and the small difference is expected: this run measures
+from the RMS steady state of the ZIP plant with a frozen profile, not from the
+load-flow point. So the remaining cases can be taken at face value unless one
+comes back at exactly 0.00 s.
+
 When it finishes: report `timescale_table.tex`, `timescale_summary.md`, the
 binding row, the margin at `T_STS = 20 s`, and `T_mech`/`T_elec` for BOTH tap
 classes (coupler and machine transformer — each now has its own two-step

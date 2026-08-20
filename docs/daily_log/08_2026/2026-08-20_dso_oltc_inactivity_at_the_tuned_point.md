@@ -701,3 +701,68 @@ assert is **replaced** rather than deleted: a new parametrised test
 `g_w_dso_oltc / g_q` to be preserved. That is a stronger guard than the one it
 replaces, not a weaker one: the old test refused to look at `gamma > 0`; the new
 one checks the invariant that regime needs. 12 passed.
+
+---
+
+# Addendum 8 — candidate `ac8941a46134` *with* the `g_q` leg
+
+`make_config_dso_oltc_active` took no arguments and pinned `gamma = 0` /
+`scale_q = False`, so the two lines of work could not be combined. It now takes
+both as keyword arguments:
+
+```python
+make_config_dso_oltc_active(*, gamma_oltc_q: float = 0.0,
+                            scale_q: Optional[bool] = None)
+```
+
+* `gamma_oltc_q` **defaults to 0.0** -- the no-argument call still reproduces
+  the archived candidate exactly (re-verified: five weights to 1e-12,
+  `dso_g_q_per_area is None`).
+* `scale_q` **defaults to `gamma_oltc_q > 0`**: the leg comes on exactly when
+  there is a Q gradient for it to compensate, which is the only regime where it
+  affects the tap. Pass it explicitly to override in either direction.
+
+CLI: `--dso-oltc-active --gamma-q X` now routes X into the **factory**, not
+through `main()`'s post-hoc override -- the override would have set gamma
+without re-deriving the leg coupled to it, i.e. silently produced the
+132-297 Mvar case. `main()` still sees `gamma_q`, finds the config already
+there (no-op replace), and only prints the banner and tags the directory.
+
+## 30 — Measured
+
+Stage 0, `gamma = 1.0`. Q = `engage_other_current` [Mvar], V = uniform [%].
+
+| loop | col | candidate, no leg | **candidate + leg** | `make_config_tuned` + leg |
+|---|---|---|---|---|
+| DSO_1 | 10/11/12 | 6.09 / 4.60 / 5.53 | **6.09 / 4.60 / 5.53** | 5.01 / 3.80 / 4.56 |
+| DSO_3 | 10/11/12 | 4.46 / 3.51 / 4.12 | **4.46 / 3.51 / 4.12** | 3.68 / 2.90 / 3.40 |
+| DSO_2 | 10/11/12 | 185.3 / 131.8 / 163.6 | **9.30 / 6.64 / 8.22** | 7.65 / 5.47 / 6.77 |
+| DSO_4 | 10/11/12 | 297.5 / 216.7 / 275.1 | **14.89 / 10.86 / 13.78** | 12.24 / 8.94 / 11.35 |
+
+Voltage thresholds are untouched by the leg (3.26 -> 3.27 % on DSO_2 col 10,
+etc. -- rounding only). Invariants at `gamma = 1`:
+
+    dso_g_v / g_w_dso_oltc = 546.1135    global and per-area
+    g_w_dso_oltc / g_q     = 0.732449    global and per-area
+
+The candidate's thresholds sit ~20 % above `make_config_tuned`'s throughout,
+which is just `g_w_dso_oltc` 183.11 vs 150 -- a more expensive tap, as designed.
+
+## 31 — The same cost applies, slightly worse
+
+Designed `g_w_dso_der`: **1172** without the leg, **5190** with it (against
+5189 for `make_config_tuned` -- the same 20^0.5 geomean arithmetic). The
+candidate ships `g_w_dso_der = 1097.16`, so with the leg it runs **4.7x below
+design**, versus `make_config_tuned`'s 9.4x at 550. So this combination is
+the *less* under-damped of the two on the continuous block, by a factor 2.
+
+## 32 — The four combinations, and which answers what
+
+| invocation | tap driver | DSO_2/4 Q threshold | reproduces archive? |
+|---|---|---|---|
+| `--dso-oltc-active` | voltage only | -- (no Q gradient) | **yes, exactly** |
+| `--dso-oltc-active --gamma-q 1` | voltage + Q | **9.3 - 14.9 Mvar** | no (gamma > 0) |
+| (no flag) | voltage + Q | 5.5 - 12.2 Mvar | n/a |
+| `--dso-oltc-active --gamma-q 1`, `scale_q=False` | voltage + Q | 132 - 297 Mvar | no |
+
+`tests/test_dso_v_relief_pairing.py`: 12 passed.

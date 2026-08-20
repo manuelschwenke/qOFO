@@ -688,7 +688,11 @@ def make_config_tuned() -> MultiTSOConfig:
     return _apply_dso_v_relief(cfg)
 
 
-def make_config_dso_oltc_active() -> MultiTSOConfig:
+def make_config_dso_oltc_active(
+    *,
+    gamma_oltc_q: float = 0.0,
+    scale_q: Optional[bool] = None,
+) -> MultiTSOConfig:
     """``make_config_tuned`` at Stage-1 candidate ``ac8941a46134`` — the point
     at which the DSO OLTCs are actually used to control DSO voltage.
 
@@ -741,7 +745,33 @@ def make_config_dso_oltc_active() -> MultiTSOConfig:
     Not re-measured on the 36 h case-study window -- the numbers above are the
     Tier-1 bank (12 x 90 min, ``rural_700``).  Interface-Q tracking is expected
     to be slightly worse than the selected point by construction.
+
+    Adding a Q incentive
+    --------------------
+    ``gamma_oltc_q`` defaults to **0.0**, which is what Stage 0 designed these
+    weights at and what reproduces the archived candidate.  Pass a positive
+    value (``--dso-oltc-active --gamma-q X``) to give the tap an interface-Q
+    gradient on top of the candidate's weight set.
+
+    ``scale_q`` then defaults to ``gamma_oltc_q > 0``, i.e. **the g_q leg comes
+    on exactly when there is a Q gradient for it to compensate.**  Without it
+    the x20 on ``g_w_dso_oltc`` is uncompensated in the tap's interface-Q
+    threshold and ``DSO_2``/``DSO_4`` need 132-297 Mvar to commit at this weight
+    set -- Q-inert, while ``DSO_1``/``DSO_3`` sit at 3.5-6.1.  Pass it
+    explicitly to override the coupling in either direction.
+
+    Note that a positive ``gamma_oltc_q`` puts this function outside the
+    archived candidate: ``g_w_dso_oltc = 183.11`` was designed by Stage 0 at
+    ``gamma = 0`` (``stage_0_preconditioning.py:319`` applies the same gamma to
+    the tap's self-cost ``||a_i||^2``).  It is then a diagnostic, and
+    ``main()`` labels the run accordingly.
     """
+    gamma = float(gamma_oltc_q)
+    if not (0.0 <= gamma <= 1.0):
+        raise ValueError(
+            f"gamma_oltc_q must be in [0, 1] (DSOControllerConfig validates the "
+            f"same range), got {gamma_oltc_q!r}")
+    want_q_leg = (gamma > 0.0) if scale_q is None else bool(scale_q)
     cfg = dataclasses.replace(
         make_config_tuned(), dso_g_v_per_area=None, dso_g_w_class=None,
         # dso_g_q_per_area too: apply_dso_v_relief(scale_q=True) reads an
@@ -749,20 +779,17 @@ def make_config_dso_oltc_active() -> MultiTSOConfig:
         # the factor (measured: 250 -> 5000 -> 100000 on a second call).
         dso_g_q_per_area=None,
     )
-    # scale_q=False, also pinned: the g_q leg did not exist when Stage 0
-    # designed this candidate, and at the gamma=0 pinned below it would change
-    # the tap not at all while still moving the DSO-DER block.
     return _apply_dso_v_relief(dataclasses.replace(
         cfg,
-        # PINNED, not inherited.  Every weight below was designed by Stage 0 at
-        # gamma = 0 (it applies the same gamma when computing the tap's
-        # self-cost ||a_i||^2 -- stage_0_preconditioning.py:319), so inheriting
-        # a non-zero gamma from make_config_tuned would leave this function
-        # claiming to reproduce ac8941a46134 while running a point Stage 0 never
-        # designed.  To run this weight set WITH a Q incentive, pass
-        # ``--gamma-q X`` -- that path is labelled as a diagnostic and gets its
-        # own results directory.
-        dso_gamma_oltc_q=0.0,
+        # SET from the argument, never inherited from make_config_tuned.  Every
+        # weight below was designed by Stage 0 at gamma = 0 (it applies the same
+        # gamma when computing the tap's self-cost ||a_i||^2 --
+        # stage_0_preconditioning.py:319), so silently inheriting a non-zero
+        # gamma would leave this function claiming to reproduce ac8941a46134
+        # while running a point Stage 0 never designed.  The default 0.0 keeps
+        # that promise; an explicit gamma_oltc_q > 0 knowingly breaks it and is
+        # labelled a diagnostic by main().
+        dso_gamma_oltc_q=gamma,
         # DSO voltage-tracking weight: baseline 1e5 x dso_g_v_ratio 1.0.
         # make_config_tuned carries 84140 (= ratio 0.841), the parked corner.
         dso_g_v=1.0e5,
@@ -778,7 +805,7 @@ def make_config_dso_oltc_active() -> MultiTSOConfig:
         # move -- consistent with engage_dso_pu / dso_g_v being the binding
         # coordinates rather than the tap price.
         g_w_dso_oltc=183.1121290126729,
-    ), scale_q=False)
+    ), scale_q=want_q_leg)
 
 
 # ---------------------------------------------------------------------------
@@ -1007,7 +1034,11 @@ def main(config_factory=None, *, experiment: str = "run_multi_system_ofo",
                 f"--gamma-q must be in [0, 1] (DSOControllerConfig validates "
                 f"the same range), got {gamma_q!r}")
         old = float(cfg.dso_gamma_oltc_q)
-        cfg = dataclasses.replace(cfg, dso_gamma_oltc_q=float(gamma_q))
+        # A factory that already took gamma as an argument (and therefore also
+        # decided its g_q leg from it) is left alone -- replacing here would be
+        # a no-op on gamma but would NOT re-derive anything coupled to it.
+        if old != float(gamma_q):
+            cfg = dataclasses.replace(cfg, dso_gamma_oltc_q=float(gamma_q))
         experiment = f"{experiment}_gammaq{float(gamma_q):g}"
         print(
             "\n" + "!" * 78
@@ -1066,7 +1097,16 @@ if __name__ == "__main__":
         # Stage-1 candidate ac8941a46134 -- see make_config_dso_oltc_active.
         # Its own results series, so the A/B against the default weight set
         # stays legible.
-        main(make_config_dso_oltc_active,
+        #
+        # gamma goes into the FACTORY, not into main()'s post-hoc override: the
+        # factory couples the g_q leg to it (scale_q defaults to gamma > 0), and
+        # replacing gamma afterwards would leave the relief's x20 uncompensated
+        # in the tap's interface-Q threshold -- DSO_2/DSO_4 at 132-297 Mvar
+        # instead of 5-12.  main() still receives gamma_q, sees the config is
+        # already there, and only prints the diagnostic banner and tags the
+        # results directory.
+        main(lambda: make_config_dso_oltc_active(
+                 gamma_oltc_q=0.0 if _GAMMA_Q is None else _GAMMA_Q),
              experiment="run_multi_system_ofo_dso_oltc_active",
              gamma_q=_GAMMA_Q)
     elif _GAMMA_Q is not None:

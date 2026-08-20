@@ -840,3 +840,73 @@ Both are edits to `CONSTRAINT_NAMES` / `feasibility_constraints` in the shared
 `tuning/objectives_v2.py`, which changes the constraint-vector shape for every
 existing study and invalidates their archived `hard` fields. Deliberately not
 done unilaterally.
+
+## 12. Barriers instead of prices — the re-run that works (2026-08-20 08:58)
+
+§11 showed both safeguards being *priced* rather than *enforced*, and the search
+buying through them. Both are now barriers.
+
+### Implementation
+
+| file | change |
+| --- | --- |
+| `tuning/objectives_v2.py` | `g6_ds_headroom` **appended** to `CONSTRAINT_NAMES` (existing indices unshifted); `ConstraintLimits.ds_headroom_pu` (default `None` = inert) and `.rho_margin` (default 0.0 = inert) |
+| | g3 now compares against `rho_emp_p95 / (1 + rho_margin)`, so the transfer allowance binds the *search*, not only the lambda* selection |
+| `tuning_mc/configs/limits_mc_v2_tier1_g6.json` | `rho_margin: 0.031`, `ds_headroom_pu: 0.01` |
+| `tuning_mc/preflight_rerun.py` | checks 1b now **block** on either barrier being inert |
+| `tests/tuning/test_g6_headroom_and_rho_margin.py` | 13 tests |
+
+Both default to inert, so every earlier study reproduces bit-for-bit (verified:
+at defaults g3 is exactly the old expression and g6 = -1.0). A metric predating
+`ds_headroom_min_pu` contributes nothing rather than a spurious violation —
+g4's "no evidence is not a violation" rule.
+
+Checked against the measured points before launching:
+
+| | rho | headroom | g3 | g6 | verdict |
+| --- | --- | --- | --- | --- | --- |
+| §11 incumbent | 1.4771 | -0.0003 | +0.0222 | +0.0103 | **rejected on both** |
+| design point | 1.3256 | +0.0200 | -0.1293 | -0.0100 | accepted |
+| lambda=0.25 candidate | 1.4743 | +0.0126 | +0.0194 | -0.0026 | rejected on g3 |
+
+### Result: 8 polls, converged at delta = 0.0375, filter 44 points
+
+| | f_ts | f_q | worst headroom | windows outside [0.90, 1.10] |
+| --- | --- | --- | --- | --- |
+| design point | 1.312511 | 0.098606 | +0.0200 pu | 0 / 12 |
+| **incumbent** | **1.280885 (-2.41 %)** | **0.088986 (-9.76 %)** | **+0.0103 pu** | **0 / 12** |
+
+`g6 = -0.0003` — the barrier is *active*, holding the incumbent exactly at the
+0.01 pu requirement instead of letting it sell through. `g3 = -0.0760`
+(rho 1.379, inside the margined 1.4549). **Every one of the 44 filter points
+respects the requirement**: worst headroom across the entire front is +0.0100 pu.
+
+Knobs: `lambda_dso` x2.0, `engage_dso_pu` x2.0, `tau` x0.71, `dso_g_v_ratio`
+x0.84, `lambda_tso` x1.19 (0.178, well inside the boundary), `dso_v_authority`
+unchanged at 20.
+
+### Enforcing beat post-selecting
+
+| | f_ts | f_q | headroom |
+| --- | --- | --- | --- |
+| §11 post-hoc selection from the unconstrained front | 1.302146 | 0.089983 | +0.0126 |
+| **§12 barrier-enforced incumbent** | **1.280885** | 0.088986 | +0.0103 |
+
+1.6 % better on f_ts at the same f_q. Constraining the *search* explores the
+admissible region; post-selecting only picks the least-bad point from a front
+that was pulled outside it. The incumbent is directly usable — no
+post-processing, which is what §9 asked for.
+
+### One honest qualification
+
+`dso_v_authority` ended at exactly 20.0, its starting value. The search did
+explore it — filter points span 10.02 to 39.91 — and 20 is where the best-f_ts
+feasible point sits, but it is the value that was hand-picked in §6.2, so this
+is *weak confirmation* rather than independent derivation. Deriving it from the
+`reach x |Q_PCC|` predictor (§8) in Stage 0 remains the stronger route.
+
+### Cost
+
+lam ~1 h, phase A ~2.2 h, phase B 8 polls at ~1.1 h, `--workers 16` (sized to
+phase B's 16-point poll = one batch). Total ~14 h. Four polls fewer than §11:
+the barriers reject candidates earlier, so `delta` shrinks sooner.

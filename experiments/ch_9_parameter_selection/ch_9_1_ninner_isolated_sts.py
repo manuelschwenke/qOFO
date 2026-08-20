@@ -24,6 +24,30 @@ point. The loop is allowed to settle at setpoint A before the step to B, so the
 iteration count is a property of the step and not of the initial condition;
 this is what ``q_pcc_setpoint_schedule_per_dso`` exists for.
 
+**Relaxing the capability (``--der-q-override-pu``).** The first full run found
+that 89 % of band-edge steps never settle, and that this is *reachability*, not
+loop speed: the censored cases end a median 11 Mvar (23 % of the commanded
+step) from a setpoint placed at 95 % of the capability the subordinate layer
+itself reported. To measure settling *as such*, the DER reactive capability can
+be forced to a symmetric ``[-x*S_n, +x*S_n]`` box via
+``MultiTSOConfig.der_q_capability_override_pu``, which
+``ActuatorBounds._compute_single_der_q_capability`` and the plant's own clip
+honour identically -- they must, or the controller would optimise against a
+plant it does not have.
+
+**The step magnitudes stay those of the REAL capability.** Targets are read in
+a probe pass run at the *baseline* config and only the measurement pass is
+relaxed. Sizing the step from the relaxed band instead would command a Q the
+scenario never declares and measure nothing useful; keeping it fixed makes the
+two runs a clean A/B on the same physical ask.
+
+**This is a diagnostic, not a physical model.** ``+-x`` pu at rated P implies
+``S = sqrt(1 + x^2)`` pu, i.e. a converter oversized beyond what the scenario
+declares. Every output says so, and a run made under it must never be quoted as
+one made under real limits. Watch ``z_slack_max`` in the result: if settling is
+still refused with capability relaxed, the binding constraint has moved to
+voltage, which is the more interesting finding.
+
 **The circularity, stated rather than hidden.** ``G_w`` was calibrated with
 ``N_inner = 9`` *assumed*, and this script measures ``N_inner`` with those
 weights in place. That is a fixed-point argument evaluated at one iteration. It
@@ -145,6 +169,7 @@ def provenance(args: argparse.Namespace, design: Dict[str, Any]) -> Dict[str, An
             "sts_period_s": STS_PERIOD_S, "settle_s": SETTLE_S,
             "observe_s": OBSERVE_S, "band_fraction": args.band_fraction,
             "band_mvar": args.band_mvar, "variant": args.variant,
+            "der_q_override_pu": args.der_q_override_pu,
         },
         "circularity": (
             "G_w was calibrated with N_inner = 9 ASSUMED; this measures "
@@ -388,6 +413,12 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
 
     # tso_period_s also lives on the nested SBX-H config; see _retime_parent.
     base = _retime_parent(dataclasses.replace(cfg, **parent), total_s * 10.0)
+    # The probe pass ALWAYS runs at the real capability: the step magnitude
+    # must be the one the plant actually declares, or the comparison against
+    # the capped run is not a comparison of the same physical ask.
+    override = job.get("der_q_override_pu")
+    measure_cfg_extra = ({} if override is None
+                         else {"der_q_capability_override_pu": float(override)})
     spec = dataclasses.replace(spec, duration_s=total_s,
                                dso_period_s=STS_PERIOD_S, dt_s=STS_PERIOD_S,
                                tso_period_s=total_s * 10.0,
@@ -450,9 +481,12 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
     q_step = [targets[t][key] if t in stepped else targets[t]["q_now"]
               for t in mine_sorted]
 
-    cfg_run = dataclasses.replace(base, q_pcc_setpoint_schedule_per_dso={
-        job["dso"]: [{"t_s": 0.0, "q_mvar": q_hold},
-                     {"t_s": SETTLE_S, "q_mvar": q_step}]})
+    cfg_run = dataclasses.replace(
+        base,
+        q_pcc_setpoint_schedule_per_dso={
+            job["dso"]: [{"t_s": 0.0, "q_mvar": q_hold},
+                         {"t_s": SETTLE_S, "q_mvar": q_step}]},
+        **measure_cfg_extra)
 
     res, records = _run_scenario(spec, cfg_run, MetricScales())
     if res.failure_reason:
@@ -562,7 +596,18 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
             for r in agg:
                 w.writerow(r)
 
-    md = ["# N_inner on the isolated subordinate loop (thesis eq. 9.2)", "",
+    ov = (meta or {}).get("constants", {}).get("der_q_override_pu")
+    md = ["# N_inner on the isolated subordinate loop (thesis eq. 9.2)", ""]
+    if ov is not None:
+        md += [f"> **DIAGNOSTIC RUN — DER reactive capability forced to "
+               f"`[-{ov:g}*S_n, +{ov:g}*S_n]`.** This is not a physical model: "
+               f"`+-{ov:g}` pu at rated P implies an apparent-power rating of "
+               f"`sqrt(1 + {ov:g}^2)` pu, beyond what the scenario declares. "
+               f"Numbers from this run must never be quoted as measured under "
+               f"real limits. Step magnitudes are still those of the REAL "
+               f"capability — only the measurement pass is relaxed — so this "
+               f"isolates settling speed from capability saturation.", ""]
+    md += [
           "`N_inner` is the first subordinate iteration after a "
           "capability-band-traversing interface-Q step at which the tracking "
           "error enters the settling band **and stays**. Right-censored at the "
@@ -788,6 +833,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--windows", default="")
     ap.add_argument("--dsos", default="",
                     help="comma-separated DSO ids; default every DSO present")
+    ap.add_argument("--der-q-override-pu", type=float, default=None,
+                    help="force every DER Q capability to [-x*S_n, +x*S_n] "
+                         "for the MEASUREMENT pass only, to observe settling "
+                         "rather than capability saturation. Step magnitudes "
+                         "still come from the real capability. DIAGNOSTIC "
+                         "ONLY -- not a physical model.")
     ap.add_argument("--trafos-per-dso", type=int, default=3,
                     help="interface transformers per DSO in this benchmark")
     ap.add_argument("--include-dead-zone", action="store_true",
@@ -856,6 +907,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     n_trafo = int(a.trafos_per_dso)
     jobs = [{"window": w, "dso": d, "direction": dirn, "variant": a.variant,
              "band_mvar": a.band_mvar, "band_fraction": a.band_fraction,
+             "der_q_override_pu": a.der_q_override_pu,
              "trafo": f"{d}|trafo_{i}"}
             for w in names for d in dsos
             for i in _trafo_indices(d, n_trafo)
@@ -870,6 +922,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"[ninner] -> {out_dir}")
     print(f"[ninner] {len(jobs)} steps = {len(names)} windows x {len(dsos)} "
           f"DSOs x 2 directions, {a.workers} workers, variant {a.variant}")
+    if a.der_q_override_pu is not None:
+        print(f"[ninner] *** DIAGNOSTIC: DER Q capability forced to "
+              f"+-{a.der_q_override_pu:g}*S_n for the measurement pass. "
+              f"Not a physical model; step sizes still from real capability.")
     print(f"[ninner] commit {meta['git_commit']} on {meta['git_branch']}"
           + ("  [WORKING TREE DIRTY]" if meta.get("git_dirty") else ""))
 

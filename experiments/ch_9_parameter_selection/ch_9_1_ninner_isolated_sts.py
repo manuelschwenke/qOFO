@@ -184,6 +184,7 @@ def provenance(args: argparse.Namespace, design: Dict[str, Any]) -> Dict[str, An
 
 def measure_n_inner(records: Sequence[Any], *, step_time_s: float,
                     sts_period_s: float, band_mvar: float,
+                    direction: str = "up",
                     ) -> List[Dict[str, Any]]:
     """``N_inner`` per interface transformer, counted from the step instant.
 
@@ -195,6 +196,20 @@ def measure_n_inner(records: Sequence[Any], *, step_time_s: float,
 
     Right-censored at the end of the observation window; censoring is returned
     as a flag, never as a dropped row.
+
+    **Each step is also classified as capability-limited or not**, from the
+    subordinate layer's OWN reported headroom in the commanded direction at the
+    end of the window: ``cap_max - q`` going up, ``q - cap_min`` going down. If
+    that is smaller than the settling band, the DSO is telling us it cannot
+    move a further band-width that way, and a failure to settle says nothing
+    about how fast the loop converges -- only that the setpoint was outside
+    what the area can deliver.
+
+    This replaces the earlier approach of forcing an artificial capability
+    box: the plant keeps its real limits, and the two populations are
+    separated afterwards. ``N_inner`` is then read over the unlimited steps --
+    the genuinely converging series -- with the limited ones reported
+    alongside rather than mixed in or silently dropped.
     """
     out: List[Dict[str, Any]] = []
     trafos = sorted({t for r in records
@@ -245,7 +260,26 @@ def measure_n_inner(records: Sequence[Any], *, step_time_s: float,
         slack = [float(v) for v in slack
                  if v is not None and math.isfinite(float(v))]
 
+        # Headroom the DSO itself reports, in the commanded direction, at the
+        # end of the window.
+        cmin = [(getattr(r, "dso_trafo_q_cap_min_mvar", {}) or {}).get(t)
+                for r in post]
+        cmax = [(getattr(r, "dso_trafo_q_cap_max_mvar", {}) or {}).get(t)
+                for r in post]
+        cmin = [float(v) for v in cmin if v is not None and math.isfinite(float(v))]
+        cmax = [float(v) for v in cmax if v is not None and math.isfinite(float(v))]
+        q_end = acts[-1] if acts else float("nan")
+        if cmin and cmax and math.isfinite(q_end):
+            headroom = ((cmax[-1] - q_end) if direction == "up"
+                        else (q_end - cmin[-1]))
+        else:
+            headroom = float("nan")
+        cap_limited = bool(math.isfinite(headroom) and headroom <= band_mvar)
+
         out.append({
+            "headroom_end_mvar": headroom,
+            "capability_limited": cap_limited,
+            "direction_measured": direction,
             "trafo": t, "group": grp,
             "n_inner": cap if censored else n_inner,
             "censored": censored,
@@ -495,7 +529,8 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
 
     rows = measure_n_inner(records, step_time_s=SETTLE_S,
                            sts_period_s=STS_PERIOD_S,
-                           band_mvar=float(job["band_mvar"]))
+                           band_mvar=float(job["band_mvar"]),
+                           direction=str(job["direction"]))
     rows = [r for r in rows if r["group"] == job["dso"]
             and (focus is None or r["trafo"] == focus)]
     for r in rows:
@@ -553,8 +588,26 @@ def aggregate(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not sub:
             continue
         n = [float(r["n_inner"]) for r in sub]
+        # The population that actually answers eq. (9.2): steps the area could
+        # deliver. A capability-limited step that never settles measures the
+        # limit, not the loop.
+        free = [r for r in sub if not r.get("capability_limited")]
+        nf = [float(r["n_inner"]) for r in free]
+        free_unc = [float(r["n_inner"]) for r in free if not r["censored"]]
         out.append({
             "dso": dso, "direction": direction, "n_steps": len(sub),
+            "n_capability_limited": sum(1 for r in sub
+                                        if r.get("capability_limited")),
+            "n_free": len(free),
+            "free_n_inner_median": _quantile(nf, 0.50),
+            "free_n_inner_p95": _quantile(nf, 0.95),
+            "free_censoring_fraction": (
+                sum(1 for r in free if r["censored"]) / len(free)
+                if free else float("nan")),
+            "free_uncensored_median": _quantile(free_unc, 0.50),
+            "free_uncensored_p95": _quantile(free_unc, 0.95),
+            "headroom_end_median_mvar": _quantile(
+                [r.get("headroom_end_mvar", float("nan")) for r in sub], 0.50),
             "n_inner_median": _quantile(n, 0.50),
             "n_inner_p95": _quantile(n, 0.95),
             "n_inner_max": max(n) if n else float("nan"),
@@ -573,7 +626,8 @@ def aggregate(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 _ROW_COLS = ["window", "dso", "direction", "variant", "trafo", "group",
-             "n_inner", "censored", "n_inner_cap", "step_mvar",
+             "n_inner", "censored", "capability_limited", "headroom_end_mvar",
+             "n_inner_cap", "step_mvar",
              "band_width_mvar", "q_set_after_mvar", "q_actual_after_mvar",
              "residual_mvar", "tap_moves", "v_min_pu", "v_max_pu",
              "v_violation", "z_slack_max"]
@@ -623,10 +677,30 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
           "choice -- raise `T_TS`, or recalibrate the weights and repeat -- is "
           "an author decision, not a script output.", "",
           "## Result", "",
-          "| DSO | direction | steps | N_inner med | p95 | max | censored | "
-          "step med [Mvar] | band width med [Mvar] | residual med [Mvar] | "
-          "taps | V viol |",
-          "|:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|"]
+          "### Capability-limited steps are separated, not mixed in", "",
+          "A step is **capability-limited** when the subordinate layer's own "
+          "reported headroom in the commanded direction, at the end of the "
+          "window, is below the settling band -- it is saying it cannot move "
+          "a further band-width that way. Such a step failing to settle "
+          "measures the limit, not the loop. `N_inner` is read over the "
+          "**free** steps.", "",
+          "| DSO | direction | steps | cap-limited | free | free N_inner med | "
+          "free p95 | free censored | headroom med [Mvar] | step med [Mvar] |",
+          "|:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|"]
+    for a in agg:
+        md.append(
+            f"| {a['dso']} | {a['direction']} | {a['n_steps']} | "
+            f"{a['n_capability_limited']} | {a['n_free']} | "
+            f"{a['free_n_inner_median']:.1f} | {a['free_n_inner_p95']:.1f} | "
+            f"{a['free_censoring_fraction']:.2f} | "
+            f"{a['headroom_end_median_mvar']:.2f} | "
+            f"{a['step_median_mvar']:.1f} |")
+
+    md += ["", "### All steps, including capability-limited ones", "",
+           "| DSO | direction | steps | N_inner med | p95 | max | censored | "
+           "step med [Mvar] | band width med [Mvar] | residual med [Mvar] | "
+           "taps | V viol |",
+           "|:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|"]
     for a in agg:
         md.append(
             f"| {a['dso']} | {a['direction']} | {a['n_steps']} | "
@@ -758,6 +832,24 @@ def self_test() -> int:
     mt = band_edge_targets(mixed, at_time_s=20.0, fraction=1.0)
     check("the last NON-degenerate report is used when the latest is degenerate",
           "T1" in mt and mt["T1"]["width"] >= 100.0, f"got {mt}")
+
+    # Capability classification: same trajectory, different reported headroom.
+    lim = ([_R(0.0, 0.0, 0.0)]
+           + [_R(float(100 + 20 * i), 50.0, 40.0, cap=(-100.0, 40.5))
+              for i in range(4)])
+    lr = measure_n_inner(lim, step_time_s=100.0, sts_period_s=20.0,
+                         band_mvar=1.0, direction="up")[0]
+    check("a step with no reported headroom left is capability-limited",
+          lr["capability_limited"], f"headroom={lr['headroom_end_mvar']}")
+    free = ([_R(0.0, 0.0, 0.0)]
+            + [_R(float(100 + 20 * i), 50.0, 40.0, cap=(-100.0, 200.0))
+               for i in range(4)])
+    fr = measure_n_inner(free, step_time_s=100.0, sts_period_s=20.0,
+                         band_mvar=1.0, direction="up")[0]
+    check("the same trajectory with headroom left is NOT capability-limited",
+          not fr["capability_limited"], f"headroom={fr['headroom_end_mvar']}")
+    check("both are still censored -- the flag does not change settling",
+          lr["censored"] and fr["censored"])
 
     check("interface indices do not restart per DSO",
           _trafo_indices("DSO_1", 3) == [0, 1, 2]
@@ -964,7 +1056,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     pooled = next((x for x in agg if x["dso"] == "__pooled__"), None)
     if pooled:
-        print(f"\n[ninner] pooled: median {pooled['n_inner_median']:.1f}, "
+        print(f"[ninner] capability-limited {pooled['n_capability_limited']}"
+              f" of {pooled['n_steps']}; over the {pooled['n_free']} FREE "
+              f"steps: median {pooled['free_n_inner_median']:.1f}, "
+              f"p95 {pooled['free_n_inner_p95']:.1f}, censored "
+              f"{pooled['free_censoring_fraction']:.2f}")
+        print(f"\n[ninner] pooled (all steps): median {pooled['n_inner_median']:.1f}, "
               f"p95 {pooled['n_inner_p95']:.1f}, "
               f"max {pooled['n_inner_max']:.0f}, "
               f"censored {pooled['censoring_fraction']:.2f} "

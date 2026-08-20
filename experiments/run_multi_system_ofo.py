@@ -533,7 +533,7 @@ def make_config_tuned() -> MultiTSOConfig:
         g_w_pcc = 49.3,  # was 60
         g_w_gen=1e9,
         # ── DSO weights ──
-        g_w_dso_der=617,  # was 800
+        g_w_dso_der=550,  # campaign optimum 549.88 (was 617)
         # zeroing to be sure
         tso_g_res_sg=0,
         tso_g_loss=0,
@@ -552,7 +552,7 @@ def make_config_tuned() -> MultiTSOConfig:
         shunt_int_v_max_pu=1.10,
         # OLTC weights and settings
         g_w_tso_oltc = 3783,  # unchanged — see note
-        g_w_dso_oltc = 393,  # was 150
+        g_w_dso_oltc = 150,  # was 150
         # ── DSO_4 voltage relief (2026-08-18) ───────────────────────────────
         # DSO_4 is the long-line area (SUBNET_DEFS scale=2.44 -> 586 km,
         # X = 222.5 ohm = 1.84 p.u., unreinforced 305 mm2) carrying the same
@@ -630,7 +630,7 @@ def make_config_tuned() -> MultiTSOConfig:
             w_track_factor=1.0,
         ),
         # ── Profile & contingency settings ──
-        start_time=datetime(2016, 5, 3, 8, 0),
+        start_time=datetime(2016, 1, 5, 8, 0),
         use_profiles=True,
         use_fixed_zones=True,
         use_zonal_gen_dispatch=True,
@@ -748,12 +748,14 @@ def make_config_per_area() -> MultiTSOConfig:
     # afterwards (see the tail of this function).  Applying it first would
     # leave a raised dso_g_v against the per-area dso_oltc design below, i.e.
     # the unmatched loop gain that limit-cycles the tap.
+    # Do NOT hand-write the per-area dicts here: the ``dataclasses.replace``
+    # below overwrites ``dso_g_w_class`` with ``_gauged_area(...)``, and
+    # ``_apply_dso_v_relief`` then recomputes ``dso_g_v_per_area`` from this
+    # config's own (gauged) ``dso_g_v``, so literals are silently discarded.
+    # Strip here, re-apply after the rewrite -- that ordering is what keeps the
+    # relief measured against each area's per-area ``dso_oltc`` base.
     cfg = dataclasses.replace(
-        make_config_tuned(),
-        dso_g_v_per_area={"DSO_2": 1_682_790.28, "DSO_4": 1_682_790.28},
-        dso_g_w_class={"DSO_2": {"dso_oltc": 7852.887},
-                       "DSO_4": {"dso_oltc": 7852.887}},
-
+        make_config_tuned(), dso_g_v_per_area=None, dso_g_w_class=None,
     )
     return _apply_dso_v_relief(dataclasses.replace(
         cfg,
@@ -848,7 +850,12 @@ def main() -> None:
         python experiments/000_M_TSO_M_DSO.py
     """
 
-    cfg = make_config_per_area()
+    # make_config_tuned(), NOT make_config_per_area(): the 2026-08-19 campaign
+    # optimum is a GLOBAL weight set (its eval carries ``zone_g_w_class: None``).
+    # make_config_per_area() overwrites every weight with its own analytic
+    # per-area literals, which is a different operating point -- and not merely
+    # a gauge rescaling of this one, so the trajectory changes.
+    cfg = make_config_tuned()
     run_dir = new_run_dir("run_multi_system_ofo", cfg)
     log = run_multi_tso_dso(cfg)
     with (run_dir.root / "records.pkl").open("wb") as handle:

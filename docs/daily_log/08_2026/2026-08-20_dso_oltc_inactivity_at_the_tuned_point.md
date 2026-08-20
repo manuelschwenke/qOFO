@@ -599,3 +599,105 @@ the two spread-limited areas never do.
    factory with a comment, so it still reproduces `ac8941a46134` as archived.
    `--gamma-q X` remains the way to run that weight set with a Q incentive, and
    it is labelled a diagnostic and writes to its own results directory.
+
+---
+
+# Addendum 7 — the relief's third leg: per-area `g_q`
+
+Manuel had set `DSO_V_RELIEF_FACTORS = {"DSO_2": 1.0, "DSO_4": 1.0}` -- i.e. the
+relief *off* -- as the only available way to stop the x20 on `g_w_dso_oltc`
+from pushing those areas' interface-Q commit threshold to 108-244 Mvar. That
+also gave up the voltage relief the factor exists for. This addendum adds the
+missing leg so both can hold at once, and restores the factor to 20.
+
+## 25 — What was added
+
+* **`MultiTSOConfig.dso_g_q_per_area`** (`configs/config.py`) -- per-area
+  override of the interface-Q weight, the exact counterpart of
+  `dso_g_v_per_area`.
+* **`apply_dso_v_relief(..., scale_q: bool = False)`** -- scales that area's
+  `g_q` by the same factor. **Default `False`**, so
+  `tuning_mc.stage_1_search.build_config` and therefore the entire 0815/stage1
+  campaign is bit-for-bit unchanged. Verified: rebuilding `fe010aa3ead1`
+  through `build_config` returns `dso_g_q_per_area = None` and all five weights
+  exact to 1e-12.
+* **Runner plumbing** (`experiments/runners/multi_tso_dso.py`) -- applies
+  `dso_g_q_per_area` to `DSOControllerConfig.g_q` in the same place and the same
+  way as `dso_g_v_per_area`, with the same cache invalidation, plus a NOTE when
+  it is set at `dso_gamma_oltc_q = 0` where it cannot affect the tap.
+* **`DSO_V_RELIEF_SCALE_Q = True`** in `run_multi_system_ofo.py`, and
+  `DSO_V_RELIEF_FACTORS` back to `{"DSO_2": 20.0, "DSO_4": 20.0}`.
+
+## 26 — Measured: it does exactly what it should
+
+Stage 0 on the runner's own config, `dso_gamma_oltc_q = 1.0`. `Q` is
+`engage_other_current` [Mvar], `V` is `engage_pu_uniform_current` [%].
+
+| loop | col | relief OFF (the workaround) | x20, no `g_q` leg | **x20 + `scale_q`** |
+|---|---|---|---|---|
+| | | Q / V | Q / V | Q / V |
+| DSO_1 | 10/11/12 | 5.01 / 3.05, 3.80 / 2.31, 4.56 / 2.11 | identical | identical |
+| DSO_3 | 10/11/12 | 3.68 / 2.91, 2.90 / 2.35, 3.40 / 2.14 | identical | identical |
+| **DSO_2** | 10 | 7.65 / 3.19 | **152.25** / 3.18 | **7.65** / 3.19 |
+| **DSO_2** | 11 | 5.47 / 2.31 | **108.38** / 2.29 | **5.47** / 2.31 |
+| **DSO_2** | 12 | 6.77 / 2.10 | **134.63** / 2.08 | **6.77** / 2.10 |
+| **DSO_4** | 10 | 12.24 / 3.33 | **244.41** / 3.33 | **12.24** / 3.33 |
+| **DSO_4** | 11 | 8.94 / 2.31 | **178.19** / 2.30 | **8.94** / 2.31 |
+| **DSO_4** | 12 | 11.35 / 2.07 | **226.55** / 2.07 | **11.35** / 2.07 |
+
+`scale_q` restores the Q threshold to the **unrelieved value exactly**, while
+the voltage threshold stays at its relief-preserved value. Both invariants now
+read identically global and per-area:
+
+    dso_g_v / g_w_dso_oltc = 560.9333    (voltage threshold)
+    g_w_dso_oltc / g_q     = 0.6000      (interface-Q threshold)
+
+**So: with the relief back at x20 and `scale_q` on, DSO_2 engages at ~5.5-7.7
+Mvar and DSO_4 at ~8.9-12.2 Mvar**, against DSO_1's 3.8-5.0 and DSO_3's
+2.9-3.7. A fleet uniform to within a factor ~3, with the DSO_4 voltage relief
+intact.
+
+## 27 — The cost, and it is not cosmetic
+
+`g_w_dso_der` is deliberately **not** scaled, so this is not a gauge rescaling:
+a relieved area's whole objective -- now both channels, not just voltage -- is
+x20 against its continuous DER block. Stage 0's designed `g_w_dso_der` moves
+
+| variant | designed `g_w_dso_der` | file runs | shortfall |
+|---|---|---|---|
+| relief OFF | 1160 | 550 | 2.1x |
+| x20, no `g_q` leg | 1170 | 550 | 2.1x |
+| **x20 + `scale_q`** | **5189** | 550 | **9.4x** |
+
+(5189/1170 = 4.43 ~ 20^0.5, the geomean over 40 DER columns of which 20 are
+scaled -- so the number is the rule, not a surprise.)
+
+Running ~9.4x below the designed DER step weight is the **under-damped**
+direction for the continuous block. The taps are now Q-responsive; the thing to
+watch on the first run is the DSO-DER trajectories, not the tap counter.
+
+## 28 — Two traps hit while doing this
+
+1. **`apply_dso_v_relief` is not idempotent on the `g_q` leg either**, for the
+   same reason as the `dso_oltc` leg: it reads an existing per-area value as its
+   base. Measured on a double call: `250 -> 5000 -> 100000`. Both
+   `make_config_dso_oltc_active` and `make_config_per_area` strip
+   `dso_g_v_per_area` / `dso_g_w_class` before re-applying -- they now strip
+   `dso_g_q_per_area` too. Caught by inspection of the built config, not by a
+   test; a test for it would be worth having.
+2. **`make_config_dso_oltc_active` must not get this leg at all.** It reproduces
+   archived candidate `ac8941a46134`, designed before the leg existed and pinned
+   at `gamma = 0` where it is inert for the tap but would still move the DER
+   block. Now pinned `scale_q=False`. Weight fidelity re-verified: exact.
+
+## 29 — Test change, stated plainly
+
+`tests/test_dso_v_relief_pairing.py` opened with
+`assert cfg.dso_gamma_oltc_q == 0.0` and the message "with gamma_oltc_q > 0 the
+loop-gain argument needs revisiting". It has been revisited, so that blanket
+assert is **replaced** rather than deleted: a new parametrised test
+`test_relief_holds_the_oltc_q_threshold_when_the_tap_tracks_q` skips at
+`gamma = 0` and, at `gamma > 0`, **requires** the `g_q` leg to be present and
+`g_w_dso_oltc / g_q` to be preserved. That is a stronger guard than the one it
+replaces, not a weaker one: the old test refused to look at `gamma > 0`; the new
+one checks the invariant that regime needs. 12 passed.

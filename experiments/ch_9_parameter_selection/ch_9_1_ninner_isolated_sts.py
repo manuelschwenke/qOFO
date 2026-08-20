@@ -1,9 +1,25 @@
 r"""Measure ``N_inner`` on the isolated subordinate loop -- thesis eq. (9.2).
 
 ``N_inner`` is the number of subordinate (STS-OFO) iterations a
-capability-band-traversing interface-Q setpoint step needs before the tracking
-error enters the settling band **and stays**. The supervisory layer is silent
-throughout, so what is measured is the subordinate loop alone.
+capability-band-traversing interface-Q setpoint step needs before **the
+iteration converges** -- that is, before the interface flow goes flat,
+``|q_pcc(k) - q_pcc(k-1)| -> 0``. The supervisory layer is silent throughout,
+so what is measured is the subordinate loop alone.
+
+**Convergence is flatness, not arrival.** The subordinate controller is
+multi-objective: it trades interface-Q tracking against voltage regulation, so
+its optimum generally sits at a non-zero Q offset from the commanded setpoint.
+A converged loop therefore need NOT reach ``q_set``, and requiring it to would
+score a correctly-converged controller as a failure.
+
+*Corrected 2026-08-20.* An earlier version defined ``N_inner`` as the first
+iteration at which ``|q_pcc - q_set|`` entered a band and stayed -- a tracking
+criterion. Against the final tuned weights it reported 91 % of steps as
+"censored" while the areas sat with 20-31 Mvar of reported headroom, zero
+voltage slack and, for DSO_3, zero tap moves: the loops had converged to their
+multi-objective optima and the criterion could not see it. The steady-state
+offset is now reported as its own quantity, which is where that trade-off
+belongs.
 
 **Parent-silent variant: frozen OFO parent (option (ii) of the handoff).**
 ``tso_mode`` stays ``'ofo'`` and ``tso_period_s`` is set beyond the horizon, so
@@ -119,6 +135,19 @@ DEFAULT_BAND_FRACTION = 0.95
 #: this is a decision rather than a detail.
 DEFAULT_BAND_MVAR = 1.0
 
+#: Flatness tolerance on the per-iteration CHANGE in interface flow [Mvar].
+#:
+#: The convergence criterion: the loop has converged at iteration ``k`` when
+#: ``|q(k) - q(k-1)|`` is at or below this and stays there. It is deliberately
+#: a separate quantity from :data:`DEFAULT_BAND_MVAR`, which bounds a tracking
+#: ERROR; conflating the two is what made a converged-but-offset loop look
+#: censored. Reported across a sweep so the choice is visible rather than
+#: decisive.
+DEFAULT_FLAT_MVAR = 0.1
+
+#: Flatness tolerances reported alongside the primary one [Mvar].
+FLAT_SWEEP_MVAR: Tuple[float, ...] = (0.02, 0.05, 0.1, 0.25, 1.0)
+
 V_MIN_PU, V_MAX_PU = 0.9, 1.1
 
 #: Design-bank strata in which the DER reactive capability is structurally
@@ -170,6 +199,7 @@ def provenance(args: argparse.Namespace, design: Dict[str, Any]) -> Dict[str, An
             "observe_s": OBSERVE_S, "band_fraction": args.band_fraction,
             "band_mvar": args.band_mvar, "variant": args.variant,
             "der_q_override_pu": args.der_q_override_pu,
+            "flat_mvar": args.flat_mvar,
         },
         "circularity": (
             "G_w was calibrated with N_inner = 9 ASSUMED; this measures "
@@ -184,7 +214,7 @@ def provenance(args: argparse.Namespace, design: Dict[str, Any]) -> Dict[str, An
 
 def measure_n_inner(records: Sequence[Any], *, step_time_s: float,
                     sts_period_s: float, band_mvar: float,
-                    direction: str = "up",
+                    direction: str = "up", flat_mvar: float = DEFAULT_FLAT_MVAR,
                     ) -> List[Dict[str, Any]]:
     """``N_inner`` per interface transformer, counted from the step instant.
 
@@ -234,13 +264,35 @@ def measure_n_inner(records: Sequence[Any], *, step_time_s: float,
         if not any(math.isfinite(x) for x in err):
             continue
 
-        n_inner: Optional[int] = None
-        for i in range(len(err)):
-            tail = err[i:]
-            if tail and all(math.isfinite(x) and x <= band_mvar for x in tail):
-                n_inner = i
-                break
+        def _first_stable(series: List[float], tol: float) -> Optional[int]:
+            for i in range(len(series)):
+                tail = series[i:]
+                if tail and all(math.isfinite(x) and x <= tol for x in tail):
+                    return i
+            return None
+
+        # THE convergence criterion: the per-iteration change in interface
+        # flow goes flat and stays flat. Index 0 of `delta` is the change from
+        # the first post-step sample to the second, so a converged-on-arrival
+        # loop scores 0.
+        q_seq = [(getattr(r, "dso_trafo_q_actual_mvar", {}) or {}).get(t)
+                 for r in post]
+        q_seq = [float(v) if v is not None else float("nan") for v in q_seq]
+        delta = [abs(q_seq[i + 1] - q_seq[i]) for i in range(len(q_seq) - 1)]
+
+        n_inner = _first_stable(delta, flat_mvar)
         censored = n_inner is None
+        by_flat = {}
+        for tol in sorted(set(FLAT_SWEEP_MVAR) | {flat_mvar}):
+            v = _first_stable(delta, tol)
+            by_flat[f"n_inner_flat_{tol:g}"] = cap if v is None else v
+            by_flat[f"unconverged_flat_{tol:g}"] = v is None
+
+        # The TRACKING view, kept for comparison and clearly named. It is what
+        # the earlier version reported as N_inner; it answers a different
+        # question and must not be conflated with convergence.
+        n_track = _first_stable(err, band_mvar)
+        track_censored = n_track is None
 
         sets = [getattr(r, "dso_trafo_q_set_mvar", {}).get(t) for r in post]
         sets = [float(v) for v in sets if v is not None]
@@ -276,7 +328,23 @@ def measure_n_inner(records: Sequence[Any], *, step_time_s: float,
             headroom = float("nan")
         cap_limited = bool(math.isfinite(headroom) and headroom <= band_mvar)
 
+        # The multi-objective trade-off, reported as its own quantity: how far
+        # the converged optimum sits from the commanded setpoint. This is a
+        # property of the controller's objective, NOT a convergence failure.
+        q_set_end = sets[-1] if sets else float("nan")
+        q_act_end = q_seq[-1] if q_seq else float("nan")
+        offset = (abs(q_act_end - q_set_end)
+                  if math.isfinite(q_act_end) and math.isfinite(q_set_end)
+                  else float("nan"))
+        last_delta = next((d for d in reversed(delta) if math.isfinite(d)),
+                          float("nan"))
+
         out.append({
+            **by_flat,
+            "n_inner_tracking": cap if track_censored else n_track,
+            "tracking_censored": track_censored,
+            "steady_state_offset_mvar": offset,
+            "final_delta_mvar": last_delta,
             "headroom_end_mvar": headroom,
             "capability_limited": cap_limited,
             "direction_measured": direction,
@@ -530,7 +598,9 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
     rows = measure_n_inner(records, step_time_s=SETTLE_S,
                            sts_period_s=STS_PERIOD_S,
                            band_mvar=float(job["band_mvar"]),
-                           direction=str(job["direction"]))
+                           direction=str(job["direction"]),
+                           flat_mvar=float(job.get("flat_mvar",
+                                                   DEFAULT_FLAT_MVAR)))
     rows = [r for r in rows if r["group"] == job["dso"]
             and (focus is None or r["trafo"] == focus)]
     for r in rows:
@@ -626,7 +696,9 @@ def aggregate(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 _ROW_COLS = ["window", "dso", "direction", "variant", "trafo", "group",
-             "n_inner", "censored", "capability_limited", "headroom_end_mvar",
+             "n_inner", "censored", "n_inner_tracking", "tracking_censored",
+             "steady_state_offset_mvar", "final_delta_mvar",
+             "capability_limited", "headroom_end_mvar",
              "n_inner_cap", "step_mvar",
              "band_width_mvar", "q_set_after_mvar", "q_actual_after_mvar",
              "residual_mvar", "tap_moves", "v_min_pu", "v_max_pu",
@@ -636,8 +708,11 @@ _ROW_COLS = ["window", "dso", "direction", "variant", "trafo", "group",
 def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
                   agg: List[Dict[str, Any]], failures: List[Dict[str, Any]],
                   meta: Optional[Dict[str, Any]] = None) -> None:
+    extra = sorted({k for r in rows for k in r
+                    if k.startswith(("n_inner_flat_", "unconverged_flat_"))})
     with (out_dir / "steps.csv").open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=_ROW_COLS, extrasaction="ignore")
+        w = csv.DictWriter(fh, fieldnames=_ROW_COLS + extra,
+                           extrasaction="ignore")
         w.writeheader()
         for r in rows:
             w.writerow(r)
@@ -781,35 +856,52 @@ def self_test() -> int:
 
     print("[self-test] isolated-STS N_inner measurement")
 
-    # Settle at 0, step to 50 at t = 100, error decays over 4 iterations.
+    # CONVERGENCE = the interface flow goes flat, NOT that it reaches q_set.
+    # q rises 10 -> 30 -> 45 -> 49 -> 50 -> 50 -> 50, so the per-iteration
+    # change is 20, 15, 4, 1, 0, 0: flat from index 4.
     recs = ([_R(float(20 * i), 0.0, 0.0) for i in range(5)]
-            + [_R(100.0, 50.0, 20.0), _R(120.0, 50.0, 40.0),
-               _R(140.0, 50.0, 48.0), _R(160.0, 50.0, 49.5),
-               _R(180.0, 50.0, 49.8), _R(200.0, 50.0, 50.0)])
+            + [_R(100.0, 50.0, 10.0), _R(120.0, 50.0, 30.0),
+               _R(140.0, 50.0, 45.0), _R(160.0, 50.0, 49.0),
+               _R(180.0, 50.0, 50.0), _R(200.0, 50.0, 50.0),
+               _R(220.0, 50.0, 50.0)])
     rows = measure_n_inner(recs, step_time_s=100.0, sts_period_s=20.0,
-                           band_mvar=1.0)
+                           band_mvar=1.0, flat_mvar=0.1)
     check("one row per interface transformer", len(rows) == 1)
-    check("N_inner counted from the step instant (3 iterations)",
-          rows[0]["n_inner"] == 3 and not rows[0]["censored"],
+    check("N_inner is the first iteration from which |dq| stays flat",
+          rows[0]["n_inner"] == 4 and not rows[0]["censored"],
           f"got {rows[0]['n_inner']}")
 
-    # Never settles -> censored at the window length, not dropped.
-    recs_c = ([_R(float(20 * i), 0.0, 0.0) for i in range(5)]
-              + [_R(float(100 + 20 * i), 50.0, 10.0) for i in range(6)])
-    rc = measure_n_inner(recs_c, step_time_s=100.0, sts_period_s=20.0,
-                         band_mvar=1.0)
-    check("a step that never settles is censored, not dropped",
-          rc[0]["censored"] and rc[0]["n_inner"] == rc[0]["n_inner_cap"],
-          f"got {rc[0]}")
+    # THE case the tracking criterion got wrong: the loop converges to its
+    # multi-objective optimum 25 Mvar short of the setpoint. It HAS converged.
+    recs_off = ([_R(0.0, 0.0, 0.0)]
+                + [_R(100.0, 50.0, 10.0), _R(120.0, 50.0, 20.0),
+                   _R(140.0, 50.0, 25.0), _R(160.0, 50.0, 25.0),
+                   _R(180.0, 50.0, 25.0)])
+    ro = measure_n_inner(recs_off, step_time_s=100.0, sts_period_s=20.0,
+                         band_mvar=1.0, flat_mvar=0.1)[0]
+    check("a loop that goes flat short of q_set HAS converged",
+          not ro["censored"] and ro["n_inner"] == 2,
+          f"got n_inner={ro['n_inner']} censored={ro['censored']}")
+    check("its distance from q_set is reported as a steady-state offset",
+          abs(ro["steady_state_offset_mvar"] - 25.0) < 1e-9,
+          f"got {ro['steady_state_offset_mvar']}")
+    check("the TRACKING view still calls that unsettled, and is kept apart",
+          ro["tracking_censored"], f"got {ro['n_inner_tracking']}")
 
-    # Touch-and-leave must not count as settled.
-    recs_b = ([_R(0.0, 0.0, 0.0)]
-              + [_R(100.0, 50.0, 49.5), _R(120.0, 50.0, 45.0),
-                 _R(140.0, 50.0, 45.0)])
-    rb = measure_n_inner(recs_b, step_time_s=100.0, sts_period_s=20.0,
-                         band_mvar=1.0)
-    check("entering the band then leaving it does not count as settled",
-          rb[0]["censored"], f"got n_inner={rb[0]['n_inner']}")
+    # A loop that keeps moving has NOT converged, however close it is.
+    recs_osc = ([_R(0.0, 0.0, 0.0)]
+                + [_R(float(100 + 20 * i), 50.0, 40.0 + (10.0 if i % 2 else 0.0))
+                   for i in range(6)])
+    rc = measure_n_inner(recs_osc, step_time_s=100.0, sts_period_s=20.0,
+                         band_mvar=1.0, flat_mvar=0.1)
+    check("a loop still oscillating is NOT converged",
+          rc[0]["censored"] and rc[0]["n_inner"] == rc[0]["n_inner_cap"],
+          f"got {rc[0]['n_inner']}")
+
+    # Flatness tolerance is reported across a sweep, not silently decisive.
+    check("a coarser flatness tolerance converges no later than a finer one",
+          rc[0]["n_inner_flat_1"] <= rc[0]["n_inner_flat_0.02"],
+          f"got {rc[0]['n_inner_flat_1']} vs {rc[0]['n_inner_flat_0.02']}")
 
     # Band-edge targets, read at the step instant.
     tg = band_edge_targets(recs, at_time_s=100.0, fraction=1.0)
@@ -848,8 +940,8 @@ def self_test() -> int:
                          band_mvar=1.0, direction="up")[0]
     check("the same trajectory with headroom left is NOT capability-limited",
           not fr["capability_limited"], f"headroom={fr['headroom_end_mvar']}")
-    check("both are still censored -- the flag does not change settling",
-          lr["censored"] and fr["censored"])
+    check("the flag is independent of whether the loop converged",
+          lr["censored"] == fr["censored"])
 
     check("interface indices do not restart per DSO",
           _trafo_indices("DSO_1", 3) == [0, 1, 2]
@@ -925,6 +1017,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--windows", default="")
     ap.add_argument("--dsos", default="",
                     help="comma-separated DSO ids; default every DSO present")
+    ap.add_argument("--flat-mvar", type=float, default=DEFAULT_FLAT_MVAR,
+                    help="convergence tolerance on the per-iteration CHANGE "
+                         "in interface flow [Mvar]; the loop has converged "
+                         "when |q(k)-q(k-1)| stays at or below this")
     ap.add_argument("--der-q-override-pu", type=float, default=None,
                     help="force every DER Q capability to [-x*S_n, +x*S_n] "
                          "for the MEASUREMENT pass only, to observe settling "
@@ -1000,6 +1096,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     jobs = [{"window": w, "dso": d, "direction": dirn, "variant": a.variant,
              "band_mvar": a.band_mvar, "band_fraction": a.band_fraction,
              "der_q_override_pu": a.der_q_override_pu,
+             "flat_mvar": a.flat_mvar,
              "trafo": f"{d}|trafo_{i}"}
             for w in names for d in dsos
             for i in _trafo_indices(d, n_trafo)

@@ -273,6 +273,7 @@ def provenance(args: argparse.Namespace) -> Dict[str, Any]:
             "rms_step_ms": RMS_STEP_MS,
             "adaptive_step": False,
             "read_stride": READ_STRIDE,
+            "pre_settle_s": args.pre_settle_s,
             "t_ds_s": T_DS_S,
             "t_ts_s": T_TS_S,
             "oltc_max_step_per_dt": OLTC_MAX_STEP_PER_DT,
@@ -325,32 +326,63 @@ def _read_scalar(obj: Any, var: str) -> float:
     raise PFSessionError(f"cannot read {var!r} on {getattr(obj,'loc_name',obj)!r}")
 
 
-def preflight(ctx: ScreeningContext, duration: float = 60.0) -> float:
+def preflight(ctx: ScreeningContext, duration: float = 60.0,
+              pre_settle_s: float = 0.0) -> float:
     """Refuse to measure settling on a model that is not at equilibrium.
 
-    A flat run that drifts means the RMS initialisation did not land on the
-    load-flow operating point, and every settling time measured afterwards
-    would be that drift plus the response. This is the one check that must
-    never be skipped. Returns the measured drift so it can be recorded.
+    A flat run that drifts means every settling time measured afterwards would
+    be that drift plus the response. This is the one check that must never be
+    skipped. Returns the measured drift so it can be recorded.
+
+    ``pre_settle_s`` advances the plant before the measurement window opens,
+    and the drift is then evaluated over the LAST ``duration`` seconds only.
+
+    *Added 2026-08-20.* The RMS plant does not hold the load-flow point: the
+    anchored ZIP load model (``load_model = "zip"``, P = P_prof*(V/1.03),
+    Q = Q_prof*(V/1.03)^2, see the 2026-07-17 log) makes every load
+    voltage-following, and at the DSO buses Q is capacitive, so a rising
+    voltage increases reactive injection quadratically. The plant therefore
+    leaves the load-flow point and converges on the ZIP model's own
+    equilibrium ~1.4e-2 pu away, reaching it within the first seconds and then
+    creeping. Measuring from the load-flow instant charges that relaxation to
+    every settling time.
+
+    Settling first and measuring from the converged point is the honest
+    reading: the battery is specified on a *fixed* operating point, not
+    specifically on the load-flow one. **State in the caption which it is** --
+    with a non-zero pre-settle the operating point is the RMS steady state of
+    the ZIP plant, which is not identical to the load-flow solution.
     """
     from pf.screening import FLAT_DRIFT_TOL
     mons = [(o, v, l) for (o, v, l) in monitored_outputs(ctx.app) if v == "m:u"]
     ctx.purge_events()
     ctx.set_monitors(mons)
     ctx.initialise()
-    ctx.simulate(duration)
+    total = float(pre_settle_s) + float(duration)
+    ctx.simulate(total)
     worst, where = 0.0, None
     for obj, var, label in mons:
         t, y = ctx.read(obj, var, stride=READ_STRIDE)
-        d = max(y) - min(y)
+        # Evaluate only the measurement window, so the settling transient the
+        # pre-settle exists to absorb is not counted as drift.
+        window = [v for tt, v in zip(t, y) if tt >= float(pre_settle_s)]
+        if not window:
+            window = y
+        d = max(window) - min(window)
         if d > worst:
             worst, where = d, label
-    print(f"[preflight] {duration:.0f} s flat run: max drift {worst:.2e} pu at {where}")
+    if pre_settle_s > 0:
+        print(f"[preflight] {pre_settle_s:.0f} s pre-settle, then "
+              f"{duration:.0f} s flat run: max drift {worst:.2e} pu at {where}")
+    else:
+        print(f"[preflight] {duration:.0f} s flat run: max drift {worst:.2e} pu at {where}")
     if worst >= FLAT_DRIFT_TOL:
         raise PFSessionError(
             f"model is NOT at equilibrium (drift {worst:.2e} pu >= "
             f"{FLAT_DRIFT_TOL:.0e}); fix the initialisation before measuring "
-            f"settling -- every T_s below would be contaminated")
+            f"settling -- every T_s below would be contaminated"
+            + ("" if pre_settle_s > 0 else
+               "; a --pre-settle-s may be needed, see the docstring"))
     return worst
 
 
@@ -907,6 +939,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="dispatch rows only")
     ap.add_argument("--save-trajectories", action="store_true",
                     help="also persist per-signal time series")
+    ap.add_argument("--pre-settle-s", type=float, default=0.0,
+                    help="advance the plant this long before the preflight "
+                         "measurement window opens, and before the battery. "
+                         "The RMS plant does not hold the load-flow point (ZIP "
+                         "loads are voltage-following); settling first makes "
+                         "the operating point the RMS steady state, which the "
+                         "caption must then say.")
     ap.add_argument("--skip-preflight", action="store_true",
                     help="skip the flat-run equilibrium check (NOT advised)")
     ap.add_argument("--out-dir", default=None,
@@ -960,7 +999,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                adaptive_step=False)
         drift = None
         if not a.skip_preflight:
-            drift = preflight(ctx)
+            drift = preflight(ctx, pre_settle_s=a.pre_settle_s)
         else:
             print("[timescale] WARNING: preflight skipped; every T_s below may "
                   "be contaminated by initialisation drift")

@@ -472,6 +472,12 @@ def make_config() -> MultiTSOConfig:
 DSO_V_RELIEF_FACTORS: Dict[str, float] = {"DSO_2": 20.0, "DSO_4": 20.0}
 """Per-area voltage-authority factors applied by :func:`_apply_dso_v_relief`.
 
+*Restored to 20.0 on 2026-08-20.* They were briefly set to 1.0 (relief off) as
+the only available way to stop the x20 on ``g_w_dso_oltc`` from pushing DSO_2 /
+DSO_4's interface-Q commit threshold to 108-244 Mvar.  That workaround also
+gave up the voltage relief the factor exists for.  :data:`DSO_V_RELIEF_SCALE_Q`
+now fixes the Q threshold directly, so the factor can go back to 20.
+
 Each factor scales that area's ``dso_g_v`` **and** its ``dso_oltc`` step weight
 by the same amount, so the OLTC loop gain ``dso_g_v / g_w_dso_oltc`` is
 unchanged and the extra authority lands on the continuous DER block.  Drop an
@@ -497,9 +503,36 @@ Rationale and full measurements:
 """
 
 
+DSO_V_RELIEF_SCALE_Q: bool = True
+"""Whether :func:`_apply_dso_v_relief` also scales each relieved area's ``g_q``.
+
+``False`` reproduces every run up to 2026-08-20.  **``True`` since 2026-08-20**,
+together with ``dso_gamma_oltc_q = 1.0``: without it the x20 on
+``g_w_dso_oltc`` is uncompensated in the OLTC's interface-Q commit threshold and
+DSO_2 / DSO_4 need 108-244 Mvar to move, against ~6 Mvar of measured RMSE.  With
+it they engage at 5.5-12.2 Mvar -- exactly the unrelieved values, since the x20
+on ``g_w_dso_oltc`` and on ``g_q`` cancel in that threshold.  The *voltage*
+threshold is unaffected either way (2.1-3.3 %).  See
+:attr:`MultiTSOConfig.dso_g_q_per_area`.
+
+**Two caveats, both measured 2026-08-20 and neither cosmetic.**
+
+* Inert at ``dso_gamma_oltc_q = 0``: no ``g_q`` makes a zero gradient finite.
+* **Not a gauge rescaling.**  ``g_w_dso_der`` is deliberately not scaled, so the
+  relieved area's whole objective -- now both channels, not just voltage -- is
+  x20 against its continuous DER block.  Stage 0's designed ``g_w_dso_der``
+  rises 1170 -> **5189** as a result (geomean over 40 columns, of which 20 are
+  scaled: 20^0.5 = 4.47x, as observed).  This file runs ``g_w_dso_der = 550``,
+  i.e. ~9.4x below the design instead of ~2.1x.  That is the under-damped
+  direction for the continuous block; watch the DSO DER trajectories, not only
+  the taps."""
+
+
 def _apply_dso_v_relief(
     cfg: MultiTSOConfig,
     factors: Optional[Dict[str, float]] = None,
+    *,
+    scale_q: Optional[bool] = None,
 ) -> MultiTSOConfig:
     """:func:`configs.config.apply_dso_v_relief` with this module's defaults.
 
@@ -507,7 +540,8 @@ def _apply_dso_v_relief(
     builder needs it too and must not import an experiment module.
     """
     return apply_dso_v_relief(
-        cfg, DSO_V_RELIEF_FACTORS if factors is None else factors)
+        cfg, DSO_V_RELIEF_FACTORS if factors is None else factors,
+        scale_q=DSO_V_RELIEF_SCALE_Q if scale_q is None else bool(scale_q))
 
 
 def make_config_tuned() -> MultiTSOConfig:
@@ -526,7 +560,7 @@ def make_config_tuned() -> MultiTSOConfig:
         # objective weights
         g_v=1E7,                      # TSO voltage tracking; drives PCC Q dispatch
         g_q=250,                      # DSO Q-tracking
-        dso_gamma_oltc_q=0.0,         # DER-primary, OLTC-backup
+        dso_gamma_oltc_q=1.0,         # DER-primary, OLTC-backup
         dso_g_v=84140,#1E5,
         # tso weights
         g_w_der=10.2,  # was 20
@@ -654,6 +688,99 @@ def make_config_tuned() -> MultiTSOConfig:
     return _apply_dso_v_relief(cfg)
 
 
+def make_config_dso_oltc_active() -> MultiTSOConfig:
+    """``make_config_tuned`` at Stage-1 candidate ``ac8941a46134`` — the point
+    at which the DSO OLTCs are actually used to control DSO voltage.
+
+    Why this exists
+    ---------------
+    The §9.3 selected candidate ``fe010aa3ead1`` executes **one** DSO tap
+    operation across the whole 12 x 90 min Tier-1 bank; ``DSO_2``, ``DSO_3``
+    and ``DSO_4`` never move.  That is not incidental: Phase B's incumbent rule
+    (``tuning_mc/stage_1_search.py:1274``) descends on ``f_ts`` alone, and it
+    walked ``engage_dso_pu`` 0.025 -> 0.0499 and ``dso_g_v_ratio`` 1.0 -> 0.841,
+    which together cost a factor ~40 in DSO tap count.  The three-criterion
+    filter (``--filter-ds``, active in that run) records the spend but does not
+    prevent it.  Full measurement:
+    ``docs/daily_log/08_2026/2026-08-20_dso_oltc_inactivity_at_the_tuned_point.md``.
+
+    The candidate
+    -------------
+    ``ac8941a46134`` is Stage-1's own design point ``X0`` plus the
+    ``dso_v_authority = 20`` relief, i.e. the DSO OLTCs move at the *untuned*
+    setting and the tuning is what switched them off.  Coordinates and
+    Tier-1 measurement, verbatim from
+    ``results/tuning_mc/stage1/evals/tier1_ac8941a46134.json``:
+
+        lambda_tso 0.15   lambda_dso 0.90   tau 1.00
+        engage_tso_pu 0.015   engage_dso_pu 0.025
+        dso_g_v_ratio 1.0     dso_v_authority 20
+
+        f_ts 1.312511   f_q 0.098606   f_ds 9.043e-10   rho_emp_p95 1.3256
+        43 DSO tap operations / bank, worst 2.01 ops/h, ZERO reversals
+
+    against the selected point's ``f_ts 1.280885 / f_q 0.088986 /
+    f_ds 4.170e-4 / rho 1.3788`` and 1 tap.  So: +2.5 % TS voltage cost,
+    +10.8 % interface-Q cost, and the DS voltage-headroom deficit collapses by
+    six orders of magnitude.  ``rho`` is *lower* than the selected point's.
+
+    ``lambda_*``, ``tau`` and the two ``engage_*`` thresholds are **design-time
+    inputs to Stage 0**, not runtime config fields
+    (``tuning_mc/stage_0_preconditioning.py:724``); they enter the plant only
+    through the five ``g_w_*`` scalars below, so setting those scalars plus
+    ``dso_g_v`` reproduces the candidate exactly.
+
+    Ordering
+    --------
+    Same trap as :func:`make_config_per_area`: :func:`apply_dso_v_relief` reads
+    an existing per-area ``dso_oltc`` entry as its base when one is present, so
+    calling it twice squares the factor.  The relief is therefore stripped
+    first and re-applied last, which keeps the loop gain
+    ``dso_g_v / g_w_dso_oltc`` invariant on ``DSO_2`` / ``DSO_4``.
+
+    Not re-measured on the 36 h case-study window -- the numbers above are the
+    Tier-1 bank (12 x 90 min, ``rural_700``).  Interface-Q tracking is expected
+    to be slightly worse than the selected point by construction.
+    """
+    cfg = dataclasses.replace(
+        make_config_tuned(), dso_g_v_per_area=None, dso_g_w_class=None,
+        # dso_g_q_per_area too: apply_dso_v_relief(scale_q=True) reads an
+        # existing per-area g_q as its base, so leaving it in place squares
+        # the factor (measured: 250 -> 5000 -> 100000 on a second call).
+        dso_g_q_per_area=None,
+    )
+    # scale_q=False, also pinned: the g_q leg did not exist when Stage 0
+    # designed this candidate, and at the gamma=0 pinned below it would change
+    # the tap not at all while still moving the DSO-DER block.
+    return _apply_dso_v_relief(dataclasses.replace(
+        cfg,
+        # PINNED, not inherited.  Every weight below was designed by Stage 0 at
+        # gamma = 0 (it applies the same gamma when computing the tap's
+        # self-cost ||a_i||^2 -- stage_0_preconditioning.py:319), so inheriting
+        # a non-zero gamma from make_config_tuned would leave this function
+        # claiming to reproduce ac8941a46134 while running a point Stage 0 never
+        # designed.  To run this weight set WITH a Q incentive, pass
+        # ``--gamma-q X`` -- that path is labelled as a diagnostic and gets its
+        # own results directory.
+        dso_gamma_oltc_q=0.0,
+        # DSO voltage-tracking weight: baseline 1e5 x dso_g_v_ratio 1.0.
+        # make_config_tuned carries 84140 (= ratio 0.841), the parked corner.
+        dso_g_v=1.0e5,
+        # The five Stage-0-designed g_w scalars, full precision.
+        g_w_der=14.430127029780047,
+        g_w_pcc=54.77878208500574,
+        g_w_dso_der=1097.158635547818,
+        g_w_tso_oltc=3783.055024849752,
+        # NOTE: make_config_tuned carries 150 here, which is neither this
+        # candidate's 183.11 nor the selected candidate's 392.64.  A lower
+        # dso_oltc step weight makes taps CHEAPER, so the file is already more
+        # tap-permissive than the archived optimum and the taps still do not
+        # move -- consistent with engage_dso_pu / dso_g_v being the binding
+        # coordinates rather than the tap price.
+        g_w_dso_oltc=183.1121290126729,
+    ), scale_q=False)
+
+
 # ---------------------------------------------------------------------------
 #  Gauge normalisation of the weight group
 # ---------------------------------------------------------------------------
@@ -756,6 +883,10 @@ def make_config_per_area() -> MultiTSOConfig:
     # relief measured against each area's per-area ``dso_oltc`` base.
     cfg = dataclasses.replace(
         make_config_tuned(), dso_g_v_per_area=None, dso_g_w_class=None,
+        # dso_g_q_per_area too: apply_dso_v_relief(scale_q=True) reads an
+        # existing per-area g_q as its base, so leaving it in place squares
+        # the factor (measured: 250 -> 5000 -> 100000 on a second call).
+        dso_g_q_per_area=None,
     )
     return _apply_dso_v_relief(dataclasses.replace(
         cfg,
@@ -842,12 +973,26 @@ def make_config_per_area() -> MultiTSOConfig:
     ))
 
 
-def main() -> None:
+def main(config_factory=None, *, experiment: str = "run_multi_system_ofo",
+         gamma_q: Optional[float] = None) -> None:
     """
     Run the multi-TSO-DSO simulation with default settings and print results.
 
     Invoke from the project root:
         python experiments/000_M_TSO_M_DSO.py
+
+    ``config_factory`` defaults to :func:`make_config_tuned`; pass
+    :func:`make_config_dso_oltc_active` (or ``--dso-oltc-active`` on the command
+    line) to run the DSO-OLTC-active weight set instead.  ``experiment`` names
+    the results subdirectory, so an alternative weight set does not land in the
+    same run series as the default one.
+
+    ``gamma_q`` overrides :attr:`MultiTSOConfig.dso_gamma_oltc_q` for a
+    DIAGNOSTIC run (``--gamma-q X``).  See the banner it prints: at any value
+    above 0 the DSO OLTC gains an interface-Q incentive it does not have in any
+    tuned configuration, which invalidates both the ``g_w_dso_oltc`` design and
+    the voltage-relief loop-gain argument.  It answers "what would the tap do if
+    it were paid to track Q", not "what should the tap do".
     """
 
     # make_config_tuned(), NOT make_config_per_area(): the 2026-08-19 campaign
@@ -855,8 +1000,40 @@ def main() -> None:
     # make_config_per_area() overwrites every weight with its own analytic
     # per-area literals, which is a different operating point -- and not merely
     # a gauge rescaling of this one, so the trajectory changes.
-    cfg = make_config_tuned()
-    run_dir = new_run_dir("run_multi_system_ofo", cfg)
+    cfg = (config_factory or make_config_tuned)()
+    if gamma_q is not None:
+        if not (0.0 <= float(gamma_q) <= 1.0):
+            raise SystemExit(
+                f"--gamma-q must be in [0, 1] (DSOControllerConfig validates "
+                f"the same range), got {gamma_q!r}")
+        old = float(cfg.dso_gamma_oltc_q)
+        cfg = dataclasses.replace(cfg, dso_gamma_oltc_q=float(gamma_q))
+        experiment = f"{experiment}_gammaq{float(gamma_q):g}"
+        print(
+            "\n" + "!" * 78
+            + f"\n  DIAGNOSTIC RUN: dso_gamma_oltc_q {old:g} -> {gamma_q:g}"
+            + "\n"
+            "\n  gamma_oltc_q scales the Q-tracking gradient on the DSO OLTC"
+            "\n  columns (controller/dso_controller.py:1216).  It does NOT zero"
+            "\n  dQ_tr/ds in H: the full sensitivity stays in the output rows,"
+            "\n  so the MIQP's predicted interface Q always sees the tap.  What"
+            "\n  gamma removes is the tap's INCENTIVE to track Q."
+            "\n"
+            "\n  Raising it above 0 invalidates three things at once:"
+            "\n    1. g_w_dso_oltc was designed AT gamma=0"
+            "\n       (tuning_mc/stage_0_preconditioning.py:319 applies the same"
+            "\n       gamma when it computes the tap's self-cost ||a_i||^2), so"
+            "\n       the designed weight no longer prices this actuator."
+            "\n    2. the dso_v_authority relief holds dso_g_v/g_w_dso_oltc"
+            "\n       constant because at gamma=0 that ratio IS the OLTC loop"
+            "\n       gain.  With a second driver it is not, and the"
+            "\n       anti-limit-cycle argument no longer covers the tap."
+            "\n    3. tests/test_dso_v_relief_pairing.py asserts gamma == 0.0."
+            "\n"
+            "\n  Watch tap_reversals_per_h_dso: the neighbouring failure mode is"
+            "\n  50.5 reversals/h (measured 2026-08-18).  Try 0.1-0.25 before 1."
+            "\n" + "!" * 78 + "\n", flush=True)
+    run_dir = new_run_dir(experiment, cfg)
     log = run_multi_tso_dso(cfg)
     with (run_dir.root / "records.pkl").open("wb") as handle:
         pickle.dump(log, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -864,8 +1041,35 @@ def main() -> None:
     print(f"Results: {run_dir.root}")
 
 
+def _argv_gamma_q() -> Optional[float]:
+    """``--gamma-q 0.25`` or ``--gamma-q=0.25`` from ``sys.argv``; None if absent."""
+    for i, tok in enumerate(sys.argv):
+        if tok == "--gamma-q":
+            if i + 1 >= len(sys.argv):
+                raise SystemExit("--gamma-q needs a value in [0, 1]")
+            return float(sys.argv[i + 1])
+        if tok.startswith("--gamma-q="):
+            return float(tok.split("=", 1)[1])
+    return None
+
+
 if __name__ == "__main__":
+    _GAMMA_Q = _argv_gamma_q()
     if "--compare" in sys.argv:
+        if _GAMMA_Q is not None:
+            raise SystemExit(
+                "--gamma-q is not plumbed through --compare: main_comparison() "
+                "builds its own paired config, and silently ignoring the flag "
+                "would report a gamma=0 run as a gamma>0 one.")
         main_comparison()
+    elif "--dso-oltc-active" in sys.argv:
+        # Stage-1 candidate ac8941a46134 -- see make_config_dso_oltc_active.
+        # Its own results series, so the A/B against the default weight set
+        # stays legible.
+        main(make_config_dso_oltc_active,
+             experiment="run_multi_system_ofo_dso_oltc_active",
+             gamma_q=_GAMMA_Q)
+    elif _GAMMA_Q is not None:
+        main(gamma_q=_GAMMA_Q)
     else:
         main()

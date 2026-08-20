@@ -47,14 +47,10 @@ def test_relief_holds_the_oltc_loop_gain(builder, dso_id):
     two hand-matched literals.
     """
     cfg = builder()
-    assert cfg.dso_gamma_oltc_q == 0.0, (
-        "these tests assume the OLTC is voltage-driven only; with "
-        "gamma_oltc_q > 0 the loop-gain argument needs revisiting"
-    )
     # The OLTC base is whatever that config would have given DSO_4 without the
     # relief: the per-area design if one exists, else the global scalar.
     bare = dataclasses.replace(builder(), dso_g_v_per_area=None,
-                               dso_g_w_class=None)
+                               dso_g_w_class=None, dso_g_q_per_area=None)
     assert bare.dso_g_v_per_area is None
     factor = DSO_V_RELIEF_FACTORS[dso_id]
     oltc_base = cfg.dso_g_w_class[dso_id]["dso_oltc"] / factor
@@ -68,6 +64,51 @@ def test_relief_holds_the_oltc_loop_gain(builder, dso_id):
         f"limit-cycle; raise dso_g_v and dso_oltc by the same factor"
     )
     assert bare.dso_g_v == cfg.dso_g_v          # relief must not touch the base
+
+
+@pytest.mark.parametrize("builder", [make_config_tuned, make_config_per_area])
+@pytest.mark.parametrize("dso_id", sorted(DSO_V_RELIEF_FACTORS))
+def test_relief_holds_the_oltc_q_threshold_when_the_tap_tracks_q(builder, dso_id):
+    """At ``gamma_oltc_q > 0`` the ``g_q`` leg must be present too.
+
+    Replaces the blanket ``assert dso_gamma_oltc_q == 0.0`` this module used to
+    open with.  That guard said "the loop-gain argument needs revisiting" -- it
+    has been (2026-08-20), and this is the result, so the guard is now a check
+    of the *second* invariant rather than a refusal to look.
+
+    Holding ``dso_g_v / g_w_dso_oltc`` preserves the tap's VOLTAGE commit
+    threshold.  Once the tap also carries a Q gradient, its INTERFACE-Q
+    threshold ``(g_w_oltc + ||a||^2) / (2 g_q |dQ/ds|)`` matters too, and the
+    factor on ``g_w_dso_oltc`` is uncompensated there unless ``g_q`` moves with
+    it.  Measured 2026-08-20 at gamma = 1 and a x20 relief without this leg:
+    DSO_2/DSO_4 commit at 108-244 Mvar against ~6 Mvar of interface-Q RMSE,
+    i.e. never, while DSO_1/DSO_3 commit at 2.9-5.0 Mvar.
+
+    Skipped at gamma = 0, where the tap has no Q gradient and no ``g_q`` makes
+    that threshold finite.
+    """
+    cfg = builder()
+    if float(cfg.dso_gamma_oltc_q) <= 0.0:
+        pytest.skip("gamma_oltc_q = 0: the OLTC carries no interface-Q gradient")
+
+    per_q = cfg.dso_g_q_per_area or {}
+    assert dso_id in per_q, (
+        f"{dso_id} has a x{DSO_V_RELIEF_FACTORS[dso_id]:g} relief on "
+        f"g_w_dso_oltc and gamma_oltc_q = {cfg.dso_gamma_oltc_q:g}, but no "
+        f"dso_g_q_per_area entry -- its interface-Q commit threshold is "
+        f"x{DSO_V_RELIEF_FACTORS[dso_id]:g} the unrelieved one and the tap will "
+        f"not respond to Q.  Pass scale_q=True to apply_dso_v_relief."
+    )
+    factor = DSO_V_RELIEF_FACTORS[dso_id]
+    oltc_base = cfg.dso_g_w_class[dso_id]["dso_oltc"] / factor
+    q_base = float(per_q[dso_id]) / factor
+    # The invariant: g_w_dso_oltc / g_q unchanged by the relief, so the Q
+    # threshold is the same as it would be without it.
+    assert (cfg.dso_g_w_class[dso_id]["dso_oltc"] / per_q[dso_id]
+            == pytest.approx(oltc_base / q_base)), (
+        "the relief moved the OLTC's interface-Q commit threshold; scale "
+        "g_q by the same factor as g_w_dso_oltc"
+    )
 
 
 def test_relief_is_scoped_to_the_spread_limited_areas():

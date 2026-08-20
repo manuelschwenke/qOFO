@@ -536,7 +536,20 @@ class ScreeningContext:
                 self._new_events_pending_admission += 1
         # Payload first, time last: moving the unused slot is the arm action.
         ev.SetAttribute("value", repr(float(new_value)))
-        ev.SetAttribute("time", float(t_event))
+        # Fold into PF's current 60 s event window, exactly as add_tap_event
+        # and add_outage_event do -- see EVENT_WINDOW_S.
+        #
+        # This was missing until 2026-08-20 and was invisible because every
+        # caller armed at a calculation clock of 0, where the fold is the
+        # identity. The Ch. 9.1 battery started pre-settling each case to
+        # 900 s before arming, and every parameter case then returned
+        # T_s = 0.00 s: the event was written at absolute 905 s, PF read it
+        # relative to the window base 900 s, and it was due at 1805 s -- past
+        # the end of a 965 s run, so it never fired. Tap and outage cases were
+        # unaffected because they already folded, which is what localised it.
+        window = EVENT_WINDOW_S * math.floor(
+            getattr(self, "_sim_time", 0.0) / EVENT_WINDOW_S)
+        ev.SetAttribute("time", float(t_event) - window)
         self._track_persistent_arm(ev, t_event)
 
     def add_load_event(self, target, d_p_percent: float, d_q_percent: float,

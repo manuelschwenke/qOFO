@@ -697,6 +697,41 @@ class MultiTSOConfig:
     ``dso_g_w_scale`` counterpart to :attr:`zone_g_w_scale`, so this is the only
     per-area ``g_w`` hook on the DSO layer."""
 
+    dso_g_q_per_area: Optional[Dict[str, float]] = None
+    """Per-DSO-area override of the interface-Q tracking weight
+    ``{dso_id: g_q}``, keyed by ``HVNetworkInfo.net_id`` like
+    :attr:`dso_g_v_per_area`.  DSOs not listed keep the global :attr:`g_q`.
+    Applied to ``DSOControllerConfig.g_q`` once after controller construction
+    and before the main loop, in the same place as :attr:`dso_g_v_per_area`.
+
+    **Exists only to complete the voltage relief, and is off unless asked for.**
+    :func:`apply_dso_v_relief` scales an area's ``dso_g_v`` and its ``dso_oltc``
+    step weight by the same factor so the OLTC *voltage* loop gain
+    ``dso_g_v / g_w_dso_oltc`` is preserved.  Nothing then compensates ``g_q``,
+    so that area's OLTC *interface-Q* commit threshold
+
+        (g_w_oltc + ||a_oltc||^2) / (2 g_q |dQ_tr/ds|)
+
+    rises by the full factor.  Measured 2026-08-20 at ``dso_gamma_oltc_q = 1``
+    and a x20 relief: DSO_1/DSO_3 engage at 2.9-5.0 Mvar while DSO_2/DSO_4 need
+    108-244 Mvar, against a measured interface-Q RMSE of ~6 Mvar -- i.e. the
+    two relieved areas are Q-inert while the unrelieved ones are not.  That
+    asymmetry is invisible in the voltage reading, where all four areas engage
+    at 2.1-3.4 %.
+
+    Scaling ``g_q`` by the same factor removes it.  **This is not a gauge
+    transformation**: ``g_w_dso_der`` is deliberately left alone, so raising
+    ``dso_g_v``, ``g_q`` and ``g_w_dso_oltc`` together makes that area's whole
+    objective heavier relative to its *continuous* DER block -- the DER now
+    takes larger steps for interface-Q error too, not only for voltage error.
+    The original relief moved authority to the DER block for voltage only; with
+    this field it does so for both channels.  State which is intended.
+
+    Irrelevant at ``dso_gamma_oltc_q = 0``, where the OLTC has no Q gradient at
+    all and the threshold above is infinite for any ``g_q``.
+
+    See ``docs/daily_log/08_2026/2026-08-20_dso_oltc_inactivity_at_the_tuned_point.md``."""
+
     dso_g_v_per_area: Optional[Dict[str, float]] = None
     """Per-DSO-area override of the voltage-tracking weight
     ``{dso_id: dso_g_v}``, keyed by ``HVNetworkInfo.net_id`` like
@@ -1781,6 +1816,8 @@ class MultiTSOConfig:
 def apply_dso_v_relief(
     cfg: "MultiTSOConfig",
     factors: Mapping[str, float],
+    *,
+    scale_q: bool = False,
 ) -> "MultiTSOConfig":
     """Give each listed DSO ``factor`` x more voltage authority at UNCHANGED
     OLTC loop gain.
@@ -1806,7 +1843,34 @@ def apply_dso_v_relief(
     per-area design for the other areas survives.  Entries with factor ``1.0``
     are skipped; an empty or all-unity mapping returns ``cfg`` unchanged.
 
-    See ``docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md``.
+    ``scale_q`` (default ``False``) additionally scales that area's interface-Q
+    weight into :attr:`MultiTSOConfig.dso_g_q_per_area` by the same factor.
+    **Off by default so every existing caller -- including
+    ``tuning_mc.stage_1_search.build_config`` and therefore the whole 0815 /
+    stage1 campaign -- reproduces bit-for-bit.**
+
+    It exists because the relief's own arithmetic creates an asymmetry it does
+    not fix.  Holding ``dso_g_v / g_w_dso_oltc`` preserves the OLTC's *voltage*
+    commit threshold, but the x-factor on ``g_w_dso_oltc`` is uncompensated in
+    the *interface-Q* threshold
+    ``(g_w_oltc + ||a_oltc||^2) / (2 g_q |dQ_tr/ds|)``, which therefore rises by
+    the full factor.  Measured 2026-08-20 at ``dso_gamma_oltc_q = 1``, x20
+    relief: DSO_2/DSO_4 need 108-244 Mvar to commit while DSO_1/DSO_3 need
+    2.9-5.0, against ~6 Mvar of measured interface-Q RMSE.
+
+    Two things to be explicit about before using it:
+
+    * It is **inert at** ``dso_gamma_oltc_q = 0``, where the OLTC carries no Q
+      gradient and no ``g_q`` makes the threshold finite.
+    * It is **not a gauge rescaling**.  ``g_w_dso_der`` is deliberately not
+      scaled, so raising ``dso_g_v``, ``g_q`` and ``g_w_dso_oltc`` together
+      makes the area's whole objective heavier against its continuous DER
+      block: that DER now takes larger steps for interface-Q error as well as
+      for voltage error.  The relief was specified as *voltage* authority; with
+      ``scale_q=True`` it becomes authority on both channels.
+
+    See ``docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md`` and
+    ``docs/daily_log/08_2026/2026-08-20_dso_oltc_inactivity_at_the_tuned_point.md``.
     """
     active = {d: float(f) for d, f in (factors or {}).items() if float(f) != 1.0}
     if not active:
@@ -1814,6 +1878,7 @@ def apply_dso_v_relief(
 
     gv = dict(cfg.dso_g_v_per_area or {})
     gw = {k: dict(v) for k, v in (cfg.dso_g_w_class or {}).items()}
+    gq = dict(getattr(cfg, "dso_g_q_per_area", None) or {})
 
     for dso_id, factor in active.items():
         if not (factor > 0.0):
@@ -1827,5 +1892,16 @@ def apply_dso_v_relief(
         # move.
         oltc_base = gw.get(dso_id, {}).get("dso_oltc", float(cfg.g_w_dso_oltc))
         gw.setdefault(dso_id, {})["dso_oltc"] = float(oltc_base) * factor
+        if scale_q:
+            # Same base rule as the OLTC half: an already-relieved area's own
+            # per-area value, else the global scalar.  Without this, applying
+            # the relief twice would measure the factor against the wrong
+            # reference -- the bug the dso_g_v half avoids by reading
+            # cfg.dso_g_v, which a second call leaves untouched.
+            q_base = gq.get(dso_id, float(cfg.g_q))
+            gq[dso_id] = float(q_base) * factor
 
-    return dataclasses.replace(cfg, dso_g_v_per_area=gv, dso_g_w_class=gw)
+    return dataclasses.replace(
+        cfg, dso_g_v_per_area=gv, dso_g_w_class=gw,
+        dso_g_q_per_area=(gq or None) if scale_q else cfg.dso_g_q_per_area,
+    )

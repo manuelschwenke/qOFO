@@ -2976,6 +2976,39 @@ def run_multi_tso_dso(
                     f"{_oltc_old * _ratio_gv:.0f} to hold it."
                 )
 
+    # ── Per-DSO interface-Q weight ───────────────────────────────────────────
+    # Third leg of the relief, written by ``apply_dso_v_relief(scale_q=True)``.
+    # Holding dso_g_v / g_w_dso_oltc preserves the OLTC's VOLTAGE threshold; the
+    # factor on g_w_dso_oltc is uncompensated in its INTERFACE-Q threshold, so
+    # without this a relieved area is Q-inert whenever dso_gamma_oltc_q > 0
+    # (measured 2026-08-20: 108-244 Mvar to commit, against ~6 Mvar of RMSE).
+    # Applied in the same place and the same way as dso_g_v_per_area so the two
+    # cannot drift apart.
+    if getattr(config, "dso_g_q_per_area", None):
+        if float(getattr(config, "dso_gamma_oltc_q", 0.0)) <= 0.0 and verbose >= 1:
+            print(
+                "  [dso_g_q] NOTE: dso_g_q_per_area is set but "
+                "dso_gamma_oltc_q = 0, so the DSO OLTC carries no Q gradient "
+                "and this changes the tap not at all.  It still moves the "
+                "continuous DSO-DER block."
+            )
+        for _d, _ctrl in dso_controllers.items():
+            _gq = config.dso_g_q_per_area.get(str(_d))
+            if _gq is None:
+                continue
+            _gq = float(_gq)
+            if not (_gq >= 0.0):
+                raise ValueError(
+                    f"dso_g_q_per_area[{_d!r}] must be >= 0, got {_gq!r}"
+                )
+            _gq_old = float(_ctrl.config.g_q)
+            _ctrl.config.g_q = _gq
+            # Same cache invalidation as the g_v leg: the interface-Q curvature
+            # H_Q G_w^-1 H_Q^T diag(g_q) depends on it.
+            _ctrl._H_cache = getattr(_ctrl, "_H_cache", None)
+            if verbose >= 1:
+                print(f"  [dso_g_q] {_d}: {_gq_old:g} -> {_gq:g}")
+
     # ── Per-zone loop-gain scaling ────────────────────────────────────────────
     # Applied here, after every controller exists and before the first step, so
     # the whole run sees one consistent gain.  ``OFOParameters`` is frozen, so

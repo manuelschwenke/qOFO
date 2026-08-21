@@ -49,11 +49,22 @@ both, bit for bit. The TSO reactive-power row reproduces exactly (11.77 s at
 
 **Say so in the caption or a footnote.** A table silently assembled from two
 runs is exactly the failure that put `11.13 s` and the placeholder "STS 1 B00"
-into the current draft.
+into the current draft. Documented, it is fine; silent, it is the same defect
+again.
 
-If you would rather have one stamp, tell me and I will re-run the full battery
-(~4.5 h, the seat is free) — that is the cleaner option and I would not argue
-against it.
+**This is decided — do not propose re-running.** A full battery re-run (~4.5 h)
+would collapse the table to one commit and one stamp, and the author has weighed
+that against the evidence of comparability above and chosen to use the data as
+it stands. Your job is to document the split, not to remove it.
+
+Suggested footnote, adapt as you like:
+
+> Rows for the reactive-power steps were measured in a separate run of the same
+> battery (2026-08-21) after the subordinate DER case was found to target a park
+> with no reactive capability at this operating point. Both runs share the same
+> pre-settled operating point (preflight drift 2.46e-08 pu in each) and the
+> transmission-side reactive-power row reproduces identically, so the rows are
+> directly comparable.
 
 ## The table
 

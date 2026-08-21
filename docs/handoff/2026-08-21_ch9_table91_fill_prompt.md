@@ -1,5 +1,28 @@
 # Handoff prompt — fill Table 9.1 (settling times) in the dissertation
 
+> ## ⚠ HOLD — do not paste the tap rows yet (2026-08-21, later the same day)
+>
+> The two OLTC rows, the binding row, the margin and both `T_mech`/`T_elec`
+> splits are **under review** and may change. Everything else in this brief
+> stands.
+>
+> The battery applies **two** 5 s lags to a tap and only one of them is
+> physical: the command `ntapcmd` is scheduled at `t_event + 5 s`
+> (`TAP_MECH_DELAY_S`, a leftover from the retired `EvtTap` path), and the
+> `TAPCTRL` DSL block *then* slides the tap with its own first-order lag
+> `Tmech = 5 s`. Measured on the saved trajectories: the coupler tap reaches
+> 63 % of its excursion at 9.97 s and 95 % at 19.97 s after `t_event`, i.e.
+> exactly 5 s of dead time followed by one and three time constants of a 5 s
+> lag. The MSC shunt, scheduled with no offset, reaches 95 % in 0.57 s.
+>
+> If the scheduling offset is removed, `T_s` for the coupler tap falls from
+> 16.42 s to ~11.4 s, the **binding row moves from the coupler tap to the
+> AVR $+0.02$ pu G 10 row at 15.22 s**, and the margin becomes ~4.78 s.
+>
+> Awaiting the author's decision on whether a command-to-motion delay on top
+> of the mechanical travel is intended. Fill the non-tap rows if you like;
+> leave the tap rows, the binding sentence and the margin until this clears.
+
 Written 2026-08-21 on the server session that produced the runs. The target
 session owns the thesis repo **and** has `Z:\` mounted, so it can read the run
 directories directly rather than working from pasted numbers.

@@ -53,7 +53,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pf.pf_parity import PARITY_LDF_SETTINGS  # noqa: E402
-from pf.wecc_apply import QVPRE_ELEMENT_NAME  # noqa: E402
+from pf.wecc_apply import QVPRE_ELEMENT_NAME, QVPRE_PARAM_ORDER  # noqa: E402
 from pf.session import (  # noqa: E402
     DEFAULT_PROJECT_PATH,
     PFSessionError,
@@ -1147,15 +1147,69 @@ def _qvpre_of(app, park_name: str):
                  and d.loc_name == QVPRE_ELEMENT_NAME), None)
 
 
+def _qvpre_headroom_mvar(app, park_name: str) -> float:
+    """Upward reactive headroom of ``park_name`` [Mvar], as QVPRE enforces it.
+
+    ``qset``/``qmax`` are the operating-diagram limits written by
+    ``wecc_apply.apply_to_park``; ``QVPRE`` clips its output to them every
+    solver step, so a dispatch past ``qmax`` never reaches the plant.
+
+    A park at zero active power carries ``qmin = qmax = 0`` under the VDE
+    capability rule and can therefore execute NO reactive dispatch at all.
+    Measured 2026-08-21 on the frozen t0 operating point: 16 of 32 parks sit
+    at P = 0 with ``qmax = 0``, among them ``DER_DSO_1_s10_b50`` -- which is
+    the park ``default_catalogue`` used to select, because ``sorted()`` puts
+    ``s10`` before ``s4``.  Its +20 Mvar case moved the plant by 3e-8 pu (the
+    solver noise floor; cf. the 2.46e-8 pu preflight drift) and reported
+    ``T_s = 0.00 s``.  That is the absence of a response, not a fast one, and
+    it reached ``timescale_table.tex`` as a number.
+
+    Returns 0.0 when the park, its REEC or its QVPRE block cannot be
+    resolved: an unreadable capability is treated as no capability, so the
+    caller skips the park loudly instead of measuring nothing quietly.
+    """
+    reec, gen = _reec_of(app, park_name)
+    if reec is None or gen is None:
+        return 0.0
+    pre = _qvpre_of(app, park_name)
+    if pre is None:
+        return 0.0
+    try:
+        params = pre.GetAttribute("params")
+        vals = {k: float(params[i]) for i, k in enumerate(QVPRE_PARAM_ORDER)}
+        sn = float(gen.GetAttribute("sgn"))
+    except Exception:
+        return 0.0
+    return max(vals["qmax"] - vals["qset"], 0.0) * sn
+
+
+def _first_park_with_headroom(app, gens: List[str], prefix: str):
+    """Alphabetically first ``prefix`` park that can actually execute a step.
+
+    Deliberately still alphabetical rather than "largest headroom": the
+    selection has to stay reproducible and comparable with the runs of record,
+    and on this model the filter changes only the DSO pick (from the
+    zero-capability ``DER_DSO_1_s10_b50`` to ``DER_DSO_1_s4_b47``, same
+    sub-network) while leaving the TSO pick ``WP_TSO_s0_b18`` untouched.
+    """
+    for name in sorted(n for n in gens if n.startswith(prefix)):
+        if _qvpre_headroom_mvar(app, name) > 0.0:
+            return name
+    return None
+
+
 def default_catalogue(app) -> List[StepDef]:
     """Worst-case single-dispatch steps, one per OFO actuator class.
 
     * **DER Q** via ``QVPRE.qset`` (pu of the park's rated S).  NOT
       ``REEC_D.Qext``: the Q(V) layer overwrites that every step.  Step
-      magnitude = min(60 Mvar, 0.5*S_n) so
-      a small-rated DSO park does not saturate; 60 Mvar is the largest TSO
-      wind-park command observed in the controller run (0024).
-      Representative parks: one large TSO wind park and one DSO DER.
+      magnitude = min(60 Mvar, 0.5*S_n, upward headroom) so
+      a small-rated DSO park does not saturate and the commanded step is
+      REALISABLE; 60 Mvar is the largest TSO wind-park command observed in
+      the controller run (0024).  Representative parks: one large TSO wind
+      park and one DSO DER, each the alphabetically first of its class that
+      has non-zero reactive capability at the operating point being measured
+      (see ``_qvpre_headroom_mvar``).
     * **Machine AVR V-ref** via ``EvtParam`` on the AVR DSL's ``usetp``
       signal (largest AVR-equipped plant; G 01 has no AVR), at both
       magnitudes of ``AVR_VREF_MAGNITUDES`` -- the 0.02 pu worst case and the
@@ -1171,19 +1225,28 @@ def default_catalogue(app) -> List[StepDef]:
     gens = [g.loc_name for g in get_all(app, "ElmGenstat")]
 
     targets: List[str] = []
-    tso = [n for n in gens if n.startswith("WP_TSO_")]
-    if tso:
-        targets.append(sorted(tso)[0])
-    dso = [n for n in gens if n.startswith("DER_")]
-    if dso:
-        targets.append(sorted(dso)[0])
+    for prefix in ("WP_TSO_", "DER_"):
+        pick = _first_park_with_headroom(app, gens, prefix)
+        if pick is None:
+            print(f"  [catalogue] WARNING: no {prefix}* park has reactive "
+                  f"capability at this operating point; its Table 9.1 row "
+                  f"will be emitted as [not run]")
+            continue
+        targets.append(pick)
 
     for park_name in targets:
         reec, gen = _reec_of(app, park_name)
         if reec is None:
             continue
         sn = float(gen.GetAttribute("sgn"))
-        q_mvar = min(60.0, 0.5 * sn)
+        # The commanded step must be REALISABLE. QVPRE clips qset to
+        # [qmin, qmax], so a step past the rail measures a smaller step than
+        # the case name claims -- and the thesis row would carry a magnitude
+        # the plant never saw. 0.5*S_n exceeds the 0.41 pu operating-diagram
+        # limit for every park in this model, so this cap always binds on the
+        # DSO side and never on the TSO side (60 Mvar of 508 MVA = 0.12 pu).
+        head_mvar = _qvpre_headroom_mvar(app, park_name)
+        q_mvar = min(60.0, 0.5 * sn, head_mvar)
         # Step QVPRE.qset, NOT REEC_D.Qext.  Since the Q(V) rollout of
         # 2026-07-21 the QVPRE block sits in the Plant Control slot and
         # writes Qext every solver step, so an EvtParam on Qext is

@@ -185,9 +185,9 @@ INSTRUMENT_ONLY: Tuple[str, ...] = ("tap_+2seq",)
 #: ``T_elec``, per tap class, in ``derive``.
 TABLE_ROWS: Tuple[Tuple[Tuple[str, ...], str, bool], ...] = (
     (("der_q_", "WP_TSO"),
-     r"Reactive-power step, $+60$\,Mvar, \gls{TSO} park",            False),
+     r"Reactive-power step, $+{mvar}$\,Mvar, \gls{TSO} park",         False),
     (("der_q_", "DER_"),
-     r"Reactive-power step, $+20$\,Mvar, \gls{DSO} \gls{DER}",       False),
+     r"Reactive-power step, $+{mvar}$\,Mvar, \gls{DSO} \gls{DER}",    False),
     (("avr_vref_+0.02", "G09"),
      r"\gls{AVR} voltage-reference step, $+0.02$\,pu, G\,09",        False),
     (("avr_vref_+0.02", "G10"),
@@ -461,7 +461,7 @@ def run_case(ctx: ScreeningContext, sd: Any, mons: List[Tuple[Any, str, str]],
             raise
         m = settling_metrics(t, y, t_event, abs_floor=_band(var))
         m["controlled"] = _is_controlled(var)
-        rows.append((label, m))
+        rows.append((label, m, var))
         if save_traj and _is_controlled(var):
             traj.extend((label, a, b) for a, b in zip(t, y))
     if save_traj and traj:
@@ -471,22 +471,38 @@ def run_case(ctx: ScreeningContext, sd: Any, mons: List[Tuple[Any, str, str]],
             for label, a, b in traj:
                 w.writerow([label, f"{a:.4f}", f"{b:.9g}"])
 
-    ctrl = [(l, m) for l, m in rows if m["controlled"]]
+    ctrl = [(l, m, v) for l, m, v in rows if m["controlled"]]
     if not ctrl:
         raise PFSessionError(f"{sd.name}: no controlled output recorded")
     ctrl.sort(key=lambda r: -r[1]["t_settle"])
-    label, worst = ctrl[0]
+    label, worst, _worst_var = ctrl[0]
     # A settling time equal to the horizon is NOT a settling time: the
     # trajectory left the band at the last sample the run holds, so the true
     # value is >= horizon and unknown. Flagged rather than silently reported,
     # because such a row would otherwise set the bound of eq. (9.1) at a
     # value that is an artefact of the run length.
     censored = worst["t_settle"] >= horizon - 1e-9
+    # The MIRROR failure of censoring, and the one the acceptance criterion
+    # missed entirely: no controlled output ever left its own band, so
+    # ``t_settle = 0`` records the ABSENCE of a response and not a fast one.
+    # Two causes, both of which must reach the author rather than the table:
+    #   * the actuator had no authority here -- measured 2026-08-21, when
+    #     ``der_q_+20Mvar_DER_DSO_1_s10_b50`` moved the plant by 3e-8 pu (the
+    #     solver noise floor, cf. the 2.46e-8 pu preflight drift) because that
+    #     park sits at P = 0 with ``qmax = 0``, and ``0.00`` was written into
+    #     timescale_table.tex as though it were a settling time;
+    #   * the step applied in full but the response is genuinely sub-band --
+    #     the +0.001 pu AVR rows, which is the magnitude the tuned TS-OFO
+    #     actually issues.  That is a RESULT, not a fault, but it still must
+    #     not print as ``0.00``.
+    # Which of the two it is, is an author judgement: this refuses to print a
+    # number and says so, rather than guessing.
+    inert = not any(m["step"] > _band(v) for _l, m, v in ctrl)
     return {"case": sd.name, "note": sd.note, "kind": sd.kind,
             "disturbance": bool(sd.disturbance), "worst_signal": label,
             "t_settle_s": worst["t_settle"], "overshoot": worst["overshoot"],
             "step": worst["step"], "horizon_s": horizon,
-            "censored": bool(censored),
+            "censored": bool(censored), "inert": bool(inert),
             "instrument_only": any(s in sd.name for s in INSTRUMENT_ONLY),
             "tabulated": any(all(s in sd.name for s in subs)
                              for subs, _c, _d in TABLE_ROWS)}
@@ -621,6 +637,7 @@ def derive(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     dist = [r for r in results if r["disturbance"]]
     censored = [r["case"] for r in results if r["censored"]]
+    inert = [r["case"] for r in results if r.get("inert")]
     return {"tap_splits": splits,
             "t_cont": t_cont, "t_cont_case": cont_worst, "t_tap": t_tap,
             "t_mech": t_mech, "t_elec": t_elec, "t_tap_source": t_tap_src,
@@ -628,6 +645,7 @@ def derive(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             "binding_case": binding_row["case"] if binding_row else None,
             "margin": margin, "n_dispatch": len(disp),
             "n_disturbance": len(dist), "censored": censored,
+            "inert": inert,
             "worst_disturbance": (max(dist, key=lambda r: r["t_settle_s"])
                                   if dist else None)}
 
@@ -635,6 +653,22 @@ def derive(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 # =====================================================================
 #  Outputs
 # =====================================================================
+
+def _case_mvar(case: str) -> str:
+    """The magnitude carried in a ``der_q_+<N>Mvar_...`` case name.
+
+    ``default_catalogue`` caps the commanded step at the park's realisable
+    reactive headroom, so the magnitude depends on the operating point and
+    cannot be written into the caption ahead of the run -- exactly the reason
+    the location column is taken from the measured worst signal.  Parsed by
+    literal partition, never by regex: these names contain ``+``.
+    """
+    _, marker, tail = case.partition("der_q_+")
+    if not marker:
+        return "?"
+    mag, marker, _ = tail.partition("Mvar")
+    return mag if marker else "?"
+
 
 def build_table(results: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
     """Table 9.1 body plus the list of captions no measured case filled."""
@@ -655,6 +689,12 @@ def build_table(results: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
             missing.append(caption)
             continue
         emitted.add(hit["case"])
+        caption = caption.replace("{mvar}", _case_mvar(hit["case"]))
+        if hit.get("inert"):
+            # No controlled output left its band, so there is no settling
+            # time here -- and ``0.00`` would read as one.
+            tex.append(f"{caption:<45}& [--] & [$<$band] \\\\")
+            continue
         sig = hit["worst_signal"].replace("_", r"\_")
         mark = r"$>$" if hit["censored"] else ""
         tex.append(f"{caption:<45}& \\texttt{{{sig}}} & "
@@ -667,8 +707,8 @@ def write_outputs(out_dir: Path, results: List[Dict[str, Any]],
                   ) -> List[str]:
     """Write the three thesis-facing files; return the missing table rows."""
     cols = ["case", "kind", "disturbance", "instrument_only", "tabulated",
-            "censored", "note", "worst_signal", "t_settle_s", "overshoot",
-            "step", "horizon_s"]
+            "censored", "inert", "note", "worst_signal", "t_settle_s",
+            "overshoot", "step", "horizon_s"]
     with (out_dir / "timescale_summary.csv").open("w", newline="",
                                                   encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
@@ -690,6 +730,8 @@ def write_outputs(out_dir: Path, results: List[Dict[str, Any]],
         if r["instrument_only"]:
             tag += ", instrument"
         cens = " (censored: >= horizon)" if r["censored"] else ""
+        if r.get("inert"):
+            cens = " (INERT: no controlled output left its band)"
         md.append(f"| {r['case']} | {tag} | {r['worst_signal']} | "
                   f"{r['t_settle_s']:.2f}{cens} |")
 
@@ -810,6 +852,7 @@ def _synthetic_results() -> List[Dict[str, Any]]:
         return {"case": case, "note": note, "kind": kind, "disturbance": dist,
                 "worst_signal": signal, "t_settle_s": t, "overshoot": 0.1,
                 "step": 1.0, "horizon_s": horizon, "censored": False,
+                "inert": False,
                 "instrument_only": any(s in case for s in INSTRUMENT_ONLY),
                 "tabulated": any(all(s in case for s in subs)
                                  for subs, _c, _d in TABLE_ROWS)}
@@ -863,6 +906,18 @@ def self_test() -> int:
           len(tex) == len(TABLE_ROWS) + 3, f"got {len(tex)}")
     check("the '+' in tap names is matched literally",
           any("7.20" in line for line in tex))
+    inert_res = [dict(r) for r in res]
+    for r in inert_res:
+        if "der_q_" in r["case"] and "DER_" in r["case"]:
+            r["inert"] = True
+    tex_i, _ = build_table(inert_res)
+    check("an inert row prints [$<$band], never a settling time",
+          any("[$<$band]" in line for line in tex_i)
+          and not any("2.40" in line for line in tex_i))
+    check("the DER magnitude is filled from the case name, not typed",
+          any("$+60$" in line for line in tex)
+          and any("$+15$" in line for line in tex),
+          "\n".join(l for l in tex if "Reactive-power" in l))
     check("the two-step instruments are NOT tabulated",
           not any("11.90" in line or "11.70" in line for line in tex))
     check("AVR rows are split by machine AND magnitude (4 rows)",
@@ -976,6 +1031,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="write here instead of results/timescale/<label>/<stamp>")
     ap.add_argument("--dry-run", action="store_true",
                     help="list the cases that would run; no PowerFactory needed")
+    ap.add_argument("--only", nargs="*", default=None, metavar="SUBSTR",
+                    help="run only the cases whose name contains one of these "
+                         "substrings (literal, never regex -- the names carry "
+                         "'+'). Re-running a single row costs minutes instead "
+                         "of the ~4.5 h full battery. The emitted table is "
+                         "PARTIAL by construction and the run exits 2.")
     ap.add_argument("--self-test", action="store_true",
                     help="check the post-processing offline; no PowerFactory "
                          "and no licence seat needed")
@@ -1033,6 +1094,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not a.no_disturbances:
             targets = resolve_outage_targets(a.outage_machines, a.outage_gens)
             cases += disturbance_catalogue(app, targets or None)
+        if a.only:
+            keep = [c for c in cases if any(k in c.name for k in a.only)]
+            if not keep:
+                print(f"[timescale] --only {a.only} matched none of "
+                      f"{len(cases)} cases; nothing to run", file=sys.stderr)
+                return 1
+            print(f"[timescale] --only {a.only}: {len(keep)} of {len(cases)} "
+                  f"cases; the emitted table is PARTIAL -- do not paste it")
+            cases = keep
         write_case_manifest(out_dir, cases)
         print(f"[timescale] {len(cases)} cases "
               f"({sum(1 for c in cases if not c.disturbance)} dispatches, "
@@ -1092,6 +1162,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   f"unfilled: {'; '.join(missing)}")
             print("[timescale] do NOT paste timescale_table.tex into the "
                   "thesis until every row is filled")
+            rc = 2
+        if d["inert"]:
+            print(f"[timescale] {len(d['inert'])} INERT case(s): "
+                  f"{', '.join(d['inert'])} -- no controlled output left its "
+                  f"band, so these measured no response and are emitted as "
+                  f"[$<$band] rather than 0.00. Decide per case whether the "
+                  f"actuator had authority at this operating point (a park at "
+                  f"P = 0 carries qmin = qmax = 0) or whether the step is real "
+                  f"but genuinely sub-band, and word the caption accordingly")
+            rc = 2
+        if a.only:
+            print("[timescale] partial run (--only): the table is incomplete "
+                  "by construction")
             rc = 2
         if d["censored"]:
             print(f"[timescale] {len(d['censored'])} censored settling "

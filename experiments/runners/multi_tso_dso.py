@@ -3009,6 +3009,35 @@ def run_multi_tso_dso(
             if verbose >= 1:
                 print(f"  [dso_g_q] {_d}: {_gq_old:g} -> {_gq:g}")
 
+    # ── Per-DSO OLTC Q-gain (gamma) ──────────────────────────────────────────
+    # The role-targeted counterpart of the two blocks above: gamma multiplies
+    # ONLY the OLTC columns of dQ/du, so it changes the tap's interface-Q
+    # commit threshold without touching the continuous DER block.  That is why
+    # it is preferred over dso_g_q_per_area for tap behaviour -- see
+    # MultiTSOConfig.dso_gamma_oltc_q_per_area.
+    #
+    # Applied last of the three, and still before the first step, so a config
+    # that sets several of them gets one consistent controller.
+    if getattr(config, "dso_gamma_oltc_q_per_area", None):
+        from controller.dso_controller import GAMMA_OLTC_Q_MAX
+        for _d, _ctrl in dso_controllers.items():
+            _gam = config.dso_gamma_oltc_q_per_area.get(str(_d))
+            if _gam is None:
+                continue
+            _gam = float(_gam)
+            if not (0.0 <= _gam <= GAMMA_OLTC_Q_MAX):
+                raise ValueError(
+                    f"dso_gamma_oltc_q_per_area[{_d!r}] must be in "
+                    f"[0, {GAMMA_OLTC_Q_MAX:g}], got {_gam!r}"
+                )
+            _gam_old = float(_ctrl.config.gamma_oltc_q)
+            _ctrl.config.gamma_oltc_q = _gam
+            # gamma enters the objective curvature through the OLTC columns of
+            # H, so any cached curvature derived from it is stale.
+            _ctrl._H_cache = getattr(_ctrl, "_H_cache", None)
+            if verbose >= 1:
+                print(f"  [dso_gamma] {_d}: {_gam_old:g} -> {_gam:g}")
+
     # ── Per-zone loop-gain scaling ────────────────────────────────────────────
     # Applied here, after every controller exists and before the first step, so
     # the whole run sees one consistent gain.  ``OFOParameters`` is frozen, so

@@ -22,6 +22,7 @@ import dataclasses
 import pytest
 
 from experiments.run_multi_system_ofo import (
+    DSO_GAMMA_OLTC_Q_PER_AREA,
     DSO_V_RELIEF_FACTORS,
     _apply_dso_v_relief,
     make_config_per_area,
@@ -68,47 +69,137 @@ def test_relief_holds_the_oltc_loop_gain(builder, dso_id):
 
 @pytest.mark.parametrize("builder", [make_config_tuned, make_config_per_area])
 @pytest.mark.parametrize("dso_id", sorted(DSO_V_RELIEF_FACTORS))
-def test_relief_holds_the_oltc_q_threshold_when_the_tap_tracks_q(builder, dso_id):
-    """At ``gamma_oltc_q > 0`` the ``g_q`` leg must be present too.
+def test_relief_does_not_inflate_the_oltc_q_threshold(builder, dso_id):
+    """At ``gamma_oltc_q > 0`` the relief's x-factor must be compensated.
 
-    Replaces the blanket ``assert dso_gamma_oltc_q == 0.0`` this module used to
-    open with.  That guard said "the loop-gain argument needs revisiting" -- it
-    has been (2026-08-20), and this is the result, so the guard is now a check
-    of the *second* invariant rather than a refusal to look.
+    Replaces the blanket ``assert dso_gamma_oltc_q == 0.0`` this module opened
+    with until 2026-08-20.  That guard said "the loop-gain argument needs
+    revisiting"; it has been, twice, and this is where it landed.
 
     Holding ``dso_g_v / g_w_dso_oltc`` preserves the tap's VOLTAGE commit
-    threshold.  Once the tap also carries a Q gradient, its INTERFACE-Q
-    threshold ``(g_w_oltc + ||a||^2) / (2 g_q |dQ/ds|)`` matters too, and the
-    factor on ``g_w_dso_oltc`` is uncompensated there unless ``g_q`` moves with
-    it.  Measured 2026-08-20 at gamma = 1 and a x20 relief without this leg:
-    DSO_2/DSO_4 commit at 108-244 Mvar against ~6 Mvar of interface-Q RMSE,
-    i.e. never, while DSO_1/DSO_3 commit at 2.9-5.0 Mvar.
+    threshold.  Once the tap also carries a Q gradient its INTERFACE-Q
+    threshold ``(g_w_oltc + ||a||^2) / (2 g_q gamma |dQ/ds|)`` matters too, and
+    the x-factor on ``g_w_dso_oltc`` is uncompensated there unless something on
+    the Q channel moves with it.  Measured at gamma = 1, x20 relief, nothing
+    compensating: DSO_2/DSO_4 commit at 108-244 Mvar against ~6 Mvar of
+    interface-Q RMSE, i.e. never.
 
-    Skipped at gamma = 0, where the tap has no Q gradient and no ``g_q`` makes
-    that threshold finite.
+    **Two instruments can compensate, and this test accepts either**, because
+    they are different claims and the config may legitimately use one or the
+    other:
+
+    ``dso_g_q_per_area``
+        raises that area's interface-Q objective weight.  Shared by every
+        column, so it also moves the continuous DER block -- measured to
+        oscillate it at the full factor.
+    ``dso_gamma_oltc_q_per_area``
+        raises the Q gain on the OLTC columns only, leaving DER untouched.
+        The instrument in service since 2026-08-20.
+
+    What is locked is the *outcome*: the relieved area's tap must not end up
+    harder to trigger on interface-Q than it would be with no relief at all.
+    Asserted on the weights, which is what the config controls; the linear
+    ``1/gamma`` reading ignores the ``gamma^2 ||a_q||^2`` self-cost term, so it
+    is a proxy for the threshold, not the threshold.  The measured Mvar values
+    are in the daily log.
+
+    Skipped at gamma = 0, where the tap has no Q gradient at all and no weight
+    makes that threshold finite.
     """
     cfg = builder()
-    if float(cfg.dso_gamma_oltc_q) <= 0.0:
+    per_gamma = cfg.dso_gamma_oltc_q_per_area or {}
+    gamma_area = float(per_gamma.get(dso_id, cfg.dso_gamma_oltc_q))
+    if gamma_area <= 0.0:
         pytest.skip("gamma_oltc_q = 0: the OLTC carries no interface-Q gradient")
 
-    per_q = cfg.dso_g_q_per_area or {}
-    assert dso_id in per_q, (
-        f"{dso_id} has a x{DSO_V_RELIEF_FACTORS[dso_id]:g} relief on "
-        f"g_w_dso_oltc and gamma_oltc_q = {cfg.dso_gamma_oltc_q:g}, but no "
-        f"dso_g_q_per_area entry -- its interface-Q commit threshold is "
-        f"x{DSO_V_RELIEF_FACTORS[dso_id]:g} the unrelieved one and the tap will "
-        f"not respond to Q.  Pass scale_q=True to apply_dso_v_relief."
+    # The two bases are NOT symmetric, and getting that wrong is how the first
+    # version of this test came out vacuous: it divided the g_q base by the
+    # voltage factor as well, so both sides carried the same assumed number and
+    # every factor passed.
+    #
+    #   g_w_dso_oltc -- may carry a per-area analytic design
+    #                   (make_config_per_area), so its base is the area's own
+    #                   entry divided by the voltage factor;
+    #   g_q, gamma   -- have no per-area *design*, only per-area overrides, so
+    #                   their bases are the global scalars.
+    v_factor = DSO_V_RELIEF_FACTORS[dso_id]
+    oltc_base = cfg.dso_g_w_class[dso_id]["dso_oltc"] / v_factor
+    q_area = float((cfg.dso_g_q_per_area or {}).get(dso_id, cfg.g_q))
+    gamma_base = float(cfg.dso_gamma_oltc_q)
+    assert gamma_base > 0.0, (
+        "the global gamma_oltc_q is the fallback this comparison is measured "
+        "against; at 0 there is no unrelieved baseline to compare to"
     )
-    factor = DSO_V_RELIEF_FACTORS[dso_id]
-    oltc_base = cfg.dso_g_w_class[dso_id]["dso_oltc"] / factor
-    q_base = float(per_q[dso_id]) / factor
-    # The invariant: g_w_dso_oltc / g_q unchanged by the relief, so the Q
-    # threshold is the same as it would be without it.
-    assert (cfg.dso_g_w_class[dso_id]["dso_oltc"] / per_q[dso_id]
-            == pytest.approx(oltc_base / q_base)), (
-        "the relief moved the OLTC's interface-Q commit threshold; scale "
-        "g_q by the same factor as g_w_dso_oltc"
+
+    inflation = ((cfg.dso_g_w_class[dso_id]["dso_oltc"] / (q_area * gamma_area))
+                 / (oltc_base / (float(cfg.g_q) * gamma_base)))
+    assert inflation <= 1.0 + 1e-9, (
+        f"{dso_id}: the x{v_factor:g} voltage relief leaves the tap's "
+        f"interface-Q commit threshold x{inflation:.2f} the unrelieved one. "
+        f"Compensate on the Q channel -- dso_gamma_oltc_q_per_area (OLTC only, "
+        f"preferred) or dso_g_q_per_area (also moves the DER block)."
     )
+
+
+def test_per_area_gamma_is_within_the_controller_bound():
+    """Every designed gamma must be one the controller will accept.
+
+    The table lives in an experiment module and the bound in the controller, so
+    nothing but this test connects them; a value past the cap would fail at
+    controller construction, i.e. minutes into a run.
+    """
+    from controller.dso_controller import GAMMA_OLTC_Q_MAX
+
+    for dso_id, gamma in DSO_GAMMA_OLTC_Q_PER_AREA.items():
+        assert 0.0 <= float(gamma) <= GAMMA_OLTC_Q_MAX, (
+            f"{dso_id}: gamma {gamma!r} outside [0, {GAMMA_OLTC_Q_MAX:g}]"
+        )
+
+
+def test_gamma_gain_is_applied_by_both_the_controller_and_stage_0():
+    """``gamma > 1`` must scale in *both* places or the design is against the
+    wrong self-cost.
+
+    Until 2026-08-20 both sites read ``if gamma < 1.0``, so a gain was a silent
+    no-op.  Fixing only one of them would be worse than fixing neither: Stage 0
+    would design ``g_w_dso_oltc`` against a ``||a_i||^2`` the MIQP never sees,
+    which is the disagreement the gamma block in ``stage_0_preconditioning``
+    exists to prevent.
+    """
+    import inspect
+
+    import controller.dso_controller as dc
+    import tuning_mc.stage_0_preconditioning as s0
+
+    for mod in (dc, s0):
+        src = inspect.getsource(mod)
+        assert "if gamma < 1.0" not in src, (
+            f"{mod.__name__} still guards the gamma scaling with '< 1.0', so a "
+            f"gamma above 1 is silently ignored there"
+        )
+        assert "gamma != 1.0" in src, (
+            f"{mod.__name__} no longer applies the gamma scaling at all"
+        )
+
+
+def test_q_leg_at_the_voltage_factor_preserves_the_threshold_exactly():
+    """``scale_q=True`` is the setting at which the two factors cancel.
+
+    Constructed here rather than read off a module default, so it keeps testing
+    the identity after ``DSO_V_RELIEF_SCALE_Q`` is retuned (it moved 20 -> 5 on
+    2026-08-20 when the full factor oscillated the DSO-DER block).
+    """
+    bare = dataclasses.replace(make_config_tuned(), dso_g_v_per_area=None,
+                               dso_g_w_class=None, dso_g_q_per_area=None)
+    cfg = _apply_dso_v_relief(bare, scale_q=True)
+    for dso_id in DSO_V_RELIEF_FACTORS:
+        ratio_area = (cfg.dso_g_w_class[dso_id]["dso_oltc"]
+                      / cfg.dso_g_q_per_area[dso_id])
+        ratio_global = float(cfg.g_w_dso_oltc) / float(cfg.g_q)
+        assert ratio_area == pytest.approx(ratio_global), (
+            f"{dso_id}: at scale_q=True the interface-Q commit threshold must "
+            f"equal the unrelieved one"
+        )
 
 
 def test_relief_is_scoped_to_the_spread_limited_areas():

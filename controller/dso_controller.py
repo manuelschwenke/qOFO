@@ -44,11 +44,23 @@ from sensitivity.jacobian import JacobianSensitivities
 from sensitivity.sensitivity_updater import SensitivityUpdater
 
 
+GAMMA_OLTC_Q_MAX: float = 100.0
+"""Ceiling on :attr:`DSOControllerConfig.gamma_oltc_q`.
+
+Was implicitly 1.0 until 2026-08-20, when the field became a gain rather than
+an attenuation.  100 is a mistake-catcher, not a stability bound: the tap's
+interface-Q commit threshold turns around at
+``gamma* = sqrt((g_w + ||a_v||^2)/||a_q||^2)`` -- measured 6-12 on this plant's
+unrelieved DSO areas and 50-120 on the relieved ones -- so a value far above
+that asks for *less* tap action while reading like it asks for more.
+"""
+
+
 @dataclass
 class DSOControllerConfig:
     """
     Configuration for the DSO controller.
-    
+
     Attributes
     ----------
     der_indices : List[int]
@@ -107,14 +119,37 @@ class DSOControllerConfig:
     v_setpoints_pu: Optional[NDArray[np.float64]] = None
     g_v: float = 1.0
     gamma_oltc_q: float = 0.0
-    """Role-based Q-tracking attenuation for OLTC columns.  Scales the
-    Q-interface tracking gradient on OLTC decision variables:
+    """Role-based Q-tracking **gain** on the OLTC columns.  Scales the
+    Q-interface tracking gradient on OLTC decision variables *only*:
         grad_f[oltc] += 2 · g_q · γ · (Q - Q_set)^T · ∂Q/∂s
     With γ = 0 (default), OLTCs are driven purely by voltage deviations
     and the physical Q effect of any tap change is still captured in the
     output constraints (H matrix).  With γ = 1, OLTCs are equally
     incentivised for Q-tracking (legacy behaviour).  Values in (0, 1)
-    provide partial Q-sensitivity as a last-resort mechanism."""
+    provide partial Q-sensitivity as a last-resort mechanism.
+
+    **γ > 1 permitted since 2026-08-20** (previously capped at 1.0, i.e. an
+    attenuation only).  This is the one knob that raises the tap's Q pressure
+    *without touching the DER block*: ``g_q`` is a single objective weight and
+    scaling it moves DER and tap alike, which oscillated the continuous block
+    (measured: designed ``g_w_dso_der`` 1172 → 5190 at a ×20 ``g_q``, against
+    1097 shipped).  γ multiplies only ``dQ_du[:, oltc_slice]``, so the DER
+    columns are bit-for-bit unchanged.
+
+    The tap's interface-Q commit threshold is **not** ∝ 1/γ, because γ also
+    enters the column's own curvature ``‖a_i‖²``:
+
+        engage_Q(γ) = ( g_w + ‖a_v‖² + γ² ‖a_q‖² ) / ( 2 g_q γ |∂Q_tr/∂s| )
+
+    which is minimised at ``γ* = sqrt((g_w + ‖a_v‖²)/‖a_q‖²)`` and **rises
+    again above it**.  Measured on this plant γ* ≈ 6–12 on the unrelieved areas
+    and ≈ 50–120 on the relieved ones.  A γ chosen past γ* buys a *higher*
+    threshold, so this knob must be tuned against the curve, never by
+    extrapolating "bigger γ ⇒ more tap action".
+
+    Per-area values go through :attr:`MultiTSOConfig.dso_gamma_oltc_q_per_area`;
+    a global gain is almost never right, because γ that suits a relieved area
+    drives an unrelieved one below its own tracking error."""
     der_mapping: Optional[DERMapping] = None
     """Per-DER mapping for individual sgen-level control.  When
     provided, enables per-DER decision variables in the MIQP
@@ -193,9 +228,15 @@ class DSOControllerConfig:
                     f"must match current_line_indices length "
                     f"({len(self.current_line_indices)})"
                 )
-        if not (0.0 <= self.gamma_oltc_q <= 1.0):
+        # Upper bound raised from 1.0 to GAMMA_OLTC_Q_MAX on 2026-08-20 so the
+        # knob can act as a gain, not only an attenuation.  The ceiling is a
+        # mistake-catcher, not a stability bound: engage_Q(γ) turns around at
+        # γ* (~50-120 on the relieved areas here), so anything far above that
+        # is asking for less tap action while looking like it asks for more.
+        if not (0.0 <= self.gamma_oltc_q <= GAMMA_OLTC_Q_MAX):
             raise ValueError(
-                f"gamma_oltc_q must be in [0, 1], got {self.gamma_oltc_q}"
+                f"gamma_oltc_q must be in [0, {GAMMA_OLTC_Q_MAX:g}], got "
+                f"{self.gamma_oltc_q}"
             )
         if self.v_setpoints_pu is not None:
             if len(self.v_setpoints_pu) != len(self.voltage_bus_indices):
@@ -1214,7 +1255,9 @@ class DSOController(BaseOFOController):
         # deviations.  The full ∂Q/∂s remains in H for output constraints,
         # preserving the physical coupling in predicted outputs.
         gamma = self.config.gamma_oltc_q
-        if gamma < 1.0:
+        # ``!= 1.0``, not ``< 1.0``: at gamma > 1 the else-branch below would
+        # pass the unscaled matrix and the gain would be a silent no-op.
+        if gamma != 1.0:
             mapping = self.config.der_mapping
             n_der = mapping.n_der if mapping is not None else len(self.config.der_indices)
             n_oltc = len(self.config.oltc_trafo_indices)

@@ -318,7 +318,12 @@ def _analyse_controller(
     # columns so Stage 0 and the MIQP agree.
     gamma = float(getattr(getattr(ctrl, "config", None), "gamma_oltc_q", 1.0))
     H_eff = H_y.copy()
-    if gamma < 1.0 and v_slice is not None:
+    # ``!= 1.0``, not ``< 1.0``: gamma became a GAIN on 2026-08-20
+    # (controller/dso_controller.py).  Left at ``<`` this would skip the scaling
+    # for gamma > 1, so Stage 0 would design g_w against a self-cost ||a_i||^2
+    # the MIQP does not see -- the exact disagreement this block exists to
+    # prevent, in the other direction.
+    if gamma != 1.0 and v_slice is not None:
         non_v = np.ones(H_y.shape[0], dtype=bool)
         non_v[v_slice] = False
         oltc_cols = [

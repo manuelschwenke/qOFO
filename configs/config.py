@@ -53,7 +53,7 @@ class MeasurementNoiseConfig:
     P and Q share gain and phase errors through one complex-power channel.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     profile: str = "minimum"
     seed: int = 20260717
 
@@ -696,6 +696,32 @@ class MultiTSOConfig:
     (``"dso_der"``, ``"dso_oltc"``, ``"dso_shunt"``).  There is no
     ``dso_g_w_scale`` counterpart to :attr:`zone_g_w_scale`, so this is the only
     per-area ``g_w`` hook on the DSO layer."""
+
+    dso_gamma_oltc_q_per_area: Optional[Dict[str, float]] = None
+    """Per-DSO-area override of :attr:`dso_gamma_oltc_q`
+    ``{dso_id: gamma}``, keyed by ``HVNetworkInfo.net_id``.  DSOs not listed
+    keep the global scalar.  Applied to ``DSOControllerConfig.gamma_oltc_q``
+    once after controller construction and before the main loop, next to
+    :attr:`dso_g_v_per_area`.
+
+    **This is the instrument for "the tap should react to interface-Q sooner",
+    and it is the only one that does not disturb the DER block.**  ``g_q`` and
+    :attr:`dso_g_q_per_area` are a single objective weight shared by every
+    column of that controller, so raising them moves the continuous DSO-DER
+    block by the same factor -- measured 2026-08-20 at a x20 ``g_q``, Stage 0's
+    designed ``g_w_dso_der`` went 1172 -> 5190 against 1097 in service and the
+    block oscillated.  ``gamma_oltc_q`` multiplies only the OLTC columns of
+    ``dQ/du``, so the DER columns are untouched.
+
+    Per-area rather than global because the right gamma is a property of the
+    area's own weights: an area carrying the x20 voltage relief needs a large
+    gain to reach a sane threshold, while an unrelieved one is already there
+    and the same gain would drive it below its own tracking error.  Designed
+    values for this plant are in
+    ``experiments/run_multi_system_ofo.py::DSO_GAMMA_OLTC_Q_PER_AREA``.
+
+    Not monotone -- see :attr:`dso_gamma_oltc_q` and
+    ``controller.dso_controller.GAMMA_OLTC_Q_MAX``."""
 
     dso_g_q_per_area: Optional[Dict[str, float]] = None
     """Per-DSO-area override of the interface-Q tracking weight
@@ -1813,11 +1839,51 @@ class MultiTSOConfig:
 #  Per-DSO voltage relief
 # ---------------------------------------------------------------------------
 
+def _q_relief_factor(
+    scale_q: "bool | float | Mapping[str, float]",
+    dso_id: str,
+    voltage_factor: float,
+) -> "float | None":
+    """The Q-leg factor for ``dso_id``, or ``None`` to leave ``g_q`` alone.
+
+    ``scale_q`` accepts, in increasing specificity:
+
+    ``False`` / ``None``
+        No Q leg.  The default, and what every study before 2026-08-20 ran.
+    ``True``
+        The same factor as the voltage relief.  This is the setting that makes
+        the OLTC's interface-Q commit threshold *identical* to the unrelieved
+        one, because the factor on ``g_w_dso_oltc`` and the factor on ``g_q``
+        cancel in ``(g_w_oltc + ||a||^2) / (2 g_q |dQ/ds|)``.
+    a number
+        That factor for every relieved area.  **Decouples the two legs on
+        purpose.**  Measured 2026-08-20: at the full factor the relieved area's
+        continuous DER block sees its objective raised by the same amount while
+        ``g_w_dso_der`` does not move, and the block oscillates.  A smaller Q
+        factor buys back damping at the cost of a proportionally higher tap
+        commit threshold -- the threshold scales as ``voltage_factor /
+        q_factor`` against the unrelieved value.
+    a mapping
+        Per-area factors; areas absent from it get no Q leg.
+
+    Kept separate from :func:`apply_dso_v_relief` so the resolution rule is
+    testable on its own and reads in one place.
+    """
+    if scale_q is None or scale_q is False:
+        return None
+    if scale_q is True:
+        return float(voltage_factor)
+    if isinstance(scale_q, Mapping):
+        raw = scale_q.get(dso_id)
+        return None if raw is None else float(raw)
+    return float(scale_q)
+
+
 def apply_dso_v_relief(
     cfg: "MultiTSOConfig",
     factors: Mapping[str, float],
     *,
-    scale_q: bool = False,
+    scale_q: "bool | float | Mapping[str, float]" = False,
 ) -> "MultiTSOConfig":
     """Give each listed DSO ``factor`` x more voltage authority at UNCHANGED
     OLTC loop gain.
@@ -1892,16 +1958,21 @@ def apply_dso_v_relief(
         # move.
         oltc_base = gw.get(dso_id, {}).get("dso_oltc", float(cfg.g_w_dso_oltc))
         gw.setdefault(dso_id, {})["dso_oltc"] = float(oltc_base) * factor
-        if scale_q:
+        q_factor = _q_relief_factor(scale_q, dso_id, factor)
+        if q_factor is not None:
+            if not (q_factor > 0.0):
+                raise ValueError(
+                    f"Q-relief factor for {dso_id!r} must be > 0, got "
+                    f"{q_factor!r}")
             # Same base rule as the OLTC half: an already-relieved area's own
             # per-area value, else the global scalar.  Without this, applying
             # the relief twice would measure the factor against the wrong
             # reference -- the bug the dso_g_v half avoids by reading
             # cfg.dso_g_v, which a second call leaves untouched.
             q_base = gq.get(dso_id, float(cfg.g_q))
-            gq[dso_id] = float(q_base) * factor
+            gq[dso_id] = float(q_base) * q_factor
 
     return dataclasses.replace(
         cfg, dso_g_v_per_area=gv, dso_g_w_class=gw,
-        dso_g_q_per_area=(gq or None) if scale_q else cfg.dso_g_q_per_area,
+        dso_g_q_per_area=(gq or None) if gq else cfg.dso_g_q_per_area,
     )

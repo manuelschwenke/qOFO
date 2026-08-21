@@ -122,3 +122,32 @@ row would have carried a magnitude the plant never saw.
   intended worst case, but the caption should not describe it as a generic step.
 - The PowerFactory project was **not** modified. The only seat use was a load flow
   and attribute reads.
+
+## Result — `results/timescale/der_headroom_fix/20260821-090759`
+
+`--label der_headroom_fix --save-trajectories --pre-settle-s 300 --only der_q_`,
+commit `29522e5`, exit 2 (partial by construction), preflight 2.46e-08 pu — bit
+for bit the same preflight drift as the 2026-08-20 run, so the operating point is
+identical and the two runs are comparable.
+
+| case | worst signal | `T_s` | inert | censored |
+|---|---|--:|:--|:--|
+| `der_q_+60Mvar_WP_TSO_s0_b18` | `u_TN_bus18` | **11.77 s** | False | False |
+| `der_q_+29Mvar_DER_DSO_1_s4_b47` | `u_TN_bus27` | **4.02 s** | False | False |
+
+- The TSO row **reproduces exactly** — 11.77 s at the same worst signal. The
+  catalogue change left it untouched, as intended.
+- The DSO row is now a measurement rather than a zero. `u_TN_bus27` is also the
+  worst signal the 2026-08-07 run of record found for this class (1.78 s there,
+  at a different park, magnitude and operating point), so the row is consistent
+  in kind with the pre-defect history.
+- Neither case flags `inert`, so the guard is not firing on a healthy case.
+- The caption magnitude was filled from the case name: the emitted row reads
+  `$+29$\,Mvar` without anything being typed.
+
+At 4.02 s the DSO DER row is far from binding, so **Table 9.1's binding row and
+margin are unchanged**: coupler tap 16.42 s, margin 3.58 s at `T_STS = 20 s`.
+
+A full battery re-run is still needed before the table can be pasted — this run
+covers 2 of 16 cases and the other 14 rows carry the 2026-08-20 values, which
+were measured before the `{mvar}` caption and the `inert` flag existed.

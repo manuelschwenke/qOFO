@@ -312,6 +312,18 @@ def _band(var: str) -> float:
     return BAND_DIAGNOSTIC
 
 
+def _is_inert(worst: Dict[str, float]) -> bool:
+    """Did the worst controlled output ever leave its band?
+
+    ``settling_metrics`` returns ``t_settle = 0.0`` exactly when no sample
+    after the event lies outside the tolerance envelope around ``y_final``,
+    i.e. when the trajectory never left the band. Since ``worst`` is the
+    controlled output with the LARGEST settling time, a zero there means no
+    controlled output moved measurably at all.
+    """
+    return float(worst["t_settle"]) <= 0.0
+
+
 def _is_controlled(var: str) -> bool:
     """Machine speed is recorded but never gates: it is not a controlled output."""
     return var.startswith(("m:u", "m:Q"))
@@ -497,7 +509,16 @@ def run_case(ctx: ScreeningContext, sd: Any, mons: List[Tuple[Any, str, str]],
     #     not print as ``0.00``.
     # Which of the two it is, is an author judgement: this refuses to print a
     # number and says so, rather than guessing.
-    inert = not any(m["step"] > _band(v) for _l, m, v in ctrl)
+    #
+    # Tested on the SETTLING TIME and not on the net step. A step-based test
+    # (``no controlled output whose |y_final - y_init| exceeds its band``)
+    # looks equivalent and is not: the load-step disturbance is a ramp, whose
+    # plant excursion is large but whose net step is small, so 0 of its 54
+    # controlled signals clear the band while its measured T_s is 305.82 s.
+    # Such a test would have flagged all three load rows inert and replaced
+    # the only disturbance evidence in Table 9.1 with "[$<$band]". Caught
+    # 2026-08-21 against the trajectories of run 20260820-135439.
+    inert = _is_inert(worst)
     return {"case": sd.name, "note": sd.note, "kind": sd.kind,
             "disturbance": bool(sd.disturbance), "worst_signal": label,
             "t_settle_s": worst["t_settle"], "overshoot": worst["overshoot"],
@@ -906,6 +927,11 @@ def self_test() -> int:
           len(tex) == len(TABLE_ROWS) + 3, f"got {len(tex)}")
     check("the '+' in tap names is matched literally",
           any("7.20" in line for line in tex))
+    check("inert is 'never left the band', not 'small net step'",
+          _is_inert({"t_settle": 0.0, "step": 5.0})
+          and not _is_inert({"t_settle": 305.82, "step": 1e-9}),
+          "a ramp (load step) has a large excursion but a small net step: "
+          "T_s = 305.82 s must NOT read as inert")
     inert_res = [dict(r) for r in res]
     for r in inert_res:
         if "der_q_" in r["case"] and "DER_" in r["case"]:

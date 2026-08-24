@@ -1,0 +1,101 @@
+--- a/experiments/ch_9_parameter_selection/ch_9_1_ninner_isolated_sts.py
++++ b/experiments/ch_9_parameter_selection/ch_9_1_ninner_isolated_sts.py
+@@ -217,6 +217,7 @@
+             "flat_mvar": args.flat_mvar,
+             "max_step_mvar": args.max_step_mvar,
+             "case_design": args.case_design,
++            "dso_v_authority_override": args.dso_v_authority_override,
+         },
+         "circularity": (
+             "G_w was calibrated with N_inner = 9 ASSUMED; this measures "
+@@ -534,11 +535,32 @@
+         os.environ[var] = "1"
+ 
+     from _ch9_selected_design import build_selected_config
++    from configs.config import apply_dso_v_relief
+     from tuning.metrics import MetricScales
+     from tuning.objectives_v2 import _run_scenario
+     from tuning_mc.scenarios_mc_v2 import tier1_design_set
+ 
+     cfg, _prov = build_selected_config()
++    relief_override = job.get("dso_v_authority_override")
++    if relief_override is not None:
++        # Diagnostic A/B override. The historical implementation is not
++        # idempotent: applying another relief on top of selected x20 would
++        # compound the per-area OLTC weight. Strip the generated pair first,
++        # then re-derive both legs from the selected base scalars.
++        cfg = dataclasses.replace(
++            cfg, dso_g_v_per_area=None, dso_g_w_class=None,
++            dso_g_q_per_area=None)
++        areas = ("DSO_2", "DSO_4")
++        cfg = apply_dso_v_relief(
++            cfg, {area: float(relief_override) for area in areas})
++        for area in areas:
++            expected_gv = float(cfg.dso_g_v) * float(relief_override)
++            expected_gw = float(cfg.g_w_dso_oltc) * float(relief_override)
++            if abs(float(cfg.dso_g_v_per_area[area]) - expected_gv) > 1e-6:
++                raise AssertionError(f"{area}: diagnostic g_v override failed")
++            got_gw = float(cfg.dso_g_w_class[area]["dso_oltc"])
++            if abs(got_gw - expected_gw) > 1e-6:
++                raise AssertionError(f"{area}: diagnostic OLTC override failed")
+     spec = next(s for s in tier1_design_set() if s.name == job["window"])
+ 
+     total_s = SETTLE_S + OBSERVE_S
+@@ -1153,6 +1175,10 @@
+                     help="full runs both directions at every window/DSO/"
+                          "interface; balanced_half assigns one direction per "
+                          "triple while balancing every interface across windows")
++    ap.add_argument("--dso-v-authority-override", type=float, default=None,
++                    help="DIAGNOSTIC ONLY: replace the selected x20 voltage "
++                         "relief on DSO_2/DSO_4, preserving dso_g_v / "
++                         "g_w_dso_oltc; does not alter archived selection")
+     ap.add_argument("--variant", choices=("frozen_ofo", "local"),
+                     default="frozen_ofo",
+                     help="parent-silent variant; 'local' swaps in a DIFFERENT "
+@@ -1186,6 +1212,10 @@
+             and (not math.isfinite(a.max_step_mvar)
+                  or a.max_step_mvar <= 0.0)):
+         ap.error("--max-step-mvar must be finite and > 0")
++    if (a.dso_v_authority_override is not None
++            and (not math.isfinite(a.dso_v_authority_override)
++                 or a.dso_v_authority_override <= 0.0)):
++        ap.error("--dso-v-authority-override must be finite and > 0")
+ 
+     if a.self_test:
+         return self_test()
+@@ -1194,6 +1224,15 @@
+     from tuning_mc.scenarios_mc_v2 import WINDOW_META, tier1_design_set
+ 
+     cfg, design = build_selected_config()
++    if a.dso_v_authority_override is not None:
++        design = dict(design)
++        design["diagnostic_runtime_override"] = {
++            "parameter": "dso_v_authority",
++            "selected": 20.0,
++            "applied": float(a.dso_v_authority_override),
++            "areas": ["DSO_2", "DSO_4"],
++            "claim": "diagnostic sensitivity; not the selected controller",
++        }
+     print(f"[design] campaign {design['campaign']} candidate "
+           f"{design['candidate_key']}: {design['verified']}")
+ 
+@@ -1257,6 +1296,8 @@
+                         "variant": a.variant, "band_mvar": a.band_mvar,
+                         "band_fraction": a.band_fraction,
+                         "max_step_mvar": a.max_step_mvar,
++                        "dso_v_authority_override": (
++                            a.dso_v_authority_override),
+                         "der_q_override_pu": a.der_q_override_pu,
+                         "flat_mvar": a.flat_mvar,
+                         "trafo": f"{d}|trafo_{i}",
+@@ -1285,6 +1326,10 @@
+         print(f"[ninner] applied per-interface step capped at "
+               f"{a.max_step_mvar:g} Mvar; raw capability-edge request retained "
+               f"in steps.csv")
++    if a.dso_v_authority_override is not None:
++        print(f"[ninner] *** DIAGNOSTIC: selected dso_v_authority x20 "
++              f"overridden to x{a.dso_v_authority_override:g} for "
++              f"DSO_2/DSO_4; this is not the selected controller")
+     print(f"[ninner] commit {meta['git_commit']} on {meta['git_branch']}"
+           + ("  [WORKING TREE DIRTY]" if meta.get("git_dirty") else ""))
+ 

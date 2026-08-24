@@ -1,0 +1,7 @@
+{
+  "source_archive_commit": "5d8e0f31c2aa5b4256782f6709ce4516142a2bdf",
+  "source_archive_branch": "main",
+  "note": "run_meta.json reports null git fields because B2 ran from a git archive without .git metadata; exact source snapshots are stored beside this file",
+  "script_snapshot_sha256": "11fb486ee18b8b9790bf7cb505c952d78a71826d709196ab47a9b3fb025ea9f9",
+  "selected_design_snapshot_sha256": "2f522a524a615784f25d18089dc3770c2a333a7e1ac39eca5d1dbe484dbc4762"
+}

@@ -1,0 +1,11 @@
+window,n,censored_f20,censored_f10,median_n_inner_f20,median_n_inner_f10,max_n_inner_f20,max_n_inner_f10
+d_gen_trip_spring,3,3,3,46.0,46.0,46,46
+d_gen_trip_summer,3,2,0,46.0,18.0,46,30
+d_gen_trip_winter,3,0,0,1.0,1.0,2,2
+d_quiet_spring,3,2,1,46.0,26.0,46,46
+d_ramp_down_spring,3,0,0,1.0,1.0,2,2
+d_ramp_down_summer,3,3,3,46.0,46.0,46,46
+d_ramp_up_autumn,3,0,0,1.0,1.0,2,2
+d_ramp_up_spring,3,0,0,24.0,14.0,31,15
+d_reversal_autumn,3,0,0,1.0,1.0,2,2
+d_reversal_spring,3,2,0,46.0,24.0,46,44

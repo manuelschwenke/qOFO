@@ -39,7 +39,6 @@ the weight comparison.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -68,16 +67,6 @@ KNOBS: Dict[str, float] = {
 #: version that stopped applying it would still pass a weights-only check.
 RELIEF_AREAS = ("DSO_2", "DSO_4")
 
-#: Post-selection safety correction established by the 2026-08-21 B1
-#: diagnostics. The archived candidate used a pooled geometric-mean DSO DER
-#: weight (549.88), which puts DSO_4's dominant continuous mode at the period-2
-#: boundary. A single scalar shared by DSO_4's ten DER columns is therefore
-#: set to that area's Stage-0 worst-column requirement, not its geometric mean.
-#: The voltage-relief factor is reduced from 20 to 10 at the same time; the
-#: paired OLTC weight is re-derived, so no OLTC loop gain is changed.
-CORRECTED_DSO_V_AUTHORITY = 10.0
-CORRECTED_DSO4_DER_WEIGHT = 828.3682036634343
-
 #: Relative tolerance on the weight assertion. The recipe is deterministic, so
 #: this is a float-repr guard, not a tolerance band: anything larger than this
 #: means the design changed and the run must not proceed.
@@ -96,73 +85,6 @@ def archived_evaluation() -> Dict[str, Any]:
             f"be verified, so the run is refused rather than executed against "
             f"an unchecked config.")
     return json.loads(path.read_text(encoding="utf-8-sig"))
-
-
-def _apply_post_selection_dso4_correction(cfg, payload):
-    """Apply and assert the narrow DSO-4 damping correction.
-
-    The archived candidate is still rebuilt and checked first. This function
-    then layers a separately identified safety correction, so provenance does
-    not misrepresent the corrected controller as the untouched campaign point.
-    """
-    from configs.config import apply_dso_v_relief
-
-    dso4 = next(
-        row for row in payload.get("per_area", [])
-        if row.get("kind") == "dso" and row.get("area") == "DSO_4")
-    derived_max = float(dso4["fields"]["g_w_dso_der"]["max"])
-    if abs(derived_max - CORRECTED_DSO4_DER_WEIGHT) > 1e-9:
-        raise AssertionError(
-            f"DSO_4 Stage-0 max-column weight changed: {derived_max!r} != "
-            f"{CORRECTED_DSO4_DER_WEIGHT!r}; revalidate the damping correction")
-
-    # The historical relief helper was not idempotent, whereas the current one
-    # is. Clear generated maps (and the declarative field when present) before
-    # deriving x10, which makes this work against archived and current code.
-    field_names = {field.name for field in dataclasses.fields(cfg)}
-    reset = {}
-    for name in ("dso_g_v_per_area", "dso_g_w_class", "dso_g_q_per_area"):
-        if name in field_names:
-            reset[name] = None
-    if "dso_v_relief_factors" in field_names:
-        reset["dso_v_relief_factors"] = None
-    cfg = dataclasses.replace(cfg, **reset)
-    cfg = apply_dso_v_relief(
-        cfg, {area: CORRECTED_DSO_V_AUTHORITY for area in RELIEF_AREAS})
-
-    per_area_cls = {
-        area: dict(values)
-        for area, values in (getattr(cfg, "dso_g_w_class", {}) or {}).items()
-    }
-    per_area_cls.setdefault("DSO_4", {})["dso_der"] = (
-        CORRECTED_DSO4_DER_WEIGHT)
-    cfg = dataclasses.replace(cfg, dso_g_w_class=per_area_cls)
-
-    expected_gv = float(cfg.dso_g_v) * CORRECTED_DSO_V_AUTHORITY
-    expected_oltc = float(cfg.g_w_dso_oltc) * CORRECTED_DSO_V_AUTHORITY
-    got_gv = dict(cfg.dso_g_v_per_area or {})
-    got_cls = dict(cfg.dso_g_w_class or {})
-    for area in RELIEF_AREAS:
-        if abs(float(got_gv[area]) - expected_gv) > 1e-6:
-            raise AssertionError(f"{area}: corrected voltage relief did not apply")
-        if abs(float(got_cls[area]["dso_oltc"]) - expected_oltc) > 1e-6:
-            raise AssertionError(f"{area}: corrected OLTC pairing did not apply")
-    if abs(float(got_cls["DSO_4"]["dso_der"])
-           - CORRECTED_DSO4_DER_WEIGHT) > 1e-9:
-        raise AssertionError("DSO_4 continuous-DER damping correction did not apply")
-
-    correction = {
-        "status": "post-selection safety correction",
-        "reason": "DSO_4 period-2 continuous-loop instability in corrected B1",
-        "dso_v_authority": CORRECTED_DSO_V_AUTHORITY,
-        "dso4_g_w_dso_der": CORRECTED_DSO4_DER_WEIGHT,
-        "weight_rule": "maximum of the ten DSO_4 Stage-0 column requirements",
-        "effective_dso_g_v_per_area": {
-            area: float(got_gv[area]) for area in RELIEF_AREAS},
-        "effective_dso_g_w_class": {
-            area: dict(got_cls[area]) for area in RELIEF_AREAS},
-    }
-    return cfg, correction
 
 
 def build_selected_config() -> Tuple[Any, Dict[str, Any]]:
@@ -286,8 +208,6 @@ def build_selected_config() -> Tuple[Any, Dict[str, Any]]:
                                     for a in RELIEF_AREAS},
                   "factor": float(factor)}
 
-    cfg, correction = _apply_post_selection_dso4_correction(cfg, payload)
-
     provenance = {
         "campaign": CAMPAIGN,
         "candidate_key": CANDIDATE_KEY,
@@ -296,13 +216,12 @@ def build_selected_config() -> Tuple[Any, Dict[str, Any]]:
         "dso_g_v": got_gv,
         "zone_g_w_class": None,
         "per_area_relief": relief,
-        "post_selection_correction": correction,
         "baseline_yaml": str(DEFAULT_BASELINE),
         "stage0_fingerprint": stage0_fingerprint(),
         "design_payload": str(_DESIGN_DIR / f"stage0_{CANDIDATE_KEY}.json"),
         "archived_eval": str(_EVAL_DIR / f"tier1_{CANDIDATE_KEY}.json"),
         "archived_rho_emp_p95": archive.get("worst_rho_emp_p95"),
-        "verified": "archived weights reproduced; DSO-4 correction asserted",
+        "verified": "rebuilt weights == archived weights",
     }
     return cfg, provenance
 

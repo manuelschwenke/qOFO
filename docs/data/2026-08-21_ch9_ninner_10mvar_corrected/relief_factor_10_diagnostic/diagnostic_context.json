@@ -1,0 +1,28 @@
+{
+  "timestamp": "2026-08-21",
+  "source_git_commit": "5d8e0f31c2aa5b4256782f6709ce4516142a2bdf",
+  "source_tree": "isolated git archive of source_git_commit",
+  "reason_for_isolation": "live dirty tree failed selected-weight assertion (g_w_dso_der and g_w_dso_oltc mismatch); it was not used",
+  "selected_candidate": "fe010aa3ead1",
+  "selected_relief_factor": 20.0,
+  "diagnostic_relief_factor": 10.0,
+  "areas": [
+    "DSO_2",
+    "DSO_4"
+  ],
+  "executed_scope": "30 paired DSO_4 cases only",
+  "command": "python ch_9_1_ninner_isolated_sts.py --workers 16 --label dso4_relief10_paired --max-step-mvar 10 --flat-mvar 1.0 --case-design balanced_half --dsos DSO_4 --dso-v-authority-override 10",
+  "factor20_reference": "../main_run/steps.csv",
+  "factor10_raw": "steps.csv",
+  "grid_matches_factor20_reference": true,
+  "mcnemar_discordant": {
+    "rescued_20_to_10": 5,
+    "newly_censored_20_to_10": 0,
+    "one_sided_exact_p_exploratory": 0.03125,
+    "two_sided_exact_p_exploratory": 0.0625
+  },
+  "script_snapshot_sha256": "9791620967fc259c87bc3288238a371eb8457c324964d5cc4c8a77ca54fef28e",
+  "selected_design_builder_sha256": "0a4682e43ab8130d85a2c90a0b977e6f5060b01c74ba16d86ba32f6e88fd2f7f",
+  "raw_files_byte_identical_to_temporary_output": true,
+  "claim": "diagnostic sensitivity; factor 10 is not the selected controller"
+}

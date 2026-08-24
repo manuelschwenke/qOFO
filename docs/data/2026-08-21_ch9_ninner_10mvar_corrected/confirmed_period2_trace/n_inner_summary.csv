@@ -1,0 +1,3 @@
+dso,direction,n_steps,n_capability_limited,n_free,free_n_inner_median,free_n_inner_p95,free_censoring_fraction,free_uncensored_median,free_uncensored_p95,headroom_end_median_mvar,n_inner_median,n_inner_p95,n_inner_max,censoring_fraction,step_median_mvar,band_width_median_mvar,residual_median_mvar,tap_moves_total,v_violations
+DSO_4,up,1,0,1,46.0,46.0,1.0,nan,nan,116.04857104490036,46.0,46.0,46.0,1.0,10.0,255.98611282310782,2.8655785689365825,0,0
+__pooled__,both,1,0,1,46.0,46.0,1.0,nan,nan,116.04857104490036,46.0,46.0,46.0,1.0,10.0,255.98611282310782,2.8655785689365825,0,0

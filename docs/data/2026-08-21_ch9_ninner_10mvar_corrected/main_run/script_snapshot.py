@@ -468,56 +468,6 @@ def cap_target_step(q_now: float, q_target: float,
     return float(q_now) + math.copysign(cap, delta)
 
 
-def extract_interface_trajectory(records: Sequence[Any], *, trafo: str,
-                                 group: str, step_time_s: float,
-                                 sts_period_s: float) -> List[Dict[str, Any]]:
-    # Post-step signed trajectory for diagnosing drift versus oscillation.
-    out: List[Dict[str, Any]] = []
-    previous: Optional[float] = None
-    for record in records:
-        time_s = float(getattr(record, "time_s", float("nan")))
-        if not math.isfinite(time_s) or time_s < step_time_s:
-            continue
-        q_set = (getattr(record, "dso_trafo_q_set_mvar", {}) or {}).get(trafo)
-        q_actual = (
-            getattr(record, "dso_trafo_q_actual_mvar", {}) or {}).get(trafo)
-        if q_set is None or q_actual is None:
-            continue
-        q_set = float(q_set)
-        q_actual = float(q_actual)
-        cap_min = (
-            getattr(record, "dso_trafo_q_cap_min_mvar", {}) or {}).get(trafo)
-        cap_max = (
-            getattr(record, "dso_trafo_q_cap_max_mvar", {}) or {}).get(trafo)
-        tap = (getattr(record, "dso_trafo_tap_pos", {}) or {}).get(trafo)
-        v_min = (
-            getattr(record, "dso_group_v_min_pu", {}) or {}).get(group)
-        v_max = (
-            getattr(record, "dso_group_v_max_pu", {}) or {}).get(group)
-        slack = (getattr(record, "dso_z_slack_max", {}) or {}).get(group)
-        out.append({
-            "time_s": time_s,
-            "inner_iteration": int(round(
-                (time_s - step_time_s) / sts_period_s)),
-            "q_set_mvar": q_set,
-            "q_actual_mvar": q_actual,
-            "q_actual_delta_mvar": (
-                float("nan") if previous is None else q_actual - previous),
-            "abs_tracking_error_mvar": abs(q_actual - q_set),
-            "cap_min_mvar": (
-                float(cap_min) if cap_min is not None else float("nan")),
-            "cap_max_mvar": (
-                float(cap_max) if cap_max is not None else float("nan")),
-            "tap_pos": int(tap) if tap is not None else None,
-            "v_min_pu": float(v_min) if v_min is not None else float("nan"),
-            "v_max_pu": float(v_max) if v_max is not None else float("nan"),
-            "z_slack_max": (
-                float(slack) if slack is not None else float("nan")),
-        })
-        previous = q_actual
-    return out
-
-
 # =====================================================================
 #  Worker
 # =====================================================================
@@ -721,17 +671,6 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
                 "failure": ("setpoint delivery mismatch: intended transformer "
                             f"intervention was not realised: {bad_delivery}")}
 
-    trajectory: List[Dict[str, Any]] = []
-    if job.get("save_trajectories") and focus is not None:
-        trajectory = extract_interface_trajectory(
-            records, trafo=focus, group=groups.get(focus, job["dso"]),
-            step_time_s=SETTLE_S, sts_period_s=STS_PERIOD_S)
-        for point in trajectory:
-            point.update({
-                "window": job["window"], "dso": job["dso"],
-                "trafo": focus, "direction": job["direction"],
-            })
-
     rows = [r for r in rows if focus is None or r["trafo"] == focus]
     for r in rows:
         raw_step = targets[r["trafo"]][key] - targets[r["trafo"]]["q_now"]
@@ -746,7 +685,6 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
                   "command_delivery_error_mvar": delivery_errors[r["trafo"]],
                   "band_width_mvar": targets[r["trafo"]]["width"]})
     return {**job, "failure": "", "rows": rows, "targets": targets,
-            "trajectory": trajectory,
             "wall_s": res.wall_time_s + res_p.wall_time_s}
 
 
@@ -857,28 +795,10 @@ _ROW_COLS = ["window", "dso", "direction", "variant", "trafo", "group",
              "capability_limited", "headroom_end_mvar",
              "n_inner_cap", "step_mvar", "raw_step_mvar",
              "step_cap_mvar", "step_capped",
-             "command_delivery_error_mvar", "case_wall_s",
+             "command_delivery_error_mvar",
              "band_width_mvar", "q_set_after_mvar", "q_actual_after_mvar",
              "residual_mvar", "tap_moves", "v_min_pu", "v_max_pu",
              "v_violation", "z_slack_max"]
-
-
-_TRACE_COLS = [
-    "window", "dso", "trafo", "direction", "time_s", "inner_iteration",
-    "q_set_mvar", "q_actual_mvar", "q_actual_delta_mvar",
-    "abs_tracking_error_mvar", "cap_min_mvar", "cap_max_mvar", "tap_pos",
-    "v_min_pu", "v_max_pu", "z_slack_max", "case_wall_s",
-]
-
-
-def write_trajectories(out_dir: Path,
-                       trajectories: Sequence[Dict[str, Any]]) -> None:
-    with (out_dir / "trajectories.csv").open(
-            "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=_TRACE_COLS,
-                                extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(trajectories)
 
 
 def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
@@ -1080,15 +1000,6 @@ def self_test() -> int:
           f"got {rc[0]['n_inner']}")
 
     # Flatness tolerance is reported across a sweep, not silently decisive.
-    trace = extract_interface_trajectory(
-        recs, trafo="T1", group="DSO_1", step_time_s=100.0,
-        sts_period_s=20.0)
-    check("trajectory export retains signed per-iteration interface motion",
-          len(trace) == 7
-          and math.isnan(trace[0]["q_actual_delta_mvar"])
-          and trace[1]["q_actual_delta_mvar"] == 20.0
-          and trace[-1]["q_actual_delta_mvar"] == 0.0)
-
     check("a coarser flatness tolerance converges no later than a finer one",
           rc[0]["n_inner_flat_1"] <= rc[0]["n_inner_flat_0.02"],
           f"got {rc[0]['n_inner_flat_1']} vs {rc[0]['n_inner_flat_0.02']}")
@@ -1242,9 +1153,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="full runs both directions at every window/DSO/"
                          "interface; balanced_half assigns one direction per "
                          "triple while balancing every interface across windows")
-    ap.add_argument("--save-trajectories", action="store_true",
-                    help="persist post-step signed interface trajectories for "
-                         "diagnosing drift versus oscillation; default off")
     ap.add_argument("--variant", choices=("frozen_ofo", "local"),
                     default="frozen_ofo",
                     help="parent-silent variant; 'local' swaps in a DIFFERENT "
@@ -1252,12 +1160,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--windows", default="")
     ap.add_argument("--dsos", default="",
                     help="comma-separated DSO ids; default every DSO present")
-    ap.add_argument("--focus-trafo", default="",
-                    help="optional exact record key, e.g. DSO_4|trafo_10; "
-                         "restricts the grid for targeted diagnostics")
-    ap.add_argument("--direction", choices=("both", "up", "down"),
-                    default="both",
-                    help="optional directional restriction; default both")
     ap.add_argument("--flat-mvar", type=float, default=DEFAULT_FLAT_MVAR,
                     help="convergence tolerance on the per-iteration CHANGE "
                          "in interface flow [Mvar]; the loop has converged "
@@ -1349,10 +1251,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     ("up", "down") if a.case_design == "full"
                     else (_half_fraction_direction(w_idx, d_idx, local_idx),)
                 )
-                if a.direction != "both":
-                    directions = tuple(
-                        value for value in directions
-                        if value == a.direction)
                 for dirn in directions:
                     jobs.append({
                         "window": w, "dso": d, "direction": dirn,
@@ -1361,16 +1259,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "max_step_mvar": a.max_step_mvar,
                         "der_q_override_pu": a.der_q_override_pu,
                         "flat_mvar": a.flat_mvar,
-                        "save_trajectories": a.save_trajectories,
                         "trafo": f"{d}|trafo_{i}",
                     })
-
-    if a.focus_trafo:
-        jobs = [job for job in jobs if job["trafo"] == a.focus_trafo]
-    if not jobs:
-        print("[abort] case restrictions produced an empty experiment grid")
-        return 1
-
     with (out_dir / "cases.csv").open("w", newline="", encoding="utf-8") as fh:
         wr = csv.writer(fh)
         wr.writerow(["window", "dso", "trafo", "direction", "variant",
@@ -1399,7 +1289,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
           + ("  [WORKING TREE DIRTY]" if meta.get("git_dirty") else ""))
 
     rows: List[Dict[str, Any]] = []
-    trajectories: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
     done = 0
     with ProcessPoolExecutor(max_workers=a.workers) as ex:
@@ -1420,12 +1309,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                       f"{res['direction']}  FAILED: "
                       f"{res['failure'].splitlines()[0]}")
                 continue
-            for row in res["rows"]:
-                row["case_wall_s"] = res["wall_s"]
-            for point in res.get("trajectory", []):
-                point["case_wall_s"] = res["wall_s"]
             rows.extend(res["rows"])
-            trajectories.extend(res.get("trajectory", []))
             ns = [r["n_inner"] for r in res["rows"]]
             print(f"  [{done}/{len(jobs)}] {res['window']}/{res['dso']}/"
                   f"{res['direction']}  N_inner={ns}, {res['wall_s']:.0f} s")
@@ -1436,8 +1320,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     agg = aggregate(rows)
     write_outputs(out_dir, rows, agg, failures, meta)
-    if trajectories:
-        write_trajectories(out_dir, trajectories)
 
     pooled = next((x for x in agg if x["dso"] == "__pooled__"), None)
     if pooled:

@@ -1,0 +1,15 @@
+--- a/experiments/ch_9_parameter_selection/ch_9_1_ninner_isolated_sts.py
++++ b/experiments/ch_9_parameter_selection/ch_9_1_ninner_isolated_sts.py
+@@ -1284,7 +1284,11 @@
+     n_trafo = int(a.trafos_per_dso)
+     jobs: List[Dict[str, Any]] = []
+     for w_idx, w in enumerate(names):
+-        for d_idx, d in enumerate(dsos):
++        for d in dsos:
++            # Preserve the full-grid checkerboard when a DSO subset is run.
++            # Renumbering DSO_4 from index 3 to 0 would flip every direction
++            # and destroy the paired factor-20/factor-10 comparison.
++            d_idx = int(str(d).rsplit("_", 1)[-1]) - 1
+             for local_idx, i in enumerate(_trafo_indices(d, n_trafo)):
+                 directions = (
+                     ("up", "down") if a.case_design == "full"

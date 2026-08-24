@@ -1,0 +1,118 @@
+{
+  "script": "experiments/ch_9_parameter_selection/ch_9_1_ninner_isolated_sts.py",
+  "script_sha256": "9791620967fc259c87bc3288238a371eb8457c324964d5cc4c8a77ca54fef28e",
+  "argv": [
+    "C:\\Users\\mschwenke\\AppData\\Local\\Temp\\codex_qofo_relief_ab_401a1ba444754274bded154cd21219ba\\tree\\experiments\\ch_9_parameter_selection\\ch_9_1_ninner_isolated_sts.py",
+    "--workers",
+    "16",
+    "--label",
+    "dso4_relief10_paired",
+    "--max-step-mvar",
+    "10",
+    "--flat-mvar",
+    "1.0",
+    "--case-design",
+    "balanced_half",
+    "--dsos",
+    "DSO_4",
+    "--dso-v-authority-override",
+    "10"
+  ],
+  "args": {
+    "band_fraction": 0.95,
+    "band_mvar": 1.0,
+    "case_design": "balanced_half",
+    "der_q_override_pu": null,
+    "dso_v_authority_override": 10.0,
+    "dsos": "DSO_4",
+    "flat_mvar": 1.0,
+    "include_dead_zone": false,
+    "label": "dso4_relief10_paired",
+    "max_step_mvar": 10.0,
+    "out": "C:\\Users\\mschwenke\\AppData\\Local\\Temp\\codex_qofo_relief_ab_401a1ba444754274bded154cd21219ba\\tree\\results\\ch9_ninner",
+    "probe": false,
+    "self_test": false,
+    "trafos_per_dso": 3,
+    "variant": "frozen_ofo",
+    "windows": "",
+    "workers": 16
+  },
+  "timestamp": "2026-08-21T15:38:26.248273+02:00",
+  "git_commit": null,
+  "git_branch": null,
+  "git_dirty": null,
+  "python": "3.12.13 | packaged by Anaconda, Inc. | (main, Jul  9 2026, 14:26:47) [MSC v.1942 64 bit (AMD64)]",
+  "executable": "F:\\python_environments\\qOFO_clean\\python.exe",
+  "platform": "Windows-2025Server-10.0.26100-SP0",
+  "design": {
+    "campaign": "stage1",
+    "candidate_key": "fe010aa3ead1",
+    "knobs": {
+      "lambda_tso": 0.17827533411555277,
+      "lambda_dso": 1.7957360834719915,
+      "tau": 0.7079457843841379,
+      "engage_tso_pu": 0.015,
+      "engage_dso_pu": 0.04988155787422199,
+      "dso_g_v_ratio": 0.8413951416451951,
+      "dso_v_authority": 20.0
+    },
+    "weights": {
+      "g_w_der": 10.171638579398767,
+      "g_w_pcc": 49.301361700463204,
+      "g_w_dso_der": 549.881810527467,
+      "g_w_tso_oltc": 3783.055024849752,
+      "g_w_dso_oltc": 392.6443639860221
+    },
+    "dso_g_v": 84139.51416451951,
+    "zone_g_w_class": null,
+    "per_area_relief": {
+      "dso_g_v_per_area": {
+        "DSO_2": 1682790.2832903902,
+        "DSO_4": 1682790.2832903902
+      },
+      "dso_g_w_class": {
+        "DSO_2": {
+          "dso_oltc": 7852.887279720442
+        },
+        "DSO_4": {
+          "dso_oltc": 7852.887279720442
+        }
+      },
+      "factor": 20.0
+    },
+    "baseline_yaml": "C:\\Users\\mschwenke\\AppData\\Local\\Temp\\codex_qofo_relief_ab_401a1ba444754274bded154cd21219ba\\tree\\tuning\\scripts\\configs\\baseline_ieee39_thevenin.yaml",
+    "stage0_fingerprint": "53c4d2124b0e",
+    "design_payload": "C:\\Users\\mschwenke\\AppData\\Local\\Temp\\codex_qofo_relief_ab_401a1ba444754274bded154cd21219ba\\tree\\results\\tuning_mc\\stage1\\designs\\stage0_fe010aa3ead1.json",
+    "archived_eval": "C:\\Users\\mschwenke\\AppData\\Local\\Temp\\codex_qofo_relief_ab_401a1ba444754274bded154cd21219ba\\tree\\results\\tuning_mc\\stage1\\evals\\tier1_fe010aa3ead1.json",
+    "archived_rho_emp_p95": 1.378849148072478,
+    "verified": "rebuilt weights == archived weights",
+    "diagnostic_runtime_override": {
+      "parameter": "dso_v_authority",
+      "selected": 20.0,
+      "applied": 10.0,
+      "areas": [
+        "DSO_2",
+        "DSO_4"
+      ],
+      "claim": "diagnostic sensitivity; not the selected controller"
+    }
+  },
+  "constants": {
+    "sts_period_s": 20.0,
+    "settle_s": 600.0,
+    "observe_s": 900.0,
+    "band_fraction": 0.95,
+    "band_mvar": 1.0,
+    "variant": "frozen_ofo",
+    "der_q_override_pu": null,
+    "flat_mvar": 1.0,
+    "max_step_mvar": 10.0,
+    "case_design": "balanced_half",
+    "dso_v_authority_override": 10.0
+  },
+  "circularity": "G_w was calibrated with N_inner = 9 ASSUMED; this measures N_inner with those weights in place. It is a check on the guess, not an independent measurement.",
+  "excluded_windows": [
+    "d_quiet_summer",
+    "d_ramp_up_winter"
+  ]
+}

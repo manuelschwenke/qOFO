@@ -1,0 +1,5 @@
+population,n,median,p80,p90,p95,max,n_gt_9,fraction_gt_9,n_censored,censoring_fraction,selection_rule
+all,120,4.0,9.0,32.50000000000013,46.0,46,22,0.18333333333333332,12,0.1,none
+converged_only,108,4.0,6.0,9.0,13.299999999999983,31,10,0.09259259259259259,0,0.0,censored == False
+dso_1_to_3,90,4.0,6.0,9.0,12.0,22,8,0.08888888888888889,0,0.0,dso != DSO_4
+windows_without_any_censoring,60,1.0,2.0,4.0,8.049999999999997,31,2,0.03333333333333333,0,0.0,window not in any window containing a censored case

@@ -90,7 +90,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from configs.config import apply_dso_v_relief
+from configs.config import apply_dso_v_relief, strip_dso_v_relief
 
 DEFAULT_BASELINE = (_REPO_ROOT / "tuning" / "scripts" / "configs"
                     / "baseline_ieee39_thevenin.yaml")
@@ -444,9 +444,6 @@ def build_config(knobs: dict[str, float], weights: dict[str, float],
         "verbose": 0, "live_plot_controller": False, "live_plot_cascade": False,
         "live_plot_system": False, "run_stability_analysis": False,
     })
-    cfg = dataclasses.replace(baseline_cfg, **overlay)
-    # LAST, so it reads the searched dso_g_v and the designed dso_oltc rather
-    # than the baseline's -- see DSO_V_RELIEF_FACTORS.
     if "dso_v_authority" in knobs:
         # Searched: one shared factor across the spread-limited areas.
         relief = {a: float(knobs["dso_v_authority"])
@@ -455,7 +452,29 @@ def build_config(knobs: dict[str, float], weights: dict[str, float],
         relief = dso_v_relief
     else:
         relief = DSO_V_RELIEF_FACTORS
-    return apply_dso_v_relief(cfg, relief)
+    # Written into the OVERLAY, not applied afterwards.  Since 2026-08-21 the
+    # relief is a config FIELD with a non-empty default, and
+    # MultiTSOConfig.__post_init__ installs whatever that field says on every
+    # construction -- so a search that did not set it would silently inherit
+    # the runner's relief and stop reproducing the pre-2026-08-18 campaigns.
+    # Stage 1 declares its own policy here, and an empty mapping means empty.
+    #
+    # The relief still derives from the SEARCHED dso_g_v and the DESIGNED
+    # dso_oltc rather than the baseline's, because __post_init__ runs after
+    # the overlay is applied -- which is the property DSO_V_RELIEF_FACTORS
+    # exists for: dso_g_v_ratio is a coordinate, so an absolute relief would
+    # let the OLTC loop gain dso_g_v / g_w_dso_oltc drift as the search walked.
+    active = {a: float(f) for a, f in (relief or {}).items() if float(f) != 1.0}
+    overlay["dso_v_relief_factors"] = dict(active) or None
+    # The baseline arrives with its OWN relief already installed (config.py
+    # gives the field a non-empty default, and load_config_yaml constructs a
+    # MultiTSOConfig), so declaring an empty policy is not enough -- the
+    # inherited per-area entries have to be stripped as well, or a campaign
+    # that asks for no relief silently keeps the runner's.  __post_init__
+    # cannot do this itself: it sees only the new factor set.
+    overlay["dso_g_v_per_area"], overlay["dso_g_w_class"] = strip_dso_v_relief(
+        baseline_cfg, keep=active)
+    return dataclasses.replace(baseline_cfg, **overlay)
 
 
 def per_transformer_wear(records, duration_s: float) -> dict[str, dict[str, float]]:

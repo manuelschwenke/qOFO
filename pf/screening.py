@@ -512,8 +512,10 @@ class ScreeningContext:
     def add_param_event(self, target, variable: str, new_value: float,
                         t_event: float) -> None:
         key = (self._event_key(target), str(variable))
+        persistent = False
         if self.persistent_event_pool:
             ev = self._persistent_param_slot(target, variable)
+            persistent = ev is not None
         else:
             ev = self._take_slot(
                 self._param_event_slots, self._param_event_next, key, "parameter")
@@ -536,20 +538,37 @@ class ScreeningContext:
                 self._new_events_pending_admission += 1
         # Payload first, time last: moving the unused slot is the arm action.
         ev.SetAttribute("value", repr(float(new_value)))
-        # Fold into PF's current 60 s event window, exactly as add_tap_event
-        # and add_outage_event do -- see EVENT_WINDOW_S.
+        # Whether the absolute time must be folded into PF's current 60 s
+        # event window (see EVENT_WINDOW_S) depends on HOW the event object
+        # reached the calculation, and the two paths are opposites:
         #
-        # This was missing until 2026-08-20 and was invisible because every
-        # caller armed at a calculation clock of 0, where the fold is the
-        # identity. The Ch. 9.1 battery started pre-settling each case to
-        # 900 s before arming, and every parameter case then returned
-        # T_s = 0.00 s: the event was written at absolute 905 s, PF read it
-        # relative to the window base 900 s, and it was due at 1805 s -- past
-        # the end of a 965 s run, so it never fired. Tap and outage cases were
-        # unaffected because they already folded, which is what localised it.
-        window = EVENT_WINDOW_S * math.floor(
-            getattr(self, "_sim_time", 0.0) / EVENT_WINDOW_S)
-        ev.SetAttribute("time", float(t_event) - window)
+        #   * mid-run objects -- a fresh ``CreateObject`` or a slot taken from
+        #     the non-persistent pool, admitted across ComSim barriers -- are
+        #     read against the current window base and MUST be folded.  This
+        #     is the Ch. 9.1 battery, which pre-settles each case to 900 s and
+        #     then arms: unfolded, the event was written at absolute 905 s,
+        #     came due at 1805 s and never fired inside a 965 s run, and every
+        #     parameter case reported T_s = 0.00 s (2026-08-20).
+        #   * PRE-CREATED persistent slots exist before ``ComInc``, so the
+        #     calculation knows them from the start and reads their times
+        #     ABSOLUTELY.  Folding those writes every dispatch at t >= 60 s
+        #     into the past, where PF silently drops it.
+        #
+        # The fold was applied to both paths on 2026-08-20 and broke the RMS
+        # co-simulation, which arms persistent slots every 20 s over 3600 s:
+        # from t = 60 s onward NOTHING reached the plant -- no DER qset, no
+        # AVR usetp, no OLTC ntapcmd -- and the run coasted open-loop on its
+        # ElmFile profiles while the controllers integrated against a plant
+        # that could not respond (run 0567: every qset frozen after t = 42 s,
+        # DSO_2/DSO_4 taps wound up to the +-13 rail).  Measured directly with
+        # an eight-step tap ladder on NC3W_DSO_4_t11: folded, taps 3-8 move
+        # nothing; unfolded, all eight land at ~9.5 Mvar/step.
+        if persistent:
+            ev.SetAttribute("time", float(t_event))
+        else:
+            window = EVENT_WINDOW_S * math.floor(
+                getattr(self, "_sim_time", 0.0) / EVENT_WINDOW_S)
+            ev.SetAttribute("time", float(t_event) - window)
         self._track_persistent_arm(ev, t_event)
 
     def add_load_event(self, target, d_p_percent: float, d_q_percent: float,

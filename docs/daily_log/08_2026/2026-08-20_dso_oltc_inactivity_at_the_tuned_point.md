@@ -766,3 +766,382 @@ the *less* under-damped of the two on the continuous block, by a factor 2.
 | `--dso-oltc-active --gamma-q 1`, `scale_q=False` | voltage + Q | 132 - 297 Mvar | no |
 
 `tests/test_dso_v_relief_pairing.py`: 12 passed.
+
+---
+
+# Addendum 9 — full-suite result
+
+`pytest tests/test_dso_v_relief_pairing.py tests/tuning` (166 + 8 tests,
+**49 min**) was launched mid-session, so its tree predates the `g_q` leg and
+still had `DSO_V_RELIEF_FACTORS = {1.0, 1.0}`. Result: **6 failed, 168 passed**.
+
+Five are that stale snapshot and pass on the current tree
+(`tests/test_dso_v_relief_pairing.py`, 12 passed):
+
+* 4x `test_relief_holds_the_oltc_loop_gain[DSO_2|DSO_4 x tuned|per_area]` --
+  the blanket `assert dso_gamma_oltc_q == 0.0`, since replaced (§29);
+* `test_relief_is_scoped_to_the_spread_limited_areas` -- it asserts
+  `set(cfg.dso_g_v_per_area) == set(DSO_V_RELIEF_FACTORS)`, which cannot hold
+  while the factors are all 1.0 and the relief returns `cfg` untouched. Passes
+  again now the factors are back at 20.
+
+## 33 — The sixth is pre-existing and unrelated
+
+`tests/tuning/stability_certificate/test_hierarchy.py::test_default_factory_reads_run_multi_system_ofo_parameters`
+asserts the weights of `make_config` (**not** `make_config_tuned`):
+
+| field | test asserts | `make_config` carries |
+|---|---|---|
+| `g_w_der` | 50 | **15** |
+| `g_w_pcc` | 200 | **50** |
+| `g_w_gen` | 5e9 | **1e9** |
+| `g_w_dso_der` | 1000 | **800** |
+| `g_w_dso_oltc` | 150 | **200** |
+
+**This predates the session.** At commit `6498295` -- before any work in this
+log -- `make_config` already read `g_w_der=15,  # 50   x 0.3`,
+`g_w_pcc=50,  # 150  x 0.3`, `g_w_dso_der=800, # 1000`, `g_w_dso_oltc=200, #200`.
+The trailing comments are the very literals the test asserts, so the test is
+pinned to the pre-`x 0.3`-fold operating point and has been failing since that
+fold landed. Nothing in this session touched `make_config`.
+
+Not fixed here: which of the two is authoritative is a decision, not a typo --
+the same class of question as `make_config_tuned`'s `g_w_dso_oltc = 150` against
+the archived optimum's 392.64 (§13a). Either the test is updated to the folded
+weights, or `make_config` is, but not silently as a side effect of an unrelated
+change.
+
+**Confirmed by the second run** (`pytest tests/tuning`, 166 tests, 51 min,
+against the tree with the `g_q` leg and the factors back at 20):
+**1 failed, 165 passed** -- and the one failure is exactly this stale test.
+Every other failure in the first run was the mid-session snapshot, as triaged
+above. Together with `tests/test_dso_v_relief_pairing.py` (12 passed) that is
+the whole picture: nothing in this session's changes broke a test.
+
+---
+
+# Addendum 10 — the Q leg gets its own factor (x20 oscillated)
+
+`--dso-oltc-active --gamma-q 1` produced massive oscillations. That is the
+failure §31 predicted from the design number, not a surprise: at the full x20
+Q leg the relieved area's objective is x20 against a `g_w_dso_der` that does
+not move, and Stage 0's designed `g_w_dso_der` goes to 5190 against the 1097
+the candidate ships -- **4.7x under-damped**.
+
+## 34 — API
+
+`scale_q` now takes `bool | float | Mapping[str, float]`, resolved by
+`configs.config._q_relief_factor` (extracted so the rule is testable alone):
+
+| `scale_q` | Q leg |
+|---|---|
+| `False` / `None` | none -- every study before 2026-08-20 |
+| `True` | the voltage factor; the two cancel and the Q threshold is *exactly* the unrelieved one |
+| a number | that factor for every relieved area |
+| a mapping | per-area factors; areas absent get no leg |
+
+* `DSO_V_RELIEF_SCALE_Q` **= 5.0** (was `True`, i.e. 20).
+* `make_config_dso_oltc_active(gamma_oltc_q=..., scale_q=...)` -- `scale_q=None`
+  means "module default when gamma > 0, else off".
+* CLI **`--q-factor X`** overrides it for the `--dso-oltc-active` path and tags
+  the results directory `..._q5`. `--q-factor 0` disables the leg. It raises
+  rather than being ignored on the default path, where the relief is built at
+  config-construction time and cannot be re-derived after the fact.
+
+## 35 — The trade curve, measured
+
+Candidate `ac8941a46134`, `gamma = 1`, shipped `g_w_dso_der = 1097.2`.
+Threshold ranges are over the three tap columns of each area.
+
+| Q factor | DSO_1 [Mvar] | DSO_2 [Mvar] | DSO_3 [Mvar] | DSO_4 [Mvar] | designed `g_w_dso_der` | shortfall |
+|---|---|---|---|---|---|---|
+| 0 (off) | 4.6 – 6.1 | 131.8 – 185.3 | 3.5 – 4.5 | 216.7 – 297.5 | 1172 | **1.1x** |
+| 2 | 4.6 – 6.1 | 65.9 – 92.7 | 3.5 – 4.5 | 108.3 – 148.7 | 1649 | 1.5x |
+| 3 | 4.6 – 6.1 | 44.0 – 61.8 | 3.5 – 4.5 | 72.2 – 99.2 | 2016 | 1.8x |
+| **5** | 4.6 – 6.1 | **26.4 – 37.1** | 3.5 – 4.5 | **43.4 – 59.5** | 2599 | **2.4x** |
+| 10 | 4.6 – 6.1 | 13.2 – 18.6 | 3.5 – 4.5 | 21.7 – 29.8 | 3672 | 3.3x |
+| 20 (= voltage factor) | 4.6 – 6.1 | 6.6 – 9.3 | 3.5 – 4.5 | 10.9 – 14.9 | 5190 | 4.7x |
+
+`DSO_1` / `DSO_3` are untouched throughout -- they carry no relief, so the leg
+does not reach them. The whole trade is on the two relieved areas, and the
+threshold scales exactly as `v_factor / q_factor` (locked as an identity in the
+tests).
+
+**At factor 5 the DSO_2/DSO_4 taps commit at 26-60 Mvar.** That is far above
+the ~6 Mvar of normal interface-Q RMSE, so they will engage only on a real
+disturbance -- which may well be the right behaviour, but it is *not* the same
+fleet as DSO_1/DSO_3 at 3.5-6.1. Uniformity and damping are in direct
+opposition here and factor 5 buys damping.
+
+**The other lever is still open and is the one that does not trade anything
+away:** raise `g_w_dso_der` toward its design value instead of lowering the Q
+factor. At factor 20 the design asks 5190; the candidate ships 1097. Setting
+`g_w_dso_der = 5190` would keep the 6.6-14.9 Mvar thresholds *and* remove the
+under-damping -- at the cost of a slower continuous block, and of departing
+from the archived candidate on a second weight. Untested.
+
+## 36 — A test of mine was vacuous; fixed
+
+`test_relief_holds_the_oltc_q_threshold_when_the_tap_tracks_q` (§29) divided
+**both** the OLTC base and the `g_q` base by the voltage factor. With a Q leg
+at a different factor the same number appears on both sides and cancels, so the
+assertion held for *every* factor -- it passed at 5 while claiming to check that
+the threshold was preserved. The two bases are not symmetric:
+
+* `g_w_dso_oltc` may carry a per-area analytic design (`make_config_per_area`),
+  so its base is the area's own entry / voltage factor;
+* `g_q` has no per-area design, so its base is the global scalar.
+
+Fixed, and it now asserts the identity `inflation == v_factor / q_factor` plus
+`q_factor <= v_factor`. Mutation-checked: passes at 5, fails with the leg
+dropped, fails at a Q factor above the voltage factor. A second test
+`test_q_leg_at_the_voltage_factor_preserves_the_threshold_exactly` constructs
+`scale_q=True` directly rather than reading the module default, so the
+cancellation identity stays locked after `DSO_V_RELIEF_SCALE_Q` is retuned
+again. **13 passed.**
+
+---
+
+# Addendum 11 — PROPOSAL: per-area `gamma_oltc_q` as a gain, not the `g_q` leg
+
+Manuel: *"can't we somehow only increase the pressure of q deviation on OLTCs,
+not on DER?"* Yes -- and it is the knob that already exists. **Not implemented;
+this is a proposal, per the architectural-change rule.**
+
+## 37 — Why the `g_q` leg was the wrong instrument
+
+`g_q` is one objective weight for the whole DSO controller. Raising it raises
+the Q-tracking gradient on **every** column:
+
+    grad_f += 2 g_q (Q - Q_set)^T dQ/du          # u = [DER... , OLTC...]
+
+so the DER block gets the same x-factor as the tap. That is the oscillation
+(§35: designed `g_w_dso_der` 1172 -> 5190 at factor 20, against 1097 shipped).
+
+`gamma_oltc_q` is already per-role: it scales the Q gradient on the **OLTC
+columns only** (`dso_controller.py:1216-1224`), leaving the DER columns exactly
+as they are. It is precisely "pressure on the tap, not on the DER".
+
+## 38 — Extrapolated thresholds
+
+Exact algebra from the gamma = 1 measurement, splitting the self-cost by
+`voltage_share`:
+
+    engage_Q(g) = ( g_w + |a_v|^2 + g^2 |a_q|^2 ) / ( 2 g_q g |dQ_tr/ds| )
+
+| area | g=1 | g=3 | g=5 | g=10 | **g=20** |
+|---|---|---|---|---|---|
+| DSO_1 | 4.6 – 6.1 | 1.7 – 2.2 | 1.3 – 1.5 | 1.1 – 1.2 | 1.3 – 1.6 |
+| DSO_2 | 131.8 – 185.3 | 44.1 – 61.9 | 26.6 – 37.2 | 13.7 – 18.9 | **7.6 – 10.0** |
+| DSO_3 | 3.5 – 4.5 | 1.4 – 1.7 | 1.1 – 1.2 | 1.1 – 1.3 | 1.6 – 2.0 |
+| DSO_4 | 216.7 – 297.5 | 72.3 – 99.2 | 43.5 – 59.6 | 22.0 – 30.0 | **11.5 – 15.3** |
+
+At `gamma = 20` on the relieved areas only, DSO_2/DSO_4 land at 7.6-15.3 Mvar --
+**the same place the `g_q` x20 leg put them (6.6-14.9)** -- while the designed
+`g_w_dso_der` stays at its gamma = 1 value of **1172** (1.1x shortfall) instead
+of 5190 (4.7x), because gamma never touches a DER column. That is the whole
+trade removed rather than balanced.
+
+Two things to note in that table:
+
+* **It must be per-area.** A *global* gain crushes DSO_1/DSO_3 to 1.1-2.2 Mvar,
+  below their own ~6 Mvar tracking error -- those taps would chatter.
+* **It is not monotone.** DSO_1 bottoms at ~1.12 Mvar around g=10 and rises
+  again to 1.33 at g=20: the `g^2 |a_q|^2` self-cost eventually outgrows the
+  gradient. Any tuning of this knob has to be told that.
+
+## 39 — What it would cost to build
+
+Four changes, all in shared code, which is why this is a proposal:
+
+1. `DSOControllerConfig.__post_init__` validates `0 <= gamma_oltc_q <= 1`
+   (`dso_controller.py:196`) -- the bound would have to open upward, with a new
+   documented ceiling.
+2. `_build_gradient` applies gamma only `if gamma < 1.0`
+   (`dso_controller.py:1217`); the `else` passes the raw matrix, so `gamma = 20`
+   is presently a **no-op**, cap or no cap. Same one-line condition.
+3. `stage_0_preconditioning.py:321` has the identical `if gamma < 1.0` guard and
+   must move with it, or Stage 0 and the MIQP disagree about the tap's
+   self-cost -- the exact failure that guard was written to prevent.
+4. A per-area override (`dso_gamma_oltc_q_per_area`) plus runner plumbing,
+   mirroring `dso_g_v_per_area` / `dso_g_q_per_area`.
+
+(1)-(3) change the *meaning* of `gamma_oltc_q` from "role-based attenuation" to
+"role-based gain". Every existing study runs it at 0.0 and is unaffected in
+value, but the field's contract and its docstring change, and
+`tuning_mc.stage_0_preconditioning` is on the campaign path.
+
+## 40 — Relationship to what is already in the tree
+
+The `g_q` leg (§34) stays useful and is not superseded: it is the correct
+instrument when the intent is "this area's interface-Q matters more", which is
+an *objective* statement. The gamma gain is the correct instrument for "this
+area's tap should react to Q sooner", which is an *allocation* statement. They
+are different claims and the thesis should not conflate them.
+
+If the gamma route is built, `DSO_V_RELIEF_SCALE_Q` should go back to `False`
+for the tap-behaviour experiments -- carrying both would double-count.
+
+---
+
+# Addendum 12 — per-area `gamma_oltc_q` as a gain: built, designed for 5-10 Mvar
+
+Implements §37-§39. `DSO_V_RELIEF_SCALE_Q` is back to **`False`** -- **the relief
+scales voltage only**, as originally specified. The Q side is now handled by the
+one knob that does not touch the DER block.
+
+## 41 — What changed
+
+| file | change |
+|---|---|
+| `controller/dso_controller.py` | new `GAMMA_OLTC_Q_MAX = 100.0`; validation bound `[0, 1]` -> `[0, 100]`; `_build_gradient` guard `if gamma < 1.0` -> `!= 1.0` |
+| `tuning_mc/stage_0_preconditioning.py` | same guard flip, so Stage 0 and the MIQP agree on `\|\|a_i\|\|^2` |
+| `configs/config.py` | new `MultiTSOConfig.dso_gamma_oltc_q_per_area` |
+| `experiments/runners/multi_tso_dso.py` | applies it to `DSOControllerConfig.gamma_oltc_q`, next to the `g_v` / `g_q` blocks, with the same cache invalidation and bound check |
+| `experiments/run_multi_system_ofo.py` | `DSO_GAMMA_OLTC_Q_PER_AREA` table; `DSO_V_RELIEF_SCALE_Q = False` |
+
+The guard flip is the part that mattered most: **both sites read
+`if gamma < 1.0`, so a gain was a silent no-op**, cap or no cap. Fixing only one
+would have been worse than fixing neither -- Stage 0 would design
+`g_w_dso_oltc` against a self-cost the MIQP never sees.
+
+## 42 — The design
+
+Solving each area's three tap columns for a 5-10 Mvar band, with
+
+    engage_Q(g) = ( g_w + ||a_v||^2 + g^2 ||a_q||^2 ) / ( 2 g_q g |dQ_tr/ds| )
+
+| area | gamma | **measured band [Mvar]** | at gamma = 1 | `gamma*` (turning point) | floor |
+|---|---|---|---|---|---|
+| DSO_1 | **0.7** | **5.37 – 7.13** | 4.6 – 6.1 | 8.0 – 10.9 | 1.11 – 1.17 |
+| DSO_2 | **25.0** | **5.58 – 6.95** | 131.8 – 185.3 | 51 – 73 | 5.05 – 5.33 |
+| DSO_3 | **0.5** | **5.66 – 7.25** | 3.5 – 4.5 | 6.1 – 8.0 | 1.11 – 1.15 |
+| DSO_4 | **40.0** | **5.76 – 6.97** | 216.7 – 297.5 | 82 – 117 | 5.07 – 5.62 |
+
+Measured end-to-end through Stage 0 on the runner's own config, not
+extrapolated. All four land in band and the fleet is uniform to **5.4 - 7.3
+Mvar**, against 3.5 - 297.5 before.
+
+**DSO_1 and DSO_3 need gamma below 1.** Unrelieved, they already commit under
+5 Mvar at gamma = 1, so the correct move there is the original *attenuation* --
+the same field, used the way it was originally meant. DSO_2 and DSO_4 need
+25-40 purely to undo the x20 the relief puts on their `g_w_dso_oltc`. **No
+single global gamma is right**, which is why the field had to become per-area.
+
+The floor column is worth keeping: `2 sqrt(A B)/C` is the *best* threshold each
+column can reach at any gamma, and on the relieved areas it is 5.05-5.62 Mvar.
+**5 Mvar is close to the physical limit of this knob on DSO_2/DSO_4** -- asking
+for less would mean a gamma past `gamma*`, where the threshold rises again.
+
+## 43 — The cost this time: none
+
+Designed `g_w_dso_der` at each area's designed gamma: **1170**, for all four.
+Against 1172 at gamma = 1 with no compensation, and 5190 with the `g_q` x20 leg.
+
+    instrument                     designed g_w_dso_der    vs 550 in service
+    none (gamma = 1)                       1172                  2.1x
+    gamma per-area (in service now)        1170                  2.1x
+    g_q leg x5                             2599                  4.7x
+    g_q leg x20                            5190                  9.4x
+
+Gamma multiplies only the OLTC columns of `dQ/du`, so the DER columns are
+bit-for-bit unchanged and the under-damping that produced the oscillation is
+simply absent. This is the trade removed rather than balanced.
+
+## 44 — Guards
+
+`tests/test_dso_v_relief_pairing.py`, **15 passed**:
+
+* `test_relief_does_not_inflate_the_oltc_q_threshold` -- rewritten again. Its
+  previous form *demanded the `g_q` leg*, a premise this addendum supersedes.
+  It now accepts **either** instrument and locks the outcome: a relieved area's
+  tap must not end up harder to trigger on Q than with no relief. Mutation
+  check -- as shipped DSO_2 0.800 / DSO_4 0.500 (pass); with the gamma table
+  wiped both read 20.0 (fail).
+* `test_per_area_gamma_is_within_the_controller_bound` -- the table lives in an
+  experiment module and the cap in the controller; nothing else connects them.
+* `test_gamma_gain_is_applied_by_both_the_controller_and_stage_0` -- asserts
+  neither module still carries `if gamma < 1.0`. This is the regression that
+  would make the whole addendum a no-op while looking correct.
+
+Campaign path re-verified bit-for-bit: `build_config` on `fe010aa3ead1` returns
+`dso_gamma_oltc_q_per_area = None`, `dso_g_q_per_area = None`, five weights
+exact to 1e-12. Full `tests/tuning` running.
+
+## 45 — Open
+
+* The table was designed against `make_config_tuned` (`g_w_dso_oltc = 150`,
+  3000 per relieved area). `make_config_dso_oltc_active` carries 183.11 /
+  3662.24, so its band is close but not identical; the factory reuses the same
+  table and that is flagged in its comment. Re-derive before quoting numbers
+  for the candidate.
+* One operating point (2026-01-05 08:00). H moves with the boundary equivalent,
+  the zone partition, the start time and `g_w_dso_oltc`; all four invalidate
+  the table.
+* `gamma_oltc_q`'s contract changed from "attenuation" to "gain". Every existing
+  study runs it at 0.0 so no result moves, but the field's meaning did, and
+  `tuning_mc.stage_0_preconditioning` is on the campaign path.
+
+---
+
+# Addendum 13 — the candidate weights *with* the per-area gamma
+
+Manuel: *"i want to run with ac8941a46134 and the per area gamma"*.
+
+```
+python experiments/run_multi_system_ofo.py --dso-oltc-active --gamma-q 1
+```
+
+-> `results/run_multi_system_ofo_dso_oltc_active_gammaq1/`
+
+Verified: all five `ac8941a46134` weights and `dso_g_v` exact to 1e-12;
+`dso_gamma_oltc_q_per_area` carries the table; `dso_g_q_per_area` is `None`
+(relief voltage-only). `--gamma-q 1` here does not set the acting gamma -- every
+DSO is in the table, so the flag's role is simply to switch the table on, since
+the factory couples it to `gamma_oltc_q > 0` to keep the no-flag call
+reproducing the archive.
+
+## 46 — Measured, and it is the better of the two
+
+| area | gamma | `ac8941a46134` + table | `make_config_tuned` + table |
+|---|---|---|---|
+| DSO_1 | 0.7 | **6.53 – 8.67** | 5.37 – 7.13 |
+| DSO_2 | 25 | **6.52 – 8.27** | 5.58 – 6.95 |
+| DSO_3 | 0.5 | **6.88 – 8.82** | 5.66 – 7.25 |
+| DSO_4 | 40 | **6.72 – 8.30** | 5.76 – 6.97 |
+| designed `g_w_dso_der` | | 1172 vs **1097 shipped = 1.1x** | 1170 vs 550 shipped = 2.1x |
+
+Both are inside the 5-10 Mvar band. The candidate is **better centred** (6.5-8.8
+vs 5.4-7.3, i.e. further from the 5 Mvar floor) **and better damped** -- its
+`g_w_dso_der = 1097.16` is within 1.1x of the design, against 2.1x for the 550
+`make_config_tuned` ships. The table was designed against the latter and
+transfers to the former without retuning; the ~20 % offset is just the higher
+`g_w_dso_oltc` (183.11 vs 150).
+
+## 47 — Weight provenance, since it keeps coming up
+
+`make_config_tuned` is **not** `ac8941a46134`. Rounded, it is `fe010aa3ead1`,
+the *selected* candidate -- except for one field that matches neither:
+
+| field | `make_config_tuned` | `ac8941a46134` | `fe010aa3ead1` (selected) |
+|---|---|---|---|
+| `g_w_der` | 10.2 | 14.4301 | 10.1716 |
+| `g_w_pcc` | 49.3 | 54.7788 | 49.3014 |
+| `g_w_dso_der` | 550 | 1097.1586 | 549.8818 |
+| `g_w_tso_oltc` | 3783 | 3783.0550 | 3783.0550 |
+| `g_w_dso_oltc` | **150** | 183.1121 | **392.6444** |
+| `dso_g_v` | 84140 | 100000 | 84139.5 |
+
+So the no-flag run is "the selected candidate, rounded, with a `g_w_dso_oltc`
+from neither" (§13a). `--dso-oltc-active` is the only path that reproduces an
+archived point exactly.
+
+## 48 — Banner corrected
+
+`main()`'s `--gamma-q` banner still warned that a gamma above 0 "invalidates the
+dso_v_authority relief argument" and that the pairing test "asserts gamma ==
+0.0". Both were fixed by §41-§44 and the text would now mislead. Rewritten: it
+prints the per-area table actually in force, states that the global value is
+only a fallback, keeps the one warning that does still hold (`g_w_dso_oltc` was
+designed at a particular gamma, so this is a diagnostic not a tuned point), and
+adds the non-monotonicity. 15 passed.

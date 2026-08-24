@@ -2977,13 +2977,18 @@ def run_multi_tso_dso(
                 )
 
     # ── Per-DSO interface-Q weight ───────────────────────────────────────────
-    # Third leg of the relief, written by ``apply_dso_v_relief(scale_q=True)``.
-    # Holding dso_g_v / g_w_dso_oltc preserves the OLTC's VOLTAGE threshold; the
-    # factor on g_w_dso_oltc is uncompensated in its INTERFACE-Q threshold, so
-    # without this a relieved area is Q-inert whenever dso_gamma_oltc_q > 0
-    # (measured 2026-08-20: 108-244 Mvar to commit, against ~6 Mvar of RMSE).
-    # Applied in the same place and the same way as dso_g_v_per_area so the two
-    # cannot drift apart.
+    # Set by hand (or by a parameter set), NOT by the voltage relief: the
+    # relief's Q leg was removed on 2026-08-21 and the relief now scales
+    # voltage only, as originally specified.
+    #
+    # It still matters that holding dso_g_v / g_w_dso_oltc preserves the OLTC's
+    # VOLTAGE threshold while leaving the factor on g_w_dso_oltc uncompensated
+    # in its INTERFACE-Q threshold, so a relieved area is Q-inert whenever
+    # dso_gamma_oltc_q > 0 (measured 2026-08-20: 108-244 Mvar to commit,
+    # against ~6 Mvar of RMSE).  The instrument for that is
+    # dso_gamma_oltc_q_per_area, which multiplies only the OLTC columns and so
+    # leaves every DER column alone.  Applied in the same place and the same
+    # way as dso_g_v_per_area so the two cannot drift apart.
     if getattr(config, "dso_g_q_per_area", None):
         if float(getattr(config, "dso_gamma_oltc_q", 0.0)) <= 0.0 and verbose >= 1:
             print(

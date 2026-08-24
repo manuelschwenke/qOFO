@@ -92,6 +92,8 @@ from pf.session import (  # noqa: E402
     get_all,
 )
 
+from pf.tap_ctrl import TMECH_DEFAULT_S  # noqa: E402
+
 logger = logging.getLogger("qofo.pf.plant")
 
 #: Q(V) dead-band half-width [pu] that disables the droop outright.  0.5 pu is
@@ -333,6 +335,11 @@ class PowerFactoryPlant:
         self._n_events = 0
         #: EvtTap shunt-step count; >1 makes the trajectory unreliable.
         self._shunt_events = 0
+        #: ``ntapcmd`` events dispatched; gates :meth:`_verify_taps`.
+        self._tap_events = 0
+        #: Simulation time of the last tap command per ``(table, index)``, so
+        #: the verification can wait out the DSL's mechanical travel.
+        self._tap_cmd_t: Dict[Tuple[str, int], float] = {}
         # Outage tolerance in read_y: PF drops an element's ``m:`` result
         # variables when it leaves service. ``_seen_in_service`` records
         # elements that have read successfully at least once, so a failure
@@ -673,6 +680,21 @@ class PowerFactoryPlant:
         # block where the plant already sits.
         for (table, idx), ctrl in self._tapctrl.items():
             shadow = self._tap2w if table == "trafo" else self._tap3w
+            # The DSL's OWN ``ntapcmd`` parameter must be re-seeded too, not
+            # only the event slots: ``inc(x1) = ntapcmd`` initialises the
+            # block from it at ComInc, and the composites persist in the
+            # project between runs, so whatever the LAST run left there is
+            # where this run's tap starts.  Observed 2026-08-21 in run 0567:
+            # four couplers carried a stale ntapcmd = -1 and PF pulled them
+            # to -1 at t = 0.01 s while the plant's shadow -- and therefore
+            # every controller -- read 0.
+            from pf.tap_ctrl import set_tap_params  # noqa: E402
+            try:                       # keep this composite's own Tmech
+                _tmech = float(ctrl.GetAttribute("params:1"))
+            except Exception:          # noqa: BLE001
+                _tmech = TMECH_DEFAULT_S
+            set_tap_params(ctrl, ntapcmd=float(shadow.get(idx, 0)),
+                           tmech_s=_tmech or TMECH_DEFAULT_S)
             self.ctx.ensure_param_event_capacity(
                 ctrl, "ntapcmd", slots,
                 initial_value=float(shadow.get(idx, 0)))
@@ -1075,6 +1097,8 @@ class PowerFactoryPlant:
             self.ctx.add_param_event(ctrl, "ntapcmd", float(target),
                                      self.t + self._EVENT_EPS_S)
             self._n_events += 1
+            self._tap_events += 1
+            self._tap_cmd_t[(table, idx)] = self.t
         shadow[idx] = target
         col = "trafo" if table == "trafo" else "trafo3w"
         getattr(self.net, col).at[idx, "tap_pos"] = target
@@ -1109,6 +1133,65 @@ class PowerFactoryPlant:
                     f"docs/daily_log/07_2026/2026-07-31_rms_tap_control_gate_e_result.md. "
                     f"Results from this run are invalid.")
 
+    #: Tolerance [taps] on the OLTC verification below.  The DSL slides the
+    #: tap to its command with ``Tmech`` = 5 s, so after a full dispatch
+    #: interval (>= 20 s = 4 Tmech) the residual is exp(-4) ~ 0.018 taps per
+    #: unit step.  Measured 2026-08-21 over a six-step ladder on
+    #: NC3W_DSO_4_t11 and MT_g0_t0: 0.9595, 1.9790, 2.9794, 3.9794, 4.9794,
+    #: 5.9794 against commands 1..6, i.e. |error| <= 0.041.  0.25 leaves an
+    #: order of magnitude of headroom and still catches a single lost tap.
+    _TAP_VERIFY_TOL = 0.25
+
+    #: Seconds a tap must have had to travel before it is verified.  Below
+    #: 4 ``Tmech`` the mechanical lag alone exceeds :attr:`_TAP_VERIFY_TOL`
+    #: (at 5 s of travel the residual is 1 - exp(-1) = 0.63 taps), so a plant
+    #: dispatched faster than this is skipped rather than failed.
+    _TAP_VERIFY_SETTLE_S = 4.0 * TMECH_DEFAULT_S
+
+    def _verify_taps(self) -> None:
+        """Assert the plant executed the OLTC taps we commanded.
+
+        The same silent-divergence argument as :meth:`_verify_shunt_steps`,
+        and the defect it exists for is not hypothetical: between 2026-08-20
+        and 2026-08-21 every ``ntapcmd`` event from t >= 60 s was written into
+        PowerFactory's past and dropped (see ``add_param_event`` in
+        pf/screening.py).  Nothing complained.  The shadow store and the
+        mirror net kept the commanded position, the controllers saw no
+        voltage response to their taps, and the DSO OLTCs wound up to the
+        +-13 rail while the plant sat at 2 -- a plausible-looking closed-loop
+        trajectory that was entirely fictitious.
+
+        ``c:nntap`` (ElmTr2) and ``c:n3tap_h`` (ElmTr3) are the positions PF
+        actually holds during RMS, and both track the DSL output live; the
+        *input* attributes ``nntap`` / ``n3tap_h`` do NOT move in RMS and are
+        useless here.  The comparison is a float one because of the
+        mechanical lag -- see :attr:`_TAP_VERIFY_TOL`.
+        """
+        if not self._tap_events:
+            return                              # nothing dispatched yet
+        for table, objs, shadow, var in (
+                ("trafo", self._tr2, self._tap2w, "c:nntap"),
+                ("trafo3w", self._tr3, self._tap3w, "c:n3tap_h")):
+            for idx, obj in objs.items():
+                if (table, idx) not in self._tapctrl:
+                    continue                    # not DSL-driven; not ours
+                t_cmd = self._tap_cmd_t.get((table, idx))
+                if (t_cmd is not None
+                        and self.t - t_cmd < self._TAP_VERIFY_SETTLE_S):
+                    continue                    # still travelling
+                want = float(shadow[idx])
+                try:
+                    got = float(obj.GetAttribute(var))
+                except Exception:               # noqa: BLE001
+                    continue                    # not calc-relevant; skip
+                if abs(got - want) > self._TAP_VERIFY_TOL:
+                    raise PFSessionError(
+                        f"{table}[{idx}] ({obj.loc_name}): commanded tap "
+                        f"{want:g} but the plant holds {got:.3f} at "
+                        f"t={self.t:.1f}s. An ntapcmd parameter event did not "
+                        f"land -- see add_param_event / EVENT_WINDOW_S in "
+                        f"pf/screening.py. Results from this run are invalid.")
+
     def advance(self, duration_s: float) -> None:
         """Continue the RMS simulation by ``duration_s`` seconds.
 
@@ -1129,6 +1212,7 @@ class PowerFactoryPlant:
         self.t += float(duration_s)
         self.ctx.simulate(self.t)
         self._verify_shunt_steps()
+        self._verify_taps()
         # Live plot: an API-driven ComSim writes into ElmRes but never asks
         # the desktop to repaint, so a visible plot page stays empty until
         # the run ends.  DoAutoScale() forces a redraw with the data written

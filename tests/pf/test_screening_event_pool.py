@@ -269,3 +269,33 @@ def test_prepare_discovers_existing_pool_and_removes_unmanaged_events():
         event.attributes["time"] == EVENT_INERT_TIME_S
         for event in retained
     )
+
+
+def test_param_event_window_fold_applies_only_off_the_persistent_pool():
+    """The 60 s window fold is a *mid-run object* quirk, not an EvtParam one.
+
+    Pre-created persistent slots exist before ComInc and carry ABSOLUTE
+    times; folding them writes every dispatch at t >= 60 s into the past,
+    where PowerFactory silently drops it.  Applying the fold to both paths
+    (2026-08-20) left the RMS co-simulation open-loop from t = 60 s onward.
+    Objects taken from the non-persistent pool still need the fold -- that is
+    the Ch. 9.1 battery, which arms after a 900 s pre-settle.
+    """
+    # Persistent pool: absolute time, no fold, at any calculation clock.
+    ctx = _context(strict=False, persistent=True)
+    target = _Target("qvpre")
+    for clock, t_event in ((0.0, 0.5), (60.0, 60.5), (1000.0, 1000.5)):
+        ctx._sim_time = clock
+        ctx.add_param_event(target, "qset", 0.1, t_event)
+        assert ctx.evt_folder.events[-1].attributes["time"] == t_event
+
+    # Non-persistent pool: folded into the current 60 s window.
+    ctx = _context(strict=True, persistent=False)
+    target = _Target("qvpre")
+    ctx.preallocate_param_events(target, "qset", 2, initial_value=-0.1)
+    ctx._sim_time = 900.0
+    ctx.add_param_event(target, "qset", 0.1, 905.0)
+    assert ctx.evt_folder.events[0].attributes["time"] == 905.0 - 900.0
+    ctx._sim_time = 0.0
+    ctx.add_param_event(target, "qset", 0.2, 5.0)
+    assert ctx.evt_folder.events[1].attributes["time"] == 5.0

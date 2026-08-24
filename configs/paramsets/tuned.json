@@ -1,0 +1,54 @@
+{
+  "name": "tuned",
+  "title": "2026-08-19 campaign optimum with DSO-4 damping correction",
+  "description": [
+    "The weight set the tuning_mc campaign selected, lifted out of",
+    "experiments/run_multi_system_ofo.make_config_tuned() on 2026-08-21.",
+    "The archived campaign base is global: its eval carries zone_g_w_class = null.",
+    "A post-selection safety overlay raises only DSO_4's continuous-DER weight.",
+    "Overlays make_config(); anything absent here keeps the runner value."
+  ],
+  "provenance": {
+    "source": "tuning_mc campaign 2026-08-19; selected candidate fe010aa3ead1",
+    "notes": [
+      "g_w_dso_der 550 is the campaign optimum 549.88 (was 617).",
+      "DSO_4 overrides dso_der to 828.3682, the maximum of its ten Stage-0",
+      "column requirements; this removes the measured period-2 continuous loop.",
+      "Validation: docs/daily_log/08_2026/2026-08-21_dso4_damping_b1_b2_corrected.md",
+      "dso_g_v 84140 = the 1e5 baseline x dso_g_v_ratio 0.841, the parked corner.",
+      "dso_gamma_oltc_q_per_area was designed 2026-08-20 for a 5-10 Mvar tap",
+      "commit band and is NOT monotone in gamma -- engage_Q turns around at",
+      "gamma* = sqrt((g_w + ||a_v||^2)/||a_q||^2), measured 8.0-10.9 on DSO_1,",
+      "6.1-8.0 on DSO_3, 51-73 on DSO_2 and 82-117 on DSO_4. Re-derive it after",
+      "any change to the boundary equivalent, the zone partition, the start",
+      "time or g_w_dso_oltc: all of them move H, and the design is a",
+      "function of H.",
+      "DSO_1 and DSO_3 need gamma BELOW 1 -- unrelieved, they already commit",
+      "under 5 Mvar at gamma = 1. DSO_2 and DSO_4 need 25-40 purely to undo the",
+      "x20 the voltage relief puts on their g_w_dso_oltc. A single global",
+      "number cannot suit both pairs.",
+      "Full working: docs/daily_log/08_2026/2026-08-20_dso_oltc_inactivity_at_the_tuned_point.md"
+    ]
+  },
+  "fields": {
+    "n_total_s": 86400.0,
+    "g_v": 1e7,
+    "g_q": 250,
+    "dso_g_v": 84140,
+    "g_w_der": 10.2,
+    "g_w_pcc": 49.3,
+    "g_w_gen": 1e9,
+    "g_w_dso_der": 550,
+    "g_w_dso_oltc": 150,
+    "dso_g_w_class": {
+      "DSO_4": {
+        "dso_der": 828.3682036634343
+      }
+    },
+    "g_w_tso_oltc": 3783,
+    "shunt_int_g_w": 100,
+    "precondition_lambda_target_tso": 0.5012,
+    "precondition_lambda_target_dso": 0.8509,
+    "precondition_class_scales": {"der": 0.13225, "pcc": 7.5617}
+  }
+}

@@ -175,6 +175,49 @@ class MeasurementNoiseConfig:
             raise ValueError("power_phase_angle_deg must be less than 90")
 
 
+# ---------------------------------------------------------------------------
+#  Lazy defaults
+# ---------------------------------------------------------------------------
+#  Both build objects that live in packages this module must not import at
+#  import time (``sensitivity.network_reduction`` pulls in pandapower;
+#  ``sbx_h`` is a coordination layer).  A ``default_factory`` defers the
+#  import to the first config that is actually constructed.
+
+def _thevenin_k_per_corridor() -> Dict[Tuple[int, int], float]:
+    """Measured per-corridor Thevenin ``k`` (007f) -- default for
+    :attr:`MultiTSOConfig.tie_thevenin_k`."""
+    from sensitivity.network_reduction import (  # noqa: E402
+        THEVENIN_K_PER_CORRIDOR,
+    )
+    return dict(THEVENIN_K_PER_CORRIDOR)
+
+
+def _default_sbx_config():
+    """The runner's SBX-H operating point -- default for
+    :attr:`MultiTSOConfig.sbx_config`.
+
+    Four values differ from the bare ``SBXConfig`` defaults, and they are the
+    hold/sag/need triple that decides when a corridor asks for support:
+    ``v_hold_tolerance_pu`` 0.0025 -> 0.005, ``v_sag_threshold_pu``
+    0.005 -> 0.01, ``n_need`` 3 -> 2 and ``release_threshold_pu``
+    ``None`` -> 0.001.  Everything else is the v6 default, restated so the
+    whole operating point reads in one place.
+    """
+    from sbx_h.config import SBXConfig  # noqa: E402
+    return SBXConfig(
+        k_sched=2,
+        tso_period_s=180.0,
+        q_band_mvar=10.0,
+        p_support_eur_per_mvarh=5.0,
+        v_hold_tolerance_pu=0.005,
+        v_sag_threshold_pu=0.01,
+        n_need=2,
+        release_threshold_pu=0.001,
+        escalation_cycles=4,
+        w_track_factor=1.0,
+    )
+
+
 @dataclass
 class MultiTSOConfig:
     """
@@ -328,7 +371,7 @@ class MultiTSOConfig:
     g_w_gen:        float = 1e7
     g_w_pcc:        float = 2.0
     g_w_tso_oltc:   float = 1.0
-    g_w_tso_shunt:  float = 10000.0
+    g_w_tso_shunt:  float = 3600.0  # runner default (2026-08-21)
     """Regularisation penalty on TSO bipolar shunt step changes.  Set
     relatively low (~ ``g_w_tso_oltc``) so the discrete actuator can
     engage when continuous DERs cannot satisfy voltage / Q targets, but
@@ -434,13 +477,13 @@ class MultiTSOConfig:
     entirely (the iteration-based ``int_cooldown`` and per-step
     ``local_oltc_max_step_per_dt`` clamp remain active)."""
 
-    oltc_cooldown_s_mt: Optional[float] = None
+    oltc_cooldown_s_mt: Optional[float] = 180.0  # runner default (2026-08-21)
     """Per-type override of ``oltc_cooldown_s`` for local-mode **machine
     2-winding (MT) gen-transformer OLTCs** (``net.trafo``).  ``None`` falls
     back to ``oltc_cooldown_s``.  Wall-clock seconds, so it is independent of
     ``dt_s`` (e.g. 180 -> at most one MT tap per 3 min)."""
 
-    oltc_cooldown_s_nc: Optional[float] = None
+    oltc_cooldown_s_nc: Optional[float] = 60.0  # runner default (2026-08-21)
     """Per-type override of ``oltc_cooldown_s`` for local-mode **coupler
     3-winding (NC) OLTCs** (``net.trafo3w``) at the TS--STS interface.
     ``None`` falls back to ``oltc_cooldown_s`` (e.g. 60 -> at most one NC tap
@@ -636,10 +679,17 @@ class MultiTSOConfig:
     boundary choice introduces.  See
     :func:`sensitivity.network_reduction.build_tso_local_net`."""
 
-    tie_thevenin_k: Any = 1.0
+    tie_thevenin_k: Any = field(
+        default_factory=lambda: _thevenin_k_per_corridor())
     """Boundary impedance for ``tie_boundary_equivalent="thevenin"``, as a
     multiple of the tie line's own series impedance.  ``k -> 0`` approaches
     the ``"pv"`` limit, ``k -> inf`` the ``"pq"`` limit.
+
+    Defaults to the MEASURED per-corridor table
+    :data:`sensitivity.network_reduction.THEVENIN_K_PER_CORRIDOR` (007f),
+    which is what every runner configuration uses; imported lazily so this
+    module keeps its pandapower-free import graph.  Pass a float to fall back
+    to one value for every corridor.
 
     Either a float (one value for every corridor) or a dict keyed by
     ``(line_idx, far_end_bus)`` for per-corridor tuning; unlisted corridors
@@ -783,6 +833,41 @@ class MultiTSOConfig:
 
     See ``docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md``."""
 
+    dso_v_relief_factors: Optional[Dict[str, float]] = field(
+        default_factory=lambda: {"DSO_2": 10.0, "DSO_4": 10.0})
+    """Per-area voltage-authority factors, applied automatically in
+    :meth:`__post_init__`.
+
+    This is the declarative form of what used to be a post-hoc
+    ``_apply_dso_v_relief(cfg)`` call at the end of every config factory.  Each
+    factor scales that area's :attr:`dso_g_v` **and** its ``dso_oltc`` entry in
+    :attr:`dso_g_w_class` by the same amount, so the OLTC loop gain
+    ``dso_g_v / g_w_dso_oltc`` is unchanged and the extra authority lands on
+    the continuous DER block.  ``None``, ``{}`` or all-unity = no relief.
+
+    Because the derivation is a pure function of :attr:`dso_g_v`,
+    :attr:`g_w_dso_oltc` and :attr:`g_q`, it is **idempotent**: a
+    ``dataclasses.replace`` re-runs it and lands on the same numbers instead of
+    squaring the factor, which is what the old call-it-twice ordering traps
+    were about.  Editing either base weight re-derives the pair automatically.
+
+    **Listed areas are the spread-limited ones, and that is the selection
+    rule.**  An HV network's internal voltage spread ``max_i V_i - min_i V_i``
+    is the part of its profile no tap changer can remove, so an area whose
+    spread is a large fraction of the 0.20 p.u. corridor has almost no margin
+    left to place.  Measured 2026-08-18, spread / max-V headroom:
+
+        DSO_1  0.015 / +0.048     DSO_2  0.117 / -0.001
+        DSO_3  0.037 / +0.039     DSO_4  0.147 / -0.001
+
+    Applying the factor to DSO_1 and DSO_3 as well bought 0.0016 and 0.0002
+    p.u. of ``V_max`` and cost DSO_3 **+53 %** interface-Q RMSE, so they are
+    deliberately absent: voltage authority on a network that is not
+    spread-limited only competes with interface-Q tracking.  Rule of thumb --
+    apply above ~0.10 p.u. of spread, leave alone below ~0.04.
+
+    See ``docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md``."""
+
     numerical_h_closed_loop: bool = True
     """When ``numerical_h=True``, controls the perturbation mode of
     :func:`sensitivity.numerical_h.compute_numerical_h_tso` /
@@ -838,7 +923,7 @@ class MultiTSOConfig:
     bus (set this True → drift persists)."""
 
     # -- Output ----------------------------------------------------------------
-    verbose:    int = 0
+    verbose:    int = 1  # runner default (2026-08-21)
     result_dir: str = str(Path(__file__).resolve().parents[1] / "results")
 
     # -- Live plot -------------------------------------------------------------
@@ -1222,7 +1307,7 @@ class MultiTSOConfig:
     ``~0.9``; OFO stable for ``< 2``).  One scalar fixes the closed-loop
     gain once the per-class shape is set by the column norms."""
 
-    precondition_lambda_target_tso: Optional[float] = None
+    precondition_lambda_target_tso: Optional[float] = 0.9  # runner default (2026-08-21)
     """Per-layer override of :attr:`precondition_lambda_target` for the TSO
     controllers; ``None`` falls back to the shared value.
 
@@ -1232,7 +1317,7 @@ class MultiTSOConfig:
     PCC-dominated, so ``g_w_pcc`` genuinely is its loop gain) but 0.021 in zone 1
     (OLTC-dominated), so a single shared target cannot be meaningful for both."""
 
-    precondition_lambda_target_dso: Optional[float] = None
+    precondition_lambda_target_dso: Optional[float] = 0.9  # runner default (2026-08-21)
     """Per-layer override of :attr:`precondition_lambda_target` for the DSO
     controllers; ``None`` falls back to the shared value.
 
@@ -1243,7 +1328,7 @@ class MultiTSOConfig:
     Measured over the full objective block, the DSO continuous loop runs at
     ``lambda = 0.91-1.15``."""
 
-    precondition_mode: str = "cap"
+    precondition_mode: str = "set"  # runner default (2026-08-21)
     """``'cap'`` (default) or ``'set'`` — see
     :func:`controller.gw_precondition.precondition_g_w`.
 
@@ -1254,7 +1339,7 @@ class MultiTSOConfig:
     the current ``lambda_max`` collapses to the same no-op, leaving the
     coordinate flat over much of its range (98 % of it, for TSO zone 1)."""
 
-    precondition_lambda_scope: str = "all"
+    precondition_lambda_scope: str = "preconditioned"  # runner default (2026-08-21)
     """``'all'`` (default) or ``'preconditioned'`` — which columns
     :attr:`precondition_lambda_target` refers to.
 
@@ -1267,7 +1352,8 @@ class MultiTSOConfig:
     ``integer_dominated`` at ``lambda_floor = 1.085`` while its continuous loop
     sits at 0.021)."""
 
-    precondition_class_scales: dict = field(default_factory=dict)
+    precondition_class_scales: dict = field(
+        default_factory=lambda: {"der": 1.0, "pcc": 1.0})  # runner default (2026-08-21)
     """Optional ``{actuator_class: factor}`` multiplying that class's
     provisional preconditioned weight before ``kappa`` is solved.
 
@@ -1277,7 +1363,7 @@ class MultiTSOConfig:
     (geometric mean 1) so shape and gain stay independent.  Empty = the analytic
     column-norm preconditioner, i.e. no preference."""
 
-    precondition_granularity: str = "class"
+    precondition_granularity: str = "column"  # runner default (2026-08-21)
     """``'class'`` (one shared ``g_w`` per actuator class, directly
     comparable to a BO-tuned ``g_w_<class>``) or ``'column'`` (per-variable
     ``g_w``, the full Zagorowska-``S`` diagonal, best conditioning)."""
@@ -1514,16 +1600,16 @@ class MultiTSOConfig:
     to :func:`network.ieee39.hv_networks.add_hv_networks`.  ``'msc_msr'``
     installs one capacitor (MSC) and one reactor (MSR) bank per DSO tertiary."""
 
-    tso_shunt_msc_n_levels: int = 4
+    tso_shunt_msc_n_levels: int = 2  # runner default (2026-08-21)
     """Number of MSC (capacitor) steps per bank (lattice ℓ ∈ {0 … N})."""
 
-    tso_shunt_msr_n_levels: int = 4
+    tso_shunt_msr_n_levels: int = 2  # runner default (2026-08-21)
     """Number of MSR (reactor) steps per bank (lattice ℓ ∈ {0 … N})."""
 
-    tso_shunt_msc_q_step_mvar: float = 50.0
+    tso_shunt_msc_q_step_mvar: float = 25.0  # runner default (2026-08-21)
     """MSC nameplate reactive power per step at V = 1 pu [Mvar] (magnitude)."""
 
-    tso_shunt_msr_q_step_mvar: float = 50.0
+    tso_shunt_msr_q_step_mvar: float = 25.0  # runner default (2026-08-21)
     """MSR nameplate reactive power per step at V = 1 pu [Mvar] (magnitude)."""
 
     shunt_int_g_w: float = 1.0
@@ -1536,17 +1622,17 @@ class MultiTSOConfig:
     NOTE: the boundary voltage sensitivity is small, so the gradient ``g_H`` is
     small — expect ``g_w`` well below 1 in practice."""
 
-    shunt_int_delta_mvar: float = 5.0
+    shunt_int_delta_mvar: float = 10.0  # runner default (2026-08-21)
     """Hysteresis half-width [Mvar].  Must satisfy
     ``0 < delta < q_step/2`` for both the MSC and MSR step sizes."""
 
-    shunt_int_t_dwell_s: float = 300.0
+    shunt_int_t_dwell_s: float = 30 * 60.0  # runner default (2026-08-21)
     """Minimum dwell time between commits of the same bank [s]."""
 
     shunt_int_daily_budget: int = 1E3
     """Maximum commits per bank within any rolling 24 h window."""
 
-    shunt_int_v_min_pu: float = 0.95
+    shunt_int_v_min_pu: float = 0.90  # runner default (2026-08-21)
     """Lower HV-boundary voltage limit [p.u.] used by the integrator's
     overshoot feasibility guard."""
 
@@ -1630,7 +1716,7 @@ class MultiTSOConfig:
 
 
     # ── Inter-organisational coordination mode ─────────────────────────────
-    coordination_mode: str = "none"
+    coordination_mode: str = "sbx_h"  # runner default (2026-08-21)
     """Inter-organisational coordination mode.
 
     Supported values are ``"none"`` (autonomous multi-zone baseline),
@@ -1640,13 +1726,22 @@ class MultiTSOConfig:
     aliases so existing SBX result files remain readable."""
 
 
-    sbx_config: Optional[object] = None
+    sbx_config: Optional[object] = field(
+        default_factory=lambda: _default_sbx_config())
     """SBX configuration (an ``sbx_h.config.SBXConfig`` instance) used when
-    ``coordination_mode="sbx_h"``.  ``None`` (default) builds
-    ``SBXConfig(tso_period_s=tso_period_s)`` with the v6 defaults.  Typed
-    loosely so this config module does not import the ``sbx_h`` package;
-    the runner validates the instance type and that its ``tso_period_s``
-    matches this config's."""
+    ``coordination_mode="sbx_h"``.  Typed loosely so this config module does
+    not import the ``sbx_h`` package at import time; the runner validates the
+    instance type and that its ``tso_period_s`` matches this config's.
+
+    The default is the runner's operating point (see
+    :func:`_default_sbx_config`), which differs from the bare ``SBXConfig``
+    defaults in four places.  Set it to ``None`` for
+    ``SBXConfig(tso_period_s=tso_period_s)`` with the plain v6 defaults.
+
+    It pins ``tso_period_s = 180 s``.  A config that changes
+    :attr:`tso_period_s` must therefore pass its own ``sbx_config`` --
+    the runner refuses the mismatch rather than silently re-deriving it,
+    because ``k_sched`` is a count of TSO iterations, not a duration."""
 
     sbx_support_intervals: Optional[Dict[tuple, list]] = None
     """SBX-H v6 planned support agreed IN ADVANCE: per corridor key
@@ -1834,145 +1929,121 @@ class MultiTSOConfig:
             )
         return out
 
+    # ── derived settings ────────────────────────────────────────────────
+    def __post_init__(self) -> None:
+        """Materialise every setting that is *derived* from other fields.
+
+        Today that is only the per-DSO voltage relief, which is why it is a
+        pure re-derivation from :attr:`dso_g_v`, :attr:`g_w_dso_oltc` and
+        :attr:`g_q`: ``dataclasses.replace`` re-runs this hook, so anything
+        that read its own previous output would compound on every copy.
+        """
+        _install_dso_v_relief(self)
+
 
 # ---------------------------------------------------------------------------
 #  Per-DSO voltage relief
 # ---------------------------------------------------------------------------
 
-def _q_relief_factor(
-    scale_q: "bool | float | Mapping[str, float]",
-    dso_id: str,
-    voltage_factor: float,
-) -> "float | None":
-    """The Q-leg factor for ``dso_id``, or ``None`` to leave ``g_q`` alone.
+def _install_dso_v_relief(cfg: "MultiTSOConfig") -> None:
+    """Write :attr:`MultiTSOConfig.dso_v_relief_factors` into the per-area maps.
 
-    ``scale_q`` accepts, in increasing specificity:
-
-    ``False`` / ``None``
-        No Q leg.  The default, and what every study before 2026-08-20 ran.
-    ``True``
-        The same factor as the voltage relief.  This is the setting that makes
-        the OLTC's interface-Q commit threshold *identical* to the unrelieved
-        one, because the factor on ``g_w_dso_oltc`` and the factor on ``g_q``
-        cancel in ``(g_w_oltc + ||a||^2) / (2 g_q |dQ/ds|)``.
-    a number
-        That factor for every relieved area.  **Decouples the two legs on
-        purpose.**  Measured 2026-08-20: at the full factor the relieved area's
-        continuous DER block sees its objective raised by the same amount while
-        ``g_w_dso_der`` does not move, and the block oscillates.  A smaller Q
-        factor buys back damping at the cost of a proportionally higher tap
-        commit threshold -- the threshold scales as ``voltage_factor /
-        q_factor`` against the unrelieved value.
-    a mapping
-        Per-area factors; areas absent from it get no Q leg.
-
-    Kept separate from :func:`apply_dso_v_relief` so the resolution rule is
-    testable on its own and reads in one place.
+    In place, and **idempotent**: every relieved entry is recomputed from the
+    config's own base scalars, never from its own previous value, so running
+    it again -- which ``dataclasses.replace`` does on every copy -- reproduces
+    the same numbers instead of squaring the factor.  Entries for areas the
+    relief does not list are left untouched, so a per-area design for the
+    other areas survives.
     """
-    if scale_q is None or scale_q is False:
-        return None
-    if scale_q is True:
-        return float(voltage_factor)
-    if isinstance(scale_q, Mapping):
-        raw = scale_q.get(dso_id)
-        return None if raw is None else float(raw)
-    return float(scale_q)
+    active = {d: float(f)
+              for d, f in (cfg.dso_v_relief_factors or {}).items()
+              if float(f) != 1.0}
+    if not active:
+        return
+    gv = dict(cfg.dso_g_v_per_area or {})
+    gw = {k: dict(v) for k, v in (cfg.dso_g_w_class or {}).items()}
+    for dso_id, factor in active.items():
+        if not (factor > 0.0):
+            raise ValueError(
+                f"voltage-relief factor for {dso_id!r} must be > 0, "
+                f"got {factor!r}")
+        gv[dso_id] = float(cfg.dso_g_v) * factor
+        gw.setdefault(dso_id, {})["dso_oltc"] = float(cfg.g_w_dso_oltc) * factor
+    cfg.dso_g_v_per_area = gv
+    cfg.dso_g_w_class = gw
 
 
 def apply_dso_v_relief(
     cfg: "MultiTSOConfig",
     factors: Mapping[str, float],
-    *,
-    scale_q: "bool | float | Mapping[str, float]" = False,
 ) -> "MultiTSOConfig":
-    """Give each listed DSO ``factor`` x more voltage authority at UNCHANGED
-    OLTC loop gain.
+    """Set :attr:`MultiTSOConfig.dso_v_relief_factors` and re-derive.
 
-    Lives here rather than in an experiment module because two independent
-    callers need it: the experiment entry point
-    (``experiments/run_multi_system_ofo.py``) and the Stage-1 config builder
-    (``tuning_mc/stage_1_search.build_config``).  The tuning path is the reason
-    the factor is applied to ``cfg``'s *own* weights instead of being written as
-    absolute numbers: ``dso_g_v_ratio`` is a search coordinate, so ``dso_g_v``
-    moves from trial to trial, and an absolute relief would silently change the
-    OLTC loop gain ``dso_g_v / g_w_dso_oltc`` as the search walked.
+    The imperative face of the relief, kept because
+    ``tuning_mc.stage_1_search.build_config`` applies a *searched* factor after
+    the overlay has set ``dso_g_v``: ``dso_g_v_ratio`` is a search coordinate,
+    so an absolute relief would let the OLTC loop gain
+    ``dso_g_v / g_w_dso_oltc`` drift as the search walked, and that ratio is
+    what keeps the integer tap out of a limit cycle.
 
-    With ``dso_gamma_oltc_q = 0`` that OLTC is voltage-driven only, so the ratio
-    *is* its loop gain: raising ``dso_g_v`` alone drives the integer tap into a
-    limit cycle (measured 2026-08-18, 50.5 tap reversals/h at factor 6.7 against
-    0.00 at baseline).  Scaling both by the same factor moves the extra
-    authority onto the continuous DER block instead, where it reshapes which DER
+    With ``dso_gamma_oltc_q = 0`` the DSO OLTC is voltage-driven only, so that
+    ratio *is* its loop gain: raising ``dso_g_v`` alone drives the integer tap
+    into a limit cycle (measured 2026-08-18, 50.5 tap reversals/h at factor 6.7
+    against 0.00 at baseline).  Scaling both by the same factor moves the extra
+    authority onto the continuous DER block, where it reshapes which DER
     injects and shrinks the network's internal voltage spread.
 
-    Merges into any existing :attr:`MultiTSOConfig.dso_g_w_class` /
-    :attr:`MultiTSOConfig.dso_g_v_per_area` rather than replacing them, so a
-    per-area design for the other areas survives.  Entries with factor ``1.0``
-    are skipped; an empty or all-unity mapping returns ``cfg`` unchanged.
+    The arithmetic itself lives in :func:`_install_dso_v_relief` and runs from
+    :meth:`MultiTSOConfig.__post_init__`, so the declarative and imperative
+    paths cannot disagree, and applying the relief twice can no longer square
+    the factor.  Entries installed by the config's PREVIOUS factor set are
+    dropped for any area the new set does not list, so the two do not layer.
+    An empty or all-unity mapping returns ``cfg`` unchanged.
 
-    ``scale_q`` (default ``False``) additionally scales that area's interface-Q
-    weight into :attr:`MultiTSOConfig.dso_g_q_per_area` by the same factor.
-    **Off by default so every existing caller -- including
-    ``tuning_mc.stage_1_search.build_config`` and therefore the whole 0815 /
-    stage1 campaign -- reproduces bit-for-bit.**
-
-    It exists because the relief's own arithmetic creates an asymmetry it does
-    not fix.  Holding ``dso_g_v / g_w_dso_oltc`` preserves the OLTC's *voltage*
-    commit threshold, but the x-factor on ``g_w_dso_oltc`` is uncompensated in
-    the *interface-Q* threshold
-    ``(g_w_oltc + ||a_oltc||^2) / (2 g_q |dQ_tr/ds|)``, which therefore rises by
-    the full factor.  Measured 2026-08-20 at ``dso_gamma_oltc_q = 1``, x20
-    relief: DSO_2/DSO_4 need 108-244 Mvar to commit while DSO_1/DSO_3 need
-    2.9-5.0, against ~6 Mvar of measured interface-Q RMSE.
-
-    Two things to be explicit about before using it:
-
-    * It is **inert at** ``dso_gamma_oltc_q = 0``, where the OLTC carries no Q
-      gradient and no ``g_q`` makes the threshold finite.
-    * It is **not a gauge rescaling**.  ``g_w_dso_der`` is deliberately not
-      scaled, so raising ``dso_g_v``, ``g_q`` and ``g_w_dso_oltc`` together
-      makes the area's whole objective heavier against its continuous DER
-      block: that DER now takes larger steps for interface-Q error as well as
-      for voltage error.  The relief was specified as *voltage* authority; with
-      ``scale_q=True`` it becomes authority on both channels.
-
-    See ``docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md`` and
-    ``docs/daily_log/08_2026/2026-08-20_dso_oltc_inactivity_at_the_tuned_point.md``.
+    See ``docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md``.
     """
     active = {d: float(f) for d, f in (factors or {}).items() if float(f) != 1.0}
     if not active:
         return cfg
+    gv, gw = strip_dso_v_relief(cfg, keep=active)
+    return dataclasses.replace(
+        cfg,
+        dso_g_v_per_area=gv,
+        dso_g_w_class=gw,
+        dso_v_relief_factors=dict(active),
+    )
 
+
+def strip_dso_v_relief(
+    cfg: "MultiTSOConfig",
+    *,
+    keep: Optional[Mapping[str, float]] = None,
+) -> Tuple[Optional[Dict[str, float]],
+           Optional[Dict[str, Dict[str, float]]]]:
+    """``(dso_g_v_per_area, dso_g_w_class)`` with ``cfg``'s OWN relief removed.
+
+    Removes only what :func:`_install_dso_v_relief` would have written for the
+    areas named in ``cfg.dso_v_relief_factors`` -- the per-area ``dso_g_v``
+    entry and the ``dso_oltc`` class weight -- so a genuine per-area design for
+    any other area, or for any other class, survives untouched.  Areas present
+    in ``keep`` are left in place because the caller is about to re-derive them.
+
+    Needed by any caller that wants a config **without** the relief its
+    starting point carries.  ``MultiTSOConfig.__post_init__`` cannot do this on
+    its own: by the time it runs, the object already holds the NEW factor set
+    and has no way to know which per-area entries the OLD one installed.  That
+    is how a relieved baseline leaked into ``tuning_mc.stage_1_search``, whose
+    campaigns declare their own (often empty) relief policy.
+    """
+    keep = keep or {}
     gv = dict(cfg.dso_g_v_per_area or {})
     gw = {k: dict(v) for k, v in (cfg.dso_g_w_class or {}).items()}
-    gq = dict(getattr(cfg, "dso_g_q_per_area", None) or {})
-
-    for dso_id, factor in active.items():
-        if not (factor > 0.0):
-            raise ValueError(
-                f"voltage-relief factor for {dso_id!r} must be > 0, got {factor!r}"
-            )
-        gv[dso_id] = float(cfg.dso_g_v) * factor
-        # Base the OLTC weight on this area's own per-area value when a per-area
-        # design is present, else on the global scalar -- otherwise the factor
-        # would be measured against the wrong reference and the loop gain would
-        # move.
-        oltc_base = gw.get(dso_id, {}).get("dso_oltc", float(cfg.g_w_dso_oltc))
-        gw.setdefault(dso_id, {})["dso_oltc"] = float(oltc_base) * factor
-        q_factor = _q_relief_factor(scale_q, dso_id, factor)
-        if q_factor is not None:
-            if not (q_factor > 0.0):
-                raise ValueError(
-                    f"Q-relief factor for {dso_id!r} must be > 0, got "
-                    f"{q_factor!r}")
-            # Same base rule as the OLTC half: an already-relieved area's own
-            # per-area value, else the global scalar.  Without this, applying
-            # the relief twice would measure the factor against the wrong
-            # reference -- the bug the dso_g_v half avoids by reading
-            # cfg.dso_g_v, which a second call leaves untouched.
-            q_base = gq.get(dso_id, float(cfg.g_q))
-            gq[dso_id] = float(q_base) * q_factor
-
-    return dataclasses.replace(
-        cfg, dso_g_v_per_area=gv, dso_g_w_class=gw,
-        dso_g_q_per_area=(gq or None) if gq else cfg.dso_g_q_per_area,
-    )
+    for area in (cfg.dso_v_relief_factors or {}):
+        if area in keep:
+            continue                       # re-derived by __post_init__
+        gv.pop(area, None)
+        if area in gw:
+            gw[area].pop("dso_oltc", None)
+            if not gw[area]:
+                gw.pop(area)
+    return (gv or None), (gw or None)

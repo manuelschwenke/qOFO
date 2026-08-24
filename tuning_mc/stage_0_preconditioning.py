@@ -695,11 +695,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-runner", type=str, default=None, metavar="FUNC",
                    help="Analyse the config built by "
                         "experiments.run_multi_system_ofo.FUNC() instead of the "
-                        "YAML baseline + scenario overlay (e.g. "
-                        "'make_config_per_area'). Use this whenever the output "
-                        "is destined for that config: the design depends on H, "
-                        "and H depends on the boundary equivalent, the zone "
-                        "partition and the start time that config declares.")
+                        "YAML baseline + scenario overlay. Since 2026-08-21 "
+                        "that module has exactly one factory, so this is "
+                        "'make_config'; an alternative weight set is a JSON "
+                        "overlay in configs/paramsets/, applied on top of it. "
+                        "Use this whenever the output is destined for that "
+                        "config: the design depends on H, and H depends on the "
+                        "boundary equivalent, the zone partition and the start "
+                        "time that config declares.")
     p.add_argument("--lambda-tso", type=float, default=None)
     p.add_argument("--lambda-tso-zone", type=str, default=None,
                    metavar="'1=..,2=..,3=..'",
@@ -868,10 +871,10 @@ def main(argv: list[str] | None = None) -> int:
     # The curvature rule reproduces what the preconditioner WOULD apply, so it
     # must use the same gain and shape the config declares.  Running with this
     # script's own defaults against a BO-tuned config silently designs a
-    # different operating point: make_config_tuned carries lambda_tso=0.5012 and
-    # class_scales {der: 0.13225, pcc: 7.5617} (= tau 0.017484), against
-    # defaults of 0.9 and tau=1, which alone moves the PCC/DER weight ratio by
-    # ~57x.
+    # different operating point: the 'tuned' parameter set carries
+    # lambda_tso=0.5012 and class_scales {der: 0.13225, pcc: 7.5617}
+    # (= tau 0.017484), against the runner defaults of 0.9 and tau=1, which
+    # alone moves the PCC/DER weight ratio by ~57x.
     _prec_lam = float(getattr(cfg, "precondition_lambda_target", 0.8) or 0.8)
     if args.lambda_tso is None:
         args.lambda_tso = float(

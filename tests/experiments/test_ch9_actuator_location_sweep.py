@@ -152,15 +152,29 @@ def _metric_row(signal: str, kind: str, t_settle: float, *,
     }
 
 
-def test_worst_reduction_is_voltage_only_and_ignores_faster_q_flows() -> None:
-    """The reported worst may only be picked from WORST_OUTPUT_KINDS.
+def test_output_families_partition_every_measured_kind() -> None:
+    """No measured output may fall outside both reported families.
 
-    The interface-Q band is a fixed 1 Mvar applied to flows whose own steps
-    differ by more than an order of magnitude, so a Q row can win the
-    reduction on band tightness rather than on corridor speed.  Restricting
-    the reduction is the whole point; the unrestricted worst stays available.
+    A kind in neither would be measured, written to signal_metrics.csv, and
+    then silently absent from both reduction columns.
     """
-    assert sweep.WORST_OUTPUT_KINDS == ("voltage",)
+    assert set(sweep.V_OUTPUT_KINDS) | set(sweep.Q_OUTPUT_KINDS) == set(
+        sweep.ALL_OUTPUT_KINDS)
+    assert not set(sweep.V_OUTPUT_KINDS) & set(sweep.Q_OUTPUT_KINDS)
+    assert set(sweep.DSO_Q_OUTPUT_KINDS) | set(sweep.TSO_Q_OUTPUT_KINDS) == set(
+        sweep.Q_OUTPUT_KINDS)
+    assert {spec.kind for spec in sweep.build_output_specs(load_snapshot(SNAPSHOT))} <= set(
+        sweep.ALL_OUTPUT_KINDS)
+
+
+def test_worst_v_and_worst_q_are_reduced_independently() -> None:
+    """Voltage and interface Q get their own worst, against their own band.
+
+    Pooling them into one max hides which family bound the result: the Q band
+    is a fixed 1 Mvar against flows whose own steps differ by more than an
+    order of magnitude, so a Q row can be worst on band tightness rather than
+    on corridor speed.  Both belong in the Ch. 9.1 table.
+    """
     rows = [
         _metric_row("V_TN_bus1", "voltage", 9.0),
         _metric_row("V_TN_bus2", "voltage", 4.0),
@@ -168,8 +182,40 @@ def test_worst_reduction_is_voltage_only_and_ignores_faster_q_flows() -> None:
         _metric_row("Q_DSO_NC3W_DSO_1_t0", "dso_interface_q", 12.0),
     ]
 
-    assert sweep.reduce_worst(rows, sweep.WORST_OUTPUT_KINDS)["signal"] == "V_TN_bus1"
-    assert sweep.reduce_worst(rows, sweep.ALL_OUTPUT_KINDS)["signal"] == "Q_TSO_Z1_Z2"
+    assert sweep.reduce_worst(rows, sweep.V_OUTPUT_KINDS)["signal"] == "V_TN_bus1"
+    assert sweep.reduce_worst(rows, sweep.Q_OUTPUT_KINDS)["signal"] == "Q_TSO_Z1_Z2"
+    assert sweep.reduce_worst(
+        rows, sweep.DSO_Q_OUTPUT_KINDS)["signal"] == "Q_DSO_NC3W_DSO_1_t0"
+
+
+def test_family_columns_carry_both_worsts_and_split_q_by_layer() -> None:
+    rows = [
+        _metric_row("V_TN_bus1", "voltage", 9.0),
+        _metric_row("Q_TSO_Z1_Z2", "tso_boundary_q", 17.0),
+        _metric_row("Q_DSO_NC3W_DSO_1_t0", "dso_interface_q", 12.0),
+    ]
+    columns = sweep._family_columns(rows, {
+        "": sweep.V_OUTPUT_KINDS, "_q": sweep.Q_OUTPUT_KINDS,
+        "_dso_q": sweep.DSO_Q_OUTPUT_KINDS, "_tso_q": sweep.TSO_Q_OUTPUT_KINDS,
+    })
+
+    assert columns["t_settle_s"] == 9.0
+    assert columns["worst_signal"] == "V_TN_bus1"
+    assert columns["t_settle_q_s"] == 17.0
+    assert columns["worst_signal_q"] == "Q_TSO_Z1_Z2"
+    assert columns["t_settle_dso_q_s"] == 12.0
+    assert columns["t_settle_tso_q_s"] == 17.0
+
+
+def test_family_columns_are_none_when_a_family_has_no_output() -> None:
+    """An absent optional family must not raise, and must not report 0 s."""
+    columns = sweep._family_columns(
+        [_metric_row("V_TN_bus1", "voltage", 9.0)],
+        {"": sweep.V_OUTPUT_KINDS, "_q": sweep.Q_OUTPUT_KINDS},
+    )
+    assert columns["t_settle_s"] == 9.0
+    assert columns["t_settle_q_s"] is None
+    assert columns["worst_signal_q"] is None
 
 
 def test_worst_reduction_ranks_censored_first_then_excursion() -> None:
@@ -190,4 +236,52 @@ def test_worst_reduction_refuses_an_empty_scope() -> None:
     """An empty reduction would report 0 s for a case that was never judged."""
     rows = [_metric_row("Q_TSO_Z1_Z2", "tso_boundary_q", 17.0)]
     with pytest.raises(ValueError, match="no measured output"):
-        sweep.reduce_worst(rows, sweep.WORST_OUTPUT_KINDS)
+        sweep.reduce_worst(rows, sweep.V_OUTPUT_KINDS)
+
+
+def test_summary_row_pickers_choose_each_family_independently() -> None:
+    """The worst-V case and the worst-Q case need not be the same case."""
+    results = [
+        {"case": "a", "t_settle_s": 12.5, "censored": False, "subband": False,
+         "t_settle_q_s": 3.0, "censored_q": False, "subband_q": False},
+        {"case": "b", "t_settle_s": 4.0, "censored": False, "subband": False,
+         "t_settle_q_s": 17.2, "censored_q": False, "subband_q": False},
+    ]
+    assert sweep._worst_row(results, "")["case"] == "a"
+    assert sweep._worst_row(results, "_q")["case"] == "b"
+    assert sweep._settle_cell(results[0], "") == "12.500"
+    assert sweep._settle_cell(results[1], "_q") == "17.200"
+
+
+def test_settle_cell_marks_censored_subband_and_missing() -> None:
+    assert sweep._settle_cell(
+        {"t_settle_s": 9.0, "censored": True}, "") == "9.000 (c)"
+    assert sweep._settle_cell(
+        {"t_settle_s": 0.072, "censored": False, "subband": True}, "") == "0.072 (sb)"
+    assert sweep._settle_cell({"t_settle_q_s": None}, "_q") == "n/a"
+
+
+def test_reductions_read_csv_string_flags_not_python_truthiness() -> None:
+    """Re-aggregating an archived run must not mark every row censored.
+
+    signal_metrics.csv stores the flags as the strings "True" / "False", and
+    bool("False") is True. Reducing with bool() therefore reports a censored
+    worst for every case of every finished run -- which is exactly what the
+    Ch. 9.1 table is read off.
+    """
+    rows = [
+        {"signal": "V_a", "output_kind": "voltage", "t_settle_s": "9.0",
+         "censored": "False", "excursion": "5.0", "tolerance": "1.0",
+         "subband": "False"},
+        {"signal": "V_b", "output_kind": "voltage", "t_settle_s": "2.0",
+         "censored": "False", "excursion": "5.0", "tolerance": "1.0",
+         "subband": "False"},
+    ]
+
+    assert sweep.reduce_worst(rows, sweep.V_OUTPUT_KINDS)["signal"] == "V_a"
+
+    columns = sweep._family_columns(rows, {"": sweep.V_OUTPUT_KINDS})
+    assert columns["censored"] is False
+    assert columns["subband"] is False
+    assert sweep._settle_cell(columns, "") == "9.000"
+

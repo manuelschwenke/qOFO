@@ -49,34 +49,43 @@ FINAL_WINDOW_S = 5.0
 CONFIRM_WINDOW_S = 5.0
 READ_STRIDE = 5
 
-#: Output kinds the reported worst settling time is reduced over.
+#: The two output families the settling time is reduced over SEPARATELY.
 #:
-#: Every kind in :func:`build_output_specs` is still measured and still written
-#: to ``signal_metrics.csv``; this only selects which rows the per-case
-#: reduction may pick.  The default is nodal voltages ALONE.
+#: Both are reported for every case and both belong in the Ch. 9.1 table:
+#: ``t_settle_s`` / ``worst_signal`` over :data:`V_OUTPUT_KINDS`, and
+#: ``t_settle_q_s`` / ``worst_signal_q`` over :data:`Q_OUTPUT_KINDS`.  There is
+#: no single headline number, because the two are not commensurable and
+#: collapsing them to one ``max`` hides which family bound the result --
+#: over run ``actuator_location_sweep_t0/20260822-014209`` that max was a Q row
+#: in 53 of 70 cases, so a single column read as a voltage claim and was not.
 #:
-#: The reduction is what the timescale claim is read off, and a settling time is
-#: only interpretable against a band.  The voltage band (1 mpu) is a network
-#: quantity with the same meaning at every bus, so a worst over the 70 voltage
-#: rows is one comparable statement.  The interface-Q band (1 Mvar) is not: it
-#: is a fixed absolute band applied to flows whose own step sizes differ by more
-#: than an order of magnitude across the 12 DSO interfaces and 5 TSO corridors,
-#: so a Q row can win the reduction because its band is tight relative to its
-#: step rather than because that corridor is slow.  Measured over run
-#: ``actuator_location_sweep_t0/20260822-014209``: a Q row won in 53 of 70 cases
-#: and set the global worst (17.172 s, against 12.472 s over voltages alone).
-#:
-#: State this wherever the number is used: with ``("voltage",)`` the experiment
-#: bounds the settling of the NODAL VOLTAGE outputs only.  Interface Q is a
-#: controlled output of both layers, so its settling is NOT covered by that
-#: bound -- ``t_settle_all_s`` in ``results.csv`` is what still carries it.
-WORST_OUTPUT_KINDS: Tuple[str, ...] = ("voltage",)
+#: A settling time is only interpretable against its band, and the two bands
+#: differ in kind.  The voltage band (1 mpu) is a network quantity with the same
+#: meaning at every bus, so a worst over the 70 voltage rows is one comparable
+#: statement.  The interface-Q band (1 Mvar) is absolute against flows whose own
+#: step sizes differ by more than an order of magnitude across the 12 DSO
+#: interfaces and 5 TSO corridors, so a Q row can be worst because its band is
+#: tight relative to its step rather than because that corridor is slow.  That
+#: is an argument for reporting the Q worst in its own column against its own
+#: band -- not for dropping it: interface Q is the tracked output of both
+#: layers, and a timescale-separation claim that omits it is incomplete.
+V_OUTPUT_KINDS: Tuple[str, ...] = ("voltage",)
+Q_OUTPUT_KINDS: Tuple[str, ...] = ("dso_interface_q", "tso_boundary_q")
 
-#: Every kind :func:`build_output_specs` produces, i.e. the pre-2026-08-24
-#: reduction scope.  Reported alongside as ``t_settle_all_s`` so the narrowed
-#: claim and the full one are never separated in the record.
+#: The Q family split by the layer that tracks it, reported as
+#: ``t_settle_dso_q_s`` / ``t_settle_tso_q_s``.  Not in the dissertation table,
+#: but the two are tracked at different periods (DSO 20 s, TSO 180 s), so the
+#: pooled Q worst is the wrong quantity to compare against either one alone.
+DSO_Q_OUTPUT_KINDS: Tuple[str, ...] = ("dso_interface_q",)
+TSO_Q_OUTPUT_KINDS: Tuple[str, ...] = ("tso_boundary_q",)
+
+#: Every kind :func:`build_output_specs` produces.  Used for the provenance
+#: record and to assert the two families above partition it.
 ALL_OUTPUT_KINDS: Tuple[str, ...] = (
     "voltage", "dso_interface_q", "tso_boundary_q")
+
+assert set(V_OUTPUT_KINDS) | set(Q_OUTPUT_KINDS) == set(ALL_OUTPUT_KINDS)
+assert not set(V_OUTPUT_KINDS) & set(Q_OUTPUT_KINDS)
 
 MAX_Q_STEP_MVAR = 60.0
 MAX_Q_STEP_FRACTION_SN = 0.5
@@ -565,6 +574,11 @@ def reduce_worst(signal_rows: Sequence[Mapping[str, Any]],
     between rows that never left their band.  Raises rather than returning a
     default when ``kinds`` selects nothing: an empty reduction would otherwise
     report a settling time of zero for a case that was never evaluated.
+
+    Flags are read with :func:`_truth`, not ``bool``, because ``signal_rows``
+    is either live metric dicts (real booleans) or rows re-read from
+    ``signal_metrics.csv`` (the strings ``"True"`` / ``"False"``), and
+    ``bool("False")`` is ``True`` -- which marks every archived row censored.
     """
     rows = [row for row in signal_rows if row["output_kind"] in kinds]
     if not rows:
@@ -572,8 +586,47 @@ def reduce_worst(signal_rows: Sequence[Mapping[str, Any]],
             f"no measured output has kind in {tuple(kinds)!r}; "
             f"present: {sorted({r['output_kind'] for r in signal_rows})}")
     return max(rows, key=lambda row: (
-        bool(row["censored"]), float(row["t_settle_s"]),
+        _truth(row["censored"]), float(row["t_settle_s"]),
         float(row["excursion"]) / float(row["tolerance"])))
+
+
+def _family_columns(
+    signal_rows: Sequence[Mapping[str, Any]],
+    families: Mapping[str, Sequence[str]],
+) -> Dict[str, Any]:
+    """One ``worst_*`` column group per output family, suffixed by its key.
+
+    ``{"": V_OUTPUT_KINDS, "_q": Q_OUTPUT_KINDS}`` yields ``worst_signal`` /
+    ``t_settle_s`` / ... for the voltages and ``worst_signal_q`` /
+    ``t_settle_q_s`` / ... for the Q flows.  A family that selects no measured
+    output yields ``None`` for its columns rather than raising: the per-layer Q
+    split is optional detail, and a network without one of the two Q kinds must
+    still produce a row.  The two families the table is built from are asserted
+    non-empty by the caller, not here.
+    """
+    columns: Dict[str, Any] = {}
+    for suffix, kinds in families.items():
+        rows = [r for r in signal_rows if r["output_kind"] in kinds]
+        stem = f"t_settle{suffix}_s" if suffix else "t_settle_s"
+        if not rows:
+            columns.update({
+                f"worst_output_kinds{suffix}": "|".join(kinds),
+                f"worst_signal{suffix}": None,
+                f"worst_output_kind{suffix}": None,
+                stem: None,
+                f"censored{suffix}": None, f"subband{suffix}": None,
+            })
+            continue
+        worst = reduce_worst(rows, kinds)
+        columns.update({
+            f"worst_output_kinds{suffix}": "|".join(kinds),
+            f"worst_signal{suffix}": worst["signal"],
+            f"worst_output_kind{suffix}": worst["output_kind"],
+            stem: float(worst["t_settle_s"]),
+            f"censored{suffix}": any(_truth(r["censored"]) for r in rows),
+            f"subband{suffix}": all(_truth(r["subband"]) for r in rows),
+        })
+    return columns
 
 
 def _read_scalar(obj: Any, variable: str) -> float:
@@ -832,10 +885,10 @@ def run_case_once(
                 "case": case.name, "signal": label, "variable": variable,
                 "output_kind": spec.kind, **metric,
             })
-        worst = reduce_worst(signal_rows, WORST_OUTPUT_KINDS)
-        worst_all = reduce_worst(signal_rows, ALL_OUTPUT_KINDS)
-        scoped = [r for r in signal_rows
-                  if r["output_kind"] in WORST_OUTPUT_KINDS]
+        family = {
+            "": V_OUTPUT_KINDS, "_q": Q_OUTPUT_KINDS,
+            "_dso_q": DSO_Q_OUTPUT_KINDS, "_tso_q": TSO_Q_OUTPUT_KINDS,
+        }
         result = {
             "case": case.name, "actuator_class": case.actuator_class,
             "domain": case.domain, "group": case.group,
@@ -845,19 +898,11 @@ def run_case_once(
             "dispatch_time_s": dispatch_time,
             "physical_event_time_s": physical_event_time,
             "event_offset_s": case.event_offset_s, "horizon_s": float(horizon_s),
-            "worst_output_kinds": "|".join(WORST_OUTPUT_KINDS),
-            "worst_signal": worst["signal"],
-            "worst_output_kind": worst["output_kind"],
-            "t_settle_s": float(worst["t_settle_s"]),
-            "censored": any(bool(row["censored"]) for row in scoped),
-            "subband": all(bool(row["subband"]) for row in scoped),
-            # The unrestricted reduction, kept so narrowing the scope never
-            # silently discards what the run actually measured.
-            "worst_signal_all": worst_all["signal"],
-            "worst_output_kind_all": worst_all["output_kind"],
-            "t_settle_all_s": float(worst_all["t_settle_s"]),
-            "censored_all": any(bool(row["censored"]) for row in signal_rows),
-            "subband_all": all(bool(row["subband"]) for row in signal_rows),
+            # One reduction per output family, never pooled into a single
+            # headline: "" is the voltage worst, "_q" the interface-Q worst,
+            # and the two _dso_q / _tso_q columns split Q by the layer that
+            # tracks it.  See V_OUTPUT_KINDS.
+            **_family_columns(signal_rows, family),
             "qss_score": case.qss_score,
             "qss_worst_output": case.qss_worst_output,
             "selection_reasons": "; ".join(case.selection_reasons), **diag,
@@ -1021,6 +1066,35 @@ def _case_order(cases: Sequence[Candidate]) -> List[Candidate]:
     )
 
 
+def _worst_row(rows: Sequence[Mapping[str, Any]], suffix: str) -> Mapping[str, Any]:
+    """The result row holding the worst settling of one output family.
+
+    Same ordering as :func:`reduce_worst` minus the excursion tie-break, which
+    is not carried up into ``results.csv``.  Rows whose family column is empty
+    (a resumed run written before that family existed) sort last instead of
+    raising.
+    """
+    stem = f"t_settle{suffix}_s" if suffix else "t_settle_s"
+    return max(rows, key=lambda r: (
+        r.get(stem) not in (None, ""),
+        _truth(r.get(f"censored{suffix}")),
+        _as_float(r.get(stem), float("-inf")),
+    ))
+
+
+def _settle_cell(row: Mapping[str, Any], suffix: str) -> str:
+    """``12.472``, ``12.472 (c)`` if censored, ``0.072 (sb)`` if sub-band."""
+    stem = f"t_settle{suffix}_s" if suffix else "t_settle_s"
+    if row.get(stem) in (None, ""):
+        return "n/a"
+    text = f"{_as_float(row.get(stem)):.3f}"
+    if _truth(row.get(f"censored{suffix}")):
+        return text + " (c)"
+    if _truth(row.get(f"subband{suffix}")):
+        return text + " (sb)"
+    return text
+
+
 _KIND_PHRASES = {
     "voltage": "nodal voltages",
     "dso_interface_q": "DSO interface-Q flows",
@@ -1060,54 +1134,43 @@ def write_summary(
         f"Tmech={args.oltc_tmech_s:g} s; settling starts at dispatch.",
         f"- Each case pre-settles for {args.pre_settle_s:g} s and starts at "
         f"{args.initial_horizon_s:g} s, extending to {args.max_horizon_s:g} s if censored.",
-        f"- Worst settling is reduced over {_kinds_phrase(WORST_OUTPUT_KINDS)} "
-        f"only; every other output is still measured and kept in "
-        f"`signal_metrics.csv`, and its unrestricted worst is reported as "
-        f"`t_settle_all_s`.",
-        "", "The claim supported by this run is the worst RMS settling time of "
-        f"the {_kinds_phrase(WORST_OUTPUT_KINDS)} among all feasible discrete "
-        "locations and the deterministically screened continuous locations. It "
-        "is not a mathematical proof over untested continuous locations"
-        + ("" if set(WORST_OUTPUT_KINDS) >= set(ALL_OUTPUT_KINDS) else
-           ", and it does NOT bound the settling of the interface-Q outputs, "
-           "which are controlled outputs of both layers")
-        + ".",
+        f"- Worst settling is reduced over {_kinds_phrase(V_OUTPUT_KINDS)} and "
+        f"over {_kinds_phrase(Q_OUTPUT_KINDS)} SEPARATELY, against their own "
+        f"bands ({BAND_VOLTAGE_PU:g} pu, {BAND_Q_MVAR:g} Mvar). The two are not "
+        f"pooled into one number: `t_settle_s` is the voltage worst and "
+        f"`t_settle_q_s` the interface-Q worst, and `results.csv` additionally "
+        f"splits Q by tracking layer (`t_settle_dso_q_s`, `t_settle_tso_q_s`).",
+        "", "The claim supported by this run is the worst RMS settling time, "
+        "reported per output family, among all feasible discrete locations and "
+        "the deterministically screened continuous locations. It is not a "
+        "mathematical proof over untested continuous locations.",
     ]
     if results:
         lines += ["", "## Current worst by actuator class and direction", "",
-                  "| Class | Direction | Case | Settling [s] | Output | Flag "
-                  "| All-output [s] |",
-                  "|---|---:|---|---:|---|---|---:|"]
+                  "Worst nodal voltage and worst interface Q are reduced "
+                  "independently, so the two halves of a row may be different "
+                  "cases. `(c)` = censored, `(sb)` = never left its band.", "",
+                  "| Class | Dir | Case (worst V) | V [s] | V output "
+                  "| Case (worst Q) | Q [s] | Q output |",
+                  "|---|---:|---|---:|---|---|---:|---|"]
         keys = sorted({(str(r.get("actuator_class")), str(r.get("direction"))) for r in results})
         for key in keys:
             rows = [r for r in results
                     if (str(r.get("actuator_class")), str(r.get("direction"))) == key]
-            worst = max(rows, key=lambda r: (_truth(r.get("censored")), _as_float(r.get("t_settle_s"))))
-            flag = "censored" if _truth(worst.get("censored")) else (
-                "sub-band" if _truth(worst.get("subband")) else "settled"
-            )
+            v, q = _worst_row(rows, ""), _worst_row(rows, "_q")
             lines.append(
-                f"| {key[0]} | {key[1]} | `{worst.get('case')}` | "
-                f"{_as_float(worst.get('t_settle_s')):.3f} | "
-                f"{worst.get('worst_signal')} | {flag} | "
-                f"{_as_float(worst.get('t_settle_all_s')):.3f} |"
+                f"| {key[0]} | {key[1]} "
+                f"| `{v.get('case')}` | {_settle_cell(v, '')} | {v.get('worst_signal')} "
+                f"| `{q.get('case')}` | {_settle_cell(q, '_q')} | {q.get('worst_signal_q')} |"
             )
-        global_worst = max(
-            results, key=lambda r: (_truth(r.get("censored")), _as_float(r.get("t_settle_s")))
-        )
-        global_worst_all = max(
-            results, key=lambda r: (_truth(r.get("censored_all")),
-                                    _as_float(r.get("t_settle_all_s")))
-        )
-        lines += ["", f"Current global worst ({_kinds_phrase(WORST_OUTPUT_KINDS)}): "
-                  f"`{global_worst.get('case')}`, "
-                  f"{_as_float(global_worst.get('t_settle_s')):.3f} s at "
-                  f"`{global_worst.get('worst_signal')}`"
-                  + (" (censored)." if _truth(global_worst.get("censored")) else "."),
-                  f"Over every measured output it is `{global_worst_all.get('case')}`, "
-                  f"{_as_float(global_worst_all.get('t_settle_all_s')):.3f} s at "
-                  f"`{global_worst_all.get('worst_signal_all')}`"
-                  + (" (censored)." if _truth(global_worst_all.get("censored_all")) else ".")]
+        v, q = _worst_row(results, ""), _worst_row(results, "_q")
+        lines += ["",
+                  f"Current global worst {_kinds_phrase(V_OUTPUT_KINDS)}: "
+                  f"`{v.get('case')}`, {_settle_cell(v, '')} s at "
+                  f"`{v.get('worst_signal')}`.",
+                  f"Current global worst {_kinds_phrase(Q_OUTPUT_KINDS)}: "
+                  f"`{q.get('case')}`, {_settle_cell(q, '_q')} s at "
+                  f"`{q.get('worst_signal_q')}`."]
     if failures:
         lines += ["", "## Failures", ""]
         for failure in failures:
@@ -1146,7 +1209,11 @@ def _provenance(args: argparse.Namespace, snapshot: Path) -> Dict[str, Any]:
             "continuous_screen": "QSS amplitude proxy plus median audit",
             "discrete_locations": "all feasible locations and directions",
             "settling_bands": {"voltage_pu": BAND_VOLTAGE_PU, "q_mvar": BAND_Q_MVAR},
-            "worst_output_kinds": list(WORST_OUTPUT_KINDS),
+            "worst_output_kinds": {
+                "v": list(V_OUTPUT_KINDS), "q": list(Q_OUTPUT_KINDS),
+                "dso_q": list(DSO_Q_OUTPUT_KINDS),
+                "tso_q": list(TSO_Q_OUTPUT_KINDS),
+            },
             "measured_output_kinds": list(ALL_OUTPUT_KINDS),
             "oltc": "pure delay plus experiment-local fast PT1",
         },

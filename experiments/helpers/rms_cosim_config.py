@@ -72,7 +72,8 @@ class CoSimSpecification:
     qv_deadband_at_contingency: Optional[float] = None
 
 
-def make_cosim_config(duration_s: float, *, verbose: int) -> MultiTSOConfig:
+def make_cosim_config(duration_s: float, *, verbose: int,
+                      paramset: Optional[str] = None) -> MultiTSOConfig:
     """Reference multi-system config inside the co-simulation envelope.
 
     Controller weights, coordination, actuator installation and dispatch are
@@ -83,6 +84,14 @@ def make_cosim_config(duration_s: float, *, verbose: int) -> MultiTSOConfig:
     from experiments.run_multi_system_ofo import make_config
 
     cfg = make_config()
+    if paramset:
+        # Applied FIRST, so the co-simulation envelope below still wins on the
+        # horizon and the exogenous sources.  ``apply_paramset`` returns a new
+        # object (dataclasses.replace), which is what re-derives the per-area
+        # voltage relief from the overlaid dso_g_v / g_w_dso_oltc bases -- an
+        # in-place assignment would leave the relief on the old bases.
+        from configs.paramsets import apply_paramset
+        cfg = apply_paramset(cfg, paramset, verbose=bool(verbose))
     cfg.n_total_s = float(duration_s)
     cfg.tso_period_s = TSO_PERIOD_S
     cfg.dso_period_s = DT_S
@@ -249,6 +258,14 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
                         help="initialise every DER Q(V) anchor to its local "
                              "res_bus.vm_pu at init (both plants)")
     # -- per-DSO scenario multipliers ------------------------------------
+    parser.add_argument(
+        "--paramset", default=None, metavar="NAME",
+        help="JSON weight overlay from configs/paramsets/, applied on top of "
+             "make_config() before the co-simulation envelope. Use "
+             "'ch9_frozen' to run on the Chapter-9 frozen design rather than "
+             "the runner's own weights, which differ substantially "
+             "(g_w_dso_der 1097.2 against 549.8818, g_w_dso_oltc 183 against "
+             "392.6444).")
     parser.add_argument("--dso-der-scale", action="append", default=None,
                         metavar="DSO=F",
                         help=f"per-DSO installed-DER multiplier, repeatable. "

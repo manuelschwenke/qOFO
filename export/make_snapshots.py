@@ -63,6 +63,7 @@ from core.profiles import (
 )
 from export.dynamic_snapshot import dump_dynamic_snapshot, verify_roundtrip
 from network.ieee39 import add_hv_networks, build_ieee39_net, tag_der_q_modes
+from network.ieee39.dso_overrides import apply_dso_overrides
 from network.ieee39.load_model import apply_zip_load_model
 from network.ieee39.meta import IEEE39NetworkMeta
 from network.ieee39.zonal_balancing import (
@@ -106,6 +107,10 @@ class SnapshotState:
     solver_options: Dict[str, object]
     snapshot_time: datetime
     phase: str
+    #: What ``apply_dso_overrides`` actually applied, or ``None``.  A scenario
+    #: multiplier is not builder state, so a snapshot that carries one has to
+    #: say so -- otherwise it is indistinguishable from the symmetric model.
+    dso_overrides: Optional[Dict[str, object]] = None
 
 
 # =====================================================================
@@ -319,6 +324,8 @@ def build_snapshot_state(
     load_zip_anchor_vm_pu: Optional[float] = None,
     profiles_csv: Optional[str] = None,
     scenario: Optional[str] = None,
+    dso_der_scale: Optional[Mapping[str, float]] = None,
+    dso_load_p_scale: Optional[Mapping[str, float]] = None,
     verbose: int = 1,
 ) -> SnapshotState:
     """Build phase ``phase`` at profile timestamp ``at``.
@@ -397,6 +404,38 @@ def build_snapshot_state(
         for z in zone_map:
             zone_map[z] = [b for b in zone_map[z] if b in existing]
 
+    # ── Per-DSO scenario multipliers (runner parity) ─────────────────────
+    # Same call, same position as experiments/runners/multi_tso_dso.py: directly
+    # after add_hv_networks and BEFORE the load model, droop tagging, profiles
+    # and the operating-point initialisation, all of which read p_mw,
+    # base_p_mw, sn_mva and the reactive-load base that this rewrites.
+    #
+    # Added 2026-09-08.  Until then this module had no doubling path at all,
+    # so every snapshot it produced was the symmetric model -- while the
+    # PowerFactory project carried the doubled one.  The two disagreed silently
+    # because ch_9_1_actuator_location_sweep.py never syncs its snapshot into
+    # PowerFactory, and the mismatch surfaced only as a factor of exactly
+    # 2.000000 on every DSO_3 nameplate in a pf_sync dry run.
+    dso_overrides: Optional[Dict[str, object]] = None
+    if phase == "full" and (dso_der_scale or dso_load_p_scale):
+        apply_dso_overrides(
+            net, meta.hv_networks,
+            dso_der_scale=dict(dso_der_scale) if dso_der_scale else None,
+            dso_load_p_scale=dict(dso_load_p_scale) if dso_load_p_scale else None,
+            dso_load_q_profile_base_mvar=None,
+            dso_line_std_type=None,
+        )
+        dso_overrides = dict(net["dso_overrides"])
+        if verbose:
+            print(f"[snapshot] dso-override applied {dso_overrides} -- scenario "
+                  f"multiplier on top of scenario={scenario!r}; this snapshot is "
+                  f"NOT comparable with an unscaled one")
+    elif dso_der_scale or dso_load_p_scale:
+        raise ValueError(
+            "per-DSO multipliers require --phase full; the 'base' and "
+            "'wind_replace' phases have no HV underlays to scale"
+        )
+
     # ── Runner step [3b]: plant load model (mirrors multi_tso_dso) ───────
     if load_model == "zip":
         apply_zip_load_model(
@@ -461,6 +500,7 @@ def build_snapshot_state(
         net=net, meta=meta, zone_map=zone_map,
         solver_options=dict(SOLVER_OPTIONS),
         snapshot_time=at, phase=phase,
+        dso_overrides=dso_overrides,
     )
 
 
@@ -509,10 +549,41 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "'rural_700'); default = MultiTSOConfig.scenario "
                              f"({DEFAULT_DSO_DER_SCENARIO!r}). The 'base' "
                              "phase always builds the bare IEEE 39 case.")
+    parser.add_argument(
+        "--dso-der-scale", default=None, metavar="DSO_3=2.0[,...]",
+        help="Per-DSO DER nameplate/dispatch multiplier (scenario multiplier, "
+             "not builder state). Requires --phase full. Recorded in the "
+             "snapshot label and provenance notes.",
+    )
+    parser.add_argument(
+        "--dso-load-p-scale", default=None, metavar="DSO_3=2.0[,...]",
+        help="Per-DSO active-load multiplier. Same contract as "
+             "--dso-der-scale; normally set to the same value.",
+    )
     parser.add_argument("--verify", action="store_true",
                         help="Round-trip verify each dumped snapshot.")
     parser.add_argument("--verbose", type=int, default=1)
     args = parser.parse_args(argv)
+
+    def _parse_dso_map(raw: Optional[str], flag: str) -> Optional[Dict[str, float]]:
+        if not raw:
+            return None
+        out: Dict[str, float] = {}
+        for token in str(raw).split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if "=" not in token:
+                raise SystemExit(f"{flag}: expected NAME=VALUE, got {token!r}")
+            name, _, value = token.partition("=")
+            try:
+                out[name.strip()] = float(value)
+            except ValueError:
+                raise SystemExit(f"{flag}: {value!r} is not a number") from None
+        return out or None
+
+    der_scale = _parse_dso_map(args.dso_der_scale, "--dso-der-scale")
+    load_p_scale = _parse_dso_map(args.dso_load_p_scale, "--dso-load-p-scale")
 
     # ── Resolve requested timestamps ─────────────────────────────────────
     requested: List[Tuple[str, datetime]] = []
@@ -535,7 +606,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         probe = build_snapshot_state(
             args.phase, DEFAULT_T0, oltc_init=False,
             shunt_kind=args.shunt_kind, load_model=args.load_model,
-            scenario=args.scenario, verbose=0,
+            scenario=args.scenario,
+            dso_der_scale=der_scale, dso_load_p_scale=load_p_scale,
+            verbose=0,
         )
         profiles = load_profiles(DEFAULT_PROFILES_CSV, timestep_min=15)
         t_peak = find_peak_residual_time(probe.net, profiles)
@@ -552,14 +625,29 @@ def main(argv: Optional[List[str]] = None) -> int:
             shunt_kind=args.shunt_kind,
             load_model=args.load_model,
             scenario=args.scenario,
+            dso_der_scale=der_scale, dso_load_p_scale=load_p_scale,
             verbose=args.verbose,
         )
         label = f"{state.phase}_{tag}_{at:%Y%m%d-%H%M}"
+        notes = None
+        if state.dso_overrides:
+            # The label must differ, or a scaled snapshot silently overwrites
+            # the symmetric one of the same timestamp and the two become
+            # indistinguishable on disk -- which is how the doubled model and
+            # the symmetric one drifted apart in the first place.
+            suffix = "".join(
+                f"_{k.replace('_', '').lower()}x{v:g}"
+                for k, v in sorted(
+                    (state.dso_overrides.get("der_scale") or {}).items())
+            )
+            label += suffix or "_dsoscaled"
+            notes = f"dso_overrides={state.dso_overrides}"
         path = dump_dynamic_snapshot(
             state.net, state.meta, state.zone_map, label, args.out_dir,
             solver_options=state.solver_options,
             snapshot_time=state.snapshot_time,
             phase=state.phase,
+            notes=notes,
         )
         print(f"[snapshot] wrote {path}")
         if args.verify:

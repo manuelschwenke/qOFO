@@ -1342,7 +1342,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         append_log = False
     else:
-        label_dir = REPO_ROOT / "results" / "timescale" / args.label
+        label_dir = REPO_ROOT / "results" / "THESIS_ch9_1_timescale_settling" / args.label
         out_dir = label_dir / stamp
         out_dir.mkdir(parents=True, exist_ok=True)
         append_log = False

@@ -51,13 +51,27 @@ Author: Manuel Schwenke / Claude Code
 """
 from __future__ import annotations
 
-# Headless rendering for the batch sweep (must precede any matplotlib import,
-# which is pulled in transitively via visualisation.style).
+# Backend selection (must precede any matplotlib import, which is pulled in
+# transitively via visualisation.style).
+#
+# FIXED 2026-09-01: this block claimed "headless rendering for the batch sweep"
+# while unconditionally forcing Qt5Agg, an INTERACTIVE backend needing a
+# display.  Unattended (overnight batch, CI, a session with no desktop) the
+# figure step at the end of main() could block or die -- after every variant's
+# log had been pickled, so the results survived but the run ended dirty.
+# It now honours MPLBACKEND exactly as visualisation/style.py already does,
+# so `MPLBACKEND=Agg python -m ...005_CIGRE_MULTI` renders headless while an
+# ordinary interactive run still gets Qt5Agg and its live plots.
 import os
-os.environ["QT_API"] = "pyqt5"
 
 import matplotlib as mpl
-mpl.use("Qt5Agg")
+
+if not os.environ.get("MPLBACKEND"):
+    os.environ["QT_API"] = "pyqt5"
+    try:
+        mpl.use("Qt5Agg")
+    except (ImportError, ValueError):
+        pass  # PyQt5 missing or unavailable -- leave matplotlib's own default.
 
 import pickle
 import sys
@@ -204,12 +218,41 @@ def make_cigre_config() -> MultiTSOConfig:
             ContingencyEvent(minute=360, element_type="line", element_index=25, action="restore"),
         ],
     )
-    cfg.scenario = "base_410"
+    # CORRECTED 2026-09-01: was "base_410", which this line never actually
+    # chose -- commit 5266850 mechanically rewrote the deprecated
+    # "wind_replace" to the string its shim maps to (build.py: "use 'base_410'"),
+    # so the driver has been running the DEFAULT installed-capacity scenario
+    # ever since rather than the intended one.  The study uses rural_700
+    # (700 MW installed DER per DSO: 460 MW wind + 240 MW PV, against
+    # base_410's 270 + 140).  Propagation is via net["ieee39_scenario"], which
+    # add_hv_networks reads when dso_generation_scenario is None, so setting it
+    # here is sufficient -- the runner passes nothing further.
+    cfg.scenario = "rural_700"
     cfg.warmup_s = 0.0
     return cfg
 
 
-#: Per-variant control-mode overrides defining the CIGRE V1–V5 ladder.
+#: Pilot buses for the classical SVR reference (variant S1), one per TSO area.
+#: Produced by ``008_PILOT_BUS_SELECT.py`` on the base case and held fixed.
+#: Regenerate with that script if the partition or the scenario changes; the
+#: JSON it writes is the source of record.
+#: Selected on rural_700 (2026-09-01).  Zone 2 is a NEAR-TIE: bus 7 scores
+#: 0.17914 against bus 6's 0.17832, a 0.5 % margin, and the two swap depending
+#: on the installed-capacity scenario (base_410 picks 6, rural_700 picks 7).
+#: Do not read anything into zone 2's pilot identity.
+PILOT_BUSES: Dict[int, int] = {1: 25, 2: 7, 3: 20}
+
+#: Thesis display names.  The code keys stay V1..V5 so existing result
+#: directories under ``results/005_cigre/`` remain valid; the thesis and its
+#: figures use the family-prefixed names, where the prefix carries the
+#: control-law family (L local, S classical secondary, O OFO, M monolithic).
+DISPLAY_NAMES: Dict[str, str] = {
+    "V1": "L1", "V2": "L2", "S1": "S1", "O1": "O1",
+    "V3": "O2", "V4": "O3", "V5": "M",
+}
+
+#: Per-variant control-mode overrides defining the variant ladder.
+#: Ladder order (thesis names): L1, L2, S1, O1, O2, O3, M.
 VARIANTS: Dict[str, Dict[str, Any]] = {
     "V1": dict(
         tso_mode="local", tso_local_mode="qv",
@@ -236,6 +279,46 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
         tso_mode="ofo",
         dso_mode="ofo",
         coordination_mode="none",
+    ),
+    # ── ADDED 2026-09-01: the two rungs that make the classical comparison
+    # controlled.  See the thesis ladder in \cref{tab:case3:variants}.
+    #
+    # S1 -- classical pilot-node SVR at the TS layer, droop beneath, TS taps
+    #       under the rule-based DiscreteTapControl logic.
+    # O1 -- TS-OFO on the CONTINUOUS actuators only, taps under that SAME
+    #       rule-based logic.  Identical to V3/O2 in every other respect.
+    #
+    # S1 -> O1 therefore changes the control law and NOTHING else: same
+    # actuators, same discrete treatment, same droop layer beneath, same
+    # references, same epochs.  Do not "improve" either row in isolation --
+    # any change to one must be mirrored in the other or the step stops being
+    # controlled and the comparison stops meaning anything.
+    "S1": dict(
+        tso_mode="svr",
+        dso_mode="local", local_der_mode="qv",
+        tso_q_mode="qv", dso_q_mode="qv",
+        tso_oltc_mode="local",
+        # Pilot buses from 008_PILOT_BUS_SELECT.py (base_410, fixed 3-area
+        # partition), selected once and held fixed as classical SVR does.
+        svr_pilot_buses=PILOT_BUSES,
+        # k_i is NOT free: it follows from t_rvr and the pilot sensitivity, so
+        # the nominal per-dispatch loop gain is tso_period_s / t_rvr = 180/300
+        # = 0.6 in every area.  t_rpr is on the inner grid: 20/60 = 0.33.
+        svr_t_rvr_s=300.0,
+        svr_t_rpr_s=60.0,
+        svr_deadband_pu=0.01,
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
+        g_w_pcc=1.0e10,
+    ),
+    "O1": dict(
+        tso_mode="ofo",
+        dso_mode="local", local_der_mode="qv",
+        tso_q_mode="qv", dso_q_mode="qv",
+        tso_oltc_mode="local",          # <-- the ONLY difference from V3
+        tso_qv_vref_pu=1.03, tso_qv_slope_pu=0.06, tso_qv_deadband_pu=0.01,
+        dso_qv_vref_pu=1.03, dso_qv_slope_pu=0.06, dso_qv_deadband_pu=0.01,
+        g_w_pcc=1.0e10,
     ),
     "V5": dict(
         control_scope="central",
@@ -586,7 +669,7 @@ def make_figures(logs: Dict[str, List[MultiTSOIterationRecord]]) -> None:
     fig_logs = {k: v for k, v in logs.items() if k not in FIG_EXCLUDE}
     make_cigre_figures(
         fig_logs, out_dirs,
-        scenario="base_410",
+        scenario="rural_700",
         gen_select=GEN_SELECT,
         v_set=V_SET,
         iface_show_v5=IFACE_SHOW_V5,

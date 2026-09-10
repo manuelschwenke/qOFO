@@ -1407,7 +1407,95 @@ class MultiTSOConfig:
     ``"local"`` -- Skip OFO step; apply local Q(V) or cos phi=1 to
                    TSO-connected windparks via pandapower
                    ``CharacteristicControl`` (Q(V)) or static Q=0
-                   (cos phi=1).  Used by ``002_M_TSO_M_DSO_COMPARE.py``."""
+                   (cos phi=1).  Used by ``002_M_TSO_M_DSO_COMPARE.py``.
+    ``"svr"``   -- Classical pilot-node secondary voltage regulation
+                   (:mod:`controller.svr_controller`), thesis variant ``S1``.
+                   One regional regulator per zone on a single pilot bus, its
+                   reactive level distributed over the area's own headroom and
+                   tracked by plant-level regulators.  Skips the OFO step but
+                   DOES command the TSO actuators, so it takes the local-mode
+                   OLTC plumbing while writing gen V and DER Q itself."""
+
+    # -- SVR reference parameters (tso_mode='svr', thesis variant S1) ---------
+    svr_pilot_buses: Optional[Dict[int, int]] = None
+    """Zone id -> pilot bus index for ``tso_mode='svr'``.
+
+    Selected once at the base case by
+    ``experiments/CIGRE_2026/008_PILOT_BUS_SELECT.py`` and held fixed, as
+    classical SVR does with its participation structure.  ``None`` raises --
+    there is no defensible default, because the choice is network-specific."""
+
+    svr_t_rvr_s: float = 300.0
+    """Regional voltage regulator time constant [s].
+
+    This fixes the integral path: ``k_i`` is derived from this and the pilot
+    sensitivity, so the nominal per-dispatch integral gain is
+    ``tso_period_s / svr_t_rvr_s`` independently of the area. A nonzero
+    ``svr_k_p_rvr`` is a separate tuning quantity."""
+
+    svr_t_rpr_s: float = 60.0
+    """Plant-level reactive power regulator time constant [s].  Must satisfy
+    ``svr_t_rpr_s < svr_t_rvr_s`` for the classical timescale separation."""
+
+    svr_k_p_rvr: float = 0.0
+    """Dimensionless proportional gain of the regional pilot-voltage PI.
+
+    It is normalized by the signed cached pilot sensitivity. The algebraic
+    contribution is evaluated only on the existing TSO/SVR dispatch grid."""
+
+    svr_k_p_rpr: float = 0.0
+    """Dimensionless proportional gain of each machine reactive-power PI.
+
+    It is normalized by the cached local ``dQ/dV_set`` slope. TS-DER keep the
+    existing direct-Q path and therefore have no separate plant PI here."""
+
+    svr_rvr_p_every_step: bool = False
+    """Recompute the outer algebraic P path on every inner-grid call.
+
+    The RVR integral state still advances only at ``tso_period_s``. False holds
+    the complete RVR output between regional samples and preserves the matched
+    S1/O1 supervisory cadence; True is a faster multirate PI experiment."""
+
+    svr_rpr_voltage_priority: bool = False
+    """Block machine RPR moves predicted to worsen the local pilot error.
+
+    Uses the measured pilot voltage and fixed calibration sensitivities on
+    the existing RPR grid. This is an explicit extension of unconditional
+    classical Q tracking; False retains that law for reproducibility.
+    Generator service-status masking applies in either mode."""
+
+    svr_deadband_pu: float = 0.01
+    """Pilot-node error dead band [pu].  Set equal to the OFO dead band."""
+
+    svr_v_ref_pu: Optional[float] = None
+    """Pilot-node voltage reference [pu].  ``None`` takes the zone's own
+    ``zone_v_setpoints_pu`` entry, which is what makes the reference scheme
+    track the same target the OFO tracks."""
+
+    # -- Discrete-actuator ownership at the TSO layer -------------------------
+    tso_oltc_mode: str = "ofo"
+    """Who dispatches the TSO-layer OLTCs.
+
+    ``"ofo"``   -- the OFO owns them as integer variables (default; variants
+                   O2, O3, M).
+    ``"local"`` -- the OFO does NOT see them: ``ZoneDefinition.oltc_trafo_indices``
+                   is left empty, so the MIQP's integer block is empty and the
+                   transmission problem degenerates to a QP.  The machine
+                   transformer taps are then HELD AT THEIR PLANNING POSITION --
+                   no ``DiscreteTapControl`` relay is installed on them.
+
+    On why "planning position" and not a local relay: the machine-transformer
+    tap is a commissioning setting in classical practice, not a closed-loop
+    regulator.  Putting a relay on the HV side while an AVR regulates the LV
+    side of the same transformer is two integral controllers on one device; it
+    was measured on 2026-09-01 to wind the taps up and diverge the power flow
+    about a minute after a generator trip, in BOTH S1 and O1.  Holding the taps
+    is the faithful classical treatment, not a workaround.
+
+    ``"local"`` is what makes thesis variant ``O1`` possible, and through it the
+    controlled ``S1 -> O1`` step: without it, going from the classical scheme to
+    the proposed one would change the control law and the discrete treatment at
+    the same time."""
     tso_local_mode: str = "qv"
     """TSO windpark local-control mode when ``tso_mode='local'``.
     ``'qv'``        -- linear Q(V) droop via CharacteristicControl.

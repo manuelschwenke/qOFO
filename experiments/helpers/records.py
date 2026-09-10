@@ -179,6 +179,18 @@ class MultiTSOIterationRecord:
     zone_tso_status:    Dict[int, Optional[str]]   = field(default_factory=dict)
     zone_tso_solve_s:   Dict[int, Optional[float]] = field(default_factory=dict)
 
+    # SVR diagnostics at the control call, before applying the new command.
+    # Q references use GEN-then-DER order (different from the actuator u);
+    # availability/block masks use zone.gen_indices order. Empty for OFO.
+    zone_svr_q_level: Dict[int, float] = field(default_factory=dict)
+    zone_svr_pilot_error_pu: Dict[int, float] = field(default_factory=dict)
+    zone_svr_q_ref_mvar: Dict[int, NDArray] = field(default_factory=dict)
+    zone_svr_gen_available: Dict[int, NDArray] = field(default_factory=dict)
+    zone_svr_rpr_blocked: Dict[int, NDArray] = field(default_factory=dict)
+    zone_svr_saturated: Dict[int, bool] = field(default_factory=dict)
+    zone_svr_rvr_p_term_level: Dict[int, float] = field(default_factory=dict)
+    zone_svr_rpr_p_term_pu: Dict[int, NDArray] = field(default_factory=dict)
+
     # Plant voltages per zone (after PF)
     zone_v_min:  Dict[int, float] = field(default_factory=dict)
     zone_v_max:  Dict[int, float] = field(default_factory=dict)

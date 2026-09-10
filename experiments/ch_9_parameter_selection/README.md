@@ -4,13 +4,20 @@ Entry points producing the numbers of thesis Chapter 9. One module per
 section, named after the section it fills, so that every reported value has a
 single traceable producer.
 
-| section | quantity fixed | script | status |
-|---|---|---|---|
-| 9.1 | `T_DS`, `T_TS` (Table 9.1) | `ch_9_1_timescale_seperation.py` | ready, **not yet run** |
-| 9.1 | `N_inner` (eq. 9.2) | — | **no script yet**, see below |
-| 9.2 | dead-band half-width `ΔU_db` | `experiments/run_deadband_n1_multiwindow.ps1` (not moved) | done, thesis filled |
-| 9.3 | objective / step-size weights | `tuning/` | pending |
-| 9.4 | shunt persistent-need threshold | — | pending |
+| section | quantity fixed | script | results | status |
+|---|---|---|---|---|
+| 9.1 | `T_DS` / `T_STS` (Table 9.1) | `ch_9_1_actuator_location_sweep.py` (current), `ch_9_1_timescale_seperation.py` (earlier design) | `results/THESIS_ch9_1_timescale_settling/` | run of record `actuator_location_sweep_t0/20260822-014209` |
+| 9.1 | `N_inner` (eq. 9.2) | `ch_9_1_ninner_isolated_sts.py` | `results/THESIS_ch9_1_ninner/` | run of record is archived at `docs/data/2026-08-21_ch9_b1_b2_corrected/B1_ninner_10mvar/`, not in `results/` |
+| 9.1 | `T_TS` sweep (context only) | `ch_9_1_ts_period_sweep.py` | `results/THESIS_ch9_1_ts_period_sweep/` | run of record archived at `docs/data/2026-08-21_ch9_b1_b2_corrected/B2_ts_period_sweep/`; selection of 180 s remains **unmeasured** |
+| 9.2 | dead-band half-width `ΔU_db` | `experiments/run_qstep_sweep.ps1`, `run_e1_drift.ps1`, `run_e3_tracking.ps1` (not moved) | `results/THESIS_ch9_2_deadband_droop{,_e1_drift,_e3_tracking}/` | done, thesis filled |
+| 9.3 | objective / step-size weights | `tuning_mc/`, reproduced by `_ch9_selected_design.py` | `results/tuning_mc/stage1/` — see `results/THESIS_ch9_3_weight_selection_POINTER.md` | selected `fe010aa3ead1`; **chapter text still names the superseded `aa4f6d4a8654`** |
+| 9.4 | shunt persistent-need threshold | — | — | pending |
+
+Result folders carrying the `THESIS_ch9_*` prefix hold the evidence behind the
+chapter; each has a `README.md` naming its run of record and marking the
+superseded and diagnostic labels. Folders **without** the prefix
+(`results/deadband_selection/`, `results/tuning/`) are earlier work that the
+thesis does not report.
 
 ---
 
@@ -35,7 +42,7 @@ Bands (quoted verbatim in the caption of Table 9.1): `1e-3` pu on voltages,
   still samples a transient rather than a settled plant.
 * **`N_inner` is not measured here.** It is a *closed-loop* property of the
   isolated DSO-OFO (parent silent, capability-band-traversing setpoint step)
-  and needs its own entry point in this folder. The summary prints
+  and has its own entry point, `ch_9_1_ninner_isolated_sts.py`. The summary prints
   `T_TS/T_DS = 9` as the **configured** ratio and says explicitly that it is
   not a measurement — do not quote that line for eq. (9.2).
 
@@ -64,7 +71,7 @@ The run itself:
 python experiments\ch_9_parameter_selection\ch_9_1_timescale_seperation.py --label full_t0_wecc --save-trajectories
 ```
 
-### Outputs — `results/timescale/<label>/<stamp>/`
+### Outputs — `results/THESIS_ch9_1_timescale_settling/<label>/<stamp>/`
 
 | file | use |
 |---|---|
@@ -76,7 +83,7 @@ python experiments\ch_9_parameter_selection\ch_9_1_timescale_seperation.py --lab
 | `run.log` | full console transcript |
 | `traj_<case>.csv` | per-signal time series (`--save-trajectories`) |
 
-`results/timescale/<label>/_latest.txt` names the newest stamp, so "which run
+`results/THESIS_ch9_1_timescale_settling/<label>/_latest.txt` names the newest stamp, so "which run
 is Table 9.1 from" has one answer.
 
 ### Exit codes

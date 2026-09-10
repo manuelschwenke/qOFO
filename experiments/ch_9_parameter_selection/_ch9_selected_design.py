@@ -78,6 +78,25 @@ RELIEF_AREAS = ("DSO_2", "DSO_4")
 CORRECTED_DSO_V_AUTHORITY = 10.0
 CORRECTED_DSO4_DER_WEIGHT = 828.3682036634343
 
+#: The frozen NETWORK of the Chapter-9 batch, decided 2026-09-09.
+#:
+#: The selected candidate is a *weight* design; the DSO_3 multipliers are a
+#: scenario multiplier applied on top, and until now no consumer of this module
+#: applied them.  That was a real inconsistency: the PowerFactory project stores
+#: the doubled model, the whole C1 lineage ran doubled, and Phase 1 of the batch
+#: ran doubled -- while every script importing ``build_selected_config`` silently
+#: ran the symmetric one.
+#:
+#: Carrying them here makes "the frozen configuration" a single object rather
+#: than a weight set plus an unwritten convention, which is what the batch
+#: requires.  Pass ``apply_frozen_network=False`` to recover the pre-2026-09-09
+#: behaviour; the archived B1/B2 runs were made that way.
+#:
+#: The weights were designed on the UN-doubled network.  That mismatch is a
+#: stated limitation of the batch, not an oversight.
+FROZEN_DSO_DER_SCALE: Dict[str, float] = {"DSO_3": 2.0}
+FROZEN_DSO_LOAD_P_SCALE: Dict[str, float] = {"DSO_3": 2.0}
+
 #: Relative tolerance on the weight assertion. The recipe is deterministic, so
 #: this is a float-repr guard, not a tolerance band: anything larger than this
 #: means the design changed and the run must not proceed.
@@ -165,12 +184,18 @@ def _apply_post_selection_dso4_correction(cfg, payload):
     return cfg, correction
 
 
-def build_selected_config() -> Tuple[Any, Dict[str, Any]]:
+def build_selected_config(
+    *, apply_frozen_network: bool = True,
+) -> Tuple[Any, Dict[str, Any]]:
     """``(cfg, provenance)`` at the §9.3 selected weights.
 
     Raises if the rebuilt weights differ from the archived ones, or if the
     knobs in the archive differ from :data:`KNOBS` -- either means this module
     is describing a different candidate from the one it names.
+
+    ``apply_frozen_network`` (default true since 2026-09-09) also applies the
+    batch's frozen DSO_3 multipliers, so every caller runs the same network as
+    well as the same weights.  See :data:`FROZEN_DSO_DER_SCALE`.
     """
     import sys
     if str(REPO_ROOT) not in sys.path:
@@ -288,7 +313,33 @@ def build_selected_config() -> Tuple[Any, Dict[str, Any]]:
 
     cfg, correction = _apply_post_selection_dso4_correction(cfg, payload)
 
+    # Applied last, and through ``dataclasses.replace`` so ``__post_init__``
+    # re-derives the per-area voltage relief from the config's own bases.  The
+    # relief derivation is idempotent, so it cannot compound.
+    network = None
+    if apply_frozen_network:
+        cfg = dataclasses.replace(
+            cfg,
+            dso_der_scale=dict(FROZEN_DSO_DER_SCALE),
+            dso_load_p_scale=dict(FROZEN_DSO_LOAD_P_SCALE),
+        )
+        network = {"dso_der_scale": dict(FROZEN_DSO_DER_SCALE),
+                   "dso_load_p_scale": dict(FROZEN_DSO_LOAD_P_SCALE)}
+        # The relief must survive the network replace, or the DSO_2/DSO_4
+        # authority silently reverts to the global scalars.
+        for area in RELIEF_AREAS:
+            if area not in (cfg.dso_g_v_per_area or {}):
+                raise AssertionError(
+                    f"{area}: per-area voltage relief lost when the frozen "
+                    f"network was applied")
+        if abs(float(cfg.dso_g_w_class["DSO_4"]["dso_der"])
+               - CORRECTED_DSO4_DER_WEIGHT) > 1e-9:
+            raise AssertionError(
+                "DSO_4 damping correction lost when the frozen network was "
+                "applied")
+
     provenance = {
+        "frozen_network": network,
         "campaign": CAMPAIGN,
         "candidate_key": CANDIDATE_KEY,
         "knobs": dict(KNOBS),

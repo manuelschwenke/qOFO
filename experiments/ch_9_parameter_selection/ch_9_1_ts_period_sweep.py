@@ -896,7 +896,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="Sweep T_TS at fixed T_STS = 20 s (thesis Sec. 9.1).")
     ap.add_argument("--label", default="ts_period_sweep")
     ap.add_argument("--out", type=Path,
-                    default=REPO_ROOT / "results" / "ch9_ts_period_sweep")
+                    default=REPO_ROOT / "results" / "THESIS_ch9_1_ts_period_sweep")
     ap.add_argument("--workers", type=int, default=6,
                     help="parallel scenarios; the server is shared, so this "
                          "is a budget, not a maximum to be filled")

@@ -1,6 +1,6 @@
 # Ch. 9.1 experiment A — worst settling per output family (V and Q)
 
-Source run: `results/timescale/actuator_location_sweep_t0/20260822-014209`
+Source run: `results/THESIS_ch9_1_timescale_settling/actuator_location_sweep_t0/20260822-014209`
 (70/70 cases complete, 2026-08-22), re-aggregated 2026-08-25.
 
 | File | What it is |

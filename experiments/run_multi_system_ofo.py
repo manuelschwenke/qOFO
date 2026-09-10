@@ -292,8 +292,8 @@ def make_config() -> MultiTSOConfig:
         # -- horizon and cadence ---------------------------------------------
         n_total_s=60.0 * 60 * 1,
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
-        dso_period_s=20.0,            # DSO-OFO every plant step
-        dt_s=20.0,
+        dso_period_s=15.0,            # DSO-OFO every plant step
+        dt_s=15.0,
         # -- objective weights -----------------------------------------------
         g_v=1E7,                      # TSO voltage tracking; drives PCC Q
         g_q=250,                      # DSO interface-Q tracking
@@ -330,7 +330,7 @@ def make_config() -> MultiTSOConfig:
             ContingencyEvent(minute=30,  element_type="gen",  element_index=2, action="trip"),
             ContingencyEvent(minute=180, element_type="gen",  element_index=2, action="restore"),
             ContingencyEvent(minute=120,  element_type="load", bus=11, p_mw=0,   q_mvar=250, action="connect"),
-            ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=0,   q_mvar=250, action="trip"),
+            ContingencyEvent(minute=330, element_type="load", bus=11, p_mw=0,   q_mvar=250, action="trip"),
             # ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
             # ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
             ContingencyEvent(minute=210, element_type="line", element_index=25, action="trip"),
@@ -356,13 +356,39 @@ def main() -> None:
     :func:`main_comparison` is the coordinated-vs-uncoordinated study and
     builds its own paired config; call it directly.
     """
-    cfg = apply_paramset(make_config(), "tuned")
+    cfg = apply_paramset(make_config(), "ch9_frozen")
     run_dir = new_run_dir("run_multi_system_ofo", cfg)
     log = run_multi_tso_dso(cfg)
     with (run_dir.root / "records.pkl").open("wb") as handle:
         pickle.dump(log, handle, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"\nSimulation complete. {len(log)} steps recorded.")
     print(f"Results: {run_dir.root}")
+
+
+def make_config_ch9_frozen() -> MultiTSOConfig:
+    """The Chapter-9 frozen configuration, for analyses that take a factory.
+
+    ``tuning_mc.stage_0_preconditioning --from-runner make_config_ch9_frozen``
+    then analyses exactly what the Chapter-9 batch runs, rather than this
+    module's own weights.  That distinction matters: the design depends on H,
+    and H depends on the network, the boundary equivalent, the zone partition
+    and the start time the config declares -- and the batch is frozen on the
+    **doubled-DSO_3** network, which ``make_config()`` does not set.
+
+    Returns the selected weight design, its per-area voltage relief, the DSO-4
+    damping correction and the frozen network, all asserted by
+    ``build_selected_config`` before it returns.  The import is local because
+    that module reaches into ``tuning_mc``, which imports this one.
+    """
+    import sys
+    from pathlib import Path as _Path
+    _sel = _Path(__file__).resolve().parent / "ch_9_parameter_selection"
+    if str(_sel) not in sys.path:
+        sys.path.insert(0, str(_sel))
+    from _ch9_selected_design import build_selected_config
+
+    cfg, _prov = build_selected_config()
+    return cfg
 
 
 if __name__ == "__main__":

@@ -771,17 +771,29 @@ def run_multi_tso_dso(
         for g in net.gen.index[net.gen["slack"].astype(bool)]:
             slack_gen_term_buses.add(int(net.gen.at[g, "bus"]))
 
+    # ``tso_oltc_mode='local'`` hands the TSO-layer taps to the rule-based
+    # DiscreteTapControl logic instead of the MIQP.  Leaving the per-zone list
+    # empty is the whole mechanism: ``n_integer = n_oltc + n_shunt`` in
+    # ``TSOController._block_sizes``, so an empty list means an empty integer
+    # block and the transmission problem degenerates to a QP.  This is what
+    # thesis variant O1 runs on; see ``MultiTSOConfig.tso_oltc_mode``.
+    _tso_oltc_local = str(getattr(config, "tso_oltc_mode", "ofo")) == "local"
+
     zone_oltc_trafos: Dict[int, List[int]] = {z: [] for z in zone_map}
-    for t_idx, g_idx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
-        lv_bus = int(net.trafo.at[t_idx, "lv_bus"])
-        if lv_bus in slack_gen_term_buses:
-            continue  # slack-gen OLTC excluded (see comment above)
-        # Machine trafo's grid bus = hv_bus of the 2W transformer
-        grid_bus = int(net.trafo.at[t_idx, "hv_bus"])
-        for z, buses in zone_map.items():
-            if grid_bus in set(buses):
-                zone_oltc_trafos[z].append(t_idx)
-                break
+    if not _tso_oltc_local:
+        for t_idx, g_idx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+            lv_bus = int(net.trafo.at[t_idx, "lv_bus"])
+            if lv_bus in slack_gen_term_buses:
+                continue  # slack-gen OLTC excluded (see comment above)
+            # Machine trafo's grid bus = hv_bus of the 2W transformer
+            grid_bus = int(net.trafo.at[t_idx, "hv_bus"])
+            for z, buses in zone_map.items():
+                if grid_bus in set(buses):
+                    zone_oltc_trafos[z].append(t_idx)
+                    break
+    elif verbose >= 1:
+        print("  [tso_oltc_mode=local] TSO OLTCs withheld from the MIQP; "
+              "integer block empty, taps held at planning position")
 
     # ── Build gen→trafo map for contingency handling ────────────────────────
     # Maps net.gen index → net.trafo index of the associated machine trafo.
@@ -1846,7 +1858,13 @@ def run_multi_tso_dso(
     v_init_dso = config.oltc_init_v_target_pu  # coupler MV-side → 1.03
     tol_pu     = config.dso_oltc_init_tol_pu
     _local_dso = config.dso_mode == "local"
-    _local_tso = config.tso_mode == "local"
+    # SVR (thesis variant S1) takes the local-mode TSO plumbing -- pinned AVR
+    # start point, DiscreteTapControl on the machine trafos, tap rate limiter --
+    # because it owns no discrete actuators.  It differs from true local mode in
+    # that it DOES command the continuous TSO actuators, through its own
+    # dispatch block below.
+    _svr_tso = config.tso_mode == "svr"
+    _local_tso = config.tso_mode in ("local", "svr")
     # Plant-side Q(V) loops (QVLocalLoop / CosPhiConstLoop) plus any
     # DiscreteTapControl on couplers / machine trafos must be iterated
     # by pp.runpp(run_control=True) every step.  Always True under the
@@ -2804,13 +2822,33 @@ def run_multi_tso_dso(
     #       lines ~1323; they were dropped after that init phase but
     #       must be re-installed to stay active for the simulation.
     _tso_der_idx_list: List[int] = [int(s) for s in meta.tso_der_indices]
+    # Piece (2) -- the DiscreteTapControl relay -- is installed ONLY where the
+    # generator voltage setpoints stand still.  Under ``tso_oltc_mode='local'``
+    # and under SVR they are deliberately NOT installed: the machine-transformer
+    # tap is then held at its commissioned position.
+    #
+    # This is not a convenience.  A relay chasing the HV bus while an AVR
+    # regulates the LV side of the SAME transformer is two integral controllers
+    # on one device, and it does not converge: measured 2026-09-01, both S1 and
+    # O1 wound the machine taps up (+1, +2, +4, +6, +9 wanted against a limiter
+    # holding -1) and the power flow diverged ~1 min after the gen-2 trip.  No
+    # plant is operated that way.  In the classical hierarchy the machine
+    # transformer tap is a planning/commissioning setting, outside the control
+    # loop -- which is precisely the contrast the thesis draws in Ch 2 and the
+    # reason in-loop discrete co-optimisation is a differentiator at all.
+    #
+    # L1/L2 keep the relay: there the AVR setpoints are pinned, so it has a
+    # static target and no fight arises.
+    _install_local_taps = _local_tso and not _tso_oltc_local and not _svr_tso
     if _local_tso:
-        # (1) Pin generator AVR setpoints
+        # (1) Pin generator AVR setpoints.  Under SVR this is only the starting
+        # point: the RPR writes net.gen.vm_pu from the first dispatch onward.
         net.gen.loc[:, "vm_pu"] = float(config.v_setpoint_pu)
         if verbose >= 1:
             print(f"  [local TSO] Pinned net.gen.vm_pu = {config.v_setpoint_pu:.3f} "
                   f"on {len(net.gen)} synchronous machines")
 
+    if _install_local_taps:
         # (2) Machine 2W OLTC DiscreteTapControl, HV side -> v_setpoint_pu
         _mt_tol_pu = config.dso_oltc_init_tol_pu
         for _tidx in meta.machine_trafo_indices:
@@ -2836,6 +2874,9 @@ def run_multi_tso_dso(
     # Central mode owns every OLTC through the single MIQP (wall-clock
     # cooldown via OFOParameters.int_cooldown_s), so the local-mode
     # DiscreteTapControl rate-limiter is disabled there.
+    # Not widened for ``_tso_oltc_local``: that mode installs no machine-trafo
+    # relay, so there is nothing for the limiter to rate-limit on the TS side.
+    # The DSO coupler taps still need it and reach it through ``_local_dso``.
     _oltc_local_active = (_local_dso or _local_tso) and not _central
     _oltc_limiter = _OLTCRateLimiter(
         max_step=config.local_oltc_max_step_per_dt,
@@ -2855,6 +2896,61 @@ def run_multi_tso_dso(
         ),
     )
     _oltc_limiter_active = _oltc_local_active and _oltc_limiter.active
+
+    # ── SVR reference construction (thesis variant S1) ────────────────────
+    # Built AFTER the local tap controls are installed and the plant has been
+    # brought to its initial operating point, because calibration perturbs a
+    # deep copy of the net as it stands here.  The controllers borrow the OFO's
+    # own ``actuator_bounds``, so both schemes see the same capability curves.
+    svr_coordinator = None
+    if _svr_tso:
+        from controller.svr_controller import (
+            SVRCoordinator, SVRZoneConfig, SVRZoneController,
+        )
+        if not config.svr_pilot_buses:
+            raise ValueError(
+                "tso_mode='svr' requires config.svr_pilot_buses (zone -> bus). "
+                "Generate them with experiments/CIGRE_2026/008_PILOT_BUS_SELECT.py."
+            )
+        _svr_ctrls: Dict[int, Any] = {}
+        for z, zd in zone_defs.items():
+            if z not in config.svr_pilot_buses:
+                raise ValueError(f"svr_pilot_buses has no entry for zone {z}")
+            _v_ref = (
+                float(config.svr_v_ref_pu)
+                if config.svr_v_ref_pu is not None
+                else float(zd.v_setpoint_pu)
+            )
+            _svr_ctrls[z] = SVRZoneController(
+                zd,
+                tso_controllers[z].actuator_bounds,
+                SVRZoneConfig(
+                    pilot_bus=int(config.svr_pilot_buses[z]),
+                    v_ref_pu=_v_ref,
+                    t_rvr_s=float(config.svr_t_rvr_s),
+                    t_rpr_s=float(config.svr_t_rpr_s),
+                    k_p_rvr=float(config.svr_k_p_rvr),
+                    k_p_rpr=float(config.svr_k_p_rpr),
+                    rvr_p_every_step=bool(config.svr_rvr_p_every_step),
+                    deadband_pu=float(config.svr_deadband_pu),
+                    rpr_voltage_priority=bool(config.svr_rpr_voltage_priority),
+                ),
+                # Same withholding the OFO gets (see _non_dispatchable_gens):
+                # without this the reference scheme would command the slack
+                # machine's AVR reference while the OFO does not, and S1 -> O1
+                # would no longer be a comparison of control laws.
+                non_dispatchable_gens=_non_dispatchable_gens,
+                verbose=verbose,
+            )
+        svr_coordinator = SVRCoordinator(_svr_ctrls)
+        if verbose >= 1:
+            print(f"  [SVR] calibrating {len(_svr_ctrls)} regional regulators "
+                  f"(pilot buses {dict(config.svr_pilot_buses)}) ...")
+        svr_coordinator.calibrate(
+            net,
+            dict(run_control=_run_control, calculate_voltage_angles=True,
+                 max_iteration=50, max_iter=300),
+        )
 
     # ── SBX-V adapter construction (before the loop: metering and the
     # PricingSolver proxies must be in place from t = 0) ─────────────────
@@ -3505,6 +3601,66 @@ def run_multi_tso_dso(
                       f"status={central_out.solver_status}  "
                       f"solve={central_out.solve_time_s:.2f}s  "
                       f"({_n_int} integer actuators)")
+
+        # ── SVR reference step (thesis variant S1) ────────────────────────────
+        # Deliberately NOT threaded through the OFO block below: that block is
+        # OFO-specific throughout (sensitivity refresh, capability messaging,
+        # coupling diagnostics, SBX hooks), and conditionals through it would
+        # put the reference scheme at the mercy of edits meant for the proposed
+        # controller.  The apply/record tail is duplicated instead, which is the
+        # smaller risk.  Everything recorded here stays in the record fields and
+        # units the OFO path uses -- that is what lets S1 and O1 be read off one
+        # metric pipeline.
+        # Fires EVERY step, not only on TSO ticks: the RPR lives on the inner
+        # grid and only the RVR is gated on ``run_tso``.  That is the classical
+        # two-timescale structure; collapsing both onto the dispatch grid would
+        # drive the RPR at a per-step gain above one.
+        if _svr_tso and not _central:
+            if run_tso:
+                tso_step_count += 1
+            svr_outputs = svr_coordinator.step(
+                plant.read_y(), float(config.dt_s),
+                rvr_due=bool(run_tso), dt_rvr_s=float(config.tso_period_s),
+            )
+            for z, svr_out in svr_outputs.items():
+                plant.apply_u(writes_from_zone_tso(
+                    plant.read_y(), zone_defs[z], svr_out.u_new,
+                ))
+
+                u = svr_out.u_new
+                n_der = len(zone_defs[z].tso_der_indices)
+                n_pcc = len(zone_defs[z].pcc_trafo_indices)
+                n_gen = len(zone_defs[z].gen_indices)
+                n_oltc = len(zone_defs[z].oltc_trafo_indices)
+                off = 0
+                rec.zone_q_der[z]     = u[off:off + n_der].copy(); off += n_der
+                rec.zone_q_pcc_set[z] = u[off:off + n_pcc].copy(); off += n_pcc
+                rec.zone_v_gen[z]     = u[off:off + n_gen].copy(); off += n_gen
+                rec.zone_oltc_taps[z] = u[off:off + n_oltc].copy()
+                # objective_value carries the squared pilot error.  The scheme
+                # does not optimise, so this column is a tracking diagnostic and
+                # is NOT comparable to the OFO objective in the same column.
+                rec.zone_tso_objective[z]   = svr_out.objective_value
+                rec.zone_tso_status[z]      = svr_out.solver_status
+                rec.zone_tso_solve_s[z]     = svr_out.solve_time_s
+                # Keep controller targets separate from post-PF Q readings.
+                rec.zone_svr_q_level[z] = svr_out.q_level
+                rec.zone_svr_pilot_error_pu[z] = svr_out.pilot_error_pu
+                rec.zone_svr_q_ref_mvar[z] = svr_out.q_ref_mvar.copy()
+                rec.zone_svr_gen_available[z] = svr_out.gen_available.copy()
+                rec.zone_svr_rpr_blocked[z] = svr_out.rpr_blocked.copy()
+                rec.zone_svr_saturated[z] = svr_out.saturated
+                rec.zone_svr_rvr_p_term_level[z] = svr_out.rvr_p_term_level
+                rec.zone_svr_rpr_p_term_pu[z] = svr_out.rpr_p_term_pu.copy()
+                rec.zone_contraction_lhs[z] = float("nan")
+
+            if verbose >= 2 and run_tso:
+                _parts = " ".join(
+                    f"z{z}: v_p={o.pilot_v_pu:.4f} e={o.pilot_error_pu:+.4f} "
+                    f"q={o.q_level:+.3f}{'*' if o.saturated else ''}"
+                    for z, o in sorted(svr_outputs.items())
+                )
+                print(f"  [SVR t={int(time_s/60):3d} min] {_parts}")
 
         # ── TSO step ──────────────────────────────────────────────────────────
         # Skipped entirely in TSO local mode: the CharacteristicControllers
@@ -4359,6 +4515,10 @@ def run_multi_tso_dso(
         # required to propagate the new q_cor / V_set / OLTC commands.
         _miqp_acted = (
             (run_tso and not _local_tso and not _central)
+            # SVR writes gen V and DER Q like the MIQP does, so its steps need
+            # the same end-of-step power flow to propagate.  Not gated on
+            # ``run_tso``: the RPR acts on every step.
+            or (_svr_tso and not _central)
             or (run_dso and not _local_dso)
             or run_central
         )

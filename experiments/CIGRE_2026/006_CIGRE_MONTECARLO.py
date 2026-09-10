@@ -304,7 +304,10 @@ def make_cigre_config() -> MultiTSOConfig:
         contingencies=[
         ],
     )
-    cfg.scenario = "base_410"
+    # CORRECTED 2026-09-01, same reason as 005_CIGRE_MULTI: "base_410" was
+    # inherited from the "wind_replace" deprecation shim, not chosen.  The
+    # study uses rural_700.
+    cfg.scenario = "rural_700"
     cfg.warmup_s = 0.0
     # Distributed slack: the active-power imbalance after a disturbance (load
     # connection, generator trip) is shared across all machines weighted by

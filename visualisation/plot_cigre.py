@@ -55,6 +55,14 @@ from visualisation.style import TU_COLOURS
 CIGRE_PALETTE: Dict[str, str] = {
     "V1": TU_COLOURS[8],   # #B90F22 red    -- lower bound
     "V2": TU_COLOURS[9],   # #D28700 amber  -- local-only
+    # ADDED 2026-09-01: the two rungs that make the classical comparison
+    # controlled (thesis names S1 / O1; see 005_CIGRE_MULTI.DISPLAY_NAMES).
+    # Without an entry here every figure raises KeyError once these variants
+    # carry logs.  S1 is the classical reference, O1 its control-law twin, so
+    # they are given adjacent-but-distinguishable hues rather than reusing the
+    # colours that already mean "lower bound" or "proposed".
+    "S1": TU_COLOURS[6],
+    "O1": TU_COLOURS[3],
     "V3": TU_COLOURS[1],   # #004E8A blue   -- one-sided OFO
     "V4": TU_COLOURS[4],   # #008877 teal   -- proposed (cascaded OFO)
     "V5": "#000000",       # black (dashed) -- centralized upper-bound reference

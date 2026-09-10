@@ -1,6 +1,6 @@
 # N_inner figure -- the numbers, with provenance
 
-Source: `results/ch9_ninner/converged/20260820-140643/steps.csv`
+Source: `results/THESIS_ch9_1_ninner/converged/20260820-140643/steps.csv`
 (experiment B1, isolated subordinate loop, frozen supervisory OFO,
 final tuned weights `stage1/fe010aa3ead1`, commit `e5d1602`, clean tree).
 No re-simulation: every number below is read off that finished run.

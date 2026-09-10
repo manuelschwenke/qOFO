@@ -1227,7 +1227,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="Isolated-STS measurement of N_inner (thesis eq. 9.2).")
     ap.add_argument("--label", default="ninner_isolated")
     ap.add_argument("--out", type=Path,
-                    default=REPO_ROOT / "results" / "ch9_ninner")
+                    default=REPO_ROOT / "results" / "THESIS_ch9_1_ninner")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--band-mvar", type=float, default=DEFAULT_BAND_MVAR)
     ap.add_argument("--band-fraction", type=float,

@@ -67,7 +67,7 @@ without a PowerFactory seat:
 
     python experiments\ch_9_parameter_selection\ch_9_1_timescale_seperation.py --self-test
 
-Outputs, in ``results/timescale/<label>/<stamp>/``
+Outputs, in ``results/THESIS_ch9_1_timescale_settling/<label>/<stamp>/``
 -------------------------------------------------
 * ``timescale_table.tex``     -- the tabular *body* of Table 9.1, ready to
                                  paste over the ``[TBD]`` rows
@@ -1054,7 +1054,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--skip-preflight", action="store_true",
                     help="skip the flat-run equilibrium check (NOT advised)")
     ap.add_argument("--out-dir", default=None,
-                    help="write here instead of results/timescale/<label>/<stamp>")
+                    help="write here instead of "
+                         "results/THESIS_ch9_1_timescale_settling/<label>/<stamp>")
     ap.add_argument("--dry-run", action="store_true",
                     help="list the cases that would run; no PowerFactory needed")
     ap.add_argument("--only", nargs="*", default=None, metavar="SUBSTR",
@@ -1089,7 +1090,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    label_dir = REPO_ROOT / "results" / "timescale" / a.label
+    label_dir = REPO_ROOT / "results" / "THESIS_ch9_1_timescale_settling" / a.label
     out_dir = Path(a.out_dir) if a.out_dir else label_dir / stamp
     out_dir.mkdir(parents=True, exist_ok=True)
 

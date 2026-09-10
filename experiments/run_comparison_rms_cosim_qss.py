@@ -339,8 +339,10 @@ def main(argv=None) -> int:
         gui_app = _pf_connect(args.project, study_case="02_RMS_CoSim")
         show_desktop(gui_app)
 
-    static_cfg = make_cosim_config(args.duration, verbose=args.verbose)
-    rms_cfg = make_cosim_config(args.duration, verbose=args.verbose)
+    static_cfg = make_cosim_config(args.duration, verbose=args.verbose,
+                                   paramset=getattr(args, "paramset", None))
+    rms_cfg = make_cosim_config(args.duration, verbose=args.verbose,
+                                paramset=getattr(args, "paramset", None))
     apply_cli_overrides(args, (static_cfg, rms_cfg))
     if args.no_qv_seed:
         static_cfg.disable_qv_seed = True

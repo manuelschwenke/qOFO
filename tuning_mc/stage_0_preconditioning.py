@@ -835,6 +835,36 @@ def main(argv: list[str] | None = None) -> int:
             repl["scenario"] = args.network
         cfg = dataclasses.replace(cfg, **repl)
         scenario = None
+    # The YAML baseline arrives carrying whatever voltage relief
+    # ``MultiTSOConfig.__post_init__`` installs by default -- since 2026-08-24
+    # that is DSO_2 / DSO_4 at x10.  Stage 0 must design against the
+    # UNRELIEVED config: the relief is applied downstream, by
+    # ``tuning_mc.stage_1_search.build_config`` via ``apply_dso_v_relief``, so
+    # leaving it in place designs against an already-relieved plant and then
+    # relieves a second time.
+    #
+    # Measured 2026-09-08 -- with two of the four DSO areas pre-scaled x10
+    # inside the geometric-mean aggregate, the global ``g_w_dso_oltc`` moved by
+    # 10**(2/4) = sqrt(10), 392.6444 -> 1241.6505, while DSO_1 / DSO_3 stayed
+    # bit-identical.  That silently broke the reproduction guard in
+    # ``experiments/ch_9_parameter_selection/_ch9_selected_design.py`` and with
+    # it every Chapter 9.1 experiment importing it.
+    #
+    # ``dso_v_relief_factors`` is cleared in the SAME ``replace`` as the maps:
+    # ``__post_init__`` runs on every copy and would otherwise reinstall what
+    # ``strip_dso_v_relief`` just removed.
+    #
+    # Deliberately NOT applied on the ``--from-runner`` path.  That path
+    # analyses the shipped configuration as it stands, and its per-area
+    # overrides are the thing being looked at (see the comment above).
+    if not args.from_runner:
+        from configs.config import strip_dso_v_relief
+        _gv_per_area, _gw_class = strip_dso_v_relief(cfg)
+        cfg = dataclasses.replace(
+            cfg, dso_v_relief_factors=None,
+            dso_g_v_per_area=_gv_per_area, dso_g_w_class=_gw_class,
+        )
+
     # Headless only.  Deliberately NOT tuning's FIXED_OVERRIDES: this analyses
     # the shipped configuration, and that overlay pins int_cooldown=1, which is
     # a tuning artefact rather than the operating point.

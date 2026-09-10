@@ -40,7 +40,8 @@
 #
 #  Runs land in results\rms_phase6_replay as 0537, 0538 (the counter is
 #  held at 0536 by the anchor directory there) and are MOVED afterwards to
-#  results\deadband_droop_e1_drift\data.  results\deadband_droop\data is
+#  results\THESIS_ch9_2_deadband_droop_e1_drift\data.  The q-step campaign in
+#  results\THESIS_ch9_2_deadband_droop\data is
 #  the q-step campaign and is not touched.
 #
 #  Usage:
@@ -61,7 +62,7 @@ $ErrorActionPreference = 'Continue'
 
 if (-not (Test-Path -LiteralPath $Prj))    { Write-Host "!! project not reachable: $Prj"; exit 1 }
 if (-not (Test-Path -LiteralPath $Python)) { Write-Host "!! python not found: $Python"; exit 1 }
-if (-not $LogDir) { $LogDir = Join-Path $Prj 'results\deadband_droop_e1_drift\logs' }
+if (-not $LogDir) { $LogDir = Join-Path $Prj 'results\THESIS_ch9_2_deadband_droop_e1_drift\logs' }
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Force $LogDir | Out-Null }
 Set-Location $Prj
 
@@ -121,7 +122,7 @@ foreach ($w in $Windows) {
 
 Write-Host ""
 Write-Host "=== DONE $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ==="
-Write-Host "  results: $Prj\results\rms_phase6_replay  (move to deadband_droop_e1_drift\data)"
+Write-Host "  results: $Prj\results\rms_phase6_replay  (move to THESIS_ch9_2_deadband_droop_e1_drift\data)"
 if ($failed.Count -gt 0) {
     Write-Host "  $($failed.Count) FAILED of ${total}:"; $failed | ForEach-Object { Write-Host "    $_" }
 } else { Write-Host "  all $total runs completed" }

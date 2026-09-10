@@ -48,7 +48,7 @@
 #  MUST be identical across shards or the results will not pool.
 #
 #  RESULT DIRECTORIES land in results/rms_phase6_replay (that is what
-#  new_run_dir does) and are moved to results/deadband_droop_e3_tracking/data
+#  new_run_dir does) and are moved to results/THESIS_ch9_2_deadband_droop_e3_tracking/data
 #  afterwards by finalize_e3_runs.py.  Cell identity is recoverable from each
 #  run's own config.json -- never from these logs.
 #
@@ -76,7 +76,7 @@ $ErrorActionPreference = 'Continue'
 
 if (-not (Test-Path -LiteralPath $Prj))    { Write-Host "!! project not reachable: $Prj"; exit 1 }
 if (-not (Test-Path -LiteralPath $Python)) { Write-Host "!! python not found: $Python"; exit 1 }
-if (-not $LogDir) { $LogDir = Join-Path $Prj 'results\deadband_droop_e3_tracking\logs' }
+if (-not $LogDir) { $LogDir = Join-Path $Prj 'results\THESIS_ch9_2_deadband_droop_e3_tracking\logs' }
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Force $LogDir | Out-Null }
 Set-Location $Prj
 

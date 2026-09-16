@@ -72,11 +72,17 @@ from pf.pf_parity import PARITY_LDF_SETTINGS  # noqa: E402
 from pf.screening import (  # noqa: E402
     RMS_STEP_MS,
     RMS_STUDY_CASE,
+    QV_INTERNAL_SIGNALS,
     SHUNT_STEP_VAR,
     TAP_MECH_DELAY_S,
     ScreeningContext,
     monitored_outputs,
 )
+
+#: Label prefixes of the Q(V) dead-band diagnostic channels, for the
+#: registration check in ``_prepare``.  Derived from the single definition in
+#: ``pf.screening`` so the two cannot drift.
+_QV_INTERNAL_PREFIXES = frozenset(p for _s, p in QV_INTERNAL_SIGNALS)
 from pf.profile_playback import (  # noqa: E402
     install_profile_playback,
     remove_profile_playback_models,
@@ -166,11 +172,18 @@ class PowerFactoryPlant:
                  preallocate_profiles: bool = False,
                  profile_playback_config=None,
                  qv_deadband_at_contingency: Optional[float] = None,
+                 export_qv_internals: bool = False,
                  rms_step_ms: float = RMS_STEP_MS,
                  rms_step_max_ms: Optional[float] = None,
                  adaptive_step: bool = False):
         if on_missing_avr not in ("raise", "skip"):
             raise ValueError(f"on_missing_avr {on_missing_avr!r}")
+        #: Record the per-park Q(V) dead-band internals; see
+        #: ``MultiTSOConfig.rms_export_qv_internals`` and
+        #: ``pf.screening.QV_INTERNAL_SIGNALS``.  Needed by the Chapter-9
+        #: dead-band experiment, whose measurement is the anchor-referenced
+        #: deviation between ACTUAL anchor updates.
+        self._export_qv_internals = bool(export_qv_internals)
         #: Diagnostic for the dead-band x droop study ONLY.  When set, every
         #: park runs its CONFIGURED Q(V) dead band through the run-up and this
         #: value is installed instead at the instant of the contingency.
@@ -325,7 +338,25 @@ class PowerFactoryPlant:
         # (capability clip vs. droop amplification); see monitored_outputs.
         # Keep the list: harvest_trajectories must iterate exactly what was
         # registered, not re-derive it with different arguments.
-        self._monitors = monitored_outputs(self.app, include_der=True)
+        # include_qv_internals: the Chapter-9 dead-band experiment needs the
+        # anchor and the dead-zone/droop signals, which qDER_*/uDER_* cannot
+        # reconstruct.  Config-gated because it is six channels per park.
+        self._monitors = monitored_outputs(
+            self.app, include_der=True,
+            include_qv_internals=self._export_qv_internals)
+        if self._export_qv_internals:
+            n_qv = sum(1 for _o, _v, lbl in self._monitors
+                       if lbl.split("_", 1)[0] in _QV_INTERNAL_PREFIXES)
+            print(f"  [qvpre] recording {n_qv} Q(V) dead-band diagnostic "
+                  f"channels (anchor, filtered V, deviation, dead-zone "
+                  f"output, unsaturated and saturated command)")
+            if not n_qv:
+                raise PFSessionError(
+                    "rms_export_qv_internals is set but no QVPRE diagnostic "
+                    "monitor was registered. The dead-band experiment would "
+                    "record nothing and the run would look successful. Check "
+                    "that the parks carry a QVPRE block "
+                    "(pf/wecc_apply.py::apply_to_park).")
         self.ctx.set_monitors(self._monitors)
         self._anchor_qv_precontrollers()
         if self.ctx.persistent_event_pool:

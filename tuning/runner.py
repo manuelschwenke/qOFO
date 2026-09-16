@@ -27,6 +27,7 @@ import contextlib
 import io
 import time
 import traceback
+import dataclasses
 from dataclasses import dataclass
 
 from configs.config import MultiTSOConfig
@@ -123,3 +124,64 @@ def run_one(
         wall_time_s=wall,
         failure_reason=failure,
     )
+
+
+def run_scenario_with_records(
+    scenario: ScenarioSpec,
+    cfg: MultiTSOConfig,
+    scales,
+) -> tuple[RunResult, list[MultiTSOIterationRecord]]:
+    """Run one scenario at weights already baked into ``cfg``.
+
+    Differs from :func:`run_one` in two ways, both required by the Chapter-9
+    experiments and by the Stage-II search:
+
+    * the weights are taken from ``cfg`` as given, rather than overlaid from a
+      parameter dict, so a parameter set that was applied upstream is not
+      re-applied here;
+    * the record list is **returned** rather than discarded, because the
+      settling, per-interval interface-Q and tap-lockout analyses all need the
+      trajectory, not just its summary metrics.
+
+    Same contract otherwise: never raises, suppresses child stdout/stderr.
+
+    Relocated from the retired ``tuning.objectives_v2`` (2026-09-10), which
+    also carried the Optuna objective and its reparameterised search space.
+    The function itself is unchanged; only its home and name are.
+    """
+    cfg_sc = scenario.overlay_on(cfg)
+    # No live plotting in a batch, whatever the caller handed in.  This runs
+    # inside pool workers -- the Chapter-9 banks use 16, the Stage-II search 22
+    # -- and ``live_plot_controller`` constructs a matplotlib figure per
+    # scenario and redraws it every step, for nobody.  The plotters only read
+    # state, so this cannot change a result; it removes overhead that a caller
+    # building on the INTERACTIVE ``make_config()`` would otherwise inherit
+    # silently (measured 2026-09-15, after the Chapter-9 lineage moved onto it).
+    _no_plots = {name: False for name in (
+        "live_plot_controller", "live_plot_cascade", "live_plot_system",
+        "live_plot_tracking", "live_plot_sbx", "live_plot_sbxv",
+    ) if getattr(cfg_sc, name, False)}
+    if _no_plots:
+        cfg_sc = dataclasses.replace(cfg_sc, **_no_plots)
+    run_fn = get_run_multi_tso_dso()
+
+    t0 = time.perf_counter()
+    failure: str = ""
+    log: list[MultiTSOIterationRecord] = []
+    buf_out, buf_err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf_out), \
+                contextlib.redirect_stderr(buf_err):
+            log = run_fn(cfg_sc)
+    except Exception as exc:
+        failure = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+        log = []
+    wall = time.perf_counter() - t0
+
+    metrics = extract_metrics(log, cfg_sc, scales=scales)
+    return RunResult(scenario.name, metrics, wall, failure), log
+
+
+#: Backwards-compatible alias for the Chapter-9 call sites, which imported this
+#: as ``tuning.objectives_v2._run_scenario``.
+_run_scenario = run_scenario_with_records

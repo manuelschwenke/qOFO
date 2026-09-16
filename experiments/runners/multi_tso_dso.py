@@ -374,6 +374,11 @@ def run_multi_tso_dso(
     log : List[MultiTSOIterationRecord]
         One record per simulation step.
     """
+    # Fail before anything is built if a weight was never supplied.  Until
+    # the 2026-09-10 reset every weight carried a dataclass default, so a
+    # config that omitted one ran anyway -- at values from configs/config.py
+    # rather than from the parameter set the caller thought was in force.
+    config.require_weights()
     v_set = config.v_setpoint_pu
     verbose = config.verbose
 

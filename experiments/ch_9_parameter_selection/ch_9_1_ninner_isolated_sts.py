@@ -107,6 +107,10 @@ if str(REPO_ROOT) not in sys.path:
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _ch9_selected_design import (  # noqa: E402
+    INITIAL_PARAMSET, SELECTED_PARAMSET,
+)
+
 # =====================================================================
 #  Constants entering a number
 # =====================================================================
@@ -149,7 +153,21 @@ DEFAULT_BAND_MVAR = 1.0
 DEFAULT_FLAT_MVAR = 0.1
 
 #: Flatness tolerances reported alongside the primary one [Mvar].
-FLAT_SWEEP_MVAR: Tuple[float, ...] = (0.02, 0.05, 0.1, 0.25, 1.0)
+#:
+#: Extended 2026-09-15 from ``(0.02, 0.05, 0.1, 0.25, 1.0)``.  The old ladder
+#: jumped 4x between 0.25 and 1.0, and the interesting region turned out to be
+#: inside that gap: on the Experiment-C bank the p95 of ``N_inner`` falls from
+#: 14.0 to 1.0 across it, so every question of the form "at which tolerance
+#: does the p95 reach N?" had to be answered by interpolating a 4x span.  The
+#: median crossing (0.211 Mvar for N = 9) was inside a measured interval; the
+#: p95 crossing (~0.41 Mvar) was not.
+#:
+#: The added points are geometric, so the ladder is uniform in log-tolerance --
+#: which is the axis ``N_inner`` is roughly linear in, since the tail of the
+#: iteration decays geometrically.
+FLAT_SWEEP_MVAR: Tuple[float, ...] = (
+    0.02, 0.05, 0.1, 0.15, 0.25, 0.35, 0.5, 0.7, 1.0,
+)
 
 V_MIN_PU, V_MAX_PU = 0.9, 1.1
 
@@ -167,6 +185,40 @@ V_MIN_PU, V_MAX_PU = 0.9, 1.1
 #: window with no admissible traversal is not a failed measurement, and
 #: counting it as one would put a spurious censoring fraction into eq. (9.2).
 DEAD_ZONE_STRATA = ("none",)
+
+#: Window banks this experiment can be measured on.
+#:
+#: ``conditions`` -- the six operating conditions W1-W6 of thesis table
+#: ``tab:timescales:conditions``, declared in ``tuning_mc/scenarios_mc_v2.py``.
+#: This is the default from 2026-09-15: F1 and F2 are specified on W1-W6, and a
+#: subordinate-response measurement taken on a different bank cannot be read
+#: alongside them.  W5 has structurally zero DER reactive capability at both
+#: levels and is excluded by :data:`DEAD_ZONE_STRATA`, so five windows are
+#: measured -- which is what the chapter already says about Experiment B.
+#:
+#: ``design12`` -- the twelve ``tier1_design_set()`` search windows, the bank of
+#: the 288-planned / 240-measured archive.  Kept so the new runs can be compared
+#: against that archive's case manifest; it is a broader coverage check, not the
+#: reported result.
+BANKS = ("conditions", "design12")
+DEFAULT_BANK = "conditions"
+
+
+def bank_specs(bank: str):
+    """Scenario specs of the named window bank.
+
+    Importing inside the function keeps ``tuning_mc`` off this module's import
+    path, which matters because the worker processes import it too.
+    """
+    from tuning_mc.scenarios_mc_v2 import condition_set, tier1_design_set
+    if bank == "conditions":
+        # ``hours`` is irrelevant here -- _run_case replaces duration_s with
+        # SETTLE_S + OBSERVE_S -- but calling it is what registers W1-W6 in
+        # WINDOW_META, which the stratum exclusion below reads.
+        return condition_set()
+    if bank == "design12":
+        return tier1_design_set()
+    raise SystemExit(f"unknown bank {bank!r}; known: {', '.join(BANKS)}")
 
 
 # =====================================================================
@@ -583,13 +635,26 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
                 "NUMEXPR_NUM_THREADS"):
         os.environ[var] = "1"
 
-    from _ch9_selected_design import build_selected_config
+    from _ch9_selected_design import SELECTED_PARAMSET, build_selected_config
     from tuning.metrics import MetricScales
-    from tuning.objectives_v2 import _run_scenario
-    from tuning_mc.scenarios_mc_v2 import tier1_design_set
+    from tuning.runner import run_scenario_with_records as _run_scenario
 
-    cfg, _prov = build_selected_config()
-    spec = next(s for s in tier1_design_set() if s.name == job["window"])
+    # The controller identity is carried in the JOB, not defaulted here: the
+    # initial-weight (Experiment C) and final-weight (Experiment E) legs run
+    # the same request bank and must be distinguishable from the run record
+    # alone.  Before 2026-09-15 this called build_selected_config() with no
+    # arguments and the worker silently ran whatever the module constant was.
+    cfg, _prov = build_selected_config(
+        paramset=job.get("paramset", SELECTED_PARAMSET),
+        apply_frozen_network=bool(job.get("frozen_network", True)))
+    if job.get("no_measurement_noise"):
+        # dataclasses.replace on the nested config, not in-place: the cfg is
+        # shared by the probe and measurement passes below.
+        cfg = dataclasses.replace(
+            cfg, measurement_noise=dataclasses.replace(
+                cfg.measurement_noise, enabled=False))
+    spec = next(s for s in bank_specs(job.get("bank", DEFAULT_BANK))
+                if s.name == job["window"])
 
     total_s = SETTLE_S + OBSERVE_S
     # Parent silent. Frozen OFO by default: one solve at t=0, then hold.
@@ -991,15 +1056,23 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
                f"(`frozen_ofo` = supervisory OFO solves once at t=0 and holds; "
                f"`local` = local Q(V) supervisory control, a DIFFERENT "
                f"baseline controller and a cross-check only)",
-               f"- weights: campaign `{d.get('campaign')}` candidate "
-               f"`{d.get('candidate_key')}`, {d.get('verified')}",
+               f"- weights: paramset `{d.get('paramset')}` candidate "
+               f"`{d.get('candidate_key')}` from `{d.get('campaign')}`",
+               f"- network: "
+               + ("**doubled DSO_3** (`dso_der_scale`/`dso_load_p_scale` "
+                  "x2), the declared Chapter-9 batch network. The Stage-I/II "
+                  "weight campaign ran SYMMETRIC, so this run does not share "
+                  "its network."
+                  if d.get("frozen_network") else
+                  "symmetric, as the Stage-I/II weight campaign used"),
                f"- settle {c.get('settle_s')} s, observe {c.get('observe_s')} s, "
                f"tracking band {c.get('band_mvar')} Mvar, flatness tolerance "
                f"{c.get('flat_mvar')} Mvar, raw target "
                f"{c.get('band_fraction')} of the reported band"
                + (f", applied step capped at {c.get('max_step_mvar')} Mvar"
                   if c.get("max_step_mvar") is not None else ""),
-               f"- `T_STS` = {STS_PERIOD_S:.0f} s, bank `tier1_design_set` on "
+               f"- `T_STS` = {STS_PERIOD_S:.0f} s, bank "
+               f"`{(meta.get('args') or {}).get('bank', DEFAULT_BANK)}` on "
                f"`rural_700`",
                f"- command: `{' '.join(meta['argv'])}`"]
 
@@ -1225,6 +1298,33 @@ def self_test() -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Isolated-STS measurement of N_inner (thesis eq. 9.2).")
+    ap.add_argument("--paramset", default=SELECTED_PARAMSET,
+                    help=f"controller weights, from configs/paramsets/. "
+                         f"{INITIAL_PARAMSET!r} is the Stage-I ANALYTIC design "
+                         f"point (Experiment C, initial weights); "
+                         f"{SELECTED_PARAMSET!r} is the Stage-II selection "
+                         f"(Experiment E, final weights). Recorded in "
+                         f"run_meta.json and resolved_config.json either way.")
+    ap.add_argument("--bank", choices=BANKS, default=DEFAULT_BANK,
+                    help="window bank. 'conditions' = W1-W6 of the thesis "
+                         "conditions table, which is also what F1/F2 use "
+                         "(W5 excluded as zero-capability, so 5 windows "
+                         "measured). 'design12' = the twelve tier1_design_set "
+                         "search windows of the 240-measured archive.")
+    ap.add_argument("--no-measurement-noise", action="store_true",
+                    help="disable the measurement-chain error model. A "
+                         "DIAGNOSTIC, not a run of record: it isolates how "
+                         "much of the per-iteration flow change at "
+                         "convergence is the loop and how much is the "
+                         "instrument. The flatness tolerance that defines "
+                         "N_inner cannot be set below that floor, so the "
+                         "floor has to be measured rather than assumed.")
+    ap.add_argument("--symmetric-network", action="store_true",
+                    help="drop the doubled-DSO_3 multipliers. The Chapter-9 "
+                         "batch is declared on the DOUBLED network and that is "
+                         "the default; the Stage-II search that produced "
+                         "ch9_selected ran symmetric, so this flag is what "
+                         "makes a run comparable with the selection bank.")
     ap.add_argument("--label", default="ninner_isolated")
     ap.add_argument("--out", type=Path,
                     default=REPO_ROOT / "results" / "THESIS_ch9_1_ninner")
@@ -1288,14 +1388,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if a.self_test:
         return self_test()
 
-    from _ch9_selected_design import build_selected_config
-    from tuning_mc.scenarios_mc_v2 import WINDOW_META, tier1_design_set
+    from _ch9_selected_design import build_selected_config, resolved_manifest
+    from tuning_mc.scenarios_mc_v2 import WINDOW_META
 
-    cfg, design = build_selected_config()
-    print(f"[design] campaign {design['campaign']} candidate "
-          f"{design['candidate_key']}: {design['verified']}")
+    cfg, design = build_selected_config(
+        paramset=a.paramset,
+        apply_frozen_network=not a.symmetric_network)
+    print(f"[design] paramset {design['paramset']} candidate "
+          f"{design['candidate_key']} from {design['campaign']}")
+    print(f"[design] base {design['base_config']}; "
+          f"shunts={cfg.install_tso_tertiary_shunts}/{cfg.shunt_dispatch} "
+          f"boundary={cfg.tie_boundary_equivalent} "
+          f"network={'DSO_3 x2' if design['frozen_network'] else 'symmetric'}")
+    if design["frozen_network"]:
+        print("[design]   -- the Stage-I/II weight campaign ran SYMMETRIC; "
+              "this run does not share its network.")
 
-    specs = tier1_design_set()
+    specs = bank_specs(a.bank)
+    print(f"[ninner] bank {a.bank}: {len(specs)} window(s)")
     names = [s.name for s in specs]
     if a.windows:
         want = [w.strip() for w in a.windows.split(",") if w.strip()]
@@ -1335,6 +1445,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     meta["excluded_windows"] = excluded if not a.include_dead_zone else []
     (out_dir / "run_meta.json").write_text(
         json.dumps(meta, indent=2, default=str), encoding="utf-8")
+    # The COMPLETE resolved configuration, not the name of the helper that
+    # built it: a run record that names a factory cannot be re-resolved once
+    # the factory changes, which is how the 2026-08 batch lost the ability to
+    # say what network and actuator set it had actually simulated.
+    (out_dir / "resolved_config.json").write_text(
+        json.dumps(resolved_manifest(cfg, design), indent=2, default=str),
+        encoding="utf-8")
     shutil.copy2(Path(__file__).resolve(), out_dir / "script_snapshot.py")
 
     # One interface is stepped in each job. The full design pairs both
@@ -1363,6 +1480,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "flat_mvar": a.flat_mvar,
                         "save_trajectories": a.save_trajectories,
                         "trafo": f"{d}|trafo_{i}",
+                        "paramset": a.paramset,
+                        "frozen_network": not bool(a.symmetric_network),
+                        "bank": a.bank,
+                        "no_measurement_noise": bool(a.no_measurement_noise),
                     })
 
     if a.focus_trafo:

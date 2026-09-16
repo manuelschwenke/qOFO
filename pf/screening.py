@@ -888,6 +888,7 @@ class ScreeningContext:
 # =====================================================================
 
 def monitored_outputs(app, include_der: bool = False,
+                      include_qv_internals: bool = False,
                       ) -> List[Tuple[Any, str, str]]:
     """(object, variable, label) list of the controlled outputs to record.
 
@@ -902,6 +903,15 @@ def monitored_outputs(app, include_der: bool = False,
     alone cannot distinguish a capability clip (park Q pinned at a limit the
     static plant does not share) from droop amplification of a voltage
     difference (park Q free, but responding to a different ``u``).
+
+    ``include_qv_internals`` adds the six QVPRE signals of
+    :data:`QV_INTERNAL_SIGNALS` per park -- the anchor, the filtered voltage,
+    the anchor-referenced deviation, the dead-zone output, and the droop
+    command before and after saturation.  Required by the Chapter-9 dead-band
+    experiment (F1), which measures ``max |U_filtered - U_anchor|`` between
+    each device's ACTUAL anchor updates and has to show that the dead zone did
+    not act; neither is recoverable from ``qDER_*`` / ``uDER_*`` alone.  Off by
+    default: it is six extra channels per park (~44 parks on this benchmark).
     """
     out: List[Tuple[Any, str, str]] = []
     pcc_terms = set()
@@ -990,7 +1000,63 @@ def monitored_outputs(app, include_der: bool = False,
                             and d.loc_name == QVPRE_ELEMENT_NAME), None)
                 if pre is not None:
                     out.append((pre, "s:qset", f"qsetDER_{g.loc_name}"))
+                    if include_qv_internals:
+                        out.extend(_qv_internal_monitors(pre, g.loc_name))
     return out
+
+
+#: The QVPRE signals the dead-band study needs, as ``(signal, label prefix)``.
+#:
+#: Every one of them is a NAMED signal of the block definition in
+#: ``pf/wecc_apply.py`` -- state, internal or output -- so this is an export
+#: gap, not a modelling one::
+#:
+#:     x1    = Tf-filtered terminal voltage        (the dead-zone INPUT)
+#:     veff  = x1 - Vanchor                        (|U_filtered - U_anchor|)
+#:     qcorr = deadzone(veff, db)                  (zero iff inside the band)
+#:     qraw  = qset - Kdroop*qcorr                 (UNSATURATED droop command)
+#:     Qext  = clip(qraw, qmin, qmax)              (SATURATED reference)
+#:
+#: plus ``Vanchor`` itself, whose changes ARE the effective anchor-update
+#: instants -- it is written by pooled ``EvtParam`` events, so the logged
+#: trace shows when the anchor actually moved rather than when a nominal
+#: 20 s / 180 s schedule says it should have.
+#:
+#: Why each is needed separately: ``Q_actual - Q_set`` is NOT the droop
+#: signal.  Converter tracking and the REEC filter live in that difference,
+#: and a park at a capability limit shows zero incremental Q while its dead
+#: zone is fully active -- which is exactly the case F1 must not miss.
+QV_INTERNAL_SIGNALS: Tuple[Tuple[str, str], ...] = (
+    ("s:Vanchor", "vanchorDER"),
+    ("s:x1",      "vfiltDER"),
+    ("s:veff",    "veffDER"),
+    ("s:qcorr",   "qcorrDER"),
+    ("s:qraw",    "qrawDER"),
+    ("s:Qext",    "qextDER"),
+)
+
+
+#: Result labels the dead-band experiment exports, as ``str.startswith`` wants
+#: them.  ``qsetDER_`` joins the group because the incremental droop command is
+#: ``qraw - qset``: without the setpoint the unsaturated command cannot be
+#: separated from the operating point it was issued around.
+#:
+#: ``s:qset`` has been a registered monitor since the DER-Q plot page needed
+#: it, but no entry point ever exported it -- both harvest filters admit
+#: ``qDER_``, and ``"qsetDER_x".startswith("qDER_")`` is False.  It therefore
+#: went into the result file and out of the CSVs (found 2026-09-15).
+QV_INTERNAL_LABEL_PREFIXES: Tuple[str, ...] = tuple(
+    f"{prefix}_" for _signal, prefix in QV_INTERNAL_SIGNALS) + ("qsetDER_",)
+
+
+def _qv_internal_monitors(pre, park_name: str) -> List[Tuple[Any, str, str]]:
+    """Dead-band diagnostic channels for one park's QVPRE block.
+
+    Separate from :data:`QV_INTERNAL_SIGNALS` so the caller can be given the
+    list without knowing the label convention.
+    """
+    return [(pre, signal, f"{prefix}_{park_name}")
+            for signal, prefix in QV_INTERNAL_SIGNALS]
 
 
 # =====================================================================

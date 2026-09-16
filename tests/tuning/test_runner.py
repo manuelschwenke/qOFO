@@ -88,5 +88,5 @@ def test_run_one_invalid_param_keys_raises(
     bad["not_a_real_param"] = 1.0
     scenario = next(s for s in design_set() if s.name == "nominal_quiet")
 
-    with pytest.raises(ValueError, match="Unknown BO params"):
+    with pytest.raises(ValueError, match="unknown parameter-set keys"):
         run_one(bad, scenario, baseline_cfg)

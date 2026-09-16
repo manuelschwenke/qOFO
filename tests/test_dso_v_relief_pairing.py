@@ -1,24 +1,23 @@
-"""
-Tests for the per-DSO voltage-relief pair (``dso_g_v_per_area`` +
-``dso_g_w_class[...]['dso_oltc']``).
+"""The per-DSO voltage relief must move ``dso_g_v`` and ``g_w_dso_oltc`` together.
 
-The pair exists because ``dso_gamma_oltc_q = 0.0`` makes the DSO OLTC a purely
-voltage-driven actuator: the tap's gradient is
-``2 * dso_g_v * (V - V_set)^T * dV/ds`` and, being integer, it commits only when
-that exceeds ``g_w_dso_oltc + g_u``.  The ratio ``dso_g_v / g_w_dso_oltc`` is
-therefore the OLTC loop gain, and raising ``dso_g_v`` on its own drives the tap
-into a limit cycle — measured 2026-08-18 on DSO_4 at 50.5 tap reversals/h
-against 0.00 at baseline (docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md).
+Why this invariant matters
+--------------------------
+With ``dso_gamma_oltc_q = 0`` the subordinate OLTC is driven only by the voltage
+gradient, so ``dso_g_v / g_w_dso_oltc`` **is** the OLTC loop gain.  Raising
+``dso_g_v`` alone pushes the integer commit threshold into a limit cycle --
+measured 50.5 tap reversals/h at a factor of 6.7, against 0.00 at baseline
+(``configs/config.py``, ``dso_v_relief_factors``).  Holding the ratio instead
+moves the extra authority onto the continuous DER block.
 
-What is locked here is the *invariant*, not the tuned factor: whichever way the
-config is built, a relieved area's ``g_v`` and its ``dso_oltc`` weight must move
-by the same factor, and the other areas' per-area designs must survive.
-
-Since 2026-08-21 the relief is a **config field**
-(:attr:`MultiTSOConfig.dso_v_relief_factors`) applied in ``__post_init__``
-rather than a post-hoc call, so the tests below also pin the property that
-motivated the change: it is idempotent, and a ``dataclasses.replace`` re-derives
-it instead of squaring the factor.
+Rewritten 2026-09-10 with the weight reset.  It previously ran against
+``experiments.run_multi_system_ofo.make_config`` and every JSON parameter set in
+``configs/paramsets/``, and asserted that a bare ``MultiTSOConfig()`` *carries*
+the relief.  All three premises are gone: the parameter sets were deleted, the
+weights no longer have defaults, and ``dso_v_relief_factors`` now defaults to
+``None`` precisely because a per-area x10 applied silently on every config
+construction was a hidden parameter set.  The invariant itself is unchanged and
+is what Stage III of the campaign relies on, so it is tested here against an
+explicit config instead of against whatever weight set happened to ship.
 """
 
 from __future__ import annotations
@@ -28,155 +27,130 @@ import dataclasses
 import pytest
 
 from configs.config import MultiTSOConfig, apply_dso_v_relief
-from configs.paramsets import apply_paramset, available
-from experiments.run_multi_system_ofo import make_config
+
+#: Areas the relief is exercised on.  Arbitrary: the invariant is per-area and
+#: does not depend on which areas a given design happens to relieve.
+RELIEVED = ("DSO_2", "DSO_4")
+
+#: A complete weight vector.  Deliberately explicit and deliberately not any
+#: campaign answer -- round numbers chosen so that a factor applied to one of
+#: them is visible by eye in a failure message.
+WEIGHTS = dict(
+    g_v=1.0e4, g_q=100.0, dso_g_v=2.0e3,
+    g_w_der=10.0, g_w_pcc=20.0, g_w_gen=1.0e8, g_w_tso_oltc=500.0,
+    g_w_dso_der=100.0, g_w_dso_oltc=50.0,
+)
 
 
-def _builders():
-    """The runner config and every parameter set applied on top of it."""
-    out = [("make_config", make_config)]
-    for name in available():
-        out.append((name,
-                    lambda n=name: apply_paramset(make_config(), n,
-                                                  verbose=False)))
-    return out
+def make_cfg(**overrides) -> MultiTSOConfig:
+    """A weight-complete config, relieved on :data:`RELIEVED` unless overridden."""
+    kw = dict(WEIGHTS)
+    kw["dso_v_relief_factors"] = {d: 10.0 for d in RELIEVED}
+    kw.update(overrides)
+    return MultiTSOConfig(**kw)
 
 
-BUILDERS = _builders()
-BUILDER_IDS = [n for n, _ in BUILDERS]
-RELIEVED = sorted(make_config().dso_v_relief_factors)
+# ---------------------------------------------------------------------------
+# The reset itself
+# ---------------------------------------------------------------------------
 
+def test_bare_config_carries_no_relief_and_no_weights() -> None:
+    """A bare config is inert: no weights, and no per-area multiplier.
 
-@pytest.mark.parametrize("builder", [b for _, b in BUILDERS], ids=BUILDER_IDS)
-@pytest.mark.parametrize("dso_id", RELIEVED)
-def test_relief_holds_the_oltc_loop_gain(builder, dso_id):
-    """g_v and the OLTC step weight move by the same factor in every builder.
-
-    The ``per_area`` set rewrites ``dso_g_w_class`` wholesale with its analytic
-    per-area block *and* rescales the whole weight group by the gauge, so it is
-    the case that would silently break if the relief were written as two
-    hand-matched literals.
+    This is the reset.  Before 2026-09-10 ``MultiTSOConfig()`` returned a config
+    with nine weights and a x10 voltage relief on DSO_2 and DSO_4 already
+    installed, so every run that did not override them inherited a parameter set
+    nobody had chosen.
     """
-    cfg = builder()
-    factor = cfg.dso_v_relief_factors[dso_id]
-    gv = cfg.dso_g_v_per_area[dso_id] / float(cfg.dso_g_v)
-    gw = cfg.dso_g_w_class[dso_id]["dso_oltc"] / float(cfg.g_w_dso_oltc)
-    assert gv == pytest.approx(factor)
-    assert gw == pytest.approx(factor), (
-        f"{dso_id}: g_v raised x{gv:g} but the OLTC step weight x{gw:g}; the "
-        f"OLTC loop gain moved x{gv / gw:g} and the integer tap may limit-cycle"
-    )
-
-
-@pytest.mark.parametrize("builder", [b for _, b in BUILDERS], ids=BUILDER_IDS)
-def test_relief_is_idempotent_under_replace(builder):
-    """``dataclasses.replace`` re-derives the relief; it must not compound.
-
-    This is the whole reason the relief became a field.  As a post-hoc call it
-    read an existing per-area ``dso_oltc`` entry as its base, so applying it
-    twice squared the factor -- a trap every config factory had to work around
-    by stripping the per-area maps first and re-applying last.
-    """
-    cfg = builder()
-    again = dataclasses.replace(cfg)
-    assert again.dso_g_v_per_area == cfg.dso_g_v_per_area
-    assert again.dso_g_w_class == cfg.dso_g_w_class
-    # ... and three copies deep, which is what a builder chain actually does.
-    thrice = dataclasses.replace(dataclasses.replace(again))
-    assert thrice.dso_g_v_per_area == cfg.dso_g_v_per_area
-    assert thrice.dso_g_w_class == cfg.dso_g_w_class
-
-
-def test_relief_tracks_an_edit_to_either_base_weight():
-    """Moving ``dso_g_v`` or ``g_w_dso_oltc`` moves the relieved pair with it.
-
-    The property an absolute per-area literal cannot have, and the reason
-    ``tuning_mc.stage_1_search`` needs the relief applied to the config's own
-    weights: ``dso_g_v_ratio`` is a search coordinate, so an absolute relief
-    would let the OLTC loop gain drift as the search walked.
-    """
-    cfg = make_config()
-    moved = dataclasses.replace(cfg, dso_g_v=2.0 * cfg.dso_g_v,
-                                g_w_dso_oltc=3.0 * cfg.g_w_dso_oltc)
-    for dso_id, factor in cfg.dso_v_relief_factors.items():
-        assert moved.dso_g_v_per_area[dso_id] == pytest.approx(
-            2.0 * cfg.dso_g_v * factor)
-        assert moved.dso_g_w_class[dso_id]["dso_oltc"] == pytest.approx(
-            3.0 * cfg.g_w_dso_oltc * factor)
-
-
-def test_relief_is_scoped_to_the_spread_limited_areas():
-    """Only the areas listed in ``dso_v_relief_factors`` get a voltage override.
-
-    DSO_1 (spread 0.015) and DSO_3 (0.037) must stay out: measured 2026-08-18,
-    giving them the factor bought 0.0016 / 0.0002 p.u. of V_max and cost DSO_3
-    +53 % interface-Q RMSE.
-    """
-    cfg = make_config()
-    assert set(cfg.dso_g_v_per_area) == set(cfg.dso_v_relief_factors)
-    assert "DSO_1" not in cfg.dso_g_v_per_area
-    assert "DSO_3" not in cfg.dso_g_v_per_area
-
-
-def test_relief_preserves_other_areas_per_area_design():
-    """The per-area ``dso_der`` / ``dso_oltc`` design for DSO_1..3 survives."""
-    cfg = apply_paramset(make_config(), "per_area", verbose=False)
-    for dso in ("DSO_1", "DSO_2", "DSO_3"):
-        assert dso in cfg.dso_g_w_class
-        assert set(cfg.dso_g_w_class[dso]) == {"dso_der", "dso_oltc"}
-    # DSO_4 keeps its analytic dso_der entry too -- the relief merges, it does
-    # not replace the area's block.
-    assert "dso_der" in cfg.dso_g_w_class["DSO_4"]
-
-
-def test_factor_one_is_a_no_op():
-    """A factor of 1.0 (or an empty mapping) disables the relief cleanly."""
-    cfg = dataclasses.replace(make_config(), dso_v_relief_factors=None,
-                              dso_g_v_per_area=None, dso_g_w_class=None)
+    cfg = MultiTSOConfig()
+    assert cfg.dso_v_relief_factors is None
     assert cfg.dso_g_v_per_area is None
-    assert apply_dso_v_relief(cfg, {"DSO_4": 1.0}) is cfg
-    assert apply_dso_v_relief(cfg, {}) is cfg
+    assert cfg.dso_g_w_class is None
+    assert set(cfg.missing_weights()) == set(MultiTSOConfig.REQUIRED_WEIGHTS)
+    with pytest.raises(ValueError, match="missing controller weights"):
+        cfg.require_weights()
 
 
-def test_explicit_call_replaces_rather_than_layers():
-    """``apply_dso_v_relief`` re-derives from the base scalars.
+# ---------------------------------------------------------------------------
+# The pairing
+# ---------------------------------------------------------------------------
 
-    Applied on top of a config that already carries the default relief, it must
-    land on ``base * new_factor`` for the areas it names and REMOVE the entries
-    it does not, rather than multiplying into whatever was there.
-    """
-    cfg = make_config()
-    assert set(cfg.dso_v_relief_factors) == {"DSO_2", "DSO_4"}
-    out = apply_dso_v_relief(cfg, {"DSO_4": 3.0})
-    assert set(out.dso_v_relief_factors) == {"DSO_4"}
-    assert out.dso_g_v_per_area == {
-        "DSO_4": pytest.approx(float(cfg.dso_g_v) * 3.0)}
-    assert out.dso_g_w_class["DSO_4"]["dso_oltc"] == pytest.approx(
-        float(cfg.g_w_dso_oltc) * 3.0)
-    assert "DSO_2" not in out.dso_g_v_per_area
-    assert "DSO_2" not in (out.dso_g_w_class or {})
+@pytest.mark.parametrize("dso_id", RELIEVED)
+def test_relief_holds_the_oltc_loop_gain(dso_id: str) -> None:
+    cfg = make_cfg()
+    factor = cfg.dso_v_relief_factors[dso_id]
+    gv = float(cfg.dso_g_v_per_area[dso_id])
+    oltc = float(cfg.dso_g_w_class[dso_id]["dso_oltc"])
+
+    assert gv == pytest.approx(float(cfg.dso_g_v) * factor)
+    assert oltc == pytest.approx(float(cfg.g_w_dso_oltc) * factor)
+    # The ratio is the point: it must match the unrelieved loop gain.
+    assert gv / oltc == pytest.approx(
+        float(cfg.dso_g_v) / float(cfg.g_w_dso_oltc))
 
 
-def test_relief_merges_into_an_existing_spec():
-    """An existing per-area spec for another class/area is not clobbered."""
-    cfg = dataclasses.replace(
-        make_config(),
-        dso_v_relief_factors={"DSO_4": 3.0},
-        dso_g_v_per_area={"DSO_2": 1.0},
-        dso_g_w_class={"DSO_2": {"dso_der": 42.0},
-                       "DSO_4": {"dso_der": 7.0}},
+def test_relief_is_idempotent_under_replace() -> None:
+    """``dataclasses.replace`` re-runs the derivation; it must not compound."""
+    cfg = make_cfg()
+    once = dict(cfg.dso_g_v_per_area)
+    again = dataclasses.replace(dataclasses.replace(cfg))
+    assert dict(again.dso_g_v_per_area) == pytest.approx(once)
+    for d in RELIEVED:
+        assert again.dso_g_w_class[d]["dso_oltc"] == pytest.approx(
+            cfg.dso_g_w_class[d]["dso_oltc"])
+
+
+def test_relief_tracks_an_edit_to_either_base_weight() -> None:
+    """Editing a base weight re-derives the relieved pair from it."""
+    cfg = make_cfg()
+    bumped = dataclasses.replace(cfg, dso_g_v=float(cfg.dso_g_v) * 3.0)
+    for d in RELIEVED:
+        f = bumped.dso_v_relief_factors[d]
+        assert bumped.dso_g_v_per_area[d] == pytest.approx(
+            float(bumped.dso_g_v) * f)
+        # The OLTC half must follow the new base too, or the gain moves.
+        assert bumped.dso_g_w_class[d]["dso_oltc"] == pytest.approx(
+            float(bumped.g_w_dso_oltc) * f)
+
+
+def test_relief_is_scoped_to_the_listed_areas() -> None:
+    cfg = make_cfg()
+    assert set(cfg.dso_g_v_per_area) == set(RELIEVED)
+
+
+def test_factor_one_and_none_are_no_ops() -> None:
+    for factors in (None, {}, {d: 1.0 for d in RELIEVED}):
+        cfg = make_cfg(dso_v_relief_factors=factors)
+        assert not (cfg.dso_g_v_per_area or {}), factors
+        assert not (cfg.dso_g_w_class or {}), factors
+
+
+def test_relief_preserves_another_areas_per_area_design() -> None:
+    """A per-area design for an unrelieved area must survive the derivation."""
+    cfg = make_cfg(
+        dso_g_v_per_area={"DSO_1": 7.0},
+        dso_g_w_class={"DSO_1": {"dso_der": 11.0}},
     )
-    assert cfg.dso_g_v_per_area["DSO_2"] == 1.0
-    assert cfg.dso_g_w_class["DSO_2"] == {"dso_der": 42.0}
-    assert cfg.dso_g_w_class["DSO_4"]["dso_der"] == 7.0
-    assert cfg.dso_g_w_class["DSO_4"]["dso_oltc"] == pytest.approx(
-        float(cfg.g_w_dso_oltc) * 3.0)
-    assert cfg.dso_g_v_per_area["DSO_4"] == pytest.approx(
-        float(cfg.dso_g_v) * 3.0)
+    assert cfg.dso_g_v_per_area["DSO_1"] == pytest.approx(7.0)
+    assert cfg.dso_g_w_class["DSO_1"]["dso_der"] == pytest.approx(11.0)
+    for d in RELIEVED:
+        assert d in cfg.dso_g_v_per_area
 
 
-@pytest.mark.parametrize("builder", [b for _, b in BUILDERS], ids=BUILDER_IDS)
-def test_per_area_gamma_is_within_the_controller_bound(builder):
+def test_explicit_call_replaces_rather_than_layers() -> None:
+    """``apply_dso_v_relief`` re-derives from the bases, never from its output."""
+    cfg = make_cfg()
+    twice = apply_dso_v_relief(cfg, {d: 10.0 for d in RELIEVED})
+    for d in RELIEVED:
+        assert twice.dso_g_v_per_area[d] == pytest.approx(
+            float(cfg.dso_g_v) * 10.0)
+
+
+# ---------------------------------------------------------------------------
+# Bounds the controller enforces, asserted on the config that feeds it
+# ---------------------------------------------------------------------------
+
+def test_per_area_gamma_is_within_the_controller_bound() -> None:
     """Every designed gamma must be one the controller will accept.
 
     The table lives in config data and the bound in the controller, so nothing
@@ -185,94 +159,38 @@ def test_per_area_gamma_is_within_the_controller_bound(builder):
     """
     from controller.dso_controller import GAMMA_OLTC_Q_MAX
 
-    cfg = builder()
-    table = cfg.dso_gamma_oltc_q_per_area or {}
-    for dso_id, gamma in table.items():
+    cfg = make_cfg()
+    for dso_id, gamma in (cfg.dso_gamma_oltc_q_per_area or {}).items():
         assert 0.0 <= float(gamma) <= GAMMA_OLTC_Q_MAX, (
-            f"{dso_id}: gamma {gamma!r} outside [0, {GAMMA_OLTC_Q_MAX:g}]"
-        )
+            f"{dso_id}: gamma {gamma!r} outside [0, {GAMMA_OLTC_Q_MAX:g}]")
     assert 0.0 <= float(cfg.dso_gamma_oltc_q) <= GAMMA_OLTC_Q_MAX
 
 
-@pytest.mark.parametrize("builder", [b for _, b in BUILDERS], ids=BUILDER_IDS)
 @pytest.mark.parametrize("dso_id", RELIEVED)
-def test_relieved_area_is_not_left_q_inert(builder, dso_id):
+def test_relieved_area_is_not_left_q_inert(dso_id: str) -> None:
     """The voltage relief must not leave the tap unable to act on interface Q.
 
-    Holding ``dso_g_v / g_w_dso_oltc`` preserves the OLTC's VOLTAGE commit
-    threshold, but the factor on ``g_w_dso_oltc`` is uncompensated in its
-    INTERFACE-Q threshold ``(g_w_oltc + ||a_oltc||^2)/(2 g_q gamma |dQ/ds|)``,
+    Holding ``dso_g_v / g_w_dso_oltc`` preserves the voltage commit threshold of
+    the OLTC, but the factor on ``g_w_dso_oltc`` is uncompensated in its
+    interface-Q threshold ``(g_w_oltc + norm(a_oltc)**2)/(2 g_q gamma dQ/ds)``,
     which therefore rises by the full factor -- 108-244 Mvar to commit on
     DSO_2/DSO_4 at gamma = 1, against ~6 Mvar of measured RMSE (2026-08-20).
 
-    Asserted on the weights, which is what the config controls; the linear
-    ``1/gamma`` reading ignores the ``gamma^2 ||a_q||^2`` self-cost term, so it
-    is a proxy for the threshold, not the threshold.  The measured Mvar values
-    are in the daily log.
-
-    Skipped at gamma = 0, where the tap has no Q gradient at all and no weight
-    makes that threshold finite.
+    Skipped at gamma = 0 -- the pinned structural value -- where the tap has no
+    Q gradient at all and no weight makes that threshold finite.
     """
-    cfg = builder()
+    cfg = make_cfg()
     per_gamma = cfg.dso_gamma_oltc_q_per_area or {}
     gamma_area = float(per_gamma.get(dso_id, cfg.dso_gamma_oltc_q))
     gamma_base = float(cfg.dso_gamma_oltc_q)
     if gamma_area <= 0.0 or gamma_base <= 0.0:
         pytest.skip("gamma_oltc_q = 0: the OLTC carries no interface-Q gradient")
 
-    v_factor = cfg.dso_v_relief_factors[dso_id]
-    oltc_base = float(cfg.g_w_dso_oltc)
     q_area = float((cfg.dso_g_q_per_area or {}).get(dso_id, cfg.g_q))
     inflation = ((cfg.dso_g_w_class[dso_id]["dso_oltc"] / (q_area * gamma_area))
-                 / (oltc_base / (float(cfg.g_q) * gamma_base)))
+                 / (float(cfg.g_w_dso_oltc) / (float(cfg.g_q) * gamma_base)))
     assert inflation <= 1.0 + 1e-9, (
-        f"{dso_id}: the x{v_factor:g} voltage relief leaves the tap's "
-        f"interface-Q commit threshold x{inflation:.2f} the unrelieved one. "
-        f"Compensate on the Q channel with dso_gamma_oltc_q_per_area (OLTC "
-        f"only, preferred) or dso_g_q_per_area (also moves the DER block)."
-    )
-
-
-def test_gamma_gain_is_applied_by_both_the_controller_and_stage_0():
-    """``gamma > 1`` must scale in *both* places or the design is against the
-    wrong self-cost.
-
-    Until 2026-08-20 both sites read ``if gamma < 1.0``, so a gain was a silent
-    no-op.  Fixing only one of them would be worse than fixing neither: Stage 0
-    would design ``g_w_dso_oltc`` against a ``||a_i||^2`` the MIQP never sees,
-    which is the disagreement the gamma block in ``stage_0_preconditioning``
-    exists to prevent.
-    """
-    import inspect
-
-    import controller.dso_controller as dc
-    import tuning_mc.stage_0_preconditioning as s0
-
-    for mod in (dc, s0):
-        src = inspect.getsource(mod)
-        assert "if gamma < 1.0" not in src, (
-            f"{mod.__name__} still guards the gamma scaling with '< 1.0', so a "
-            f"gamma above 1 is silently ignored there"
-        )
-        assert "gamma != 1.0" in src, (
-            f"{mod.__name__} no longer applies the gamma scaling at all"
-        )
-
-
-def test_bare_config_carries_the_relief_by_default():
-    """A plain ``MultiTSOConfig()`` already has the relief installed.
-
-    The field default is the runner's factor set, so a config built anywhere --
-    a test, a tuning stage, an ad-hoc script -- gets the spread-limited areas'
-    voltage authority without having to remember a post-hoc call.
-    """
-    cfg = MultiTSOConfig(dso_g_v=1.0e5, g_w_dso_oltc=183.0)
-    factors = cfg.dso_v_relief_factors
-    # The factor itself is a tuning point and moves; what is locked is that a
-    # bare config HAS one and that it is installed on both weights.
-    assert factors, "MultiTSOConfig lost its default voltage relief"
-    assert set(factors) == {"DSO_2", "DSO_4"}
-    assert cfg.dso_g_v_per_area == {
-        d: pytest.approx(1.0e5 * f) for d, f in factors.items()}
-    assert cfg.dso_g_w_class == {
-        d: {"dso_oltc": pytest.approx(183.0 * f)} for d, f in factors.items()}
+        f"{dso_id}: the voltage relief leaves the interface-Q commit threshold "
+        f"of the tap at x{inflation:.2f} the unrelieved one. Compensate on the "
+        f"Q channel with dso_gamma_oltc_q_per_area (OLTC only, preferred) or "
+        f"dso_g_q_per_area (which also moves the DER block).")

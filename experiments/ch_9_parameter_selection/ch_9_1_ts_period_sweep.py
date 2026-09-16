@@ -58,6 +58,26 @@ if str(REPO_ROOT) not in sys.path:
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _ch9_selected_design import (  # noqa: E402
+    INITIAL_PARAMSET, SELECTED_PARAMSET,
+)
+
+#: Window banks, mirroring ``ch_9_1_ninner_isolated_sts``.  The cadence check
+#: has to be readable next to the response measurement, so the two must be able
+#: to run the same bank.
+BANKS = ("conditions", "design12")
+DEFAULT_BANK = "conditions"
+
+
+def bank_specs(bank: str):
+    """Scenario specs of the named window bank; see the ninner module."""
+    from tuning_mc.scenarios_mc_v2 import condition_set, tier1_design_set
+    if bank == "conditions":
+        return condition_set()
+    if bank == "design12":
+        return tier1_design_set()
+    raise SystemExit(f"unknown bank {bank!r}; known: {', '.join(BANKS)}")
+
 # =====================================================================
 #  Constants entering a number
 # =====================================================================
@@ -66,12 +86,20 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 #: ``T_STS = 20 s``, so the GCD requirement on ``dt_s`` (configs/config.py:188)
 #: holds at every point and the runner's ``time_s % period_s < 1`` test fires
 #: cleanly.
-TS_PERIODS_S: Tuple[float, ...] = (60.0, 120.0, 180.0, 240.0, 300.0)
+#:
+#: Changed 2026-09-10 from ``(60, 120, 180, 240, 300)`` to the RATIOS the
+#: chapter asks to compare -- ``N_inner`` in ``{9, 10, 12, 18}`` at
+#: ``T_STS = 20 s`` -- which is item B2 of the Chapter-9 closing section.  The
+#: previous grid was a period sweep in seconds and did not line up with the
+#: ratios the flatness measurement reports against: 9 covers 94.6 % of the
+#: measured final-response counts and 10 covers 96.7 %, so the interesting
+#: comparison is between adjacent ratios, not between round periods.
+TS_PERIODS_S: Tuple[float, ...] = (180.0, 200.0, 240.0, 360.0)
 
-#: The pilot subset: the two ends and the incumbent. Its purpose is not
+#: The pilot subset: the incumbent ratio and the far end.  Its purpose is not
 #: results -- it is to read the actual CAIR band widths and check the settling
 #: band is reachable at all before the full grid is spent on it.
-PILOT_PERIODS_S: Tuple[float, ...] = (60.0, 180.0, 300.0)
+PILOT_PERIODS_S: Tuple[float, ...] = (180.0, 360.0)
 PILOT_N_WINDOWS = 3
 
 #: Subordinate period, FIXED. See the module docstring: sweeping this would
@@ -400,16 +428,20 @@ def _run_point(job: Dict[str, Any]) -> Dict[str, Any]:
                 "NUMEXPR_NUM_THREADS"):
         os.environ[var] = "1"
 
-    from _ch9_selected_design import build_selected_config
+    from _ch9_selected_design import SELECTED_PARAMSET, build_selected_config
     from tuning.metrics import MetricScales
-    from tuning.objectives_v2 import _run_scenario
-    from tuning_mc.scenarios_mc_v2 import tier1_design_set
+    from tuning.runner import run_scenario_with_records as _run_scenario
 
-    cfg, _prov = build_selected_config()
+    # Controller identity travels in the job; see the same note in
+    # ch_9_1_ninner_isolated_sts._run_case.
+    cfg, _prov = build_selected_config(
+        paramset=job.get("paramset", SELECTED_PARAMSET),
+        apply_frozen_network=bool(job.get("frozen_network", True)))
     # The supervisory period lives in TWO places; see _retime_parent.
     cfg = _retime_parent(cfg, float(job["tso_period_s"]),
                          job.get("sbx_cycle", "iterations"))
-    spec = next(s for s in tier1_design_set() if s.name == job["window"])
+    spec = next(s for s in bank_specs(job.get("bank", DEFAULT_BANK))
+                if s.name == job["window"])
     spec = dataclasses.replace(spec, tso_period_s=float(job["tso_period_s"]),
                                dso_period_s=STS_PERIOD_S, dt_s=STS_PERIOD_S)
 
@@ -649,7 +681,8 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
                f"- settling band {meta['constants']['band_mvar']} Mvar, "
                f"delta floor {meta['constants']['delta_floor_mvar']} Mvar",
                f"- `T_STS` = {STS_PERIOD_S:.0f} s fixed "
-               f"(`dso_period_s = dt_s`), bank `tier1_design_set` on "
+               f"(`dso_period_s = dt_s`), bank "
+               f"`{(meta.get('args') or {}).get('bank', DEFAULT_BANK)}` on "
                f"`rural_700`",
                f"- command: `{' '.join(meta['argv'])}`"]
 
@@ -894,6 +927,21 @@ def self_test() -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Sweep T_TS at fixed T_STS = 20 s (thesis Sec. 9.1).")
+    ap.add_argument("--paramset", default=SELECTED_PARAMSET,
+                    help=f"controller weights, from configs/paramsets/. "
+                         f"{INITIAL_PARAMSET!r} = Stage-I analytic point, "
+                         f"{SELECTED_PARAMSET!r} = Stage-II selection. "
+                         f"T_TS and G_w are NOT separable, so a sweep is only "
+                         f"readable against a named weight set.")
+    ap.add_argument("--bank", choices=BANKS, default=DEFAULT_BANK,
+                    help="window bank; must match the bank C/E were measured "
+                         "on. 'conditions' = W1-W6, 'design12' = the twelve "
+                         "tier1_design_set search windows.")
+    ap.add_argument("--symmetric-network", action="store_true",
+                    help="drop the doubled-DSO_3 multipliers. The Chapter-9 "
+                         "batch is declared on the DOUBLED network and that "
+                         "is the default; see "
+                         "_ch9_selected_design.FROZEN_DSO_DER_SCALE.")
     ap.add_argument("--label", default="ts_period_sweep")
     ap.add_argument("--out", type=Path,
                     default=REPO_ROOT / "results" / "THESIS_ch9_1_ts_period_sweep")
@@ -930,21 +978,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if a.reaggregate is not None:
         from _ch9_selected_design import build_selected_config
-        cfg, _d = build_selected_config()
+        cfg, _d = build_selected_config(
+            paramset=a.paramset,
+            apply_frozen_network=not a.symmetric_network)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         return reaggregate(
             a.reaggregate, a.reaggregate.parent / f"{a.reaggregate.name}_reagg_{stamp}",
             v_min_pu=float(getattr(cfg, "v_min_pu", V_MIN_PU)),
             v_max_pu=float(getattr(cfg, "v_max_pu", V_MAX_PU)))
 
-    from _ch9_selected_design import build_selected_config
-    from tuning_mc.scenarios_mc_v2 import WINDOW_META, tier1_design_set
+    from _ch9_selected_design import build_selected_config, resolved_manifest
+    from tuning_mc.scenarios_mc_v2 import WINDOW_META
 
-    cfg, design = build_selected_config()
-    print(f"[design] campaign {design['campaign']} candidate "
-          f"{design['candidate_key']}: {design['verified']}")
+    cfg, design = build_selected_config(
+        paramset=a.paramset,
+        apply_frozen_network=not a.symmetric_network)
+    print(f"[design] paramset {design['paramset']} candidate "
+          f"{design['candidate_key']} from {design['campaign']}")
+    print(f"[design] base {design['base_config']}; "
+          f"shunts={cfg.install_tso_tertiary_shunts}/{cfg.shunt_dispatch} "
+          f"boundary={cfg.tie_boundary_equivalent} "
+          f"network={'DSO_3 x2' if design['frozen_network'] else 'symmetric'}")
 
-    specs = tier1_design_set()
+    specs = bank_specs(a.bank)
+    print(f"[sweep] bank {a.bank}: {len(specs)} window(s)")
     names = [s.name for s in specs]
     if a.windows:
         want = [w.strip() for w in a.windows.split(",") if w.strip()]
@@ -975,10 +1032,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     meta = provenance(a, design)
     (out_dir / "run_meta.json").write_text(
         json.dumps(meta, indent=2, default=str), encoding="utf-8")
+    (out_dir / "resolved_config.json").write_text(
+        json.dumps(resolved_manifest(cfg, design), indent=2, default=str),
+        encoding="utf-8")
 
     jobs = [{"window": w, "tso_period_s": p, "band_mvar": a.band_mvar,
              "delta_floor_mvar": a.delta_floor_mvar,
-             "sbx_cycle": a.sbx_cycle}
+             "sbx_cycle": a.sbx_cycle,
+             "paramset": a.paramset,
+             "frozen_network": not bool(a.symmetric_network),
+             "bank": a.bank}
             for p in periods for w in names]
     # Written BEFORE the runs, so an aborted campaign still documents what it
     # meant to measure.

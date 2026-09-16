@@ -308,3 +308,177 @@ def stratum_of(scenario_name: str) -> str:
 # having to build the specs first.
 for _f in (tier1_design_set, tier1_confirm_set, tier2_audit_set):
     _f()
+
+
+# ---------------------------------------------------------------------------
+# The six operating conditions of thesis Table ``tab:timescales:conditions``
+# ---------------------------------------------------------------------------
+#
+# Declared here, in tracked source, for the first time.  Before 2026-09-10 the
+# W1-W6 definitions existed only inside the untracked
+# ``results/THESIS_ch9_PF_batch_2026-09-08/`` tree and as five PowerFactory
+# snapshots that are not in this clone, so nothing outside that run could be
+# built at the same operating points.
+#
+# Four of the six coincide with entries of :data:`DESIGN_WINDOWS`, and their
+# strata agree there independently: W3 and W4 ``partial``, W5 ``none``,
+# W6 ``full``.
+#
+# Capability columns of the thesis table are the WIDTH of the aggregate DER
+# reactive interval at TS / STS level for the frozen model, not the headroom
+# remaining at the initial state.  Net export is positive towards the TS, with
+# its percentile in the profile year.
+#
+# These windows are **profile-driven with no injected disturbance**.  That is
+# deliberate: the conditions already span the operating envelope, and an
+# injected event would reintroduce the concentration that made 94 % of measured
+# tap activity fall in the two evented audit windows of the 0815 campaign --
+# which is exactly what makes a taps/day figure unreadable.
+
+#: ``(name, start, stratum, TS capability Mvar, STS capability Mvar,
+#:   net export MW, percentile, regime)``
+CONDITIONS: list[tuple[str, datetime, str, float, float, float, int, str]] = [
+    ("W1", datetime(2016, 1, 5, 8, 0),    "full",    1626.5, 1702.0,  458, 77,
+     "wind support, photovoltaic below the capability threshold; "
+     "Experiment-A reference point"),
+    ("W2", datetime(2016, 2, 22, 13, 0),  "full",    1626.5, 2590.0,  165, 67,
+     "high load, full capability"),
+    ("W3", datetime(2016, 1, 4, 8, 0),    "partial",  522.1,  923.2, -462, 32,
+     "reduced capability at both levels, recovering"),
+    ("W4", datetime(2016, 11, 26, 10, 0), "partial",    0.0,  888.0, -618, 18,
+     "no transmission-level DER reactive capability, subordinate available"),
+    ("W5", datetime(2016, 2, 3, 20, 0),   "none",       0.0,    0.0, -792,  4,
+     "no DER reactive capability at either level"),
+    ("W6", datetime(2016, 7, 18, 14, 0),  "full",    1626.5, 2590.0, 1103, 92,
+     "high export, full capability, voltage-rise corner"),
+]
+
+#: Conditions with zero DER reactive capability at BOTH levels.
+#:
+#: Excluded from the Stage-II ranking objective and reported as a feasibility
+#: check only.  With nothing to allocate, every weight coordinate is
+#: structurally inert, so such a window contributes a constant that dilutes
+#: every measured effect -- the 0815 campaign measured zero-capability windows
+#: returning bit-identical costs across a 9x move in the supervisory loop gain
+#: while supplying 35 % of the aggregate.  The thesis already excludes them
+#: from Experiment B, which runs in five of the six windows.
+ZERO_CAPABILITY: tuple[str, ...] = tuple(
+    name for name, _s, stratum, *_r in CONDITIONS if stratum == "none"
+)
+
+#: Screening length for Stage II-a, and refinement length for Stage II-b.
+SCREEN_H = 3
+REFINE_H = 12
+
+
+def condition_set(hours: float = REFINE_H,
+                  exclude_zero_capability: bool = False) -> List[ScenarioSpec]:
+    """The six thesis conditions as scenario specs of the requested length.
+
+    ``hours`` is the only thing that changes between Stage II-a (3 h, ranking
+    and coordinate screening) and Stage II-b / II-c (12 h, the authoritative
+    wear measurement).  A tap rate read off a short window may not be
+    extrapolated to a day: one tap is 0.33/h at 3 h against 0.083/h at 12 h, so
+    a daily budget quantised on the short window is a coin toss rather than a
+    constraint.
+    """
+    out: List[ScenarioSpec] = []
+    for name, start, stratum, _ts, _sts, _exp, _pct, _regime in CONDITIONS:
+        if exclude_zero_capability and name in ZERO_CAPABILITY:
+            continue
+        _register(name, "profile", _season_of(start), stratum,
+                  f"condition_{hours:g}h", start)
+        out.append(_spec(name, start, (), duration_s=float(hours) * 3600.0))
+    return out
+
+
+def condition_meta(name: str) -> dict:
+    """Row of :data:`CONDITIONS` as a dict, for run provenance and reporting."""
+    for row in CONDITIONS:
+        if row[0] == name:
+            keys = ("name", "start", "stratum", "cap_ts_mvar", "cap_sts_mvar",
+                    "net_export_mw", "export_percentile", "regime")
+            return {k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                    for k, v in zip(keys, row)}
+    raise KeyError(f"unknown condition {name!r}; known: "
+                   f"{[r[0] for r in CONDITIONS]}")
+
+
+def _season_of(start: datetime) -> str:
+    return {12: "winter", 1: "winter", 2: "winter",
+            3: "spring", 4: "spring", 5: "spring",
+            6: "summer", 7: "summer", 8: "summer",
+            9: "autumn", 10: "autumn", 11: "autumn"}[start.month]
+
+
+# Register the conditions at import time, like the other banks.
+condition_set()
+
+
+# ---------------------------------------------------------------------------
+# One disturbance per condition window
+# ---------------------------------------------------------------------------
+#
+# Added 2026-09-11.  The six conditions were profile-driven with no injected
+# disturbance, which kept the switching budget readable but left wear and
+# disturbance rejection untested: measured over 12 h, four of the six windows
+# produced 0-2 tap operations, so the hunting constraint was decided almost
+# entirely by W4, the condition with no transmission-level DER capability.
+#
+# The construction follows the retired audit bank rather than the event-dense
+# design bank: the window must still look like a day -- mostly profile, ONE
+# event -- so that a taps/day figure remains something that may legitimately be
+# extrapolated.  An event-dense window concentrates tap activity and makes the
+# rate an artefact of where the events were placed (the 0815 campaign measured
+# 94 % of tap activity inside its two evented windows).
+#
+# Event type alternates by condition so the bank is not a monoculture, and the
+# type is chosen against what each condition stresses.
+
+def _condition_events(name: str, hours: float) -> tuple:
+    """One disturbance for a condition window, placed in its middle third."""
+    h = 3600.0
+    if hours < 4.0:                       # too short to place an event sanely
+        return ()
+    if name in ("W1", "W3", "W5"):
+        # N-1 generator outage, cleared after an hour.  The counter-move at the
+        # restore is what exercises the "explained by a new event" branch of the
+        # hunting metric.
+        t_trip = 0.40 * hours
+        return (
+            ContingencyEvent(minute=int(t_trip * 60), element_type="gen",
+                             element_index=2, action="trip"),
+            ContingencyEvent(minute=int((t_trip + 1.0) * 60), element_type="gen",
+                             element_index=2, action="restore"),
+        )
+    if name in ("W2", "W4"):
+        # Sustained load build-up, no restore: the one-way ramp that exhausts
+        # continuous reactive range and hands authority to the tap changers.
+        start = int(0.45 * hours * 60)
+        return tuple(_load_ramp(bus=5, start_min=start, n_steps=4,
+                                step_min=20, p_mw=120.0, q_mvar=60.0))
+    # W6 is the voltage-rise corner: stress it in the direction it is a corner
+    # for, by SHEDDING load rather than adding it.
+    start = int(0.45 * hours * 60)
+    return tuple(_load_ramp(bus=27, start_min=start, n_steps=3,
+                            step_min=20, p_mw=-110.0, q_mvar=-55.0))
+
+
+def condition_set_evented(hours: float = REFINE_H,
+                          exclude_zero_capability: bool = False
+                          ) -> List[ScenarioSpec]:
+    """The six conditions, each carrying one disturbance.
+
+    Same operating points and the same length as :func:`condition_set`; only
+    the disturbance is added, so the two banks are directly comparable and the
+    effect of the events is isolated.
+    """
+    out: List[ScenarioSpec] = []
+    for name, start, stratum, _ts, _sts, _exp, _pct, _regime in CONDITIONS:
+        if exclude_zero_capability and name in ZERO_CAPABILITY:
+            continue
+        _register(name, "profile+event", _season_of(start), stratum,
+                  f"condition_evented_{hours:g}h", start)
+        out.append(_spec(name, start, _condition_events(name, hours),
+                         duration_s=float(hours) * 3600.0))
+    return out

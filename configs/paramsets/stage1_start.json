@@ -1,0 +1,93 @@
+{
+  "name": "stage1_start",
+  "title": "Stage-I analytic design point (contraction screen + tap engagement)",
+  "description": [
+    "Produced by tuning/stage1_screen.py::design_stage1 on 2026-09-10.",
+    "NOT a tuned point: this is the starting point for the Stage-II search.",
+    "Gauge g_v is pinned so that the supervisory voltage priority pi = g*sigma^2 equals 1.",
+    "Continuous scale placed by bisection so lambda_max(B) = 1.0 on the worst",
+    "area and condition of each layer; tap weights priced from a stated",
+    "engagement deviation of 0.010 pu (TS) and 0.020 pu (STS).",
+    "All 42 area-condition values of lambda_max(B) lie at or below 1.0,",
+    "against a screen of 0.8*2 = 1.6 and a selection ceiling of 1.546.",
+    "shunt_int_g_w added 2026-09-11. It sits in the gauge-invariance group with",
+    "the nine weights, so it must travel with the parameter set; leaving it in",
+    "make_config at its old-gauge value of 10 made the eight shunt banks inert",
+    "for the entire campaign (accumulated state peaked at 0.395 Mvar against a",
+    "22.5 Mvar commit threshold, zero commits in 5 h with disturbances).",
+    "Value 0.03 derived from a 30 min persistence at the measured p90 boundary",
+    "pressure |g_H| = 0.133; the independent gauge-consistent rescale of the old",
+    "value gives 0.040, so the two routes agree within 30 %.",
+    "A single very large demand may still commit within one supervisory period:",
+    "the anti-windup clamp (25 Mvar) sits above the threshold (22.5), and that",
+    "behaviour was accepted as desirable rather than designed out."
+  ],
+  "provenance": {
+    "producer": "tuning/stage1_screen.py::design_stage1",
+    "date": "2026-09-10",
+    "git_commit": "47c6b70",
+    "network": "rural_700",
+    "conditions": [
+      "W1",
+      "W2",
+      "W3",
+      "W4",
+      "W5",
+      "W6"
+    ],
+    "priorities": {
+      "pi_v_ts": 1.0,
+      "pi_q": 1.0,
+      "pi_v_ds": 1.0
+    },
+    "tau": 1.0,
+    "d_engage_pu": {
+      "oltc": 0.01,
+      "dso_oltc": 0.02
+    },
+    "lambda_targets": {
+      "TS": 1.0,
+      "STS": 1.0
+    },
+    "kappa": {
+      "TS": 0.05048726819165223,
+      "STS": 0.4941725967046749
+    },
+    "integer_floors": {
+      "TS_1": 0.5174163835048873,
+      "TS_2": 0.15649883666683542,
+      "TS_3": 0.37468165341829557,
+      "STS_DSO_1": 0.3271420432251279,
+      "STS_DSO_2": 0.3349387258787361,
+      "STS_DSO_3": 0.32220047531449636,
+      "STS_DSO_4": 0.35373935913023896
+    },
+    "screen_ceiling": 1.6,
+    "select_ceiling": 1.5458937198067635,
+    "worst_lambda_max_B": 1.0,
+    "weight_fingerprint": "874818ae70a4",
+    "shunt_int_g_w_derivation": {
+      "persistence_min": 30.0,
+      "reference_g_H_p90": 0.1331,
+      "commit_threshold_mvar": 22.5,
+      "T_TS_s": 180.0,
+      "gauge_consistent_cross_check": 0.04,
+      "single_tick_commit_possible": true
+    }
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.04,
+    "dso_g_v": 10000.0,
+    "g_w_der": 0.05048726819165223,
+    "g_w_pcc": 0.05048726819165223,
+    "g_w_gen": 100000000.0,
+    "g_w_tso_oltc": 20.678528018096085,
+    "g_w_dso_der": 0.4941725967046749,
+    "g_w_dso_oltc": 17.587619828496884,
+    "tso_period_s": 180.0,
+    "dso_period_s": 20.0,
+    "dt_s": 20.0,
+    "shunt_int_g_w": 0.03
+  }
+}

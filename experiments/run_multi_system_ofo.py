@@ -98,16 +98,7 @@ def main_comparison() -> None:
         tso_period_s=60.0 * 3,    # TSO every 3 minutes
         dso_period_s=20.0,    # DSO every 5 seconds (more inner iterations)
         dt_s=20.0,
-        g_v=150000.0,  # TSO voltage tracking; drives PCC Q dispatch
-        # ── DSO objective tuning ──
-        dso_g_v=20000.0,  # reduced to avoid competing with Q tracking
         dso_gamma_oltc_q=0.0,  # OLTC Q-tracking attenuation: DER-primary, OLTC-backup
-        # ── TSO weights (alpha=1, spectral rho(C)/2) ──
-        g_w_der=10,   # single-DER zones; rho~C_jj=396 -> min 198
-        g_w_gen=4e7,   # excluded from stability
-        # ── DSO weights (alpha=1, rho(C_DER)=790 -> min 395) ──
-        g_w_dso_der=1000,  # 8 correlated DER; sf~2.5 for smooth tracking
-        g_w_dso_oltc=30,   # rho(C_OLTC)~1.1; higher for switching suppression
         use_fixed_zones=True,      # literature 3-area partition (not spectral)
         run_stability_analysis=False,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
@@ -135,11 +126,19 @@ def main_comparison() -> None:
     )
 
     # ── Scenario A: coordinated TSO-DSO ─────────────────────────────────
-    cfg_a = MultiTSOConfig(
+    # Weights come from the selected parameter set, never from this file.
+    # Before the 2026-09-10 reset this study carried its own nine-weight set
+    # -- a second, independent controller living in the same module as
+    # make_config, and differing from it on every weight.
+    from configs.paramsets import apply_paramset
+    from experiments.ch_9_parameter_selection._ch9_selected_design import (
+        SELECTED_PARAMSET,
+    )
+
+    _selected = apply_paramset(make_config(), SELECTED_PARAMSET, verbose=False)
+    cfg_a = dataclasses.replace(
+        _selected,
         **base_kwargs,
-        g_q=200,
-        g_w_pcc=100,
-        g_w_tso_oltc=100,
         live_plot_controller=True,
         live_plot_cascade=True,
     )
@@ -148,9 +147,11 @@ def main_comparison() -> None:
     cfg_b = dataclasses.replace(
         cfg_a,
         dso_mode="local",       # local controllers instead of OFO
+        # These three are what DEFINES the uncoordinated variant, not a
+        # tuning choice: pinning Q_PCC removes the TSO ability to dispatch it
+        # and g_q = 0 removes the subordinate Q-tracking objective entirely.
         g_w_pcc=1e5,           # TSO cannot dispatch Q_PCC (no coordination)
         g_q=0,
-        g_w_tso_oltc=250,
         local_der_mode="cos_phi_1",  # unity power factor for HV-connected DER
         warmup_s=900.0,         # 15 min: let TSO OFO settle before baseline activates
         live_plot_controller=True,
@@ -165,7 +166,7 @@ def main_comparison() -> None:
     cfg_b.result_dir = str(run_dir.root)
 
     print("=" * 72)
-    print("  Scenario A: Coordinated TSO-DSO (OFO, g_q=200)")
+    print("  Scenario A: Coordinated TSO-DSO (OFO, interface-Q tracked)")
     print("=" * 72)
     log_a = run_multi_tso_dso(cfg_a)
 
@@ -258,61 +259,41 @@ def main_comparison() -> None:
 # =============================================================================
 
 def make_config() -> MultiTSOConfig:
-    """Run configuration for the multi-TSO / multi-DSO run -- **edit here**.
+    """The STRUCTURAL run configuration -- horizon, cadence, network, events.
 
-    This is the only config factory in the project.  It carries the horizon,
-    the OFO timing, the objective weights, the shunt dispatch, the boundary
-    equivalent and the profile / contingency schedule; **everything else lives
-    in the** :class:`configs.config.MultiTSOConfig` **defaults**, which were
-    overwritten on 2026-08-21 with the values this file used to restate.
+    **It carries no controller weights.**  Since the 2026-09-10 reset the nine
+    weights live in exactly one place, a JSON parameter set under
+    ``configs/paramsets/``, and are applied on top of this config with
+    :func:`configs.paramsets.apply_paramset`.  A config returned from here is
+    therefore weight-INCOMPLETE by design: running it raises from
+    :meth:`MultiTSOConfig.require_weights` rather than silently using a
+    default.
 
-    Two consequences worth knowing before editing:
+    That is the whole point of the reset.  This factory previously stated its
+    own nine weights, ``configs/config.py`` restated them as dataclass
+    defaults, two JSON parameter sets restated them again, six YAML baselines
+    disagreed with all of the above, and the Chapter-9 design regenerated them
+    from search coordinates and then patched the result twice -- so "the
+    weights the controller ran at" had no single answer.
 
-    * A setting that is NOT below is not "unset" -- it is set in
-      ``configs/config.py``.  Look there before adding a line here.
-    * Alternative weight sets are **data**, not code: JSON overlays in
-      ``configs/paramsets/``, applied with
-      :func:`configs.paramsets.apply_paramset`.  ``make_config_tuned`` and
-      ``make_config_per_area`` are now ``tuned`` and ``per_area`` there.
-      ``make_config_dso_oltc_active`` is gone entirely: its Stage-1 candidate
-      ``ac8941a46134`` -- the point at which the DSO OLTCs are actually used
-      to control DSO voltage -- **is** the weight set below, to the rounding
-      of its full-precision literals (g_w_der 14.430127, g_w_pcc 54.778782,
-      g_w_dso_der 1097.158636, g_w_tso_oltc 3783.055025,
-      g_w_dso_oltc 183.112129, dso_g_v 1e5).
-
-    The per-DSO voltage relief is likewise a config field now
-    (:attr:`MultiTSOConfig.dso_v_relief_factors`, default
-    ``{"DSO_2": 20.0, "DSO_4": 20.0}``), re-derived from ``dso_g_v`` /
-    ``g_w_dso_oltc`` on every ``dataclasses.replace``.  Editing either base
-    weight below therefore moves the relieved pair with it, and the old
-    call-it-twice-and-square-the-factor trap is gone.
+    The cadence below is ``T_STS = 20 s`` (Experiment A) and
+    ``T_TS = 180 s``; the ratio ``N_inner = 9`` is a MEASURED property
+    (Experiment B), not a setting, and is re-measured whenever the weights
+    change because it is a joint property of the period ratio and ``G_w``.
     """
     return MultiTSOConfig(
         # -- horizon and cadence ---------------------------------------------
-        n_total_s=60.0 * 60 * 1,
+        n_total_s=60.0 * 60 * 6,
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
-        dso_period_s=15.0,            # DSO-OFO every plant step
-        dt_s=15.0,
-        # -- objective weights -----------------------------------------------
-        g_v=1E7,                      # TSO voltage tracking; drives PCC Q
-        g_q=250,                      # DSO interface-Q tracking
-        dso_g_v=1.0e5,                # DSO voltage; keep below the Q weight
+        dso_period_s=20.0,            # T_STS, fixed by Experiment A
+        dt_s=20.0,
         dso_gamma_oltc_q=0.0,
         zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},
-        # -- TSO actuator step weights ---------------------------------------
-        g_w_gen=1e9,
-        g_w_der=14.4,
-        g_w_pcc=54.8,
-        g_w_tso_oltc=3783,
         # -- TSO tertiary shunts (MSC/MSR) -----------------------------------
         install_tso_tertiary_shunts=True,
         shunt_dispatch="integrator",
         # step = g_H/(2*g_w); SMALLER = bigger step -- TUNE THIS.
-        shunt_int_g_w=100,
-        # -- DSO actuator step weights ---------------------------------------
-        g_w_dso_der=1097.2,
-        g_w_dso_oltc=183,
+        shunt_int_g_w=10,
         # -- Diagnostics -----------------------------------------------------
         live_plot_controller=True,
         live_plot_cascade=True,
@@ -356,7 +337,14 @@ def main() -> None:
     :func:`main_comparison` is the coordinated-vs-uncoordinated study and
     builds its own paired config; call it directly.
     """
-    cfg = apply_paramset(make_config(), "ch9_frozen")
+    from experiments.ch_9_parameter_selection._ch9_selected_design import (
+        SELECTED_PARAMSET,
+    )
+    # Was hard-coded to 'ch9_selected' with SELECTED_PARAMSET commented out,
+    # from the days when that constant still said 'stage1_start'.  It says
+    # 'ch9_selected' now, so the constant is the single place the chapter's
+    # controller identity is declared and the literal is gone.
+    cfg = apply_paramset(make_config(), SELECTED_PARAMSET)
     run_dir = new_run_dir("run_multi_system_ofo", cfg)
     log = run_multi_tso_dso(cfg)
     with (run_dir.root / "records.pkl").open("wb") as handle:
@@ -369,16 +357,23 @@ def make_config_ch9_frozen() -> MultiTSOConfig:
     """The Chapter-9 frozen configuration, for analyses that take a factory.
 
     ``tuning_mc.stage_0_preconditioning --from-runner make_config_ch9_frozen``
-    then analyses exactly what the Chapter-9 batch runs, rather than this
-    module's own weights.  That distinction matters: the design depends on H,
-    and H depends on the network, the boundary equivalent, the zone partition
-    and the start time the config declares -- and the batch is frozen on the
-    **doubled-DSO_3** network, which ``make_config()`` does not set.
+    then analyses exactly what the Chapter-9 batch runs.  That distinction
+    mattered while the two lineages differed: the design depends on H, and H
+    depends on the network, the boundary equivalent, the zone partition and the
+    start time the config declares.
 
-    Returns the selected weight design, its per-area voltage relief, the DSO-4
-    damping correction and the frozen network, all asserted by
-    ``build_selected_config`` before it returns.  The import is local because
-    that module reaches into ``tuning_mc``, which imports this one.
+    Since 2026-09-15 ``build_selected_config`` builds on :func:`make_config`,
+    so this is ``apply_paramset(make_config(), SELECTED_PARAMSET)`` plus the
+    frozen **doubled-DSO_3** multipliers, which :func:`make_config` does not
+    set.  Those two things -- the Chapter-9 weights and the Chapter-9 network
+    -- are the whole difference from a bare :func:`make_config`, and naming
+    them in one factory is why this function still exists: the
+    ``--from-runner`` interface takes a factory name.
+
+    Note that the network is the one respect in which the Chapter-9 batch
+    differs from the Stage-I/II weight campaign, which ran symmetric.  The
+    import is local because that module reaches into ``tuning_mc``, which
+    imports this one.
     """
     import sys
     from pathlib import Path as _Path

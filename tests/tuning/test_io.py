@@ -19,7 +19,7 @@ from tuning._io import (
     save_config_yaml,
     save_tuned_params,
 )
-from tuning.parameters import BO_DIMS
+from tuning.parameters import WEIGHT_FIELDS
 
 
 # ---------------------------------------------------------------------------
@@ -47,9 +47,9 @@ def test_save_load_config_roundtrip(
     loaded = load_config_yaml(path)
 
     # All BO fields preserved
-    for p in BO_DIMS:
-        assert getattr(loaded, p.name) == pytest.approx(
-            float(getattr(cfg, p.name))
+    for name in WEIGHT_FIELDS:
+        assert getattr(loaded, name) == pytest.approx(
+            float(getattr(cfg, name))
         )
 
     # start_time round-trips as datetime (not str)
@@ -102,7 +102,7 @@ def test_roundtrip_preserves_non_string_mapping_keys(
 # ---------------------------------------------------------------------------
 
 def test_save_load_tuned_params_roundtrip(tmp_path: Path) -> None:
-    params = {p.name: float(i + 1) * 1.5 for i, p in enumerate(BO_DIMS)}
+    params = {n: float(i + 1) * 1.5 for i, n in enumerate(WEIGHT_FIELDS)}
     meta = {
         "study_name": "smoke",
         "n_trials":   5,

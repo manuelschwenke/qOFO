@@ -48,6 +48,7 @@ from experiments.helpers.rms_replay import (  # noqa: E402
 from experiments.results_io import new_run_dir  # noqa: E402
 from experiments.runners import run_multi_tso_dso  # noqa: E402
 from pf.replay import PowerFactoryReplayFactory  # noqa: E402
+from pf.screening import QV_INTERNAL_LABEL_PREFIXES  # noqa: E402
 from pf.session import DEFAULT_PROJECT_PATH  # noqa: E402
 
 
@@ -89,6 +90,7 @@ def main(argv=None) -> int:
         gui_off_flag=(run_dir.root / "DISABLE_GUI"),
         gui_refresh_every=args.gui_refresh_every,
         live_plot=args.live_plot,
+        export_qv_internals=bool(cfg.rms_export_qv_internals),
     )
 
     print("\n[cosim] PowerFactory RMS closed loop")
@@ -108,11 +110,13 @@ def main(argv=None) -> int:
 
     print("  [results] bulk-exporting ElmRes through ComRes")
     started = perf_counter()
+    _wanted = ("qSTS_", "u_", "qDER_", "uDER_")
+    if cfg.rms_export_qv_internals:
+        _wanted = _wanted + QV_INTERNAL_LABEL_PREFIXES
     bulk_raw = factory.plant.harvest_trajectories_bulk(
         run_dir.csv / "rms_comres_full.csv",
         since_s=0.0, stride=args.stride,
-        labels=lambda label: label.startswith(
-            ("qSTS_", "u_", "qDER_", "uDER_")),
+        labels=lambda label: label.startswith(_wanted),
     )
     print(f"  [results] ComRes export completed in "
           f"{perf_counter() - started:.1f} s")
@@ -126,6 +130,22 @@ def main(argv=None) -> int:
     if der_raw:
         trajectories_long_frame(der_raw).to_csv(
             run_dir.csv / "rms_der_raw.csv", index=False)
+    # Dead-band internals go to their OWN file rather than into
+    # rms_der_raw.csv: the existing analyses (analysis.deadband_*) read that
+    # file and select on its label set, and silently widening it would change
+    # what every one of them measures.
+    qv_raw = {k: v for k, v in bulk_raw.items()
+              if k.startswith(QV_INTERNAL_LABEL_PREFIXES)}
+    if qv_raw:
+        trajectories_long_frame(qv_raw).to_csv(
+            run_dir.csv / "rms_qv_internals.csv", index=False)
+        print(f"  [results] {len(qv_raw)} Q(V) dead-band channels -> "
+              f"csv/rms_qv_internals.csv")
+    elif cfg.rms_export_qv_internals:
+        raise SystemExit(
+            "rms_export_qv_internals was requested but the ComRes export "
+            "returned no QVPRE channel. The dead-band experiment needs them; "
+            "do not treat this run as a measurement.")
 
     rms_traj = rms_controlled_trajectories(raw, factory.snapshot_doc)
     trajectories_long_frame(rms_traj).to_csv(

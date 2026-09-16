@@ -1,322 +1,174 @@
-"""The §9.3 selected weight design, reproduced rather than retyped.
+"""The Chapter-9 selected weight design, loaded rather than reconstructed.
 
-Both §9.1 closed-loop experiments (`ch_9_1_ts_period_sweep`, the `T_TS` sweep,
-and `ch_9_1_ninner_isolated_sts`, the isolated-STS `N_inner` measurement) must
-run at the weights the chapter selects. ``N_inner`` is a joint property of the
-period ratio and of ``G_w``: run it at the file defaults of
-``experiments/run_multi_system_ofo.py`` (``g_w_der=10``, ``g_w_dso_der=1000``,
-...) and the answer describes the *old in-service* controller, not the one
-Chapter 9 designs.
+What this replaces
+------------------
+Until 2026-09-10 this module rebuilt the design at run time: seven search
+coordinates were pushed through ``tuning_mc.stage_0_preconditioning`` to
+*generate* weights, a per-area voltage relief was applied on top, a
+post-selection correction then stripped and re-derived that relief at a
+different factor and overrode one area's DER weight by hand, a frozen network
+multiplier was applied last, and the result was asserted against an archived
+JSON under ``results/``.  Five layers, and the module's own docstring recorded
+that the chapter text named a *superseded* candidate.
 
-The design is therefore rebuilt through the campaign's own recipe --
-``load_config_yaml`` -> ``design_payload`` -> ``build_config``
-(``tuning_mc/stage_1_search.py::evaluate_one``) -- so that a later correction to
-Stage 0 or to the config overlay propagates here instead of leaving a stale
-literal behind. The designed weights are then asserted against the archived
-evaluation JSON, and a mismatch raises: silently running at *almost* the
-selected point is the failure this module exists to prevent.
+The campaign now produces a single parameter set.  This module loads it.  If
+the weights need to change, the campaign is re-run and the parameter set is
+replaced; nothing is regenerated, patched or asserted at run time.
 
-Selected candidate: ``results/tuning_mc/stage1``, key ``fe010aa3ead1`` --
-the FINAL tuning optimum (``rho_emp_p95 = 1.3788``).
+The 2026-09-15 correction: ONE structural configuration
+-------------------------------------------------------
+Until 2026-09-15 this module built its config from a bare ``MultiTSOConfig()``
+while the Stage-II search, the run comparison and the RMS co-simulation all
+built theirs from :func:`experiments.run_multi_system_ofo.make_config`.  Those
+two bases differ in fourteen fields, and six of them change the physics:
 
-*Corrected 2026-08-20.* This module previously named ``campaign_0815`` /
-``aa4f6d4a8654`` (``rho_emp_p95 = 1.4480``), the candidate whose coordinates
-match the Sec. 9.3 chapter text as drafted. That is a superseded point: the
-tuning continued past it. Measuring ``N_inner`` at superseded weights answers
-for a controller that will not be used, so both B experiments are re-run here.
+======================================  ====================  ==================
+field                                   ``make_config()``     bare dataclass
+======================================  ====================  ==================
+``install_tso_tertiary_shunts``         True                  False
+``shunt_dispatch``                      ``integrator``        ``off``
+``tie_boundary_equivalent``             ``thevenin``          ``pq``
+``local_sensitivities_tso/dso``         True                  False
+``zone_v_setpoints_pu``                 1.03 in all 3 zones   None
+``dso_der_scale``/``dso_load_p_scale``  {} (symmetric)        DSO_3 x2
+======================================  ====================  ==================
 
-The final candidate carries a seventh coordinate, ``dso_v_authority = 20.0``,
-which the earlier one did not. It is NOT a stored weight: ``build_config``
-turns it into a per-area voltage relief on the spread-limited areas via
-``apply_dso_v_relief``, raising ``dso_g_v`` and ``g_w_dso_oltc`` together by
-that factor so the OLTC loop gain ``dso_g_v / g_w_dso_oltc`` -- the ratio that
-keeps the integer tap out of a limit cycle -- is preserved. The archive
-therefore stores ``zone_g_w_class: null`` while the effective config carries
-``DSO_2``/``DSO_4`` values at 20x the globals. Both are asserted below, because
-a silently unapplied relief would look exactly like a correctly applied one in
-the weight comparison.
+So the Chapter-9.1 response experiments ran with the MSC/MSR banks absent -- and
+``shunt_int_g_w`` therefore inert -- a PQ rather than Thevenin boundary
+equivalent, no local sensitivity refresh and no zone voltage setpoints, while
+the weights they ran at were selected on the other configuration.  ``N_inner``
+measured there is not ``N_inner`` of the controller the chapter reports.
+
+The last row is the one difference the author chose to KEEP: the Chapter-9 batch
+is declared on the doubled-DSO_3 network, so :func:`build_selected_config`
+re-applies those multipliers on top of the runner configuration.  Everything
+else now comes from ``make_config()`` unchanged.
+
+The base is now :func:`~experiments.run_multi_system_ofo.make_config`, which is
+what the author asked for in writing::
+
+    from configs.paramsets import apply_paramset
+    from experiments.run_multi_system_ofo import make_config
+
+    cfg = apply_paramset(make_config(), "ch9_selected")
+
+and which is exactly what :func:`build_selected_config` now returns.
+
+Interface is unchanged -- ``build_selected_config() -> (cfg, provenance)`` --
+but the provenance dict regained the ``campaign``, ``candidate_key`` and
+``verified`` keys that the Chapter-9.1 entry points print, which had been
+dropped in the 2026-09-10 rewrite and raised ``KeyError`` on every run since.
+
+Author: Manuel Schwenke / Claude Code (2026-09-15)
 """
 
 from __future__ import annotations
 
 import dataclasses
-import json
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: Campaign directory and candidate. Named once, here.
-CAMPAIGN = "stage1"
-CANDIDATE_KEY = "fe010aa3ead1"
-
-#: The seven search coordinates, verbatim from
-#: ``results/tuning_mc/stage1/evals/spec_fe010aa3ead1.json``.
-KNOBS: Dict[str, float] = {
-    "lambda_tso": 0.17827533411555277,
-    "lambda_dso": 1.7957360834719915,
-    "tau": 0.7079457843841379,
-    "engage_tso_pu": 0.015,
-    "engage_dso_pu": 0.04988155787422199,
-    "dso_g_v_ratio": 0.8413951416451951,
-    "dso_v_authority": 20.0,
-}
-
-#: Areas the ``dso_v_authority`` relief applies to, and the factor. Asserted
-#: against the built config rather than trusted: the relief is generated by
-#: ``apply_dso_v_relief`` at build time, not stored in the archive, so a
-#: version that stopped applying it would still pass a weights-only check.
-RELIEF_AREAS = ("DSO_2", "DSO_4")
-
-#: Post-selection safety correction established by the 2026-08-21 B1
-#: diagnostics. The archived candidate used a pooled geometric-mean DSO DER
-#: weight (549.88), which puts DSO_4's dominant continuous mode at the period-2
-#: boundary. A single scalar shared by DSO_4's ten DER columns is therefore
-#: set to that area's Stage-0 worst-column requirement, not its geometric mean.
-#: The voltage-relief factor is reduced from 20 to 10 at the same time; the
-#: paired OLTC weight is re-derived, so no OLTC loop gain is changed.
-CORRECTED_DSO_V_AUTHORITY = 10.0
-CORRECTED_DSO4_DER_WEIGHT = 828.3682036634343
-
-#: The frozen NETWORK of the Chapter-9 batch, decided 2026-09-09.
+#: The parameter set this chapter runs at.
 #:
-#: The selected candidate is a *weight* design; the DSO_3 multipliers are a
-#: scenario multiplier applied on top, and until now no consumer of this module
-#: applied them.  That was a real inconsistency: the PowerFactory project stores
-#: the doubled model, the whole C1 lineage ran doubled, and Phase 1 of the batch
-#: ran doubled -- while every script importing ``build_selected_config`` silently
-#: ran the symmetric one.
+#: ``ch9_selected`` is candidate ``399e30d3b60b``, chosen 2026-09-11 from the
+#: Stage-II evented 12 h bank by ``ch_9_3_select.py``; see
+#: ``results/THESIS_ch9_3_stage2/refine_evented/selection_report.json``.
 #:
-#: Carrying them here makes "the frozen configuration" a single object rather
-#: than a weight set plus an unwritten convention, which is what the batch
-#: requires.  Pass ``apply_frozen_network=False`` to recover the pre-2026-09-09
-#: behaviour; the archived B1/B2 runs were made that way.
+#: It replaced ``stage1_start`` here on 2026-09-15.  ``stage1_start`` is the
+#: Stage-I *analytic* design point and remains the correct parameter set for
+#: Experiment B and for the initial-weight leg of Experiment C -- pass it
+#: explicitly (``--paramset stage1_start``) rather than by editing this
+#: constant, so that a run record always names the controller it ran at.
+SELECTED_PARAMSET = "ch9_selected"
+
+#: The Stage-I analytic design point, for the initial-weight legs (B and C).
+INITIAL_PARAMSET = "stage1_start"
+
+#: Per-DSO scenario multipliers of the 2026-09-09 "frozen network".
 #:
-#: The weights were designed on the UN-doubled network.  That mismatch is a
-#: stated limitation of the batch, not an oversight.
+#: Applied by default: the Chapter-9 batch is declared on the doubled-DSO_3
+#: model, the PowerFactory project stores it, and the whole Chapter-9.1 lineage
+#: ran doubled.  Confirmed by the author 2026-09-15.
+#:
+#: **This is a stated mismatch, not an oversight.**  ``make_config()`` -- the
+#: base every weight in ``ch9_selected`` was selected on -- does NOT set these,
+#: so the Stage-II screen, refinement and selection all ran on the SYMMETRIC
+#: model.  Running the response experiments here therefore evaluates the
+#: selected weights on a network the search never saw.  The chapter has to say
+#: so; ``resolved_config.json`` and the run banner both record which network
+#: was used, and ``apply_frozen_network=False`` gives the Stage-II-comparable
+#: variant when that comparison is what is wanted.
 FROZEN_DSO_DER_SCALE: Dict[str, float] = {"DSO_3": 2.0}
 FROZEN_DSO_LOAD_P_SCALE: Dict[str, float] = {"DSO_3": 2.0}
 
-#: Relative tolerance on the weight assertion. The recipe is deterministic, so
-#: this is a float-repr guard, not a tolerance band: anything larger than this
-#: means the design changed and the run must not proceed.
-WEIGHT_RTOL = 1e-9
 
-_EVAL_DIR = REPO_ROOT / "results" / "tuning_mc" / CAMPAIGN / "evals"
-_DESIGN_DIR = REPO_ROOT / "results" / "tuning_mc" / CAMPAIGN / "designs"
-
-
-def archived_evaluation() -> Dict[str, Any]:
-    """The Tier-1 evaluation record of the selected candidate."""
-    path = _EVAL_DIR / f"tier1_{CANDIDATE_KEY}.json"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"archived evaluation missing: {path}. The selected design cannot "
-            f"be verified, so the run is refused rather than executed against "
-            f"an unchecked config.")
-    return json.loads(path.read_text(encoding="utf-8-sig"))
-
-
-def _apply_post_selection_dso4_correction(cfg, payload):
-    """Apply and assert the narrow DSO-4 damping correction.
-
-    The archived candidate is still rebuilt and checked first. This function
-    then layers a separately identified safety correction, so provenance does
-    not misrepresent the corrected controller as the untouched campaign point.
-    """
-    from configs.config import apply_dso_v_relief
-
-    dso4 = next(
-        row for row in payload.get("per_area", [])
-        if row.get("kind") == "dso" and row.get("area") == "DSO_4")
-    derived_max = float(dso4["fields"]["g_w_dso_der"]["max"])
-    if abs(derived_max - CORRECTED_DSO4_DER_WEIGHT) > 1e-9:
-        raise AssertionError(
-            f"DSO_4 Stage-0 max-column weight changed: {derived_max!r} != "
-            f"{CORRECTED_DSO4_DER_WEIGHT!r}; revalidate the damping correction")
-
-    # The historical relief helper was not idempotent, whereas the current one
-    # is. Clear generated maps (and the declarative field when present) before
-    # deriving x10, which makes this work against archived and current code.
-    field_names = {field.name for field in dataclasses.fields(cfg)}
-    reset = {}
-    for name in ("dso_g_v_per_area", "dso_g_w_class", "dso_g_q_per_area"):
-        if name in field_names:
-            reset[name] = None
-    if "dso_v_relief_factors" in field_names:
-        reset["dso_v_relief_factors"] = None
-    cfg = dataclasses.replace(cfg, **reset)
-    cfg = apply_dso_v_relief(
-        cfg, {area: CORRECTED_DSO_V_AUTHORITY for area in RELIEF_AREAS})
-
-    per_area_cls = {
-        area: dict(values)
-        for area, values in (getattr(cfg, "dso_g_w_class", {}) or {}).items()
-    }
-    per_area_cls.setdefault("DSO_4", {})["dso_der"] = (
-        CORRECTED_DSO4_DER_WEIGHT)
-    cfg = dataclasses.replace(cfg, dso_g_w_class=per_area_cls)
-
-    expected_gv = float(cfg.dso_g_v) * CORRECTED_DSO_V_AUTHORITY
-    expected_oltc = float(cfg.g_w_dso_oltc) * CORRECTED_DSO_V_AUTHORITY
-    got_gv = dict(cfg.dso_g_v_per_area or {})
-    got_cls = dict(cfg.dso_g_w_class or {})
-    for area in RELIEF_AREAS:
-        if abs(float(got_gv[area]) - expected_gv) > 1e-6:
-            raise AssertionError(f"{area}: corrected voltage relief did not apply")
-        if abs(float(got_cls[area]["dso_oltc"]) - expected_oltc) > 1e-6:
-            raise AssertionError(f"{area}: corrected OLTC pairing did not apply")
-    if abs(float(got_cls["DSO_4"]["dso_der"])
-           - CORRECTED_DSO4_DER_WEIGHT) > 1e-9:
-        raise AssertionError("DSO_4 continuous-DER damping correction did not apply")
-
-    correction = {
-        "status": "post-selection safety correction",
-        "reason": "DSO_4 period-2 continuous-loop instability in corrected B1",
-        "dso_v_authority": CORRECTED_DSO_V_AUTHORITY,
-        "dso4_g_w_dso_der": CORRECTED_DSO4_DER_WEIGHT,
-        "weight_rule": "maximum of the ten DSO_4 Stage-0 column requirements",
-        "effective_dso_g_v_per_area": {
-            area: float(got_gv[area]) for area in RELIEF_AREAS},
-        "effective_dso_g_w_class": {
-            area: dict(got_cls[area]) for area in RELIEF_AREAS},
-    }
-    return cfg, correction
+#: Live-plot fields forced off for a measurement campaign.
+#:
+#: ``make_config()`` is the INTERACTIVE runner configuration and switches the
+#: controller and cascade windows on.  Building on it (2026-09-15) therefore
+#: turned them on in every Chapter-9 worker, where the bare dataclass lineage
+#: had them off -- and ``live_plot_controller`` constructs a matplotlib
+#: ``TSOControllerLivePlotter`` per case, inside each of 16 pool workers, with
+#: a redraw every step.  Pure overhead in a batch: the plotters only read state
+#: and draw, so they cannot change a result, but they cost wall time and have
+#: no one to show it to.
+#:
+#: Not simply "the defaults": ``live_plot_show_reserves`` and
+#: ``live_plot_show_tie_flows`` default to True and are display options of a
+#: window that will not exist, so they are left alone.
+_LIVE_PLOT_FIELDS: Tuple[str, ...] = (
+    "live_plot_controller", "live_plot_cascade", "live_plot_system",
+    "live_plot_tracking", "live_plot_sbx", "live_plot_sbxv",
+)
 
 
 def build_selected_config(
-    *, apply_frozen_network: bool = True,
+    *,
+    paramset: str = SELECTED_PARAMSET,
+    apply_frozen_network: bool = True,
+    live_plots: bool = False,
 ) -> Tuple[Any, Dict[str, Any]]:
-    """``(cfg, provenance)`` at the §9.3 selected weights.
+    """``(cfg, provenance)`` at the named weights, on the runner configuration.
 
-    Raises if the rebuilt weights differ from the archived ones, or if the
-    knobs in the archive differ from :data:`KNOBS` -- either means this module
-    is describing a different candidate from the one it names.
+    ``cfg`` is ``apply_paramset(make_config(), paramset)`` -- the same object
+    the Stage-II search, ``ch_9_3_compare_runs`` and the RMS co-simulation
+    build -- so a result measured here is measured on the controller the rest
+    of the chapter reports.
 
-    ``apply_frozen_network`` (default true since 2026-09-09) also applies the
-    batch's frozen DSO_3 multipliers, so every caller runs the same network as
-    well as the same weights.  See :data:`FROZEN_DSO_DER_SCALE`.
+    Live plotting is forced OFF unless ``live_plots=True``; see
+    :data:`_LIVE_PLOT_FIELDS`.  This is a measurement harness, and
+    ``make_config()`` is the interactive configuration.
+
+    Raises with an actionable message if the parameter set does not exist.
+    That is deliberately not softened into a fallback: a fallback here is how
+    the previous design came to run at weights nobody had selected.
     """
     import sys
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
 
-    from tuning._io import load_config_yaml
-    from tuning_mc.stage_1_search import (
-        APPLIED_FIELDS, DEFAULT_BASELINE, build_config, design_payload,
-        knob_key, stage0_fingerprint, _zone_lambda_spec,
-    )
+    from configs.paramsets import apply_paramset, available, load_paramset
+    from experiments.run_multi_system_ofo import make_config
 
-    archive = archived_evaluation()
+    if paramset not in available():
+        raise FileNotFoundError(
+            f"parameter set {paramset!r} does not exist. Available: "
+            f"{available() or '(none)'}. The Chapter-9 weights are produced by "
+            f"the Stage-I/II campaign (see tuning/stage1_screen.py and the "
+            f"2026-09-10 weight reset in docs/daily_log); until it has run "
+            f"there is no selected design to load."
+        )
 
-    # (1) The archive must be the candidate this module claims.
-    if knob_key(KNOBS) != CANDIDATE_KEY:
-        raise AssertionError(
-            f"knob_key(KNOBS) = {knob_key(KNOBS)!r} but this module names "
-            f"{CANDIDATE_KEY!r}; the coordinates and the key disagree.")
-    for field, want in KNOBS.items():
-        got = float(archive["knobs"][field])
-        if abs(got - want) > 1e-12:
-            raise AssertionError(
-                f"knob {field}: archive has {got!r}, this module has {want!r}")
+    doc = load_paramset(paramset)
+    cfg = apply_paramset(make_config(), paramset, verbose=False)
 
-    # (2) Rebuild through the campaign's own recipe.
-    baseline_cfg = load_config_yaml(Path(DEFAULT_BASELINE))
-    payload = design_payload(KNOBS, baseline=Path(DEFAULT_BASELINE),
-                             design_scenario="none", workdir=_DESIGN_DIR)
-    block = payload["config_block"]
-    weights = {f: float(block[f]["designed"]) for f in APPLIED_FIELDS}
+    if not live_plots:
+        cfg = dataclasses.replace(
+            cfg, **{name: False for name in _LIVE_PLOT_FIELDS})
 
-    # zone_g_w_class is null for this candidate: global scalars, no per-area
-    # block. Recomputed rather than assumed, so a change of knobs is caught.
-    zblock = None
-    if _zone_lambda_spec(KNOBS) is not None:
-        raise AssertionError(
-            "this candidate carries a per-zone lambda spec, but the archived "
-            "zone_g_w_class is null; the two cannot both be right.")
-    if archive.get("zone_g_w_class") is not None:
-        raise AssertionError(
-            f"archive zone_g_w_class is {archive['zone_g_w_class']!r}, "
-            f"expected null for this candidate.")
-
-    # (3) The assertion the handoff asks for: designed == archived.
-    mismatches = []
-    for field, got in sorted(weights.items()):
-        want = float(archive["weights"][field])
-        if want == 0.0:
-            ok = got == 0.0
-        else:
-            ok = abs(got - want) <= WEIGHT_RTOL * abs(want)
-        if not ok:
-            mismatches.append(f"  {field}: rebuilt {got!r} != archived {want!r}")
-    if mismatches:
-        raise AssertionError(
-            "the rebuilt design does not reproduce the archived one -- Stage 0 "
-            "or the config overlay has changed since campaign_0815, so this "
-            "run would NOT be at the weights the chapter selects:\n"
-            + "\n".join(mismatches))
-
-    cfg = build_config(KNOBS, weights, baseline_cfg, zone_g_w_class=zblock)
-
-    # (4) dso_g_v is set by the overlay from the searched ratio, not designed
-    # by Stage 0, so it is checked against the archive separately.
-    want_gv = float(archive["dso_g_v"])
-    got_gv = float(cfg.dso_g_v)
-    if abs(got_gv - want_gv) > WEIGHT_RTOL * abs(want_gv):
-        raise AssertionError(
-            f"dso_g_v: built {got_gv!r} != archived {want_gv!r}")
-
-    # (5) The per-area relief. Generated, not stored, so it is checked against
-    # the arithmetic it is defined by: dso_g_v and g_w_dso_oltc both scaled by
-    # dso_v_authority on the spread-limited areas, which preserves the OLTC
-    # loop gain dso_g_v / g_w_dso_oltc.
-    relief = {}
-    factor = KNOBS.get("dso_v_authority")
-    if factor is not None:
-        per_area_gv = dict(getattr(cfg, "dso_g_v_per_area", {}) or {})
-        # dso_g_w_class, NOT zone_g_w_class: apply_dso_v_relief writes the
-        # per-area OLTC weight into the former. The two names are one letter
-        # apart in intent and completely different in effect -- reading the
-        # wrong one reported the relief as absent when it had applied.
-        per_area_cls = dict(getattr(cfg, "dso_g_w_class", {}) or {})
-        missing = [a for a in RELIEF_AREAS if a not in per_area_gv]
-        if missing:
-            raise AssertionError(
-                f"dso_v_authority = {factor} is set, but the built config has "
-                f"no per-area dso_g_v for {missing}. The relief did not apply; "
-                f"a weights-only check would not have caught this.")
-        for area in RELIEF_AREAS:
-            want = got_gv * float(factor)
-            got = float(per_area_gv[area])
-            if abs(got - want) > 1e-6 * abs(want):
-                raise AssertionError(
-                    f"{area} dso_g_v: built {got!r} != {got_gv!r} * {factor!r} "
-                    f"= {want!r}")
-        # The OLTC half must scale by the same factor, or the loop gain
-        # dso_g_v / g_w_dso_oltc moves and the integer tap limit-cycles
-        # (measured 2026-08-18: 50.5 reversals/h at factor 6.7).
-        want_oltc = float(cfg.g_w_dso_oltc) * float(factor)
-        for area in RELIEF_AREAS:
-            got_oltc = float((per_area_cls.get(area) or {}).get("dso_oltc",
-                                                                float("nan")))
-            if not abs(got_oltc - want_oltc) <= 1e-6 * abs(want_oltc):
-                raise AssertionError(
-                    f"{area} dso_oltc: built {got_oltc!r} != "
-                    f"{cfg.g_w_dso_oltc!r} * {factor!r} = {want_oltc!r}; the "
-                    f"OLTC half of the relief did not apply, so the loop gain "
-                    f"dso_g_v / g_w_dso_oltc has moved")
-        relief = {"dso_g_v_per_area": {a: float(per_area_gv[a])
-                                       for a in RELIEF_AREAS},
-                  "dso_g_w_class": {a: per_area_cls.get(a)
-                                    for a in RELIEF_AREAS},
-                  "factor": float(factor)}
-
-    cfg, correction = _apply_post_selection_dso4_correction(cfg, payload)
-
-    # Applied last, and through ``dataclasses.replace`` so ``__post_init__``
-    # re-derives the per-area voltage relief from the config's own bases.  The
-    # relief derivation is idempotent, so it cannot compound.
-    network = None
+    network: Optional[Dict[str, Any]] = None
     if apply_frozen_network:
         cfg = dataclasses.replace(
             cfg,
@@ -325,42 +177,80 @@ def build_selected_config(
         )
         network = {"dso_der_scale": dict(FROZEN_DSO_DER_SCALE),
                    "dso_load_p_scale": dict(FROZEN_DSO_LOAD_P_SCALE)}
-        # The relief must survive the network replace, or the DSO_2/DSO_4
-        # authority silently reverts to the global scalars.
-        for area in RELIEF_AREAS:
-            if area not in (cfg.dso_g_v_per_area or {}):
-                raise AssertionError(
-                    f"{area}: per-area voltage relief lost when the frozen "
-                    f"network was applied")
-        if abs(float(cfg.dso_g_w_class["DSO_4"]["dso_der"])
-               - CORRECTED_DSO4_DER_WEIGHT) > 1e-9:
-            raise AssertionError(
-                "DSO_4 damping correction lost when the frozen network was "
-                "applied")
 
-    provenance = {
+    # The one invariant still worth asserting: the config that comes out must
+    # be weight-complete.  Everything else the old module checked was
+    # reconciling layers that no longer exist.
+    cfg.require_weights()
+
+    prov = doc.get("provenance", {})
+    provenance: Dict[str, Any] = {
+        "paramset": paramset,
+        "title": doc.get("title", paramset),
+        "fields": dict(doc.get("fields", {})),
+        "paramset_provenance": prov,
+        "base_config": "experiments.run_multi_system_ofo.make_config",
         "frozen_network": network,
-        "campaign": CAMPAIGN,
-        "candidate_key": CANDIDATE_KEY,
-        "knobs": dict(KNOBS),
-        "weights": weights,
-        "dso_g_v": got_gv,
-        "zone_g_w_class": None,
-        "per_area_relief": relief,
-        "post_selection_correction": correction,
-        "baseline_yaml": str(DEFAULT_BASELINE),
-        "stage0_fingerprint": stage0_fingerprint(),
-        "design_payload": str(_DESIGN_DIR / f"stage0_{CANDIDATE_KEY}.json"),
-        "archived_eval": str(_EVAL_DIR / f"tier1_{CANDIDATE_KEY}.json"),
-        "archived_rho_emp_p95": archive.get("worst_rho_emp_p95"),
-        "verified": "archived weights reproduced; DSO-4 correction asserted",
+        # -- keys the Chapter-9.1 entry points print.  Derived from the
+        #    parameter set rather than restated, so they cannot drift from it.
+        "campaign": prov.get("producer", paramset),
+        "candidate_key": (prov.get("weight_fingerprint")
+                          or prov.get("selected_key")
+                          or prov.get("candidate_key")
+                          or "(none)"),
+        "verified": doc.get("title", paramset),
     }
     return cfg, provenance
 
 
+def resolved_manifest(cfg: Any, provenance: Dict[str, Any]) -> Dict[str, Any]:
+    """The complete resolved configuration, for the run record.
+
+    Section 3 of the 2026-09-15 experiment plan requires a run to persist the
+    configuration it actually resolved rather than the name of the helper that
+    built it.  Every ``MultiTSOConfig`` field that is JSON-representable is
+    written out; the rest are stringified, so the manifest is always complete
+    and never raises on an exotic field.
+    """
+    import json
+
+    fields: Dict[str, Any] = {}
+    for f in dataclasses.fields(cfg):
+        value = getattr(cfg, f.name)
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError):
+            value = repr(value)
+        fields[f.name] = value
+    return {"design": provenance, "resolved_config": fields}
+
+
 if __name__ == "__main__":
-    cfg, prov = build_selected_config()
-    print(json.dumps(prov, indent=2, default=str))
+    import argparse
+    import json
+
+    ap = argparse.ArgumentParser(prog="_ch9_selected_design")
+    ap.add_argument("--paramset", default=SELECTED_PARAMSET)
+    ap.add_argument("--symmetric-network", action="store_true",
+                    help="drop the doubled-DSO_3 multipliers and run the "
+                         "symmetric model the Stage-II search used")
+    ap.add_argument("--manifest", action="store_true",
+                    help="print the full resolved configuration")
+    a = ap.parse_args()
+
+    cfg, prov = build_selected_config(
+        paramset=a.paramset,
+        apply_frozen_network=not a.symmetric_network)
+    if a.manifest:
+        print(json.dumps(resolved_manifest(cfg, prov), indent=2, default=str))
+    else:
+        print(json.dumps(prov, indent=2, default=str))
     print(f"\ntso_period_s={cfg.tso_period_s} dso_period_s={cfg.dso_period_s} "
-          f"dt_s={cfg.dt_s} scenario={cfg.scenario} "
-          f"precondition_g_w={cfg.precondition_g_w}")
+          f"dt_s={cfg.dt_s} scenario={cfg.scenario}")
+    print(f"shunts={cfg.install_tso_tertiary_shunts}/{cfg.shunt_dispatch} "
+          f"shunt_int_g_w={cfg.shunt_int_g_w} "
+          f"boundary={cfg.tie_boundary_equivalent} "
+          f"local_sens={cfg.local_sensitivities_tso}/"
+          f"{cfg.local_sensitivities_dso}")
+    print(f"dso_der_scale={cfg.dso_der_scale} "
+          f"dso_load_p_scale={cfg.dso_load_p_scale}")

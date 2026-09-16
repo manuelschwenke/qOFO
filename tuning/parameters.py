@@ -1,15 +1,45 @@
-"""
+r"""
 tuning/parameters.py
 ====================
-Declarative definition of the Bayesian-optimization decision space and
-the mapping between BO param dicts and :class:`MultiTSOConfig` instances.
+The canonical controller-weight vector, and its overlay onto ``MultiTSOConfig``.
 
-The BO search space is 8-dimensional.
+One vector, nine weights
+------------------------
+After the 2026-09-10 reset there is exactly one definition of "the controller
+weights".  :data:`WEIGHT_FIELDS` names them; a *parameter set* is a mapping over
+exactly these keys plus the timing fields, and nothing else in the codebase may
+carry a competing default (``configs.config`` raises on an unset weight).
 
-``FIXED_OVERRIDES`` lists fields that are always overwritten when
-applying BO params, regardless of their value in the baseline config:
-live plots disabled, verbose silenced, etc.  This guarantees that BO
-trials are headless and deterministic w.r.t. the baseline.
+The gauge
+---------
+The MIQP objective ``w^T G_w w + grad_f^T w + z^T G_z z`` is positively
+homogeneous of degree one in the whole weight vector: scaling ``Q``, ``G_w``,
+``G_z`` and the shunt integrator's gain by a common ``c`` multiplies the
+objective by ``c`` and leaves the argmin — hence the trajectory, *including the
+integer tap sequence* — unchanged.  Measured 2026-07-31: reproduced to ~4e-10.
+
+So weights map many-to-one onto controllers: an entire ray through the origin
+is one controller.  A search over all nine spends budget on a direction that
+provably changes nothing, and a reported ``g_v = 1e7`` means nothing on its own.
+
+:data:`GAUGE_FIELD` is therefore **pinned**, and the remaining eight coordinates
+are searched.  Objective weights are searched as dimensionless priorities
+``pi = g * sigma^2`` (:class:`tuning.stage1_screen.PriorityScales`) so that
+"voltage matters more than interface-Q" is a unit-free statement the reader can
+check, rather than a ratio of raw magnitudes in different units.
+
+What is *not* here
+------------------
+* **Scoring weights.**  Candidate selection is by stated operational constraints
+  plus a lexicographic order on the controlled outputs, so there is no composite
+  cost and no ``w_*`` to justify.  The retired ``CostWeights``/``PerfWeights``
+  scalarisations were themselves untuned parameter sets, and the interface-Q
+  term in them was gameable: a prior BO run drove ``g_w_pcc`` to ~270 because
+  freezing the PCC setpoint makes interface-Q error vanish trivially.
+* **Search bounds.**  The box is centred on the Stage-I point and lives with the
+  campaign that draws it, not in this module — bounds that outlive the design
+  they were drawn around are how the previous campaign came to exclude its own
+  known-good point (``g_v = 1e7`` against a box of ``[1e2, 1e5]``).
 """
 
 from __future__ import annotations
@@ -21,243 +51,155 @@ import math
 from typing import Any
 
 from configs.config import MultiTSOConfig
-from tuning._types import BOParam, Ceilings
 
+__all__ = [
+    "WEIGHT_FIELDS",
+    "GAUGE_COUPLED_FIELDS",
+    "SHUNT_FIELDS",
+    "SEARCHED_FIELDS",
+    "GAUGE_FIELD",
+    "TIMING_FIELDS",
+    "FIXED_OVERRIDES",
+    "apply_to_config",
+    "params_from_config",
+    "weight_fingerprint",
+]
 
-#: Bumped whenever the *meaning* of a coordinate changes in a way that makes
-#: old trials incomparable, even if the bounds happen to stay the same.
-#: Bounds changes are caught automatically by the fingerprint below; this is
-#: for semantic changes the numbers cannot express.
-SEARCH_SPACE_VERSION: int = 2
+#: The single weight the gauge is fixed on.  Every other weight is meaningful
+#: only as a ratio to this one.  Pinned, never searched.
+GAUGE_FIELD: str = "g_v"
 
-
-def search_space_fingerprint() -> str:
-    """Stable digest of the decision space, for storage in ``study.user_attrs``.
-
-    Resuming a study across a change of search space silently mixes trials that
-    were never comparable.  That happened here: every persisted IEEE-39 study
-    records a 9th parameter, ``tso_g_q_tie``, which is not in
-    :data:`BO_DIMS` any more -- and is not even a field of
-    :class:`~configs.config.MultiTSOConfig` (the field is ``tso_g_q_pcc``).
-    Feeding such a study's best-params back through :func:`apply_to_config`
-    raises ``ValueError: Unknown BO params``.
-
-    :func:`tuning.tune.main` compares this digest against the one recorded on
-    the study and refuses to resume on a mismatch.
-    """
-    payload = {
-        "version": SEARCH_SPACE_VERSION,
-        "dims": sorted(
-            (p.name, float(p.low), str(p.high), bool(p.log)) for p in BO_DIMS
-        ),
-        "fixed": sorted(
-            (k, str(v)) for k, v in FIXED_OVERRIDES.items()
-        ),
-    }
-    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
-
-
-# 8 BO dimensions.
-# `g_w_tso_shunt` is conditionally excluded while
-# `install_tso_tertiary_shunts=False` in the baseline (no shunt actuators
-# → vacuous coordinate). The slot is pinned in FIXED_OVERRIDES so the
-# baseline value still flows through `apply_to_config`. Re-enable by
-# uncommenting and removing the FIXED_OVERRIDES entry once shunts are
-# installed.
-#
-# rows of the TSO MIQP objective — analogous to `g_q` (Q-PCC tracking),
-# scales the curvature ``Q`` block of the iteration matrix rather than
-# the proximal ``G_w`` block.  Bounds are chosen from the field's own
-# docstring (configs/multi_tso_config.py:294): validated 1.0 starting
-# point, aggressive 1e2-1e4, numerically unstable above 1e6.  A
-# log-uniform [1e-1, 1e3] range stays inside the validated envelope.
-#
-# Adaptive `g_w` meta-knobs (`g_w_adapt_beta1`, `g_w_adapt_beta2`,
-# `g_w_adapt_t_min`, `g_w_adapt_t_max`, `g_w_adapt_deadband_rel`,
-# added 2026-04-29) are NOT in BO_DIMS by default.  When the operator
-# enables one or more `adapt_g_w_*` flags in the config, the existing
-# `g_w_*` BO dims serve as the *initial* values for the online adapter
-# (warm-start), and the meta-knobs take their config defaults.  Add the
-# meta-knobs to `BO_DIMS` only after deciding to BO-tune them too —
-# typical ranges: β₁, β₂ ∈ [1e-2, 3e-1] log-uniform; t_min ∈ [1e-3, 1]
-# log-uniform; t_max ∈ [1, 1e6] log-uniform.  See paper Eq. 16
-# (Zagorowska et al., IFAC WC 2026, arXiv:2604.12863).
-BO_DIMS: tuple[BOParam, ...] = (
-    BOParam("g_v",           log=True, low=1e2, high=1e5), #  high="ceil", fallback_high=1e7),
-    BOParam("g_q",           log=True, low=1e-1,  high=1e3),
-    BOParam("dso_g_v",       log=True, low=1,  high=1e5),
-    BOParam("g_w_der",       log=True, low=1e-1, high=1e3), # high="ceil", fallback_high=1e4),
-    # `g_w_pcc` upper bound capped at 30 (≈10^1.5) on 2026-05-02:
-    # a prior BO run converged to ``g_w_pcc ≈ 269.7`` by exploiting
-    # the gameability of ``itae_q_pcc`` (very high ``g_w_pcc`` freezes
-    # the PCC setpoint, making the DSO trivially track it).  See the
-    # ``CostWeights`` docstring in ``tuning/metrics.py`` for the
-    # paired objective-side fix (demoted ``w_q_track`` and new
-    # ``w_pcc_underutil`` term).  Values above ~30 are sluggish without
-    # a meaningful end-performance benefit.
-    BOParam("g_w_pcc",       log=True, low=1e-1, high=30.0),
-    BOParam("g_w_tso_oltc",  log=True, low=1, high=1e5), # high="ceil", fallback_high=1e4),
-    #BOParam("g_w_tso_shunt", log=True, low=1e-1, high="ceil", fallback_high=1e4),
-    BOParam("g_w_dso_der",   log=True, low=1e-1, high=1e3), # high="ceil", fallback_high=1e4),
-    BOParam("g_w_dso_oltc",  log=True, low=1, high=1e5), # high="ceil", fallback_high=1e4),
-    # ── Stage-2 (Q(V) local loop) knobs ─────────────────
+#: The nine controller weights.  ``g_w_tso_shunt`` is deliberately absent: the
+#: shunt is dispatched by a separate integrator outside the MIQP, so it is a
+#: structural choice rather than a tuned weight.
+WEIGHT_FIELDS: tuple[str, ...] = (
+    "g_v",              # TS voltage tracking            [1/pu^2]   (gauge)
+    "g_q",              # STS interface-Q tracking       [1/Mvar^2]
+    "dso_g_v",          # STS voltage tracking           [1/pu^2]
+    "g_w_der",          # TS DER step price              [1/Mvar^2]
+    "g_w_pcc",          # PCC setpoint step price        [1/Mvar^2]
+    "g_w_gen",          # AVR setpoint step price        [1/pu^2]
+    "g_w_tso_oltc",     # machine-transformer tap price  [1/tap^2]
+    "g_w_dso_der",      # STS DER step price             [1/Mvar^2]
+    "g_w_dso_oltc",     # STS coupling-transformer tap   [1/tap^2]
 )
 
+#: The eight coordinates a search may move.
+SEARCHED_FIELDS: tuple[str, ...] = tuple(
+    f for f in WEIGHT_FIELDS if f != GAUGE_FIELD
+)
 
-# Fields always pinned during tuning (override baseline config).
+#: Weights that are **not searched** but that must scale with the gauge.
+#:
+#: These sit in the invariance group with everything in :data:`WEIGHT_FIELDS`
+#: -- scaling the whole group by a common factor reproduces the trajectory --
+#: but they are set by their own rule rather than by the search, so they were
+#: originally left out of the parameter set entirely.  That was a defect.
+#:
+#: Measured 2026-09-11: pinning the gauge at ``g_v = 40000`` (from ``1e7``)
+#: while ``shunt_int_g_w`` stayed at its old-gauge value of 10 made the
+#: integrator advance ~250x too slowly for its own commit threshold.  The
+#: accumulated state peaked at 0.395 Mvar against a threshold of 22.5, so the
+#: eight shunt banks **never committed once** -- an entire actuator class was
+#: silently absent from the whole campaign.
+#:
+#: Carrying them in the parameter set is what stops that recurring: the gauge
+#: and everything coupled to it now move together or not at all.
+GAUGE_COUPLED_FIELDS: tuple[str, ...] = (
+    "shunt_int_g_w",
+)
+
+#: Switched-shunt integrator design, carried in the parameter set for the same
+#: reason as the cadence: the commit behaviour of the bulk banks is part of the
+#: design, and leaving it in ``configs.config`` defaults is how it came to be
+#: silently wrong.  ``shunt_int_g_w`` is NOT here -- it is gauge-coupled and
+#: lives in :data:`GAUGE_COUPLED_FIELDS`; these three are free design choices.
+SHUNT_FIELDS: tuple[str, ...] = (
+    "shunt_int_delta_mvar",
+    "shunt_int_t_dwell_s",
+    "shunt_int_daily_budget",
+)
+
+#: Cadence, carried in a parameter set so that a weight set and the periods it
+#: was designed against cannot drift apart.  ``N_inner = tso_period_s /
+#: dso_period_s`` is a *measured* quantity (Experiment B) and is not a field.
+TIMING_FIELDS: tuple[str, ...] = ("tso_period_s", "dso_period_s", "dt_s")
+
+#: Fields always pinned when a parameter set is applied.  Headless and
+#: structural only — **no weights**.  A weight pinned here would be a silent
+#: parameter set of exactly the kind the reset removed.
 FIXED_OVERRIDES: dict[str, Any] = {
-    # g_w_gen is excluded from BO_DIMS and therefore inherits the baseline
-    # exactly. It is deliberately not duplicated as a numeric override:
-    # run_multi_system_ofo uses a very large value to keep AVR moves slow.
-
-    # Conditionally pinned: shunts not installed at TSO tertiary
-    # (`install_tso_tertiary_shunts=False`), so this dim is vacuous.
-    # Value matches the 002 baseline; remove this key when shunts are
-    # re-installed and the BO_DIMS entry is uncommented.
-    "g_w_tso_shunt":           50000.0,
-
-
-    # Structural choices, not tuned
-    "dso_gamma_oltc_q":        0.0,
+    # Structural choices, not tuned.
     "int_max_step":            1,
-    "int_cooldown":            1,    # USER FIXED 2025-04-27
-
-    # Headless / deterministic
+    "int_cooldown":            1,
+    # Headless / deterministic.
     "verbose":                 0,
     "live_plot_controller":    False,
     "live_plot_cascade":       False,
     "live_plot_system":        False,
     "run_stability_analysis":  False,
+    # The runtime curvature preconditioner REGENERATES g_w at controller
+    # construction, overwriting whatever a parameter set supplied.  It must be
+    # off, or the weights that run are not the weights that were selected.
+    "precondition_g_w":        False,
 }
 
 
-def resolve_high(param: BOParam, ceilings: Ceilings | None) -> float:
-    """Resolve the effective upper bound for one BO param.
-
-    If ``param.high`` is the literal ``"ceil"``, look up the ceiling for
-    ``param.name`` in ``ceilings``.  If the ceiling is missing, non-finite,
-    less than or equal to ``param.low``, or ``ceilings is None``, return
-    ``param.fallback_high``.
-    """
-    if isinstance(param.high, str):
-        if param.high != "ceil":
-            raise ValueError(
-                f"BOParam.high must be a float or the literal 'ceil', "
-                f"got {param.high!r}"
-            )
-        if ceilings is None:
-            return float(param.fallback_high)
-        c = ceilings.as_dict().get(param.name)
-        if c is None or not math.isfinite(c) or c <= param.low:
-            return float(param.fallback_high)
-        return float(c)
-    return float(param.high)
-
-
-def search_space(ceilings: Ceilings | None) -> dict[str, tuple[float, float, bool]]:
-    """Return ``{name: (low, high, log)}`` ready for any BO library.
-
-    Used by tests and by ``objective.py`` (Task 3) to drive Optuna.
-    """
-    return {
-        p.name: (float(p.low), resolve_high(p, ceilings), bool(p.log))
-        for p in BO_DIMS
-    }
-
-
 def apply_to_config(cfg: MultiTSOConfig, params: dict[str, float]) -> MultiTSOConfig:
-    """Return a new ``MultiTSOConfig`` with BO params overlaid plus
-    ``FIXED_OVERRIDES``.
+    """Return ``cfg`` with a weight/timing mapping and :data:`FIXED_OVERRIDES`.
 
-    Parameters
-    ----------
-    cfg
-        Baseline config; not mutated.
-    params
-        Must contain exactly the keys in ``[p.name for p in BO_DIMS]``.
-        Extra keys raise :class:`ValueError`.  Missing keys raise
-        :class:`KeyError`.
+    ``params`` must contain **every** weight in :data:`WEIGHT_FIELDS` — the
+    gauge included, since it is pinned rather than absent — and may contain the
+    timing fields.  Unknown keys and missing weights both raise: a partial
+    overlay that silently inherits a weight from somewhere else is the failure
+    mode this reset exists to remove.
 
-    Returns
-    -------
-    MultiTSOConfig
-        New instance with BO params + ``FIXED_OVERRIDES`` applied.  All
-        other fields are unchanged from ``cfg``.
-
-    Raises
-    ------
-    ValueError
-        If ``params`` contains unknown keys, non-finite values, or
-        negative values.
-    KeyError
-        If any expected BO param is missing from ``params``.
+    ``dataclasses.replace`` is used so ``__post_init__`` re-derives everything
+    downstream of the weights (per-area voltage relief in particular).
     """
-    expected = {p.name for p in BO_DIMS}
-    given = set(params.keys())
-    extra = given - expected
-    missing = expected - given
+    allowed = (set(WEIGHT_FIELDS) | set(TIMING_FIELDS)
+               | set(GAUGE_COUPLED_FIELDS) | set(SHUNT_FIELDS))
+    given = set(params)
+    extra = sorted(given - allowed)
     if extra:
-        raise ValueError(f"Unknown BO params: {sorted(extra)}")
+        raise ValueError(
+            f"unknown parameter-set keys: {extra}. Allowed: "
+            f"{sorted(allowed)}")
+    missing = sorted(set(WEIGHT_FIELDS) - given)
     if missing:
-        raise KeyError(f"Missing BO params: {sorted(missing)}")
+        raise KeyError(
+            f"parameter set is incomplete: {missing} missing. Every weight "
+            f"must be stated explicitly; there is no default to fall back on.")
 
     for k, v in params.items():
-        if not isinstance(v, (int, float)) or isinstance(v, bool):
-            raise ValueError(f"Non-numeric value for {k}: {v!r}")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"non-numeric value for {k}: {v!r}")
         v_f = float(v)
         if not math.isfinite(v_f):
-            raise ValueError(f"Non-finite value for {k}: {v}")
-        if v_f < 0:
-            raise ValueError(f"Negative value for {k}: {v}")
+            raise ValueError(f"non-finite value for {k}: {v}")
+        if v_f <= 0.0:
+            raise ValueError(
+                f"non-positive value for {k}: {v}. Every weight divides or "
+                f"scales a curvature term; zero is not a valid price.")
 
-    overlay: dict[str, Any] = {**{k: float(v) for k, v in params.items()},
-                               **FIXED_OVERRIDES}
+    # ``shunt_int_daily_budget`` is an int on the dataclass; casting every key
+    # to float would hand the bank config a float where it validates an int.
+    _int_fields = {"shunt_int_daily_budget"}
+    overlay: dict[str, Any] = {
+        **{k: (int(v) if k in _int_fields else float(v))
+           for k, v in params.items()},
+        **FIXED_OVERRIDES,
+    }
     return dataclasses.replace(cfg, **overlay)
 
 
 def params_from_config(cfg: MultiTSOConfig) -> dict[str, float]:
-    """Inverse of :func:`apply_to_config`: extract the 8 BO fields from
-    a config.
-
-    Useful for warm-starting BO from a known-good config.
-
-    This is a *pure extractor* and deliberately does not validate -- callers
-    that need the config to be reachable by the optimiser should ask
-    :func:`out_of_box_params` and decide what to do about it.
-    """
-    return {p.name: float(getattr(cfg, p.name)) for p in BO_DIMS}
+    """Extract the nine weights from a config.  Pure extractor, no validation."""
+    return {f: float(getattr(cfg, f)) for f in WEIGHT_FIELDS}
 
 
-def out_of_box_params(
-    cfg: MultiTSOConfig,
-    ceilings: Ceilings | None = None,
-) -> dict[str, tuple[float, float, float]]:
-    """Config fields that the search space **cannot represent**.
-
-    Returns ``{name: (value, low, high)}`` for every BO dimension whose value
-    in ``cfg`` lies outside its bounds -- i.e. operating points no trial can
-    ever propose.
-
-    This is not hypothetical.  Three independent configurations are all
-    outside the current box on the same two coordinates:
-
-    =========================  ==========  ============  ==================
-    config                     ``g_v``     ``g_w_pcc``   box
-    =========================  ==========  ============  ==================
-    hand-tuned ``make_config``  1e7         80            ``g_v``: [1e2, 1e5]
-    ``baseline_002_ieee39``     1e5 (edge)  100           ``g_w_pcc``: [0.1, 30]
-    ``tests/tuning/conftest``   1.2e5       100
-    =========================  ==========  ============  ==================
-
-    The hand-tuned point is the one you report as controlling well, so the
-    optimiser was searching a region that excluded the only known-good answer.
-    Hard-coding ``--no-warm-start-baseline`` suppressed the symptom.
-    """
-    out: dict[str, tuple[float, float, float]] = {}
-    for p in BO_DIMS:
-        v = float(getattr(cfg, p.name))
-        hi = resolve_high(p, ceilings)
-        if v < p.low or v > hi:
-            out[p.name] = (v, float(p.low), float(hi))
-    return out
+def weight_fingerprint(params: dict[str, float]) -> str:
+    """Stable short digest of a weight vector, for run provenance and caching."""
+    payload = {k: repr(float(params[k])) for k in sorted(params)}
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]

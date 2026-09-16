@@ -224,6 +224,13 @@ class PowerFactoryReplayFactory:
     The STATIC plant is deliberately left alone -- in every other experiment
     both plants run Q(V) throughout -- so Gate E cannot certify such a run."""
 
+    export_qv_internals: bool = False
+    """Record the per-park Q(V) dead-band internals in the RMS result file.
+
+    Mirrors ``MultiTSOConfig.rms_export_qv_internals``; see
+    ``pf.screening.QV_INTERNAL_SIGNALS`` for the six signals and why the
+    Chapter-9 dead-band experiment cannot be run without them."""
+
     profile_delivery: str = "events"
     """``events`` (legacy) or pre-ComInc ``elmfile`` profile delivery.
 
@@ -483,6 +490,7 @@ class PowerFactoryReplayFactory:
             event_pool_slots=self.event_pool_slots,
             preallocate_profiles=self.preallocate_profiles,
             qv_deadband_at_contingency=self.qv_deadband_at_contingency,
+            export_qv_internals=self.export_qv_internals,
             rms_step_ms=self.rms_step_ms,
             rms_step_max_ms=self.rms_step_max_ms,
             adaptive_step=self.adaptive_step,

@@ -1,0 +1,66 @@
+{
+  "name": "ch9_oltc_led",
+  "title": "OLTC-led distribution voltage control: taps act at half the deviation, DER stay on interface Q",
+  "description": [
+    "Derived from ch9_alt_lowwear (candidate 399e30d3b60b), 2026-09-11.",
+    "Two changes, both from the Stage-I analytic rules, nothing hand-guessed:",
+    "  1. g_w_dso_oltc set by the commit rule for a 0.010 pu engagement",
+    "     deviation instead of 0.020, so the subordinate taps act at roughly",
+    "     half the voltage error they previously needed (15.72 -> 6.26).",
+    "  2. g_q and g_w_dso_der scaled TOGETHER by 2. DER response to interface-Q",
+    "     error goes as g_q/g_w_dso_der and is therefore unchanged, while their",
+    "     response to voltage error goes as dso_g_v/g_w_dso_der and halves.",
+    "     The DER Q-to-voltage attention ratio doubles, 25.3 -> 50.7, at no cost",
+    "     in Q tracking speed.",
+    "NOT yet validated in closed loop: the OLTC loop gain dso_g_v/g_w_dso_oltc",
+    "rises 567 -> 1423, and lowering a tap price is the direction that produces",
+    "hunting. Run the evented bank before trusting it.",
+    "shunt_int_g_w added 2026-09-11. It sits in the gauge-invariance group with",
+    "the nine weights, so it must travel with the parameter set; leaving it in",
+    "make_config at its old-gauge value of 10 made the eight shunt banks inert",
+    "for the entire campaign (accumulated state peaked at 0.395 Mvar against a",
+    "22.5 Mvar commit threshold, zero commits in 5 h with disturbances).",
+    "Value 0.03 derived from a 30 min persistence at the measured p90 boundary",
+    "pressure |g_H| = 0.133; the independent gauge-consistent rescale of the old",
+    "value gives 0.040, so the two routes agree within 30 %.",
+    "A single very large demand may still commit within one supervisory period:",
+    "the anti-windup clamp (25 Mvar) sits above the threshold (22.5), and that",
+    "behaviour was accepted as desirable rather than designed out."
+  ],
+  "provenance": {
+    "derived_from": "ch9_alt_lowwear / 399e30d3b60b",
+    "git_commit": "47c6b70",
+    "d_engage_pu": {
+      "oltc": 0.01,
+      "dso_oltc": 0.01
+    },
+    "gq_and_gw_dso_der_factor": 2.0,
+    "lambda_max_B": 1.2785199023493352,
+    "lambda_worst_at": "STS_DSO_4@W6",
+    "select_ceiling": 1.5458937198067635,
+    "der_q_to_v_attention_ratio_median": 50.7,
+    "oltc_loop_gain_dso_g_v_over_g_w_dso_oltc": 1424.9625377417615,
+    "closed_loop_validated": false,
+    "weight_fingerprint": "76f14060d417",
+    "shunt_int_g_w_derivation": {
+      "persistence_min": 30.0,
+      "reference_g_H_p90": 0.1331,
+      "commit_threshold_mvar": 22.5,
+      "T_TS_s": 180.0,
+      "gauge_consistent_cross_check": 0.04,
+      "single_tick_commit_possible": true
+    }
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.9953899833062753,
+    "dso_g_v": 8915.334668564183,
+    "g_w_der": 0.006085568121399567,
+    "g_w_pcc": 0.493553441555076,
+    "g_w_gen": 15481813.581071282,
+    "g_w_tso_oltc": 20.678528018096085,
+    "g_w_dso_der": 3.8820474602434936,
+    "g_w_dso_oltc": 6.256539686083918,
+    "shunt_int_g_w": 0.03
+  }
+}

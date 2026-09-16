@@ -1,22 +1,23 @@
 """
 tuning
 ======
-Bayesian-optimization tuning system for the multi-TSO/DSO OFO controller.
+Weight-campaign support for the cascaded MIQP-OFO controller.
 
-Public modules:
-    parameters -- BO search-space declaration and Config overlay.
-    ceilings   -- One-shot LMI ceiling extraction from
-                  ``analyse_multi_zone_stability``.
-    scenarios  -- Declarative design / validation scenario sets.
-    metrics    -- Trajectory metric extraction and composite cost.
-    runner     -- One-trial wrapper around ``run_multi_tso_dso``.
+Public modules
+--------------
+``parameters``      the canonical nine-weight vector and its config overlay
+``stage1_screen``   Stage I: the analytic contraction screen (no simulation)
+``scenarios``       declarative scenario / window specifications
+``metrics``         trajectory metric extraction
+``runner``          one (weights, window) evaluation
+``bisect_switching``  OLTC weight calibrated against a taps/day budget
 
-Task 1: parameters + ceilings.
-Task 2: scenarios + metrics + runner.
-Task 3 (later): objective, CLI, BO library integration.
+The Bayesian-optimisation stack (``tune``, ``objective``, ``objectives_v2``,
+``reparam``, ``rawspace``, ``ceilings``, ``stability_certificate``) and the
+``tuning_mc`` staged campaign were retired on 2026-09-10 with the weight reset;
+they remain in git history.
 """
 
-from tuning._types import BOParam, Ceilings
 from tuning.metrics import (
     CostWeights,
     NoiseFloors,
@@ -24,32 +25,31 @@ from tuning.metrics import (
     extract_metrics,
 )
 from tuning.parameters import (
-    BO_DIMS,
-    FIXED_OVERRIDES,
+    GAUGE_FIELD,
+    SEARCHED_FIELDS,
+    TIMING_FIELDS,
+    WEIGHT_FIELDS,
     apply_to_config,
     params_from_config,
-    resolve_high,
-    search_space,
+    weight_fingerprint,
 )
-from tuning.runner import RunResult, run_one
-from tuning.scenarios import ScenarioSpec, design_set, validation_set
+from tuning.runner import RunResult, run_one, run_scenario_with_records
+from tuning.scenarios import ScenarioSpec
 
 __all__ = [
-    "BOParam",
-    "Ceilings",
-    "BO_DIMS",
-    "FIXED_OVERRIDES",
     "CostWeights",
+    "GAUGE_FIELD",
     "NoiseFloors",
     "RunResult",
+    "SEARCHED_FIELDS",
     "ScenarioSpec",
+    "TIMING_FIELDS",
     "TrajectoryMetrics",
+    "WEIGHT_FIELDS",
     "apply_to_config",
-    "design_set",
     "extract_metrics",
     "params_from_config",
-    "resolve_high",
     "run_one",
-    "search_space",
-    "validation_set",
+    "run_scenario_with_records",
+    "weight_fingerprint",
 ]

@@ -14,7 +14,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Tuple, Union
 
 _MEASUREMENT_NOISE_PROFILE_COMPONENTS: Mapping[str, Mapping[str, float]] = {
     "minimum": {
@@ -340,7 +340,7 @@ class MultiTSOConfig:
     ``TSOControllerConfig.v_max_pu``."""
 
     # -- Objective weights -----------------------------------------------------
-    g_v:            float = 50000.0
+    g_v:            Optional[float] = None
     zone_g_v: Optional[Dict[int, float]] = None
     """Optional per-zone voltage-tracking-weight override ``{zone_id: g_v}``
     (zones not listed fall back to the global :attr:`g_v`).  Routed to that
@@ -354,9 +354,8 @@ class MultiTSOConfig:
     (:attr:`zone_tso_g_loss`) or reserve centering (:attr:`zone_tso_g_res_sg`
     / :attr:`zone_tso_g_res_der`) without a competing voltage-tracking
     gradient."""
-    g_q:            float = 1.0
-    dso_g_v:        float = 50000.0
-
+    g_q:            Optional[float] = None
+    dso_g_v:        Optional[float] = None
     central_dso_g_v: float = 20000.0
     """Voltage-tracking weight applied to the HV (110 kV / STS) buses by the
     single centralized controller (``control_scope='central'``, CIGRE V5).
@@ -367,10 +366,10 @@ class MultiTSOConfig:
     ``control_scope == 'central'``."""
 
     # -- G_w regularisation weights (TSO) --------------------------------------
-    g_w_der:        float = 2.0
-    g_w_gen:        float = 1e7
-    g_w_pcc:        float = 2.0
-    g_w_tso_oltc:   float = 1.0
+    g_w_der:        Optional[float] = None
+    g_w_gen:        Optional[float] = None
+    g_w_pcc:        Optional[float] = None
+    g_w_tso_oltc:   Optional[float] = None
     g_w_tso_shunt:  float = 3600.0  # runner default (2026-08-21)
     """Regularisation penalty on TSO bipolar shunt step changes.  Set
     relatively low (~ ``g_w_tso_oltc``) so the discrete actuator can
@@ -383,11 +382,10 @@ class MultiTSOConfig:
     dso_gamma_oltc_q: float = 0.0
 
     # -- G_w regularisation weights (DSO) --------------------------------------
-    g_w_dso_der:    float = 10.0
+    g_w_dso_der:    Optional[float] = None
     """Step-size penalty on the DSO DER block (1/Mvar², units of Q_cor)."""
 
-    g_w_dso_oltc:   float = 1.0
-
+    g_w_dso_oltc:   Optional[float] = None
     # -- Adaptive g_w (paper Eq. 16, sign-only rule) --------------------------
     # When any of the per-class flags below is True, the corresponding
     # ``g_w_*`` entries become the *initial* values for an online
@@ -833,8 +831,7 @@ class MultiTSOConfig:
 
     See ``docs/daily_log/08_2026/2026-08-18_dso4_voltage_relief.md``."""
 
-    dso_v_relief_factors: Optional[Dict[str, float]] = field(
-        default_factory=lambda: {"DSO_2": 10.0, "DSO_4": 10.0})
+    dso_v_relief_factors: Optional[Dict[str, float]] = None
     """Per-area voltage-authority factors, applied automatically in
     :meth:`__post_init__`.
 
@@ -1178,6 +1175,26 @@ class MultiTSOConfig:
     (the controller's bounds) and ``der_qv_local_loop._qv_capability`` (the
     plant's clip).  Those two MUST agree -- a mismatch makes the controller
     optimise against a plant it does not have."""
+
+    rms_export_qv_internals: bool = False
+    """Record each DER park's Q(V) dead-band internals in the RMS result file.
+
+    Adds the six ``QVPRE`` signals of ``pf.screening.QV_INTERNAL_SIGNALS`` per
+    park: the anchor ``Vanchor``, the Tf-filtered terminal voltage ``x1``, the
+    anchor-referenced deviation ``veff = x1 - Vanchor``, the dead-zone output
+    ``qcorr``, and the droop command before (``qraw``) and after (``Qext``)
+    capability saturation.
+
+    Required by the Chapter-9 dead-band experiment: its measurement is
+    ``max |U_filtered - U_anchor|`` between each device's **actual** anchor
+    updates, and the pass criterion is that the dead zone did not act.  Neither
+    is recoverable from the delivered Q and terminal voltage alone --
+    ``Q_actual - Q_set`` carries the converter tracking and REEC filter
+    dynamics, and a park saturated at a capability limit shows no incremental
+    Q while its dead zone is fully active.
+
+    Off by default: six extra result channels per park, ~44 parks on this
+    benchmark.  Added 2026-09-15."""
 
     rms_profile_settle_s: float = 0.0
     """Seconds the RMS plant advances to reflect a new profile *before* the
@@ -2016,6 +2033,43 @@ class MultiTSOConfig:
                 deadband_rel=self.g_w_adapt_deadband_rel,
             )
         return out
+
+    # ── weight completeness ─────────────────────────────────────────────
+    #: The controller weights that have no default.  Before the 2026-09-10
+    #: reset each of these carried a dataclass default, so a config that
+    #: omitted one silently inherited a value from here -- which made
+    #: ``configs/config.py`` a parameter set in its own right, competing with
+    #: the JSON overlays in ``configs/paramsets/`` and with the weight sets
+    #: restated in individual experiment scripts.  They are now ``None`` and
+    #: must be supplied explicitly by a parameter set.
+    REQUIRED_WEIGHTS: ClassVar[Tuple[str, ...]] = (
+        "g_v", "g_q", "dso_g_v",
+        "g_w_der", "g_w_pcc", "g_w_gen", "g_w_tso_oltc",
+        "g_w_dso_der", "g_w_dso_oltc",
+    )
+
+    def missing_weights(self) -> List[str]:
+        """Names of the required weights this config does not set."""
+        return [n for n in self.REQUIRED_WEIGHTS if getattr(self, n) is None]
+
+    def require_weights(self) -> None:
+        """Raise unless every required weight is set.
+
+        Called by the runner before any controller is constructed, rather than
+        from ``__post_init__``: a bare ``MultiTSOConfig()`` is still legitimate
+        for reading *structural* defaults (``export.make_snapshots`` does
+        exactly that for ``scenario``), and only a config that is about to
+        drive controllers needs its weights.
+        """
+        missing = self.missing_weights()
+        if missing:
+            raise ValueError(
+                "MultiTSOConfig is missing controller weights: "
+                + ", ".join(missing)
+                + ". These have no defaults by design. Apply a parameter set "
+                "(configs.paramsets.apply_paramset) or set them explicitly. "
+                "See docs/daily_log for the 2026-09-10 weight reset."
+            )
 
     # ── derived settings ────────────────────────────────────────────────
     def __post_init__(self) -> None:

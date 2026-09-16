@@ -33,7 +33,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from configs.config import MultiTSOConfig  # noqa: E402
-from pf.screening import RMS_STEP_MS  # noqa: E402
+from pf.screening import (  # noqa: E402
+    QV_INTERNAL_LABEL_PREFIXES,
+    RMS_STEP_MS,
+)
 from experiments.helpers.rms_cosim_config import (  # noqa: E402
     DT_S,
     TSO_PERIOD_S,
@@ -393,6 +396,7 @@ def main(argv=None) -> int:
         ),
         profile_delivery=(args.profile_delivery if args.profiles else "events"),
         qv_deadband_at_contingency=args.qv_deadband_at_contingency,
+        export_qv_internals=bool(rms_cfg.rms_export_qv_internals),
         **({} if args.rms_step_ms is None
            else {"rms_step_ms": float(args.rms_step_ms)}),
         **({} if args.rms_step_max_ms is None
@@ -434,6 +438,8 @@ def main(argv=None) -> int:
         stride=args.stride,
         labels=lambda label: label.startswith(
             ("qSTS_", "u_", "qDER_", "uDER_")
+            + (QV_INTERNAL_LABEL_PREFIXES
+               if rms_cfg.rms_export_qv_internals else ())
         ),
     )
     print(
@@ -459,6 +465,26 @@ def main(argv=None) -> int:
         trajectories_long_frame(der_raw).to_csv(
             run_dir.csv / "rms_der_raw.csv", index=False
         )
+
+    # Dead-band internals, in their OWN file: analysis.deadband_* select on
+    # the label set of rms_der_raw.csv, and widening it would silently change
+    # what every one of those analyses measures.
+    qv_raw = {
+        label: trajectory
+        for label, trajectory in bulk_raw.items()
+        if label.startswith(QV_INTERNAL_LABEL_PREFIXES)
+    }
+    if qv_raw:
+        trajectories_long_frame(qv_raw).to_csv(
+            run_dir.csv / "rms_qv_internals.csv", index=False
+        )
+        print(f"  [results] {len(qv_raw)} Q(V) dead-band channels -> "
+              f"csv/rms_qv_internals.csv")
+    elif rms_cfg.rms_export_qv_internals:
+        raise SystemExit(
+            "rms_export_qv_internals was requested but the ComRes export "
+            "returned no QVPRE channel. The dead-band experiment needs them; "
+            "do not treat this run as a measurement.")
 
     static_traj = static_controlled_trajectories(static_log)
     rms_traj = rms_controlled_trajectories(raw, factory.snapshot_doc)

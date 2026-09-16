@@ -32,6 +32,16 @@ DT_S = 20.0
 #: TS/TSO dispatch period [s].
 TSO_PERIOD_S = 180.0
 
+#: Controller weights used when ``--paramset`` is not given.
+#:
+#: There is no useful "no overlay" case any more: since the 2026-09-10 weight
+#: reset :func:`~experiments.run_multi_system_ofo.make_config` is
+#: weight-INCOMPLETE by design and ``MultiTSOConfig.require_weights`` raises
+#: before any controller is built, so the previous default of ``None`` made
+#: every co-simulation abort unless the caller remembered the flag.  None of
+#: the archived ``.ps1`` launchers pass it.
+DEFAULT_PARAMSET = "ch9_selected"
+
 #: Per-DSO scenario multipliers applied unless ``--symmetric-dso`` is given.
 #: DSO_3 is the reinforced stress case of
 #: ``docs/daily_log/07_2026/2026-07-30_ieee39_dso_powerfactory_sync_handover.md``:
@@ -207,7 +217,17 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
              "the real VDE-AR-N-4120 / STATCOM diagrams. REQUIRED for any "
              "physically meaningful result.")
     parser.add_argument("--dso-oltc-switch-cost", type=float, default=None,
-                        help="override g_w_dso_oltc (make_config default 150)")
+                        help="override g_w_dso_oltc AFTER the parameter set. "
+                             "Legacy diagnostic; do NOT use in a Chapter-9 "
+                             "campaign. It replaces one of the nine selected "
+                             "weights with a number from the pre-2026-09-10 "
+                             "gauge -- the value 200 that the archived .ps1 "
+                             "launchers pass is 12.7x the selected 15.7164 -- "
+                             "and, being an assignment rather than a "
+                             "dataclasses.replace, it does NOT re-derive the "
+                             "per-DSO voltage relief that reads g_w_dso_oltc "
+                             "as its base, so the relief is left on the "
+                             "parameter set's value while the weight is not.")
     parser.add_argument("--load-step-time", type=float, default=None,
                         help="simulation time [s] of an exogenous load step "
                              "applied to BOTH plants. Omitted = no step. Not a "
@@ -252,6 +272,17 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
                              "dead band, with no bus below 0.96 pu.")
     parser.add_argument("--q-step-mvar", type=float, default=None,
                         help="reactive step [Mvar] for --q-step-bus")
+    parser.add_argument(
+        "--qv-internals", action="store_true",
+        help="record each DER park's Q(V) dead-band internals in the RMS "
+             "result file: the anchor Vanchor, the filtered terminal voltage, "
+             "the anchor-referenced deviation veff = V_filt - V_anchor, the "
+             "dead-zone output, and the droop command before and after "
+             "capability saturation. Written to csv/rms_qv_internals.csv. "
+             "REQUIRED for the Chapter-9 dead-band experiment, whose "
+             "measurement is max|veff| between ACTUAL anchor updates and "
+             "whose pass criterion is that the dead zone did not act -- "
+             "neither is recoverable from qDER_*/uDER_* alone.")
     parser.add_argument("--no-qv-seed", action="store_true",
                         help="disable seed_qv_equilibrium on the STATIC plant")
     parser.add_argument("--seed-der-anchor", action="store_true",
@@ -259,13 +290,15 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
                              "res_bus.vm_pu at init (both plants)")
     # -- per-DSO scenario multipliers ------------------------------------
     parser.add_argument(
-        "--paramset", default=None, metavar="NAME",
-        help="JSON weight overlay from configs/paramsets/, applied on top of "
-             "make_config() before the co-simulation envelope. Use "
-             "'ch9_frozen' to run on the Chapter-9 frozen design rather than "
-             "the runner's own weights, which differ substantially "
-             "(g_w_dso_der 1097.2 against 549.8818, g_w_dso_oltc 183 against "
-             "392.6444).")
+        "--paramset", default=DEFAULT_PARAMSET, metavar="NAME",
+        help=f"JSON weight overlay from configs/paramsets/, applied on top of "
+             f"make_config() before the co-simulation envelope. Default "
+             f"{DEFAULT_PARAMSET!r}. NOT optional in practice: since the "
+             f"2026-09-10 weight reset make_config() carries no weights and "
+             f"the runner raises from require_weights() without an overlay. "
+             f"(The former help named 'ch9_frozen', which has never existed "
+             f"as a parameter set, and quoted weights from the pre-reset "
+             f"gauge.)")
     parser.add_argument("--dso-der-scale", action="append", default=None,
                         metavar="DSO=F",
                         help=f"per-DSO installed-DER multiplier, repeatable. "
@@ -325,7 +358,17 @@ def apply_cli_overrides(args, cfgs) -> None:
             cfg.dso_qv_slope_pu = float(args.dso_slope)
         if args.physical_capability:
             cfg.der_q_capability_override_pu = None
+        cfg.rms_export_qv_internals = bool(getattr(args, "qv_internals", False))
         if args.dso_oltc_switch_cost is not None:
+            # Assignment, not dataclasses.replace: __post_init__ does not
+            # re-run, so the per-DSO voltage relief keeps the parameter set's
+            # g_w_dso_oltc base while the weight itself moves.  Kept for
+            # continuity with the archived runs that used it, and reported.
+            print(f"  [!] --dso-oltc-switch-cost overrides the parameter "
+                  f"set's g_w_dso_oltc {cfg.g_w_dso_oltc:g} -> "
+                  f"{float(args.dso_oltc_switch_cost):g}; the derived per-DSO "
+                  f"voltage relief is NOT re-derived. The run is no longer at "
+                  f"the selected design.")
             cfg.g_w_dso_oltc = float(args.dso_oltc_switch_cost)
         if args.seed_der_anchor:
             cfg.seed_der_anchor_to_local_v = True

@@ -32,14 +32,15 @@ Smoke test: `python -X utf8 pf/hello_pf.py`
 
 ### 0.2 Commit before you run anything
 
-The working tree is **dirty**: 21 modified files, 16 untracked, including all the
-Chapter-9 changes made on 2026-09-15. Every run of the QSS chain is stamped
-`[WORKING TREE DIRTY]` in its `run_meta.json`, meaning its `git_commit` does not identify
-the code that produced it. That is already a defect in the record; do not add F1 and F2 to
-it.
+The tree was committed at **`45f4e14`** on 2026-09-16
+("feat(ch9): one configuration for the whole chapter, and the QSS chain re-run on the
+batch network"). Start from that commit, on branch `weights-reset-2026-09-10`.
 
-Ask the author before committing, then commit, then run. Your runs must be reproducible
-from their hash — they are the chapter's disturbance-response evidence.
+**Keep it clean.** Both Chapter-9.1 entry points stamp `[WORKING TREE DIRTY]` into
+`run_meta.json`, and a dirty tree means the `git_commit` a run records does not identify
+the code that produced it. The QSS runs from 2026-09-15 carry that defect; do not add F1
+and F2 to it. Commit any change you make **before** you run, and ask the author first —
+this is their thesis history.
 
 ---
 

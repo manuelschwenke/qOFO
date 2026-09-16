@@ -112,6 +112,18 @@ QCMD_EPS_PU = 1e-9
 HEADROOM_EPS_PU = 1e-6
 
 
+#: Default blanking window around a bulk-shunt switching instant [s], as
+#: (pre, post).  The shunt state is recorded on the subordinate dispatch grid,
+#: so the switch instant is known only to within one ``T_STS`` = 20 s record
+#: interval -- hence the pre-window.  The post-window is one full supervisory
+#: period ``T_TS`` = 180 s: the bulk banks are dispatched by an integrator
+#: OUTSIDE the MIQP, so the hierarchy can only re-optimise around a new bank
+#: state at its next supervisory dispatch.  Chosen on those grounds, not by
+#: tuning until the answer was convenient.
+SWITCH_BLANK_PRE_S: float = 20.0
+SWITCH_BLANK_POST_S: float = 180.0
+
+
 @dataclass
 class ParkDrift:
     """One park's anchor-referenced drift over one run."""
@@ -127,6 +139,10 @@ class ParkDrift:
     #: True when the anchor never moved: the whole run is ONE interval, and
     #: the drift measured is drift since initialisation.
     never_reanchored: bool = False
+    #: Maximum over the UNBLANKED population, always retained alongside.
+    max_abs_veff_raw: float = float("nan")
+    #: Fraction of post-startup samples removed by the switching blanking.
+    blanked_fraction: float = 0.0
 
 
 @dataclass
@@ -141,6 +157,61 @@ class ParkActivation:
     headroom_up: float
     headroom_down: float
     zero_headroom: bool
+
+
+def shunt_switch_times(run_dir: Path) -> List[float]:
+    """Instants at which any bulk shunt bank changed state, from the records.
+
+    Read from ``rms_records.pkl`` rather than the QVPRE channels: the shunt
+    state is a controller-side quantity and does not appear in the Q(V)
+    export.  Returns the record time at which the new state is first seen; the
+    switch itself fired somewhere in the preceding dispatch interval, which is
+    what ``SWITCH_BLANK_PRE_S`` covers.
+    """
+    import pickle
+
+    path = run_dir / "rms_records.pkl"
+    if not path.exists():
+        raise SystemExit(
+            f"{path} not found; switching exclusion needs the records. "
+            f"Re-run the reduction with --no-exclude-switching to measure "
+            f"the unblanked population instead.")
+    with path.open("rb") as handle:
+        log = pickle.load(handle)
+
+    def flat(x) -> List[float]:
+        out: List[float] = []
+        if isinstance(x, dict):
+            for v in x.values():
+                out += flat(v)
+        elif isinstance(x, (list, tuple, np.ndarray)):
+            for v in x:
+                out += flat(v)
+        elif x is not None:
+            try:
+                out.append(float(x))
+            except (TypeError, ValueError):
+                pass
+        return out
+
+    times = np.array([float(r.time_s) for r in log])
+    states = [flat(getattr(r, "zone_tso_shunt_states", None)) for r in log]
+    states = [s_ for s_ in states if s_]
+    if len(states) < 2:
+        return []
+    width = min(len(s_) for s_ in states)
+    arr = np.array([s_[:width] for s_ in states], dtype=float)
+    moved = np.abs(np.diff(arr, axis=0)).sum(axis=1) > 1e-9
+    return [float(t) for t in times[1:][moved]]
+
+
+def blank_mask(index: np.ndarray, switch_times: Sequence[float],
+               *, pre_s: float, post_s: float) -> np.ndarray:
+    """Boolean mask, True where the sample is KEPT (outside every window)."""
+    keep = np.ones(index.shape, dtype=bool)
+    for ts in switch_times:
+        keep &= ~((index >= ts - pre_s) & (index <= ts + post_s))
+    return keep
 
 
 def load_channels(run_dir: Path) -> Dict[str, pd.DataFrame]:
@@ -203,7 +274,10 @@ def anchor_update_times(anchor: pd.Series,
 
 
 def park_drift(veff: pd.Series, anchor: Optional[pd.Series],
-               *, startup_exclude_s: float = 0.0) -> ParkDrift:
+               *, startup_exclude_s: float = 0.0,
+               exclude_windows: Optional[Sequence[float]] = None,
+               pre_s: float = SWITCH_BLANK_PRE_S,
+               post_s: float = SWITCH_BLANK_POST_S) -> ParkDrift:
     """Per-interval and overall maxima of ``|veff|`` for one park.
 
     ``startup_exclude_s`` is applied BEFORE any reduction, and the caller is
@@ -216,6 +290,18 @@ def park_drift(veff: pd.Series, anchor: Optional[pd.Series],
 
     times = series.index.to_numpy(dtype=float)
     values = np.abs(series.to_numpy(dtype=float))
+
+    # RAW extremum, before any switching blanking: the handover requires the
+    # unblanked figure to travel alongside the blanked one, never replaced.
+    raw_max = float(values.max())
+    n_total = int(values.size)
+    if exclude_windows:
+        keep = blank_mask(times, exclude_windows, pre_s=pre_s, post_s=post_s)
+        times, values = times[keep], values[keep]
+        if values.size == 0:
+            return ParkDrift(park, 0, float("nan"), float("nan"),
+                             max_abs_veff_raw=raw_max, blanked_fraction=1.0)
+    blanked_fraction = (1.0 - values.size / n_total) if n_total else 0.0
 
     updates: List[float] = []
     if anchor is not None:
@@ -245,11 +331,16 @@ def park_drift(veff: pd.Series, anchor: Optional[pd.Series],
         interval_max=interval_max,
         max_interval_s=float(max(gaps)) if gaps else 0.0,
         never_reanchored=not updates,
+        max_abs_veff_raw=raw_max,
+        blanked_fraction=blanked_fraction,
     )
 
 
 def park_activation(ch: Dict[str, pd.DataFrame], park: str,
-                    *, startup_exclude_s: float = 0.0) -> ParkActivation:
+                    *, startup_exclude_s: float = 0.0,
+                    exclude_windows: Optional[Sequence[float]] = None,
+                    pre_s: float = SWITCH_BLANK_PRE_S,
+                    post_s: float = SWITCH_BLANK_POST_S) -> ParkActivation:
     """Dead-zone activation and droop command for one park.
 
     The incremental command is reported twice.  ``unsat`` is ``qraw - qset``,
@@ -263,7 +354,12 @@ def park_activation(ch: Dict[str, pd.DataFrame], park: str,
         if frame is None or park not in frame.columns:
             return None
         series = frame[park]
-        return series[series.index >= float(startup_exclude_s)].dropna()
+        series = series[series.index >= float(startup_exclude_s)].dropna()
+        if exclude_windows is not None and len(series):
+            keep = blank_mask(series.index.to_numpy(dtype=float),
+                              exclude_windows, pre_s=pre_s, post_s=post_s)
+            series = series[keep]
+        return series
 
     q_corr = col("q_corr")
     q_raw, q_ext, q_set = col("q_raw"), col("q_ext"), col("q_set")
@@ -316,18 +412,25 @@ def park_activation(ch: Dict[str, pd.DataFrame], park: str,
     )
 
 
-def measure_reference(run_dir: Path, *, startup_exclude_s: float = 0.0
+def measure_reference(run_dir: Path, *, startup_exclude_s: float = 0.0,
+                      exclude_switching: bool = False,
+                      pre_s: float = SWITCH_BLANK_PRE_S,
+                      post_s: float = SWITCH_BLANK_POST_S
                       ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """F1-reference: the drift a candidate half-width must sit above."""
     ch = load_channels(run_dir)
     veff = effective_veff(ch)
     anchor = ch.get("v_anchor")
 
+    switches = shunt_switch_times(run_dir) if exclude_switching else None
+
     rows: List[ParkDrift] = []
     for park in veff.columns:
         a = anchor[park] if anchor is not None and park in anchor else None
         rows.append(park_drift(veff[park], a,
-                               startup_exclude_s=startup_exclude_s))
+                               startup_exclude_s=startup_exclude_s,
+                               exclude_windows=switches,
+                               pre_s=pre_s, post_s=post_s))
 
     frame = pd.DataFrame([{
         "park": r.park,
@@ -336,6 +439,7 @@ def measure_reference(run_dir: Path, *, startup_exclude_s: float = 0.0
         "p95_abs_veff_pu": r.p95_abs_veff,
         "max_interval_s": r.max_interval_s,
         "never_reanchored": r.never_reanchored,
+        "max_abs_veff_raw_pu": r.max_abs_veff_raw,
     } for r in rows]).sort_values("max_abs_veff_pu", ascending=False)
 
     finite = frame["max_abs_veff_pu"].replace([np.inf, -np.inf], np.nan).dropna()
@@ -346,18 +450,33 @@ def measure_reference(run_dir: Path, *, startup_exclude_s: float = 0.0
         "p95_park_max_pu": (float(np.percentile(finite, 95))
                             if len(finite) else float("nan")),
         "startup_exclude_s": float(startup_exclude_s),
+        # The unblanked extremum travels with every blanked figure.
+        "max_abs_veff_raw_pu": float(
+            frame["max_abs_veff_raw_pu"].max(skipna=True)),
+        "n_shunt_switches": (0 if switches is None else len(switches)),
+        "switch_blanked_fraction": float(
+            np.mean([r.blanked_fraction for r in rows])) if rows else 0.0,
+        "exclude_switching": bool(exclude_switching),
+        "switch_blank_pre_s": float(pre_s),
+        "switch_blank_post_s": float(post_s),
     }
     return frame, summary
 
 
 def measure_confirm(run_dir: Path, *, delta_pu: float,
-                    startup_exclude_s: float = 0.0
+                    startup_exclude_s: float = 0.0,
+                    exclude_switching: bool = False,
+                    pre_s: float = SWITCH_BLANK_PRE_S,
+                    post_s: float = SWITCH_BLANK_POST_S
                     ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """F1-confirmation: the width is inert, and saturation is not hiding it."""
     ch = load_channels(run_dir)
     veff = effective_veff(ch)
 
-    rows = [park_activation(ch, park, startup_exclude_s=startup_exclude_s)
+    switches = shunt_switch_times(run_dir) if exclude_switching else None
+    rows = [park_activation(ch, park, startup_exclude_s=startup_exclude_s,
+                            exclude_windows=switches,
+                            pre_s=pre_s, post_s=post_s)
             for park in veff.columns]
     frame = pd.DataFrame([{
         "park": r.park,
@@ -381,6 +500,10 @@ def measure_confirm(run_dir: Path, *, delta_pu: float,
             frame["max_incremental_unsat_pu"].max(skipna=True)),
         "passes": bool(n_active_parks == 0),
         "startup_exclude_s": float(startup_exclude_s),
+        "n_shunt_switches": (0 if switches is None else len(switches)),
+        "exclude_switching": bool(exclude_switching),
+        "switch_blank_pre_s": float(pre_s),
+        "switch_blank_post_s": float(post_s),
     }
     return frame, summary
 
@@ -556,6 +679,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="seconds discarded at the start of every leg. Declare "
                          "it before reduction and use the same value in every "
                          "leg; convergence is NOT implied by 180 s elapsing.")
+    ap.add_argument("--exclude-switching", dest="exclude_switching",
+                    action="store_true", default=True,
+                    help="blank a window around every bulk-shunt switching "
+                         "instant before reduction (DEFAULT). The bulk banks "
+                         "are dispatched by an integrator outside the MIQP and "
+                         "their commitment steps the terminal voltage; without "
+                         "this the width is set by switching transients rather "
+                         "than by routine operation. The unblanked extremum is "
+                         "always reported alongside.")
+    ap.add_argument("--no-exclude-switching", dest="exclude_switching",
+                    action="store_false",
+                    help="measure the unblanked population instead.")
+    ap.add_argument("--switch-pre-s", type=float, default=SWITCH_BLANK_PRE_S,
+                    help="blanking window before each switch [s]")
+    ap.add_argument("--switch-post-s", type=float, default=SWITCH_BLANK_POST_S,
+                    help="blanking window after each switch [s]")
     ap.add_argument("--out", type=Path, default=None,
                     help="write the per-park table here as CSV")
     ap.add_argument("--self-test", action="store_true")
@@ -573,11 +712,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for run_dir in a.run:
         if a.mode == "reference":
             frame, summary = measure_reference(
-                run_dir, startup_exclude_s=a.startup_exclude_s)
+                run_dir, startup_exclude_s=a.startup_exclude_s,
+                exclude_switching=a.exclude_switching,
+                pre_s=a.switch_pre_s, post_s=a.switch_post_s)
         else:
             frame, summary = measure_confirm(
                 run_dir, delta_pu=float(a.delta),
-                startup_exclude_s=a.startup_exclude_s)
+                startup_exclude_s=a.startup_exclude_s,
+                exclude_switching=a.exclude_switching,
+                pre_s=a.switch_pre_s, post_s=a.switch_post_s)
         frame = frame.assign(run=run_dir.name)
         frames.append(frame)
         summaries.append(summary)
@@ -587,6 +730,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if a.mode == "reference":
         sel = select_half_width(summaries, margin_pu=float(a.margin))
+        if a.exclude_switching:
+            raw = max(float(s.get("max_abs_veff_raw_pu", float("nan")))
+                      for s in summaries)
+            n_sw = sum(int(s.get("n_shunt_switches", 0)) for s in summaries)
+            frac = float(np.mean([s.get("switch_blanked_fraction", 0.0)
+                                  for s in summaries]))
+            print(f"\n[F1] bulk-shunt switching EXCLUDED: {n_sw} switching "
+                  f"instant(s), window [-{a.switch_pre_s:g}, "
+                  f"+{a.switch_post_s:g}] s, {100*frac:.1f}% of post-startup "
+                  f"samples blanked")
+            print(f"[F1] UNBLANKED max |V_filt - V_anchor| = {raw:.6g} pu "
+                  f"(retained; the width below does NOT cover it)")
         print(f"\n[F1] observed max |V_filt - V_anchor| = "
               f"{sel['observed_max_pu']:.6g} pu over {sel['n_runs']} run(s)")
         print(f"[F1] + declared margin {sel['margin_pu']:.6g} pu "

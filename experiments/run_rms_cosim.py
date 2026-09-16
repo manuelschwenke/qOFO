@@ -48,6 +48,7 @@ from experiments.helpers.rms_replay import (  # noqa: E402
 from experiments.results_io import new_run_dir  # noqa: E402
 from experiments.runners import run_multi_tso_dso  # noqa: E402
 from pf.replay import PowerFactoryReplayFactory  # noqa: E402
+from pf.result_export import realign_qv_parameter_channels  # noqa: E402
 from pf.screening import QV_INTERNAL_LABEL_PREFIXES  # noqa: E402
 from pf.session import DEFAULT_PROJECT_PATH  # noqa: E402
 
@@ -138,10 +139,16 @@ def main(argv=None) -> int:
     qv_raw = {k: v for k, v in bulk_raw.items()
               if k.startswith(QV_INTERNAL_LABEL_PREFIXES)}
     if qv_raw:
+        qv_raw, qv_align = realign_qv_parameter_channels(qv_raw)
         trajectories_long_frame(qv_raw).to_csv(
             run_dir.csv / "rms_qv_internals.csv", index=False)
         print(f"  [results] {len(qv_raw)} Q(V) dead-band channels -> "
               f"csv/rms_qv_internals.csv")
+        print(f"  [qvpre] event-instant realignment: "
+              f"anchor {qv_align['anchor_rows_realigned']} rows "
+              f"({qv_align['anchor_rows_ambiguous']} ambiguous), "
+              f"qset {qv_align['qset_rows_realigned']} rows "
+              f"({qv_align['qset_rows_ambiguous']} ambiguous)")
     elif cfg.rms_export_qv_internals:
         raise SystemExit(
             "rms_export_qv_internals was requested but the ComRes export "

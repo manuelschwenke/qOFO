@@ -225,3 +225,106 @@ def load_comres_trajectories(
         label: (time[keep].copy(), arrays[column][keep].copy())
         for label, column in mapped
     }
+
+
+# =====================================================================
+#  Q(V) dead-band internals: parameter/derived-signal realignment
+# =====================================================================
+
+#: Rows whose identity residual exceeds this are treated as candidates for an
+#: event-instant split.  The ComRes CSV carries six decimals, so the rounding
+#: quantum alone is 1e-6 and a threshold an order above it separates a genuine
+#: split (which is the size of the parameter jump) from export rounding.
+QV_SPLIT_EPS: float = 1e-5
+
+#: A realignment is only applied when using the previous parameter value cuts
+#: the residual by at least this factor.  Guards the case where the droop
+#: contribution ``Kdroop*qcorr`` is itself comparable to the setpoint step, in
+#: which case neither alignment is decisive and the row is left alone.
+QV_REALIGN_MARGIN: float = 0.5
+
+
+def _realign_one(param: np.ndarray, resid_now: np.ndarray,
+                 resid_prev: np.ndarray) -> Tuple[np.ndarray, int, int]:
+    """Revert ``param`` to its previous sample where that is the consistent
+    reading.  Returns ``(param, n_realigned, n_ambiguous)``."""
+    out = param.copy()
+    changed = np.zeros(param.shape, dtype=bool)
+    changed[1:] = np.abs(np.diff(param)) > 1e-12
+    split = changed & (resid_now > QV_SPLIT_EPS)
+    decisive = split & (resid_prev < QV_REALIGN_MARGIN * resid_now)
+    ambiguous = split & ~decisive
+    idx = np.flatnonzero(decisive)
+    out[idx] = param[idx - 1]
+    return out, int(idx.size), int(ambiguous.sum())
+
+
+def realign_qv_parameter_channels(
+    qv_raw: Dict[str, Trajectory],
+) -> Tuple[Dict[str, Trajectory], Dict[str, int]]:
+    """Restore simultaneity between QVPRE parameters and derived signals.
+
+    ``Vanchor`` and ``qset`` are written by pooled ``EvtParam`` events.  Within
+    the integration step that applies such an event, PowerFactory may store the
+    result row *after* the parameter write but *before* the DSL block
+    re-evaluates its internal variables.  That row then carries the new
+    parameter beside the pre-event ``veff``/``qcorr``/``qraw``/``Qext`` -- a
+    state the block never actually held.
+
+    It is a race, not a fixed lag: on the 2026-09-16 verification run only 157
+    of 1165 anchor updates and 152 of 736 setpoint writes were split, so a
+    blanket shift would corrupt the ~87 % that are already consistent.  Each
+    change row is therefore tested against the block's own algebra
+    (``veff == x1 - Vanchor`` for the anchor, ``qraw == qset - Kdroop*qcorr``
+    for the setpoint) and the parameter is reverted only where the previous
+    value is decisively the consistent one.
+
+    Left uncorrected this is not cosmetic: ``qraw - qset`` is F1's incremental
+    droop command, and a split row reports a spurious command the size of the
+    whole setpoint step (0.152 pu on that run) at every dispatch, which would
+    fail the F1 confirmation for a reason unrelated to the dead band.
+
+    Returns the realigned channel dict and a per-channel count of the rows
+    touched, for the run summary.
+    """
+    out = dict(qv_raw)
+    stats: Dict[str, int] = {
+        "anchor_rows_realigned": 0, "anchor_rows_ambiguous": 0,
+        "qset_rows_realigned": 0, "qset_rows_ambiguous": 0,
+        "parks": 0,
+    }
+    parks = sorted(label[len("vanchorDER_"):] for label in qv_raw
+                   if label.startswith("vanchorDER_"))
+    stats["parks"] = len(parks)
+
+    for park in parks:
+        def get(prefix: str) -> Optional[np.ndarray]:
+            entry = qv_raw.get(f"{prefix}{park}")
+            return None if entry is None else np.asarray(entry[1], dtype=float)
+
+        v_anchor, v_filt, v_eff = get("vanchorDER_"), get("vfiltDER_"), get("veffDER_")
+        q_set, q_raw = get("qsetDER_"), get("qrawDER_")
+
+        if (v_anchor is not None and v_filt is not None and v_eff is not None
+                and v_anchor.size == v_filt.size == v_eff.size
+                and v_anchor.size > 1):
+            prev = np.concatenate(([v_anchor[0]], v_anchor[:-1]))
+            fixed, n, n_amb = _realign_one(
+                v_anchor,
+                np.abs(v_eff - (v_filt - v_anchor)),
+                np.abs(v_eff - (v_filt - prev)),
+            )
+            out[f"vanchorDER_{park}"] = (qv_raw[f"vanchorDER_{park}"][0], fixed)
+            stats["anchor_rows_realigned"] += n
+            stats["anchor_rows_ambiguous"] += n_amb
+
+        if (q_set is not None and q_raw is not None
+                and q_set.size == q_raw.size and q_set.size > 1):
+            prev = np.concatenate(([q_set[0]], q_set[:-1]))
+            fixed, n, n_amb = _realign_one(
+                q_set, np.abs(q_raw - q_set), np.abs(q_raw - prev))
+            out[f"qsetDER_{park}"] = (qv_raw[f"qsetDER_{park}"][0], fixed)
+            stats["qset_rows_realigned"] += n
+            stats["qset_rows_ambiguous"] += n_amb
+
+    return out, stats

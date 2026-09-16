@@ -64,7 +64,8 @@ def main(argv=None) -> int:
         raise ValueError("stride must be >= 1")
     project = args.project or DEFAULT_PROJECT_PATH
 
-    cfg = make_cosim_config(args.duration, verbose=args.verbose)
+    cfg = make_cosim_config(args.duration, verbose=args.verbose,
+                            paramset=getattr(args, "paramset", None))
     apply_cli_overrides(args, (cfg,))
 
     spec = CoSimSpecification(

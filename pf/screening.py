@@ -1650,11 +1650,148 @@ def cmd_flat(ctx: ScreeningContext, out_dir: Path, duration: float = 60.0) -> in
 #: these the installed version actually has.
 COMMOD_EXPORT_ATTRS: Tuple[Tuple[str, Any], ...] = (
     ("iExpMat", 1), ("iMatExp", 1), ("iExport", 1), ("iWriteMat", 1),
+    # PF 2025 SP4 spelling (found via dir(ComMod) 2026-09-22): writes
+    # Amat.mtl, Jacobian.mtl, VariableToIdx_*.txt into ``dirMatl``.
+    ("iSysMatsMatl", 1),
 )
+
+#: ComMod options for the participation run (PF 2025 SP4 names, found via
+#: dir(ComMod) 2026-09-22).  Full QR spectrum, left+right eigenvectors and
+#: participation factors, every recording filter off (the default
+#: ``ignoreBelow = 1e-6`` hides exactly the structural zeros), the
+#: constant-state report on, and the Matlab export of eigenvalues,
+#: participation factors and system matrices.  Saved before and restored
+#: after the run, so the study case is left as found.
+COMMOD_PARTICIPATION_OPTS: Tuple[Tuple[str, Any], ...] = (
+    ("iopt_met", 0), ("iQRorQZ", 0), ("iopt_noevec", 0),
+    ("iLeft", 1), ("iRight", 1), ("iPart", 1),
+    ("isRecMinMagn", 0), ("isRecMaxMagn", 0), ("isRecMinReal", 0),
+    ("isRecMaxReal", 0), ("isRecMinImag", 0), ("isRecMaxImag", 0),
+    ("isRecMinDampRat", 0), ("isRecMaxDampRat", 0),
+    ("isRecOscModesOnly", 0), ("isRecUnstabModesOnly", 0),
+    ("repConstantStates", 1), ("repBufferAndExtDll", 1),
+    ("iEValMatl", 1), ("iPartMatl", 1), ("iSysMatsMatl", 1),
+    ("iLEVMatl", 0), ("iREVMatl", 0),
+)
+
+#: Object classes that own state variables in this model (M2 inventory).
+MODAL_STATE_CLASSES = ("ElmSym", "ElmDsl", "ElmLod", "StaVmea", "StaPqmea",
+                       "StaImea")
+
+
+def _state_owner_meta(app) -> Dict[Tuple[str, str], Tuple[str, str, str, str]]:
+    """``(parent loc_name, "<obj>.<Class>") -> (class, DSL type, parent,
+    parent class)`` for every calc-relevant object that can own a state.
+
+    The key is the last two components of a ``VariableToIdx_Amat.txt`` path.
+    """
+    meta: Dict[Tuple[str, str], Tuple[str, str, str, str]] = {}
+    for cls in MODAL_STATE_CLASSES:
+        for o in get_all(app, cls):
+            par = o.GetParent()
+            dsl = ""
+            if cls == "ElmDsl":
+                typ = o.GetAttribute("typ_id")
+                dsl = typ.loc_name if typ is not None else ""
+            meta[(par.loc_name if par is not None else "",
+                  f"{o.loc_name}.{cls}")] = (
+                cls, dsl, par.loc_name if par is not None else "",
+                par.GetClassName() if par is not None else "")
+    return meta
+
+
+def _modal_participation(ctx: "ScreeningContext", out_dir: Path, mod,
+                         window: str, droop_case: str) -> None:
+    """Write ``modal_modes.csv`` and its companions from the Matlab export.
+
+    Reads ``PartFacs.mtl`` rather than the ElmRes (one ElmRes cell costs
+    ~0.6 ms through the API, i.e. ~15 min per 1242x1242 matrix).
+    """
+    import numpy as np
+    from pf import modal_participation as mp
+
+    matl = out_dir / "matl"
+    content = ctx.app.GetOutputWindow().GetContent()
+    # One element per message; a message may span several lines.
+    lines = [ln for x in (content if isinstance(content, (list, tuple))
+                          else [content]) for ln in str(x).splitlines()]
+    (out_dir / "commod_output.txt").write_text("\n".join(lines), encoding="utf-8")
+    dims = [l.strip() for l in lines if "System dimensions" in l
+            or "Dimension of eigenvalue problem" in l]
+
+    lam = mp.read_evals(matl)
+    n = len(lam)
+    P = mp.read_partfacs(matl, n)
+    varidx = mp.read_varidx(matl)
+    constant = mp.parse_constant_states(lines)
+    states = mp.state_table(varidx, _state_owner_meta(ctx.app), constant)
+    modes, tops = mp.mode_table(lam, P, states, window=window,
+                                droop_case=droop_case)
+    modes.to_csv(out_dir / "modal_modes.csv", index=False)
+    tops.to_csv(out_dir / "modal_participation_top.csv", index=False)
+    states.to_csv(out_dir / "modal_states.csv", index=False)
+    clusters = mp.degenerate_clusters(modes)
+    clusters.to_csv(out_dir / "modal_degenerate_clusters.csv", index=False)
+
+    # Cross-check against the ElmRes eigenvalues of the same run.
+    res = [r for r in get_all(ctx.app, "ElmRes") if "Modal" in r.loc_name][0]
+    res.Load()
+    n_res = res.GetNumberOfRows()
+    lam_res = np.array([complex(res.GetValue(i, 0)[1], res.GetValue(i, 1)[1])
+                        for i in range(n_res)])
+    d_eig = (float(np.max(np.abs(lam_res - lam))) if n_res == n
+             else float("nan"))
+
+    unresolved = int((~states["resolved"]).sum())
+    other = states[states["group"] == "other"]
+    nz = modes[modes["re"].abs() < 1e-3]
+    lines_out = [
+        f"# Participation run -- {window} / {droop_case}", "",
+        *[f"- PF: {d}" for d in dims],
+        f"- eigenvalues exported: {n}; ElmRes rows: {n_res}; "
+        f"max |lambda_ElmRes - lambda_export| = {d_eig:.3e}",
+        f"- modes (Im >= 0): {len(modes)}; unstable (Re > 1e-6): "
+        f"{int((modes['re'] > 1e-6).sum())}; near-zero (|Re| < 1e-3): "
+        f"{len(nz)}, of which dominated by a PF constant-at-OP state: "
+        f"{int(nz['dominant_constant'].sum())}",
+        f"- states per group: {states['group'].value_counts().to_dict()}",
+        f"- states PF reports constant at the OP: {len(constant)}",
+        f"- state owners not resolved in PF (grouped from path only): {unresolved}",
+        f"- 'other' states by class: {other['model_class'].value_counts().to_dict()}",
+        f"- repeated-eigenvalue clusters: {len(clusters)}, spanning more than "
+        f"one group: {int((~clusters['single_group']).sum()) if len(clusters) else 0}",
+        f"- modes whose argmax-group differs from the dominant state's group: "
+        f"{int((modes['group'] != modes['dominant_group']).sum())}",
+        "", "Participation: `|P_kj| / sum_k |P_kj|` from `matl/PartFacs.mtl` "
+        "(PF's own factors); `tau_s = 1/|Re|`, `ts_s = 4/|Re|`.",
+    ]
+    (out_dir / "modal_participation.md").write_text("\n".join(lines_out),
+                                                    encoding="utf-8")
+    print(f"[modal] participation: {len(modes)} modes, {len(nz)} near-zero, "
+          f"{unresolved} unresolved state owners; -> {out_dir/'modal_modes.csv'}")
+
+
+class _CommodOptions:
+    """Set ComMod options for one run and restore the previous values."""
+
+    def __init__(self, mod, opts: Sequence[Tuple[str, Any]]):
+        self.mod, self.opts, self.saved = mod, opts, {}
+
+    def __enter__(self):
+        for k, v in self.opts:
+            self.saved[k] = self.mod.GetAttribute(k)
+            self.mod.SetAttribute(k, v)
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self.saved.items():
+            self.mod.SetAttribute(k, v)
+        return False
 
 
 def cmd_modal(ctx: ScreeningContext, out_dir: Path,
-              export_matrices: bool = False) -> int:
+              export_matrices: bool = False, participation: bool = False,
+              window: str = "", droop_case: str = "") -> int:
     """Eigenvalue screen at the RMS operating point.
 
     ``export_matrices`` additionally asks ComMod to write the linearised
@@ -1664,11 +1801,30 @@ def cmd_modal(ctx: ScreeningContext, out_dir: Path,
     concerns (Path A of ``pf/probes/probe_modal_residue.py``); without it the
     empirical route of ``analysis/modal_residue.py`` is required, which needs
     the step battery re-run with ``--save-trajectories``.
+
+    ``participation`` runs ComMod with :data:`COMMOD_PARTICIPATION_OPTS`
+    (restored afterwards) and additionally writes ``modal_modes.csv``,
+    ``modal_participation_top.csv``, ``modal_states.csv``,
+    ``modal_degenerate_clusters.csv``, ``modal_participation.md`` and the
+    Matlab export under ``matl/``; ``window``/``droop_case`` label the rows.
+    ``modal.md`` is written exactly as without the flag.
     """
     import math
     ctx.initialise()
     mod = ctx.app.GetFromStudyCase("ComMod")
-    if export_matrices:
+    if participation:
+        (out_dir / "matl").mkdir(parents=True, exist_ok=True)
+        # The folder first: PF rejects the Matlab flags while dirMatl is empty.
+        opts = (("dirMatl", str(out_dir / "matl")),) + COMMOD_PARTICIPATION_OPTS
+        ctx.app.ClearOutputWindow()
+        with _CommodOptions(mod, opts):
+            if mod.Execute():
+                raise PFSessionError("ComMod failed")
+            _modal_participation(ctx, out_dir, mod, window, droop_case)
+    # With ``participation`` the ElmRes already holds the full-spectrum run
+    # (and ``matl/`` the matrices): the table below is built from it, never
+    # from a second, filtered ComMod run.
+    if export_matrices and not participation:
         applied = []
         for attr, val in COMMOD_EXPORT_ATTRS:
             try:
@@ -1676,7 +1832,7 @@ def cmd_modal(ctx: ScreeningContext, out_dir: Path,
                 applied.append(attr)
             except Exception:
                 continue
-        for attr in ("dirMat", "dirMatrix", "sExpPath"):
+        for attr in ("dirMat", "dirMatrix", "sExpPath", "dirMatl"):
             try:
                 mod.SetAttribute(attr, str(out_dir))
                 applied.append(attr)
@@ -1689,7 +1845,7 @@ def cmd_modal(ctx: ScreeningContext, out_dir: Path,
                   "ComMod -- the exact residue path is unavailable; use "
                   "analysis/modal_residue.py on a battery run with "
                   "--save-trajectories")
-    if mod.Execute():
+    if not participation and mod.Execute():
         raise PFSessionError("ComMod failed")
     res = [r for r in get_all(ctx.app, "ElmRes") if "Modal" in r.loc_name][0]
     res.Load()
@@ -1962,6 +2118,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--export-matrices", action="store_true",
                         help="modal: also ask ComMod to write the linearised "
                              "system matrices (enables exact residues)")
+    parser.add_argument("--participation", action="store_true",
+                        help="modal: full spectrum with participation "
+                             "factors -> modal_modes.csv (ComMod options "
+                             "restored afterwards)")
+    parser.add_argument("--modal-window", default="",
+                        help="modal --participation: window label, e.g. W1")
+    parser.add_argument("--droop-case", default="",
+                        help="modal --participation: droop-case label, "
+                             "e.g. db_wide / db_zero")
     args = parser.parse_args(argv)
 
     app = connect(args.project, study_case=RMS_STUDY_CASE)
@@ -1976,7 +2141,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "flat":
         return cmd_flat(ctx, out_dir, args.duration)
     if args.command == "modal":
-        return cmd_modal(ctx, out_dir, export_matrices=args.export_matrices)
+        return cmd_modal(ctx, out_dir, export_matrices=args.export_matrices,
+                         participation=args.participation,
+                         window=args.modal_window, droop_case=args.droop_case)
     targets = resolve_outage_targets(args.outage_machines, args.outage_gens)
     return cmd_steps(ctx, out_dir, window=args.window,
                      disturbances=args.disturbances,

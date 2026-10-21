@@ -364,7 +364,6 @@ class MultiTSOIterationRecord:
     boundary pressure that sets ``shunt_int_g_w`` (protocol D2b); the earlier
     reference value 0.133 was not recorded with its procedure."""
     zone_tso_shunt_drive: Dict[int, NDArray] = field(default_factory=dict)
-    zone_tso_shunt_hybrid: Dict[int, dict] = field(default_factory=dict)
     """Actual gradient supplied to the bank, including optional STS support."""
     zone_tso_shunt_request_kind: Dict[int, List[str]] = field(default_factory=dict)
     shunt_commits: List[Dict[str, Any]] = field(default_factory=list)

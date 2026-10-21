@@ -1807,9 +1807,6 @@ class MultiTSOConfig:
     shunt_int_t_dwell_s: float = 30 * 60.0  # runner default (2026-08-21)
     """Minimum dwell time between commits of the same bank [s]."""
 
-    shunt_int_daily_budget: int = 1E3
-    """Maximum commits per bank within any rolling 24 h window."""
-
     shunt_int_v_min_pu: float = 0.90  # runner default (2026-08-21)
     """Lower HV-boundary voltage limit [p.u.] used by the integrator's
     overshoot feasibility guard."""
@@ -1827,142 +1824,8 @@ class MultiTSOConfig:
     (through ``h_v``) and to the interface feed-forward at a commit.  Runs made
     before 2026-10-14 correspond to ``False``."""
 
-    shunt_int_t_persistence_s: float = 0.0
-    """Positive values require continuous observed demand for this duration.
-    Zero preserves the original accumulation rule. A lost or reversed demand
-    resets pending accumulation. This duration is separate from bank dwell."""
-
-    shunt_int_drive: str = "objective"
-    """Which signal drives the integrating bank dispatch.
-
-      * ``'objective'``      — the shared TS objective gradient projected on the
-                               bank's output column, i.e. coordinated dispatch.
-      * ``'local_voltage'``  — the bank's OWN bus voltage deviation outside
-                               shunt_local_v_deadband_pu, projected on its
-                               voltage sensitivity, scaled by shunt_local_g.
-                               Autonomous substation control: no zone target, no
-                               interface term, no reserve term, no coordination
-                               with the other actuators (CIGRE CSE 026 §2.6).
-
-    The second exists as the *comparison partner* for coordinated dispatch
-    (2026-10-21): it is how such banks are actually operated, so it is the
-    baseline against which coordinating them in the MIQP has to justify itself.
-    It keeps the integrator's hysteresis, dwell, switching budget and voltage
-    guard unchanged."""
-
-    shunt_local_g: float = 1.0
-    """Gain on the local voltage deviation [per pu] in
-    shunt_int_drive='local_voltage'.  Together with shunt_int_g_w it sets how
-    many TS observations of a given deviation accumulate to a switch; derive it
-    from a recorded deviation distribution rather than choosing it."""
-
-    shunt_local_v_ref_pu: float = 1.03
-    """Local voltage reference of the autonomous rule [pu].  Defaults to the
-    zone setpoint used by the study configurations."""
-
-    shunt_local_v_deadband_pu: float = 0.01
-    """Half-width of the local voltage deadband [pu].  Deviations inside it
-    produce no drive at all, so routine operation does not accumulate."""
-
     shunt_int_gradient_deadband: float = 0.0
     """Magnitude below which confirmed-demand mode clears a pending request."""
-
-    shunt_sts_support: bool = False
-    """Enable the experimental STS assistance supervisor. Tracking assistance
-    has priority over reserve support. Both hold the total interface target
-    fixed by transferring the bank contribution out of the delegated request.
-    These are explicit supervisory costs, separate from the normal TS objective.
-    Requires positive shunt_int_t_persistence_s and cascaded OFO controllers.
-    Vertical SBX settlement is not supported by this experimental mode."""
-
-    shunt_sts_tracking_weight: float = 1.0
-    shunt_sts_reserve_weight: float = 1.0
-    shunt_sts_tracking_deadband_mvar: float = 5.0
-    shunt_sts_tracking_scale_mvar: float = 25.0
-    shunt_sts_reserve_start: float = 0.8
-    """Reserve support acts outside the central 80% of the capability half-band
-    by default, leaving a 10% margin of the full band at each limit."""
-    shunt_sts_response_wait_s: float = 40.0
-    """Minimum observed time since a material STS reference change before
-    support is considered. Persistence then provides the longer demand test."""
-
-    shunt_hybrid_voltage_error_allowance_pu: float = 0.001
-    """Maximum per-bus increase in predicted voltage tracking error for a
-    slow support commit, compared with the regular hybrid MIQP solution.
-    The voltage corridor remains hard for every hybrid bank commit.
-    Hybrid mode uses g_w_tso_shunt per squared physical level change for the
-    regular decision, and shunt_int_g_w for the independent slow memories."""
-
-    shunt_hybrid_support_gate: str = "voltage_allowance"
-    """Which test admits a confirmed slow support candidate.
-
-      * ``'voltage_allowance'`` — bound the predicted worst-bus voltage
-                                  tracking-error increase by
-                                  shunt_hybrid_voltage_error_allowance_pu.
-      * ``'shared_objective'``  — require the first-order increase of the
-                                  shared TS objective, grad_y f @ dy between
-                                  the candidate's and the regular solution's
-                                  predicted outputs, not to exceed
-                                  shunt_hybrid_support_exchange times the
-                                  support cost removed.
-    The second prices the voltage/interface-Q exchange in the weights the
-    controller is tuned on (2026-10-20); the first is retained because the
-    recorded October diagnostics used it.  Both keep the hard predicted voltage
-    corridor and refuse an increased predicted output-limit violation."""
-
-    shunt_hybrid_regular_confirmations: int = 1
-    """Consecutive TS instants the regular (objective-driven) MIQP must select
-    the same bank and direction before the step is committed.
-
-    1, the default, is the immediate behaviour.  Higher values implement
-    "commit on a deviation that is large AND not recovered directly by the other
-    actuators" (2026-10-21): the movement weight g_w_tso_shunt supplies the
-    magnitude test, and the confirmation supplies the persistence test, because
-    an instant in which the continuous actuators resolve the deviation makes the
-    MIQP hold every bank and resets the count.  Needed because the path
-    otherwise commits on the first instant a threshold is crossed, which in the
-    20 October runs fired at t = 20 s, eight minutes before the disturbance."""
-
-    shunt_ts_reserve_weight: float = 0.0
-    """Weight of the *supervisory* TS fleet reserve cost that only the hybrid
-    bank decision sees (2026-10-21).
-
-    The cost penalises a shortfall of either **directional margin in Mvar**
-    below shunt_ts_reserve_margin_steps bank steps, over this zone's
-    synchronous machines *and* its TS-connected DER — the DER being the larger
-    reactive resource in this model.  It is deliberately NOT part of the shared
-    objective: placed there it moves every continuous actuator, which the
-    21 October probes showed competes with voltage tracking and breaks the TS
-    band above ~1e4.  Keeping it supervisory leaves the generators and TS DER on
-    their voltage task and lets only the banks act on fleet reserve.
-
-    Whether the path fires is decided by the margin threshold, not by this
-    weight: a threshold condition carries no gradient, so the per-bank memory
-    acts as a confirmation timer.  The weight prices the benefit in the
-    acceptance test (shunt_hybrid_support_gate) only.  0.0 disables the path."""
-
-    shunt_ts_reserve_margin_steps: float = 1.0
-    """Directional reactive margin, in bank steps, below which the supervisory
-    TS fleet reserve cost becomes non-zero.
-
-    Expressed in bank steps so the threshold carries the actuator's own scale:
-    one step means the fleet has less room left, in the binding direction, than
-    a single bank commit would take over.  This replaces the normalised
-    band-position form of 20 October, which conflated a unit with no capability
-    at all (a VDE park below P/S_n = 0.1, excluded as ineligible) with a unit
-    that has capability but no room left, and whose threshold in Mvar moved
-    with the band width."""
-
-    shunt_hybrid_support_exchange: float = 0.0
-    """Shared-objective units accepted per unit of support cost removed, used
-    only by shunt_hybrid_support_gate='shared_objective'.
-
-    The default 0.0 admits a candidate only when it does not worsen the shared
-    objective to first order, which needs no calibration and still admitted the
-    one commit of the 20 October check (its increase was negative).  A positive
-    value is a deliberate willingness to pay TS objective for subordinate
-    support and must be derived from candidates whose recorded
-    shared_objective_increase is positive; none has been observed yet."""
 
     def validate_integrator_mode(self) -> None:
         """Fail-fast consistency check for the switched-shunt dispatch mode.
@@ -1970,79 +1833,12 @@ class MultiTSOConfig:
         Raises ``ValueError`` on any inconsistent or out-of-range setting; the
         per-bank numeric guards (``delta ∈ (0, q_step/2)`` etc.) are additionally
         enforced by :class:`controller.shunt_integrator.ShuntBankConfig`."""
-        if self.shunt_dispatch not in ("off", "miqp", "integrator", "hybrid"):
+        if self.shunt_dispatch not in ("off", "miqp"):
             raise ValueError(
-                f"shunt_dispatch must be 'off', 'miqp', 'integrator' or 'hybrid', "
+                f"shunt_dispatch must be 'off' or 'miqp', "
                 f"got {self.shunt_dispatch!r}"
             )
-        if self.shunt_int_drive not in ("objective", "local_voltage"):
-            raise ValueError(
-                f"shunt_int_drive must be 'objective' or 'local_voltage', "
-                f"got {self.shunt_int_drive!r}")
-        if self.shunt_int_drive == "local_voltage":
-            # The autonomous rule replaces the driving signal, so it cannot be
-            # combined with a supervisor that also replaces it, nor with the
-            # joint MIQP decision it exists to be compared against.
-            if self.shunt_dispatch != "integrator":
-                raise ValueError(
-                    "shunt_int_drive='local_voltage' requires "
-                    "shunt_dispatch='integrator'")
-            if self.shunt_sts_support:
-                raise ValueError(
-                    "shunt_int_drive='local_voltage' is autonomous and cannot "
-                    "be combined with STS shunt support")
-            if (not math.isfinite(self.shunt_local_g) or self.shunt_local_g <= 0
-                    or not math.isfinite(self.shunt_local_v_deadband_pu)
-                    or self.shunt_local_v_deadband_pu < 0):
-                raise ValueError("Invalid local voltage gain or deadband")
-        if self.shunt_sts_support and (
-                self.shunt_dispatch not in ("integrator", "hybrid")
-                or self.shunt_int_t_persistence_s <= 0):
-            raise ValueError("STS shunt support requires integrator or hybrid mode and positive persistence")
-        if (not math.isfinite(self.shunt_int_t_persistence_s)
-                or self.shunt_int_t_persistence_s < 0):
-            raise ValueError("Shunt persistence must be finite and non-negative")
-        if self.shunt_sts_support:
-            if (self.control_scope != "cascaded" or self.tso_mode != "ofo"
-                    or self.dso_mode != "ofo" or self.dso_ids_to_run):
-                raise ValueError("STS shunt support requires all cascaded OFO controllers")
-            if self.coordination_mode in ("sbx_v", "sbxv"):
-                raise ValueError("STS shunt support is not integrated with vertical SBX settlement")
-        if self.shunt_dispatch == "hybrid":
-            if (not self.shunt_sts_support or self.coordination_mode != "none"
-                    or self.tso_pcc_capability_on_output):
-                raise ValueError("Hybrid shunts require STS support, coordination_mode='none' "
-                                 "and input-side PCC capability bounds")
-            if (not math.isfinite(self.g_w_tso_shunt) or self.g_w_tso_shunt <= 0
-                    or not math.isfinite(self.shunt_hybrid_voltage_error_allowance_pu)
-                    or self.shunt_hybrid_voltage_error_allowance_pu < 0):
-                raise ValueError("Invalid hybrid shunt weight or voltage error allowance")
-            if self.shunt_hybrid_support_gate not in (
-                    "voltage_allowance", "shared_objective"):
-                raise ValueError(
-                    f"shunt_hybrid_support_gate must be 'voltage_allowance' or "
-                    f"'shared_objective', got {self.shunt_hybrid_support_gate!r}")
-            if (not math.isfinite(self.shunt_hybrid_support_exchange)
-                    or self.shunt_hybrid_support_exchange < 0):
-                raise ValueError(
-                    "shunt_hybrid_support_exchange must be finite and non-negative")
-            if (not math.isfinite(self.shunt_ts_reserve_weight)
-                    or self.shunt_ts_reserve_weight < 0):
-                raise ValueError(
-                    "shunt_ts_reserve_weight must be finite and non-negative")
-            if (int(self.shunt_hybrid_regular_confirmations)
-                    != self.shunt_hybrid_regular_confirmations
-                    or self.shunt_hybrid_regular_confirmations < 1):
-                raise ValueError(
-                    "shunt_hybrid_regular_confirmations must be an integer >= 1")
-            if (not math.isfinite(self.shunt_ts_reserve_margin_steps)
-                    or self.shunt_ts_reserve_margin_steps <= 0.0):
-                raise ValueError(
-                    "shunt_ts_reserve_margin_steps must be finite and positive")
-        elif self.shunt_ts_reserve_weight > 0.0:
-            raise ValueError(
-                "shunt_ts_reserve_weight > 0 requires shunt_dispatch='hybrid'")
-        if self.shunt_dispatch not in ("integrator", "hybrid"):
+        if self.shunt_dispatch != "miqp":
             return
         if not self.install_tso_tertiary_shunts:
             raise ValueError(

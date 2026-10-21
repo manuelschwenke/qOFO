@@ -102,7 +102,8 @@ class HybridShuntSolver:
                  support_config: STSShuntSupportConfig,
                  voltage_error_allowance_pu=.001,
                  support_gate="voltage_allowance", support_exchange=0.,
-                 ts_reserve_weight=0., ts_reserve_margin_steps=1.):
+                 ts_reserve_weight=0., ts_reserve_margin_steps=1.,
+                 regular_confirmations=1):
         if not math.isfinite(movement_weight) or movement_weight <= 0:
             raise ValueError("Hybrid shunt movement weight must be positive")
         if (not math.isfinite(voltage_error_allowance_pu)
@@ -117,6 +118,8 @@ class HybridShuntSolver:
         if (not math.isfinite(ts_reserve_margin_steps)
                 or ts_reserve_margin_steps <= 0):
             raise ValueError("TS fleet reserve margin must be a positive step count")
+        if int(regular_confirmations) != regular_confirmations or regular_confirmations < 1:
+            raise ValueError("regular_confirmations must be an integer >= 1")
         self.solver, self.context_provider = solver, context_provider
         self.movement_weight = movement_weight
         self.support_config = support_config
@@ -125,6 +128,8 @@ class HybridShuntSolver:
         self.support_exchange = support_exchange
         self.ts_reserve_weight = ts_reserve_weight
         self.ts_reserve_margin_steps = ts_reserve_margin_steps
+        self.regular_confirmations = int(regular_confirmations)
+        self._regular_pending = {}
         self.memories = {}
         self.selected = None
         self.last_context = None
@@ -168,6 +173,35 @@ class HybridShuntSolver:
             integer_indices=p.integer_indices+list(range(n, n+m)),
             one_step_indices=tuple(range(n, n+m)),
             hard_output_indices=tuple(int(i) for i in rows))
+
+    def _regular_confirmed(self, ctx, j, direction):
+        """Whether the regular path has selected this bank and direction for
+        ``regular_confirmations`` consecutive TS observations.
+
+        A count of 1, the default, is the immediate behaviour. Higher counts
+        require the proposal to survive the ordinary actuators' attempt to
+        recover the deviation: a changed bank, a changed direction, an
+        observation gap, or an instant in which the MIQP holds every bank all
+        reset it. The deviation must therefore be both large enough to clear
+        the movement weight and persistent enough to outlast the continuous
+        response.
+        """
+        bank = ctx.models[j].bank
+        key = bank.config.shunt_idx
+        previous = self._regular_pending.get(key)
+        gap = (previous is not None
+               and ctx.time_s - previous[2] > bank.config.max_sample_gap_s)
+        if previous is None or previous[0] != direction or gap:
+            count = 1
+        else:
+            count = previous[1] + 1
+        # Only one proposal is tracked: a different bank means the previous
+        # proposal was not sustained.
+        self._regular_pending = {key: (direction, count, ctx.time_s)}
+        self.diagnostics["regular_pending"] = {
+            "shunt_idx": key, "direction": direction, "count": count,
+            "required": self.regular_confirmations}
+        return count >= self.regular_confirmations
 
     def _fleet_enabled(self, ctx):
         return self.ts_reserve_weight > 0.0 and ctx.fleet is not None
@@ -267,7 +301,24 @@ class HybridShuntSolver:
         moves = regular.w_integer[problem.n_integer:]
         if np.count_nonzero(moves):
             j = int(np.flatnonzero(moves)[0])
-            return self._finish(problem, joint, regular, ctx, j, "objective", started)
+            if self._regular_confirmed(ctx, j, int(moves[j])):
+                return self._finish(problem, joint, regular, ctx, j, "objective", started)
+            # Not yet confirmed. Re-solve with every bank held, so the ordinary
+            # actuators are dispatched consistently and get another instant to
+            # recover the deviation themselves. If they do, the MIQP stops
+            # selecting the bank and the count resets: that is what makes the
+            # criterion "large AND not recovered by the other actuators".
+            lo, hi = joint.u_lower.copy(), joint.u_upper.copy()
+            lo[problem.n_total:] = hi[problem.n_total:] = joint.u_current[problem.n_total:]
+            regular = self.solver.solve(replace(joint, u_lower=lo, u_upper=hi))
+            self.diagnostics["candidate_solves"] += 1
+            if not regular.is_feasible:
+                result = self.solver.solve(problem)
+                self.diagnostics["candidate_solves"] += 1
+                self.diagnostics["regular_fallback"] = True
+                return replace(result, solve_time_s=perf_counter()-started)
+        else:
+            self._regular_pending.clear()
 
         regular_u = joint.u_current+self._increment(joint, regular)
         regular_y = joint.y_current+joint.H_tilde @ self._increment(joint, regular)
@@ -399,6 +450,7 @@ class HybridShuntSolver:
         model, direction, kind, t = self.selected
         commit = model.bank.commit_selected(direction, t, kind)
         self.selected = None
+        self._regular_pending.clear()
         # A bank changes the shared operating point. All slow requests in this
         # zone must be observed again before another slow commit.
         for memory in self.memories.values():

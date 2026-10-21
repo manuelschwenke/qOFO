@@ -22,7 +22,8 @@ def main():
     # weights zero, so only the regular path and the supervisory TS fleet
     # reserve can act (2026-10-21).
     ap.add_argument("--cases", nargs="+",
-                    choices=["legacy", "regular", "hybrid", "slow", "fleet"],
+                    choices=["legacy", "regular", "hybrid", "slow", "fleet",
+                             "off", "local", "coord"],
                     default=["legacy", "regular", "hybrid", "slow"])
     ap.add_argument("--seconds", type=float, default=3600)
     ap.add_argument("--paramset", default="ch9_selected_pcc27_gqceil_comp_q_off")
@@ -51,6 +52,7 @@ def main():
     # Supervisory TS fleet reserve: seen by the bank decision only.
     ap.add_argument("--ts-reserve-weight", type=float, default=0.)
     ap.add_argument("--ts-reserve-margin-steps", type=float, default=1.)
+    ap.add_argument("--regular-confirmations", type=int, default=1)
     # Fleet-stress scenario: replace the 150 Mvar connect/trip pair with ONE
     # sustained reactive load, so the zone's machines are driven up their Q
     # curve and stay there instead of being relieved at minute 30.
@@ -65,14 +67,26 @@ def main():
     # The profile hour sets the TS DER active power and therefore, through the
     # VDE dead zone below P/S_n = 0.1, their reactive capability. At
     # 2016-11-26 10:00 the whole 2198 MVA of TS wind parks can supply nothing.
+    # Three-way comparison (2026-10-21): banks held, banks under autonomous
+    # local voltage control, banks coordinated inside the MIQP.
+    ap.add_argument("--local-g", type=float, default=1.)
+    ap.add_argument("--local-deadband-pu", type=float, default=.01)
     ap.add_argument("--start-time", default=None,
                     help="profile start, e.g. '2016-11-26 10:00'")
     ap.add_argument("--output", type=Path, required=True)
     args = ap.parse_args()
     for case in args.cases:
-        cfg = build_config("legacy" if case == "legacy" else "reserve",
+        cfg = build_config(
+            "legacy" if case in ("legacy", "off", "local") else "reserve",
             args.seconds, args.paramset, True, args.frozen_network)
-        if case != "legacy":
+        if case == "off":
+            # Banks installed and held: the baseline of the three-way study.
+            cfg = replace(cfg, shunt_int_daily_budget=0)
+        elif case == "local":
+            cfg = replace(cfg, shunt_int_drive="local_voltage",
+                shunt_local_g=args.local_g,
+                shunt_local_v_deadband_pu=args.local_deadband_pu)
+        elif case not in ("legacy",):
             cfg = replace(cfg, shunt_dispatch="hybrid", shunt_sts_support=True,
                 g_w_tso_shunt=1e6 if case == "slow" else args.movement_weight,
                 **({} if args.slow_weight is None
@@ -82,8 +96,11 @@ def main():
                 shunt_hybrid_support_exchange=args.support_exchange,
                 shunt_ts_reserve_weight=args.ts_reserve_weight,
                 shunt_ts_reserve_margin_steps=args.ts_reserve_margin_steps,
-                shunt_sts_tracking_weight=0. if case in ("regular", "fleet") else 10.,
-                shunt_sts_reserve_weight=0. if case in ("regular", "fleet") else 100.)
+                shunt_hybrid_regular_confirmations=args.regular_confirmations,
+                shunt_sts_tracking_weight=(
+                    0. if case in ("regular", "fleet", "coord") else 10.),
+                shunt_sts_reserve_weight=(
+                    0. if case in ("regular", "fleet", "coord") else 100.))
         for name, value in (("g_q", args.g_q), ("tso_g_res_sg", args.g_res_sg),
                             ("tso_g_res_der", args.g_res_der)):
             if value is not None:

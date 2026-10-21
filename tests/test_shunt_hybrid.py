@@ -469,3 +469,70 @@ def test_hybrid_rejects_unsupported_configurations(settings):
     values.update(settings)
     with pytest.raises(ValueError):
         MultiTSOConfig(**values).validate_integrator_mode()
+
+
+@pytest.mark.parametrize("settings", [
+    {"shunt_int_drive": "sideways"},
+    {"shunt_int_drive": "local_voltage", "shunt_dispatch": "hybrid"},
+    {"shunt_int_drive": "local_voltage", "shunt_local_g": 0},
+    {"shunt_int_drive": "local_voltage", "shunt_local_v_deadband_pu": -0.01},
+])
+def test_local_voltage_drive_rejects_unsupported_configurations(settings):
+    from configs.config import MultiTSOConfig
+    values = dict(shunt_dispatch="integrator", install_tso_tertiary_shunts=True,
+                  coordination_mode="none")
+    values.update(settings)
+    with pytest.raises(ValueError):
+        MultiTSOConfig(**values).validate_integrator_mode()
+
+
+def test_local_voltage_drive_excludes_the_shared_objective_terms():
+    # The autonomous rule must not be combinable with STS support, which also
+    # replaces the driving signal.
+    from configs.config import MultiTSOConfig
+    cfg = MultiTSOConfig(shunt_dispatch="integrator", install_tso_tertiary_shunts=True,
+                         coordination_mode="none", shunt_int_drive="local_voltage",
+                         shunt_sts_support=True, shunt_int_t_persistence_s=360)
+    with pytest.raises(ValueError, match="autonomous"):
+        cfg.validate_integrator_mode()
+
+
+def test_regular_path_commits_immediately_by_default():
+    solver, p, ctx, _ = make_case(voltage=.95, gradient=-100, step_v=.02,
+                                  movement_weight=1)
+    advance(solver, p, ctx, 0)
+    commit, _, _ = solver.take_commit()
+    assert commit.request_kind == "objective"
+    assert solver.diagnostics["regular_pending"]["count"] == 1
+
+
+def test_regular_path_waits_for_its_confirmations():
+    solver, p, ctx, _ = make_case(voltage=.95, gradient=-100, step_v=.02,
+                                  movement_weight=1)
+    solver.regular_confirmations = 3
+    for t, expected in ((0, 1), (5, 2)):
+        advance(solver, p, ctx, t)
+        assert solver.take_commit() is None
+        assert solver.diagnostics["regular_pending"]["count"] == expected
+        assert solver.diagnostics["bank_moves"] == [0]      # dispatched held
+    advance(solver, p, ctx, 10)
+    commit, _, _ = solver.take_commit()
+    assert commit.request_kind == "objective" and commit.new_level == 1
+
+
+def test_regular_confirmation_resets_when_the_deviation_is_recovered():
+    # An instant in which the MIQP holds every bank clears the count, which is
+    # what makes the criterion "not recovered by the other actuators".
+    solver, p, ctx, _ = make_case(voltage=.95, gradient=-100, step_v=.02,
+                                  movement_weight=1)
+    solver.regular_confirmations = 3
+    advance(solver, p, ctx, 0)
+    assert solver.diagnostics["regular_pending"]["count"] == 1
+    ctx.output_gradient = np.array([0., 0.])                # deviation resolved
+    p_quiet = replace(p, grad_f=np.array([0., 0.]))
+    advance(solver, p_quiet, ctx, 5)
+    assert solver.take_commit() is None
+    assert not solver._regular_pending
+    ctx.output_gradient = np.array([-100., 0.])             # and it returns
+    advance(solver, p, ctx, 10)
+    assert solver.diagnostics["regular_pending"]["count"] == 1

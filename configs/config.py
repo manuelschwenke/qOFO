@@ -1832,6 +1832,38 @@ class MultiTSOConfig:
     Zero preserves the original accumulation rule. A lost or reversed demand
     resets pending accumulation. This duration is separate from bank dwell."""
 
+    shunt_int_drive: str = "objective"
+    """Which signal drives the integrating bank dispatch.
+
+      * ``'objective'``      — the shared TS objective gradient projected on the
+                               bank's output column, i.e. coordinated dispatch.
+      * ``'local_voltage'``  — the bank's OWN bus voltage deviation outside
+                               shunt_local_v_deadband_pu, projected on its
+                               voltage sensitivity, scaled by shunt_local_g.
+                               Autonomous substation control: no zone target, no
+                               interface term, no reserve term, no coordination
+                               with the other actuators (CIGRE CSE 026 §2.6).
+
+    The second exists as the *comparison partner* for coordinated dispatch
+    (2026-10-21): it is how such banks are actually operated, so it is the
+    baseline against which coordinating them in the MIQP has to justify itself.
+    It keeps the integrator's hysteresis, dwell, switching budget and voltage
+    guard unchanged."""
+
+    shunt_local_g: float = 1.0
+    """Gain on the local voltage deviation [per pu] in
+    shunt_int_drive='local_voltage'.  Together with shunt_int_g_w it sets how
+    many TS observations of a given deviation accumulate to a switch; derive it
+    from a recorded deviation distribution rather than choosing it."""
+
+    shunt_local_v_ref_pu: float = 1.03
+    """Local voltage reference of the autonomous rule [pu].  Defaults to the
+    zone setpoint used by the study configurations."""
+
+    shunt_local_v_deadband_pu: float = 0.01
+    """Half-width of the local voltage deadband [pu].  Deviations inside it
+    produce no drive at all, so routine operation does not accumulate."""
+
     shunt_int_gradient_deadband: float = 0.0
     """Magnitude below which confirmed-demand mode clears a pending request."""
 
@@ -1877,6 +1909,19 @@ class MultiTSOConfig:
     controller is tuned on (2026-10-20); the first is retained because the
     recorded October diagnostics used it.  Both keep the hard predicted voltage
     corridor and refuse an increased predicted output-limit violation."""
+
+    shunt_hybrid_regular_confirmations: int = 1
+    """Consecutive TS instants the regular (objective-driven) MIQP must select
+    the same bank and direction before the step is committed.
+
+    1, the default, is the immediate behaviour.  Higher values implement
+    "commit on a deviation that is large AND not recovered directly by the other
+    actuators" (2026-10-21): the movement weight g_w_tso_shunt supplies the
+    magnitude test, and the confirmation supplies the persistence test, because
+    an instant in which the continuous actuators resolve the deviation makes the
+    MIQP hold every bank and resets the count.  Needed because the path
+    otherwise commits on the first instant a threshold is crossed, which in the
+    20 October runs fired at t = 20 s, eight minutes before the disturbance."""
 
     shunt_ts_reserve_weight: float = 0.0
     """Weight of the *supervisory* TS fleet reserve cost that only the hybrid
@@ -1930,6 +1975,26 @@ class MultiTSOConfig:
                 f"shunt_dispatch must be 'off', 'miqp', 'integrator' or 'hybrid', "
                 f"got {self.shunt_dispatch!r}"
             )
+        if self.shunt_int_drive not in ("objective", "local_voltage"):
+            raise ValueError(
+                f"shunt_int_drive must be 'objective' or 'local_voltage', "
+                f"got {self.shunt_int_drive!r}")
+        if self.shunt_int_drive == "local_voltage":
+            # The autonomous rule replaces the driving signal, so it cannot be
+            # combined with a supervisor that also replaces it, nor with the
+            # joint MIQP decision it exists to be compared against.
+            if self.shunt_dispatch != "integrator":
+                raise ValueError(
+                    "shunt_int_drive='local_voltage' requires "
+                    "shunt_dispatch='integrator'")
+            if self.shunt_sts_support:
+                raise ValueError(
+                    "shunt_int_drive='local_voltage' is autonomous and cannot "
+                    "be combined with STS shunt support")
+            if (not math.isfinite(self.shunt_local_g) or self.shunt_local_g <= 0
+                    or not math.isfinite(self.shunt_local_v_deadband_pu)
+                    or self.shunt_local_v_deadband_pu < 0):
+                raise ValueError("Invalid local voltage gain or deadband")
         if self.shunt_sts_support and (
                 self.shunt_dispatch not in ("integrator", "hybrid")
                 or self.shunt_int_t_persistence_s <= 0):
@@ -1965,6 +2030,11 @@ class MultiTSOConfig:
                     or self.shunt_ts_reserve_weight < 0):
                 raise ValueError(
                     "shunt_ts_reserve_weight must be finite and non-negative")
+            if (int(self.shunt_hybrid_regular_confirmations)
+                    != self.shunt_hybrid_regular_confirmations
+                    or self.shunt_hybrid_regular_confirmations < 1):
+                raise ValueError(
+                    "shunt_hybrid_regular_confirmations must be an integer >= 1")
             if (not math.isfinite(self.shunt_ts_reserve_margin_steps)
                     or self.shunt_ts_reserve_margin_steps <= 0.0):
                 raise ValueError(

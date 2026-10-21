@@ -3353,7 +3353,8 @@ def run_multi_tso_dso(
                 support_gate=config.shunt_hybrid_support_gate,
                 support_exchange=config.shunt_hybrid_support_exchange,
                 ts_reserve_weight=config.shunt_ts_reserve_weight,
-                ts_reserve_margin_steps=config.shunt_ts_reserve_margin_steps)
+                ts_reserve_margin_steps=config.shunt_ts_reserve_margin_steps,
+                regular_confirmations=config.shunt_hybrid_regular_confirmations)
             ctrl.solver = adapter
             hybrid_solvers[z] = adapter
 
@@ -4343,11 +4344,25 @@ def run_multi_tso_dso(
                             float(grad_y_i[vb_i.index(b)]) for b in obs_map
                         ], dtype=np.float64)
                         g_h = float(grad_v_obs @ h_col)
+                        if config.shunt_int_drive == "local_voltage":
+                            # Classic autonomous substation rule: accumulate the
+                            # bank's OWN bus voltage deviation outside a
+                            # deadband, projected on its voltage sensitivity so
+                            # the device sign carried by h_col sets the
+                            # direction (CIGRE CSE 026 §2.6).  Replaces the
+                            # shared-objective drive entirely: no zone target,
+                            # no interface term, no coordination.
+                            _dev = np.asarray(v_meas_b, dtype=np.float64) - float(
+                                config.shunt_local_v_ref_pu)
+                            _db = float(config.shunt_local_v_deadband_pu)
+                            _dev = np.sign(_dev)*np.maximum(np.abs(_dev)-_db, 0.0)
+                            g_h = float(config.shunt_local_g * (_dev @ h_col))
                         # ── Q_PCC term (dimensionless Mvar/Mvar interface ratio —
                         # base-independent, no s_base scaling).  Active only when
                         # the bank's interface is a monitored PCC.
                         t_if = bc.interface_trafo3w_idx
-                        if pcc_i and t_if in pcc_i:
+                        _local = config.shunt_int_drive == "local_voltage"
+                        if pcc_i and t_if in pcc_i and not _local:
                             h_qpcc = float(sens_i.compute_dQtrafo3w_hv_dQ_shunt(
                                 trafo3w_idx=t_if, shunt_bus_idx=bc.bus_idx,
                                 q_step_mvar=sign_b,
@@ -4358,7 +4373,7 @@ def run_multi_tso_dso(
                         # objective (tso_g_res_sg) drive the bulk shunt to offload
                         # generator reactive loading on sustained need.  Opt-in via
                         # tso_g_res_sg != 0.
-                        if use_reserve:
+                        if use_reserve and not _local:
                             Hg, _, _ = sens_i.compute_dQgen_dQ_shunt_matrix(
                                 gen_buses_i, [int(bc.bus_idx)], [sign_b],
                             )

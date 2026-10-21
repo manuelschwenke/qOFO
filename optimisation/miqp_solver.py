@@ -72,7 +72,6 @@ class MIQPResult:
     objective_value: float
     status: str
     solve_time_s: float
-    additional_output_change: Optional[NDArray[np.float64]] = None
     
     @property
     def is_optimal(self) -> bool:

@@ -646,11 +646,13 @@ def _cache_path(root: Path, condition: str, scenario: str,
 
 
 def _check_shunt_screen_support(cfg) -> None:
-    if getattr(cfg, "shunt_dispatch", "off") == "hybrid":
+    if getattr(cfg, "shunt_dispatch", "off") == "miqp":
         raise ValueError(
-            "Stage-I screening does not yet include the hybrid bank columns "
-            "and g_w_tso_shunt. Extend the curvature capture and cache identity "
-            "before screening this controller.")
+            "Stage-I screening does not include the switched-shunt bank "
+            "columns or g_w_tso_shunt. Extend the curvature capture and the "
+            "cache identity before screening this controller. (The guard named "
+            "the retired 'hybrid' mode until 2026-10-22; the bank columns are "
+            "now in the ordinary MIQP, so it applies to 'miqp'.)")
 
 
 def load_or_build_operating_points(

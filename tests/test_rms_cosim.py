@@ -172,7 +172,7 @@ def test_cosim_config_only_overrides_reference_envelope():
     assert cfg.coordination_mode == "sbx_h"
     assert cfg.sbx_config == make_reference_config().sbx_config
     assert cfg.install_tso_tertiary_shunts is True
-    assert cfg.shunt_dispatch == "integrator"
+    assert cfg.shunt_dispatch == "miqp"
     assert cfg.tso_shunt_kind == "msc_msr"
 
 

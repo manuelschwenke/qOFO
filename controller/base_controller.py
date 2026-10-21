@@ -636,14 +636,6 @@ class BaseOFOController(ABC):
         # Step 10: Predict new outputs.
         #   Δy ≈ H · σ
         y_predicted = y_current + H @ sigma
-        # A solver extension may optimise additional physical actuators while
-        # retaining the existing controller vector. Include their selected
-        # effect in the public prediction, as in the joint MIQP constraints.
-        if result.additional_output_change is not None:
-            extra = np.asarray(result.additional_output_change, dtype=float)
-            if extra.shape != y_predicted.shape or not np.all(np.isfinite(extra)):
-                raise ValueError("Invalid additional actuator output prediction")
-            y_predicted = y_predicted + extra
 
         # Step 11: Cooldown bookkeeping for integer switches.
         if int_idx.size > 0:

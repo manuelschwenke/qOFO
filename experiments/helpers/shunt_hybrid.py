@@ -57,4 +57,4 @@ def build_hybrid_context(tso, banks, dsos, feedback, offsets, time_s, rescale=Tr
     # the length of the Q_gen tail of every bank column.
     return HybridContext(time_s, models, tso._compute_output_gradient(meas),
                          np.arange(nv), np.asarray(cfg.v_setpoints_pu),
-                         tso.fleet_reserve_state(meas), ng)
+                         tso.fleet_reserve_state(meas), ng, nd)

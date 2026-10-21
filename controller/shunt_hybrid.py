@@ -9,8 +9,9 @@ import math
 from time import perf_counter
 import numpy as np
 
-from controller.shunt_support import (STSShuntSupportConfig, fleet_cost,
-                                      support_request, ts_fleet_reserve_request)
+from controller.shunt_support import (STSShuntSupportConfig, STSShuntRequest,
+                                      fleet_margin_cost, fleet_reserve_direction,
+                                      support_request)
 
 
 @dataclass
@@ -66,10 +67,12 @@ class HybridContext:
     output_gradient: np.ndarray
     voltage_indices: np.ndarray
     voltage_targets: np.ndarray
-    # TS fleet reserve, supervisory only: the machine state and the length of
-    # the Q_gen block, which is the tail of every bank's output column.
+    # TS fleet reserve, supervisory only. ``fleet`` carries the directional
+    # margins of the machines and the TS DER; ``n_gen`` is the length of the
+    # Q_gen output tail and ``n_der`` the length of the DER control head.
     fleet: object = None
     n_gen: int = 0
+    n_der: int = 0
 
 
 class HybridShuntSolver:
@@ -99,7 +102,7 @@ class HybridShuntSolver:
                  support_config: STSShuntSupportConfig,
                  voltage_error_allowance_pu=.001,
                  support_gate="voltage_allowance", support_exchange=0.,
-                 ts_reserve_weight=0., ts_reserve_start=.8):
+                 ts_reserve_weight=0., ts_reserve_margin_steps=1.):
         if not math.isfinite(movement_weight) or movement_weight <= 0:
             raise ValueError("Hybrid shunt movement weight must be positive")
         if (not math.isfinite(voltage_error_allowance_pu)
@@ -111,8 +114,9 @@ class HybridShuntSolver:
             raise ValueError("Support exchange weight must be finite and non-negative")
         if not math.isfinite(ts_reserve_weight) or ts_reserve_weight < 0:
             raise ValueError("TS fleet reserve weight must be finite and non-negative")
-        if not math.isfinite(ts_reserve_start) or not 0 < ts_reserve_start < 1:
-            raise ValueError("TS fleet reserve start must lie strictly in (0, 1)")
+        if (not math.isfinite(ts_reserve_margin_steps)
+                or ts_reserve_margin_steps <= 0):
+            raise ValueError("TS fleet reserve margin must be a positive step count")
         self.solver, self.context_provider = solver, context_provider
         self.movement_weight = movement_weight
         self.support_config = support_config
@@ -120,7 +124,7 @@ class HybridShuntSolver:
         self.support_gate = support_gate
         self.support_exchange = support_exchange
         self.ts_reserve_weight = ts_reserve_weight
-        self.ts_reserve_start = ts_reserve_start
+        self.ts_reserve_margin_steps = ts_reserve_margin_steps
         self.memories = {}
         self.selected = None
         self.last_context = None
@@ -166,24 +170,45 @@ class HybridShuntSolver:
             hard_output_indices=tuple(int(i) for i in rows))
 
     def _fleet_enabled(self, ctx):
-        return (self.ts_reserve_weight > 0.0 and ctx.fleet is not None
-                and ctx.n_gen > 0)
+        return self.ts_reserve_weight > 0.0 and ctx.fleet is not None
 
-    def _fleet_request(self, ctx, model):
-        """Supervisory TS fleet reserve request for one bank, or ``None``.
+    def _fleet_margin_mvar(self, bank):
+        return self.ts_reserve_margin_steps*bank.config.q_step_mvar
 
-        The ``Q_gen`` block is the tail of the bank's output column, in the
-        canonical output ordering ``[V | Q_PCC | I | Q_gen]``.
+    def _fleet_observation(self, ctx, model):
+        """Direction the fleet margins demand, and the gradient that drives the
+        confirmation memory.
+
+        The fleet condition is a **threshold on a directional Mvar margin**, not
+        a gradient: the DER half of the fleet is a control the candidate
+        re-optimises, so no ``dQ/dlevel`` sensitivity exists for it and no
+        gradient can be formed. The memory is therefore a pure confirmation
+        timer — one observation saturates the accumulator, so readiness is
+        governed by ``t_persistence_s`` alone. The weight no longer decides
+        whether the path fires; the margin threshold does. It only prices the
+        benefit in the acceptance test.
         """
         if not self._fleet_enabled(ctx):
-            return None
-        column = np.asarray(model.output_step, dtype=float)
+            return 0, 0.
         bank = model.bank
-        return ts_fleet_reserve_request(ctx.fleet,
-            h_gen=column[len(column)-ctx.n_gen:],
-            q_step_mvar=bank.config.q_step_mvar, level=bank.level,
-            n_levels=bank.config.n_levels,
-            weight=self.ts_reserve_weight, start=self.ts_reserve_start)
+        direction = fleet_reserve_direction(ctx.fleet,
+            margin_mvar=self._fleet_margin_mvar(bank),
+            injects=1 if bank.config.kind == "MSC" else -1,
+            level=bank.level, n_levels=bank.config.n_levels)
+        if not direction:
+            return 0, 0.
+        saturating = 2.*bank.config.g_w*bank.config.q_step_mvar
+        return direction, -direction*saturating
+
+    def _fleet_cost(self, ctx, bank, u=None, y=None):
+        """Fleet margin cost at a solution: machines from the predicted outputs,
+        DER from the chosen controls."""
+        return fleet_margin_cost(ctx.fleet,
+            weight=self.ts_reserve_weight,
+            margin_mvar=self._fleet_margin_mvar(bank),
+            q_gen=(None if not ctx.n_gen or y is None
+                   else np.asarray(y)[len(y)-ctx.n_gen:]),
+            q_der=None if not ctx.n_der or u is None else np.asarray(u)[:ctx.n_der])
 
     def _observe(self, ctx):
         observations = []
@@ -200,15 +225,16 @@ class HybridShuntSolver:
             measured = replace(f, q_requested=f.q_measured) if f is not None else None
             requests["sts_reserve"] = support_request(measured, **common,
                 config=replace(self.support_config, tracking_weight=0))
+            gradients = {k: (r.gradient if r else 0.) for k, r in requests.items()}
             if self._fleet_enabled(ctx):
                 # Supervisory only: absent from the shared objective, so the
                 # continuous actuators keep their voltage task.
-                requests["ts_reserve"] = self._fleet_request(ctx, model)
-            for kind, req in requests.items():
+                gradients["ts_reserve"] = self._fleet_observation(ctx, model)[1]
+            for kind, gradient in gradients.items():
                 mem = self.memories.setdefault((b.config.shunt_idx, kind), DemandMemory())
-                mem.observe(req.gradient if req else 0., ctx.time_s, b)
+                mem.observe(gradient, ctx.time_s, b)
                 observations.append(dict(shunt_idx=b.config.shunt_idx, kind=kind,
-                    gradient=req.gradient if req else 0., accumulated_mvar=mem.value,
+                    gradient=gradient, accumulated_mvar=mem.value,
                     ready_direction=mem.ready(ctx.time_s, b)))
         return observations
 
@@ -223,11 +249,12 @@ class HybridShuntSolver:
                             "selected_reason": None, "rejected_support": 0,
                             "support_candidates": []}
         if self._fleet_enabled(ctx):
-            # Worst machine position in its own band, recorded whether or not it
-            # is outside ts_reserve_start: without it a zero gradient cannot be
-            # told from a fleet that is simply far from its rails.
-            self.diagnostics["fleet_max_abs_r"] = float(
-                np.max(np.abs(ctx.fleet.normalised())))
+            # Directional margins in Mvar, recorded whether or not either is
+            # short: without them an absent request cannot be told from a fleet
+            # that simply has room.
+            up, down = ctx.fleet.directional()
+            self.diagnostics["fleet_margin_up_mvar"] = up
+            self.diagnostics["fleet_margin_down_mvar"] = down
         joint = self._augment(problem, ctx)
         regular = self.solver.solve(joint)
         if not regular.is_feasible:
@@ -257,7 +284,13 @@ class HybridShuntSolver:
                     continue
                 indices = model.pcc_control_indices
                 if kind == "ts_reserve":
-                    request = self._fleet_request(ctx, model)
+                    # The condition must still hold now: a memory can be ready
+                    # from earlier observations while the margin has recovered.
+                    now, _ = self._fleet_observation(ctx, model)
+                    cost = self._fleet_cost(ctx, b) if now == direction else 0.
+                    request = (STSShuntRequest("ts_reserve", -float(direction),
+                                               np.zeros(0), cost, cost)
+                               if now == direction else None)
                 else:
                     cfg = replace(self.support_config,
                         reserve_weight=0 if kind == "sts_tracking" else self.support_config.reserve_weight,
@@ -312,17 +345,16 @@ class HybridShuntSolver:
                 reduction = float(request.cost_before-request.cost_after)
                 if kind == "ts_reserve":
                     # The candidate re-optimised every ordinary control around
-                    # the forced step, so an AVR or delegated-Q adjustment can
-                    # cancel the bank-only relief the request predicted. Measure
-                    # the benefit on the COMPLETE candidate, against the regular
-                    # solution, so the bank is not credited with a recovery the
-                    # ordinary controller would have achieved anyway.
-                    gen = slice(len(y)-ctx.n_gen, len(y))
-                    common = dict(weight=self.ts_reserve_weight,
-                                  start=self.ts_reserve_start)
-                    diagnostic["fleet_reduction_bank_only"] = reduction
-                    reduction = (fleet_cost(ctx.fleet, regular_y[gen], **common)
-                                 - fleet_cost(ctx.fleet, y[gen], **common))
+                    # the forced step, so an AVR or DER adjustment can cancel the
+                    # relief. Measure the benefit on the COMPLETE candidate,
+                    # against the regular solution, so the bank is not credited
+                    # with a recovery the ordinary controller achieves anyway.
+                    candidate_u = joint.u_current+self._increment(joint, candidate)
+                    before = self._fleet_cost(ctx, b, u=regular_u, y=regular_y)
+                    after = self._fleet_cost(ctx, b, u=candidate_u, y=y)
+                    reduction = before-after
+                    diagnostic["fleet_cost_regular"] = before
+                    diagnostic["fleet_cost_candidate"] = after
                     diagnostic["fleet_reduction_full_candidate"] = reduction
                     if reduction <= 1e-12:
                         self.diagnostics["rejected_support"] += 1

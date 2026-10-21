@@ -5,8 +5,8 @@ import pytest
 
 from controller.shunt_hybrid import BankModel, HybridContext, HybridShuntSolver
 from controller.shunt_integrator import MSC, ShuntBankConfig
-from controller.shunt_support import (STSShuntFeedback, STSShuntSupportConfig,
-                                      TSFleetReserveState)
+from controller.shunt_support import (FleetMargins, STSShuntFeedback,
+                                      STSShuntSupportConfig)
 from optimisation.miqp_solver import MIQPProblem, MIQPSolver
 
 
@@ -38,12 +38,23 @@ def make_case(target=40., measured=20., voltage=1., gradient=0., step_v=.0001,
     return solver, p, ctx, bank
 
 
-def make_fleet_case(q_gen=45., half=50., gen_step=-10., weight=100.,
-                    step_v=.0001, gradient=0., movement_weight=100.,
+def make_fleet_case(q_gen=45., gen_half=50., q_der=35., der_half=40.,
+                    gen_step=-10., weight=100., margin_steps=1., step_v=.0001,
+                    gradient=0., movement_weight=100., der_grad=0.,
                     pin_pcc=False, **bank_settings):
-    """Outputs are [V | Q_PCC | Q_gen] with one machine, so the supervisory TS
-    fleet reserve can be exercised in isolation. The shared objective carries no
-    reserve term: the Q_gen entry of the output gradient is zero."""
+    """One machine and one TS DER, so the directional fleet margins can be
+    exercised in isolation.
+
+    Controls are ``[Q_DER | Q_PCC_set | other]`` and outputs ``[V | Q_PCC |
+    Q_gen]``, matching the canonical orderings the solver assumes: the DER block
+    heads the control vector and the machine block tails the output vector. The
+    shared objective carries no reserve term, so the Q_gen entry of the output
+    gradient is zero.
+
+    Defaults put the fleet short on the *up* margin: machine 45 of [-50, +50]
+    leaves 5, DER 35 of [-40, +40] leaves 5, so 10 Mvar against a threshold of
+    one 25 Mvar bank step. An MSC engagement relieves it.
+    """
     settings = dict(shunt_idx=0, bus_idx=1, interface_trafo3w_idx=2,
         dso_id="STS", kind="MSC", q_step_mvar=25., n_levels=2,
         g_w=.01, delta=5., t_dwell_s=30., daily_switch_budget=10,
@@ -53,23 +64,28 @@ def make_fleet_case(q_gen=45., half=50., gen_step=-10., weight=100.,
     f = STSShuntFeedback(np.array([2]), np.array([20.]), np.array([20.]),
         np.array([-100.]), np.array([100.]), np.array([100.]), 0.)
     model = BankModel(bank, np.array([step_v, 25., gen_step]), np.array([2]),
-        np.array([0]), np.array([25.]), np.array([0.]), f)
-    fleet = TSFleetReserveState(np.array([q_gen]), np.array([0.]),
-                                np.array([half]), np.array([True]))
+        np.array([1]), np.array([25.]), np.array([0.]), f)
+    fleet = FleetMargins(np.array([q_gen, q_der]),
+                         np.array([-gen_half, -der_half]),
+                         np.array([gen_half, der_half]),
+                         np.array([True, True]), 1)
     ctx = HybridContext(0., [model], np.array([gradient, 0., 0.]),
-                        np.array([0]), np.array([1.]), fleet, 1)
-    lo = np.array([0., -.1]) if pin_pcc else np.array([-100., -.1])
-    hi = np.array([0., .1]) if pin_pcc else np.array([100., .1])
-    p = MIQPProblem(2, 0, 3, 1., np.diag([1., 10000.]), np.eye(3),
-        np.array([0., gradient]),
-        np.array([[0., 1.], [1., 0.], [0., 0.]]),
-        np.array([0., 0.]), lo, hi,
+                        np.array([0]), np.array([1.]), fleet, 1, 1)
+    # The DER control bounds ARE its capability, as _get_control_limits sets
+    # them from compute_der_q_bounds; a mismatch would make the solver move the
+    # DER merely to re-enter its own box.
+    lo = np.array([-der_half, 0. if pin_pcc else -100., -.1])
+    hi = np.array([der_half, 0. if pin_pcc else 100., .1])
+    p = MIQPProblem(3, 0, 3, 1., np.diag([1., 1., 10000.]), np.eye(3),
+        np.array([der_grad, 0., gradient]),
+        np.array([[0., 0., 1.], [0., 1., 0.], [0., 0., 0.]]),
+        np.array([q_der, 0., 0.]), lo, hi,
         np.array([1., 20., q_gen]), np.array([.9, -200., -1e4]),
         np.array([1.1, 200., 1e4]), [])
     solver = HybridShuntSolver(MIQPSolver(verbose=False), lambda: ctx,
         movement_weight=movement_weight,
         support_config=STSShuntSupportConfig(tracking_weight=10, reserve_weight=100),
-        ts_reserve_weight=weight)
+        ts_reserve_weight=weight, ts_reserve_margin_steps=margin_steps)
     return solver, p, ctx, bank
 
 
@@ -341,7 +357,7 @@ def test_support_candidate_with_explicit_solver_backend(backend):
     assert p.u_current[0]+r.w_continuous[0]+dq[0] == pytest.approx(45, abs=1e-5)
 
 
-def test_ts_fleet_reserve_commits_when_a_machine_leaves_its_band():
+def test_ts_fleet_reserve_commits_when_a_directional_margin_is_short():
     solver, p, ctx, _ = make_fleet_case()
     for t in (0, 10, 20):
         advance(solver, p, ctx, t)
@@ -349,35 +365,43 @@ def test_ts_fleet_reserve_commits_when_a_machine_leaves_its_band():
     assert commit.request_kind == "ts_reserve" and commit.new_level == 1
     candidate = solver.diagnostics["support_candidates"][0]
     assert candidate["kind"] == "ts_reserve" and candidate["rejection"] is None
-    assert candidate["support_cost_reduction"] > 0
+    assert candidate["fleet_cost_candidate"] < candidate["fleet_cost_regular"]
+    # The margins are recorded whether or not either side is short.
+    assert solver.diagnostics["fleet_margin_up_mvar"] == pytest.approx(10.)
+    assert solver.diagnostics["fleet_margin_down_mvar"] == pytest.approx(170.)
 
 
-def test_ts_fleet_reserve_takes_no_credit_for_relief_the_ordinary_controls_give():
-    # The ordinary control already brings the machine back inside its band, so
-    # the regular solution needs no bank step. The bank-only prediction still
-    # shows relief, because it is evaluated from the measured state.
-    solver, p, ctx, _ = make_fleet_case()
-    p = replace(p, H_tilde=np.array([[0., 0.], [1., 0.], [0., -10.]]),
-                grad_f=np.array([0., -1e4]),
-                u_lower=np.array([-100., -5.]), u_upper=np.array([100., 5.]))
+def test_ts_fleet_reserve_counts_der_margin_not_only_machines():
+    # The machine alone is short (5 Mvar), but a roomy DER lifts the fleet
+    # margin above the threshold, so no request is made.
+    solver, p, ctx, _ = make_fleet_case(q_der=0., der_half=40.)
     for t in (0, 10, 20):
         advance(solver, p, ctx, t)
     assert solver.take_commit() is None
-    candidate = solver.diagnostics["support_candidates"][0]
-    assert candidate["rejection"] == "no_fleet_relief"
-    assert candidate["fleet_reduction_bank_only"] > 0
-    assert candidate["fleet_reduction_full_candidate"] <= 0
+    assert not solver.diagnostics["support_candidates"]
+    assert solver.diagnostics["fleet_margin_up_mvar"] == pytest.approx(45.)
 
 
-def test_ts_fleet_reserve_inside_the_band_makes_no_request():
-    # 0.7 of the half-width is inside the 0.8 deadband.
-    solver, p, ctx, _ = make_fleet_case(q_gen=35.)
+def test_ts_fleet_reserve_with_room_makes_no_request():
+    solver, p, ctx, _ = make_fleet_case(q_gen=0., q_der=0.)
     for t in (0, 10, 20):
         advance(solver, p, ctx, t)
     assert solver.take_commit() is None
     assert not solver.diagnostics["support_candidates"]
     assert all(m.since is None for k, m in solver.memories.items()
                if k[1] == "ts_reserve")
+
+
+def test_ts_fleet_reserve_takes_no_credit_for_relief_the_ordinary_controls_give():
+    # The DER control is driven to its own rail, which restores the fleet margin
+    # in the regular solution, so the bank adds nothing and is refused.
+    solver, p, ctx, _ = make_fleet_case(der_grad=1e4)
+    for t in (0, 10, 20):
+        advance(solver, p, ctx, t)
+    assert solver.take_commit() is None
+    candidate = solver.diagnostics["support_candidates"][0]
+    assert candidate["rejection"] == "no_fleet_relief"
+    assert candidate["fleet_cost_regular"] == pytest.approx(0.)
 
 
 def test_ts_fleet_reserve_is_absent_from_the_shared_objective():
@@ -394,7 +418,7 @@ def test_ts_fleet_reserve_is_absent_from_the_shared_objective():
 def test_ts_fleet_reserve_leaves_the_delegated_request_free():
     # The delegated control is pinned to its current value, so the transfer an
     # STS request applies would be out of bounds. A fleet request does not
-    # apply it — the offset-only convention — so it is still admitted.
+    # apply it - the offset-only convention - so it is still admitted.
     solver, p, ctx, _ = make_fleet_case(pin_pcc=True)
     for t in (0, 10, 20):
         advance(solver, p, ctx, t)
@@ -402,6 +426,18 @@ def test_ts_fleet_reserve_leaves_the_delegated_request_free():
     assert commit.request_kind == "ts_reserve"
     assert all(c["rejection"] != "delegated_bounds"
                for c in solver.diagnostics["support_candidates"])
+
+
+def test_ts_fleet_reserve_memory_is_a_confirmation_timer():
+    # A threshold condition carries no gradient, so one observation saturates
+    # the accumulator and readiness is governed by persistence alone.
+    solver, p, ctx, _ = make_fleet_case()
+    advance(solver, p, ctx, 0)
+    memory = solver.memories[(0, "ts_reserve")]
+    assert memory.value == pytest.approx(25.)
+    assert memory.direction == 1
+    assert memory.ready(0., ctx.models[0].bank) == 0      # persistence not met
+    assert memory.ready(20., ctx.models[0].bank) == 1
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -423,7 +459,7 @@ def test_stage1_rejects_incomplete_hybrid_curvature(tmp_path, cached):
     {"shunt_hybrid_support_gate": "pu_allowance"},
     {"shunt_hybrid_support_exchange": -1},
     {"shunt_ts_reserve_weight": -1},
-    {"shunt_ts_reserve_start": 1.0},
+    {"shunt_ts_reserve_margin_steps": 0},
 ])
 def test_hybrid_rejects_unsupported_configurations(settings):
     from configs.config import MultiTSOConfig

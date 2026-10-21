@@ -126,107 +126,109 @@ def _outside_band(value, width):
 
 
 @dataclass(frozen=True)
-class TSFleetReserveState:
-    """Reactive-reserve state of the TS zone's own synchronous machines.
+class FleetMargins:
+    """Directional reactive margins of the TS zone's own reactive resources.
 
-    Every field is a quantity the TS measures or derives itself, so no
-    subordinate report and no assumption about a subordinate response enters
-    this cost. ``q_mid`` and ``q_half`` must come from the same capability
-    source as the controller's own reserve term, which
-    ``TSOController.fleet_reserve_state`` guarantees.
+    One entry per unit: the first ``n_gen`` are synchronous machines, whose
+    reactive power is a TS *output*; the rest are TS-connected DER, whose
+    reactive power is a TS *control*. The distinction matters for prediction,
+    not for the margins themselves.
+
+    Margins are **directional and in Mvar**, not a normalised position in a
+    band. The normalised form conflates two different conditions: a unit with
+    no capability at all (a VDE-AR-N 4120 park below ``P/S_n = 0.1``) is
+    excluded as ineligible, whereas a unit with capability but no room left is
+    what the reserve question is about. A margin of zero states the second
+    unambiguously, and the asymmetry of the capability curve (-0.33 against
+    +0.41 S_n) is carried rather than averaged away.
     """
     q_mvar: NDArray[np.float64]
-    q_mid: NDArray[np.float64]
-    q_half: NDArray[np.float64]
+    q_min: NDArray[np.float64]
+    q_max: NDArray[np.float64]
     eligible: NDArray[np.bool_]
+    n_gen: int
 
     def __post_init__(self) -> None:
         n = len(self.q_mvar)
-        for name in ("q_mid", "q_half", "eligible"):
+        if not 0 <= self.n_gen <= n:
+            raise ValueError("n_gen must index into the unit vector")
+        for name in ("q_min", "q_max", "eligible"):
             if len(getattr(self, name)) != n:
-                raise ValueError(f"Fleet reserve {name} must have length {n}")
-        for name in ("q_mvar", "q_mid", "q_half"):
+                raise ValueError(f"Fleet margin {name} must have length {n}")
+        for name in ("q_mvar", "q_min", "q_max"):
             if not np.all(np.isfinite(np.asarray(getattr(self, name), dtype=float))):
-                raise ValueError(f"Fleet reserve {name} must be finite")
-        if np.any(np.asarray(self.q_half)[np.asarray(self.eligible)] <= 0.0):
-            raise ValueError("Eligible machines need a positive capability half-width")
-
-    def normalised(self) -> NDArray[np.float64]:
-        """Signed distance from the band centre, zero where not eligible."""
-        out = np.zeros(len(self.q_mvar), dtype=float)
+                raise ValueError(f"Fleet margin {name} must be finite")
         ok = np.asarray(self.eligible, dtype=bool)
-        out[ok] = ((np.asarray(self.q_mvar, dtype=float)[ok]
-                    - np.asarray(self.q_mid, dtype=float)[ok])
-                   / np.asarray(self.q_half, dtype=float)[ok])
-        return out
+        if np.any(np.asarray(self.q_max)[ok] < np.asarray(self.q_min)[ok]):
+            raise ValueError("Eligible units need q_max >= q_min")
+
+    def directional(self, q_mvar=None):
+        """Aggregate room to raise and to lower fleet reactive power [Mvar]."""
+        q = np.asarray(self.q_mvar if q_mvar is None else q_mvar, dtype=float)
+        if q.shape != self.q_mvar.shape:
+            raise ValueError("Replacement reactive power must match the fleet")
+        ok = np.asarray(self.eligible, dtype=bool)
+        up = float(np.sum(np.maximum(np.asarray(self.q_max, dtype=float)[ok]-q[ok], 0.)))
+        down = float(np.sum(np.maximum(q[ok]-np.asarray(self.q_min, dtype=float)[ok], 0.)))
+        return up, down
+
+    def substituted(self, q_gen=None, q_der=None):
+        """Unit reactive power with machine and/or DER values replaced."""
+        q = np.asarray(self.q_mvar, dtype=float).copy()
+        if q_gen is not None:
+            q[:self.n_gen] = np.asarray(q_gen, dtype=float)
+        if q_der is not None:
+            q[self.n_gen:] = np.asarray(q_der, dtype=float)
+        return q
 
 
-def fleet_cost(state: TSFleetReserveState, q_gen, *, weight: float,
-               start: float) -> float:
-    """``J_fleet`` evaluated at an arbitrary machine reactive-power vector.
+def fleet_margin_cost(margins: FleetMargins, *, weight: float,
+                      margin_mvar: float, q_gen=None, q_der=None) -> float:
+    """Shortfall of either directional margin below ``margin_mvar``.
 
-    Used to measure the relief of a *complete* candidate solution, in which the
-    ordinary controls have been re-optimised around the forced bank step and may
-    have cancelled part of the bank-only effect.
+        J = weight · [ s(R_up)² + s(R_down)² ] / margin_mvar²,
+        s(R) = max(margin_mvar − R, 0)
+
+    so the cost is zero while both directions keep at least ``margin_mvar`` of
+    room, and the weight is dimensionless. The caller expresses
+    ``margin_mvar`` as a multiple of the bank step, which gives the threshold
+    the actuator's own scale instead of an arbitrary fraction of a band.
+
+    ``q_gen`` and ``q_der`` substitute the machine and DER reactive power, which
+    is how a complete candidate is evaluated: the machines from the predicted
+    outputs, the DER from the candidate's chosen controls.
     """
-    moved = replace(state, q_mvar=np.asarray(q_gen, dtype=float))
-    excess = _outside_band(moved.normalised(), start)
-    return weight * float(excess @ excess)
+    if margin_mvar <= 0:
+        raise ValueError("margin_mvar must be positive")
+    up, down = margins.directional(margins.substituted(q_gen, q_der))
+    shortfall = max(margin_mvar-up, 0.)**2 + max(margin_mvar-down, 0.)**2
+    return weight * shortfall / margin_mvar**2
 
 
-def ts_fleet_reserve_request(state: Optional[TSFleetReserveState], *, h_gen,
-                             q_step_mvar: float, level: int, n_levels: int,
-                             weight: float, start: float,
-                             ) -> Optional[STSShuntRequest]:
-    """Request a bank step when the TS's own machines are near their rails.
+def fleet_reserve_direction(margins: Optional[FleetMargins], *, margin_mvar: float,
+                            injects: int, level: int, n_levels: int) -> int:
+    """Bank direction that relieves the short side, or 0 if none applies.
 
-    ``h_gen`` is the machine reactive-power change per positive bank level, the
-    ``Q_gen`` block of the bank's output column. The cost is
+    ``injects`` is +1 for a bank whose engagement injects reactive power (MSC)
+    and −1 for one that absorbs it (MSR). A short ``up`` margin means the fleet
+    is near its upper rail and the network must be supplied from elsewhere, so
+    an injecting bank engages and an absorbing bank releases; a short ``down``
+    margin is the mirror case. Checked against the 21 October capacitive
+    scenario, where the machines sat at their absorbing rail and the action
+    taken was an MSR engagement.
 
-        J = weight · || D_start(r) ||²,   r = (Q − Q_mid)/Q_half,
-
-    with ``D_start`` the componentwise outside-band operator, so the cost is
-    zero while every machine stays inside the central part of its band and no
-    centring pressure is exerted there. A whole physical step must reduce it.
-
-    This is a *supervisory* cost: it is evaluated only for the bank decision and
-    is deliberately absent from the shared TS objective, so the continuous
-    actuators keep their voltage task. Admission of the resulting candidate is
-    decided separately, against the shared objective.
+    Both sides short cannot be relieved by one bank, so no request is made.
     """
-    if state is None or weight <= 0.0:
-        return None
-    h = np.asarray(h_gen, dtype=float)
-    if h.shape != state.q_mvar.shape or not np.all(np.isfinite(h)):
-        raise ValueError("h_gen must be finite and match the machine ordering")
-    if not math.isfinite(q_step_mvar) or q_step_mvar <= 0:
-        raise ValueError("q_step_mvar must be finite and positive")
-    if not 0 <= level <= n_levels:
-        raise ValueError("Invalid bank level")
-    if not 0.0 < start < 1.0:
-        raise ValueError("start must lie strictly between zero and one")
-
-    ok = np.asarray(state.eligible, dtype=bool)
-    if not np.any(ok):
-        return None
-    half = np.asarray(state.q_half, dtype=float)
-    excess = _outside_band(state.normalised(), start)
-    if not np.any(excess):
-        return None
-    gradient = 2.0 * weight * float(excess[ok] @ (h[ok] / half[ok]))
-    if gradient == 0.0:
-        return None
-    direction = -1 if gradient > 0 else +1
-    if not 0 <= level + direction <= n_levels:
-        return None
-    before = weight * float(excess @ excess)
-    moved = np.asarray(state.q_mvar, dtype=float) + direction*h
-    after_state = replace(state, q_mvar=moved)
-    after_excess = _outside_band(after_state.normalised(), start)
-    after = weight * float(after_excess @ after_excess)
-    if after >= before - 1e-12:
-        return None
-    return STSShuntRequest("ts_reserve", gradient, (direction*h).copy(), before, after)
+    if margins is None or margin_mvar <= 0:
+        return 0
+    if injects not in (-1, 1):
+        raise ValueError("injects must be +1 (MSC) or -1 (MSR)")
+    up, down = margins.directional()
+    short_up, short_down = up < margin_mvar, down < margin_mvar
+    if short_up == short_down:
+        return 0
+    direction = 1 if injects == (1 if short_up else -1) else -1
+    return direction if 0 <= level + direction <= n_levels else 0
 
 
 def support_request(feedback: Optional[STSShuntFeedback], *, h_q,

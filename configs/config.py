@@ -1882,22 +1882,31 @@ class MultiTSOConfig:
     """Weight of the *supervisory* TS fleet reserve cost that only the hybrid
     bank decision sees (2026-10-21).
 
-    The cost is ``w · Σ_g D_r0(r_g)²`` with ``r_g = (Q_g − Q_mid,g)/Q_half,g``
-    over this zone's synchronous machines and ``D_r0`` the outside-band
-    operator, so it is zero while every machine stays inside the central part
-    of its band.  It is deliberately NOT part of the shared objective: placed
-    there it moves every continuous actuator, which the 21 October probes showed
-    competes with voltage tracking and breaks the TS band above ~1e4.  Keeping
-    it supervisory leaves the generators and TS DER on their voltage task and
-    lets only the banks act on fleet reserve.  Admission of the resulting
-    candidate is decided by shunt_hybrid_support_gate.  0.0 disables it; the
-    scale must be derived, not guessed, since Q_half² normalises the cost."""
+    The cost penalises a shortfall of either **directional margin in Mvar**
+    below shunt_ts_reserve_margin_steps bank steps, over this zone's
+    synchronous machines *and* its TS-connected DER — the DER being the larger
+    reactive resource in this model.  It is deliberately NOT part of the shared
+    objective: placed there it moves every continuous actuator, which the
+    21 October probes showed competes with voltage tracking and breaks the TS
+    band above ~1e4.  Keeping it supervisory leaves the generators and TS DER on
+    their voltage task and lets only the banks act on fleet reserve.
 
-    shunt_ts_reserve_start: float = 0.8
-    """Normalised band position outside which the supervisory TS fleet reserve
-    cost becomes non-zero, as shunt_sts_reserve_start does for the subordinate
-    envelope.  The default leaves a 10% margin of the full band at either end
-    and exerts no centring pressure inside it."""
+    Whether the path fires is decided by the margin threshold, not by this
+    weight: a threshold condition carries no gradient, so the per-bank memory
+    acts as a confirmation timer.  The weight prices the benefit in the
+    acceptance test (shunt_hybrid_support_gate) only.  0.0 disables the path."""
+
+    shunt_ts_reserve_margin_steps: float = 1.0
+    """Directional reactive margin, in bank steps, below which the supervisory
+    TS fleet reserve cost becomes non-zero.
+
+    Expressed in bank steps so the threshold carries the actuator's own scale:
+    one step means the fleet has less room left, in the binding direction, than
+    a single bank commit would take over.  This replaces the normalised
+    band-position form of 20 October, which conflated a unit with no capability
+    at all (a VDE park below P/S_n = 0.1, excluded as ineligible) with a unit
+    that has capability but no room left, and whose threshold in Mvar moved
+    with the band width."""
 
     shunt_hybrid_support_exchange: float = 0.0
     """Shared-objective units accepted per unit of support cost removed, used
@@ -1956,10 +1965,10 @@ class MultiTSOConfig:
                     or self.shunt_ts_reserve_weight < 0):
                 raise ValueError(
                     "shunt_ts_reserve_weight must be finite and non-negative")
-            if (not math.isfinite(self.shunt_ts_reserve_start)
-                    or not 0.0 < self.shunt_ts_reserve_start < 1.0):
+            if (not math.isfinite(self.shunt_ts_reserve_margin_steps)
+                    or self.shunt_ts_reserve_margin_steps <= 0.0):
                 raise ValueError(
-                    "shunt_ts_reserve_start must lie strictly between zero and one")
+                    "shunt_ts_reserve_margin_steps must be finite and positive")
         elif self.shunt_ts_reserve_weight > 0.0:
             raise ValueError(
                 "shunt_ts_reserve_weight > 0 requires shunt_dispatch='hybrid'")

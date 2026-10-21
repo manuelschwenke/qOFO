@@ -50,7 +50,7 @@ def main():
     ap.add_argument("--support-exchange", type=float, default=0.)
     # Supervisory TS fleet reserve: seen by the bank decision only.
     ap.add_argument("--ts-reserve-weight", type=float, default=0.)
-    ap.add_argument("--ts-reserve-start", type=float, default=.8)
+    ap.add_argument("--ts-reserve-margin-steps", type=float, default=1.)
     # Fleet-stress scenario: replace the 150 Mvar connect/trip pair with ONE
     # sustained reactive load, so the zone's machines are driven up their Q
     # curve and stay there instead of being relieved at minute 30.
@@ -81,7 +81,7 @@ def main():
                 shunt_hybrid_support_gate=args.support_gate,
                 shunt_hybrid_support_exchange=args.support_exchange,
                 shunt_ts_reserve_weight=args.ts_reserve_weight,
-                shunt_ts_reserve_start=args.ts_reserve_start,
+                shunt_ts_reserve_margin_steps=args.ts_reserve_margin_steps,
                 shunt_sts_tracking_weight=0. if case in ("regular", "fleet") else 10.,
                 shunt_sts_reserve_weight=0. if case in ("regular", "fleet") else 100.)
         for name, value in (("g_q", args.g_q), ("tso_g_res_sg", args.g_res_sg),

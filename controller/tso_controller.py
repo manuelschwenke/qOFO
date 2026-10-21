@@ -905,35 +905,65 @@ class TSOController(BaseOFOController):
         return list(range(oltc_start, oltc_start + n_oltc))
 
     def fleet_reserve_state(self, measurement: Measurement):
-        """Reactive-reserve state of this zone's synchronous machines.
+        """Directional reactive margins of this zone's own reactive resources.
 
-        Uses the same capability source, band definition
-        (``Q_mid = ½(Q_min+Q_max)``, ``Q_half = ½(Q_max−Q_min)``), half-width
-        epsilon and out-of-service mask as the ``Q_gen`` block of
-        :meth:`_output_objective_gradient`, so a *supervisory* cost built on
-        this cannot drift from the controller's own reserve term — the failure
-        mode the DER capability override in :mod:`core.actuator_bounds` warns
-        about.  Returns ``None`` when the fleet state is unavailable; the
-        supervisory consumer then simply makes no request.
+        Covers the synchronous machines **and** the TS-connected DER, which are
+        the dominant reactive resource in this model: their VDE capability
+        outweighs the machines wherever there is duty to carry, so a reserve
+        statement about the machines alone describes the smaller half of the
+        fleet.
+
+        The machine block uses the same capability source, band definition,
+        half-width epsilon and out-of-service mask as the ``Q_gen`` block of
+        :meth:`_output_objective_gradient`, so a supervisory cost built on this
+        cannot drift from the controller's own reserve term.  The DER block uses
+        the same :meth:`core.actuator_bounds.ActuatorBounds.compute_der_q_bounds`
+        call and the same control ordering as :meth:`_get_control_limits`, so
+        the margins refer to exactly the variables the MIQP bounds.
+
+        Returns ``None`` when neither block is available; the supervisory
+        consumer then makes no request.
         """
-        from controller.shunt_support import TSFleetReserveState
+        from controller.shunt_support import FleetMargins
+
+        _EPS = 1e-6  # Mvar; narrower bands are treated as no capability
+        q_list, lo_list, hi_list, ok_list = [], [], [], []
 
         n_gen = len(self.config.gen_indices)
-        if (n_gen == 0
-                or self.actuator_bounds.gen_params is None
-                or len(measurement.gen_p_mw) != n_gen
-                or len(measurement.gen_vm_pu) != n_gen
-                or len(measurement.gen_q_mvar) != n_gen):
+        if (n_gen > 0
+                and self.actuator_bounds.gen_params is not None
+                and len(measurement.gen_p_mw) == n_gen
+                and len(measurement.gen_vm_pu) == n_gen
+                and len(measurement.gen_q_mvar) == n_gen):
+            q_min_g, q_max_g = self.actuator_bounds.compute_gen_q_bounds(
+                measurement.gen_p_mw, measurement.gen_vm_pu,
+            )
+            q_list.append(np.asarray(measurement.gen_q_mvar, dtype=np.float64))
+            lo_list.append(np.asarray(q_min_g, dtype=np.float64))
+            hi_list.append(np.asarray(q_max_g, dtype=np.float64))
+            ok_list.append((q_max_g - q_min_g > _EPS)
+                           & ~np.asarray(self._oos_gen_mask, dtype=bool))
+        n_gen_used = len(q_list[0]) if q_list else 0
+
+        mapping = self.config.der_mapping
+        n_der = mapping.n_der if mapping is not None else len(self.config.der_indices)
+        if n_der > 0:
+            der_p = self._extract_der_active_power(measurement)
+            q_min_d, q_max_d = self.actuator_bounds.compute_der_q_bounds(der_p)
+            # Controller ordering: the DER block is the head of the control
+            # vector, so this is exactly what the MIQP decides over.
+            q_der = np.asarray(
+                self._extract_control_values(measurement)[:n_der], dtype=np.float64)
+            q_list.append(q_der)
+            lo_list.append(np.asarray(q_min_d, dtype=np.float64))
+            hi_list.append(np.asarray(q_max_d, dtype=np.float64))
+            ok_list.append(q_max_d - q_min_d > _EPS)
+
+        if not q_list:
             return None
-        q_min_g, q_max_g = self.actuator_bounds.compute_gen_q_bounds(
-            measurement.gen_p_mw, measurement.gen_vm_pu,
-        )
-        q_half_g = 0.5 * (q_max_g - q_min_g)
-        eligible = (q_half_g > 1e-6) & ~np.asarray(self._oos_gen_mask, dtype=bool)
-        return TSFleetReserveState(
-            np.asarray(measurement.gen_q_mvar, dtype=np.float64).copy(),
-            0.5 * (q_max_g + q_min_g), q_half_g, eligible,
-        )
+        return FleetMargins(np.concatenate(q_list), np.concatenate(lo_list),
+                            np.concatenate(hi_list), np.concatenate(ok_list),
+                            n_gen_used)
 
     def _actuator_class_indices(self) -> Dict[str, NDArray[np.int64]]:
         """Per-class index map for adaptive ``g_w`` (paper Eq. 16).

@@ -3353,7 +3353,7 @@ def run_multi_tso_dso(
                 support_gate=config.shunt_hybrid_support_gate,
                 support_exchange=config.shunt_hybrid_support_exchange,
                 ts_reserve_weight=config.shunt_ts_reserve_weight,
-                ts_reserve_start=config.shunt_ts_reserve_start)
+                ts_reserve_margin_steps=config.shunt_ts_reserve_margin_steps)
             ctrl.solver = adapter
             hybrid_solvers[z] = adapter
 

@@ -4248,6 +4248,23 @@ def run_multi_tso_dso(
                             q_itf_sh_offset[key_c] = (
                                 q_itf_sh_offset.get(key_c, 0.0) + dq_itf
                             )
+                            # The same physical step as the TSO's OWN reduced
+                            # model predicts it. The two models are independent
+                            # reductions of the same plant, and the MIQP priced
+                            # the step with this row while the feedforward above
+                            # uses the DSO's; recording both is what makes the
+                            # discrepancy measurable (2026-10-22 decision: keep
+                            # the TS row in the column, measure the gap).
+                            dq_itf_ts = float("nan")
+                            if H_z is not None:
+                                pcc_list_c = [int(i) for i
+                                              in zone_defs[z].pcc_trafo_indices]
+                                if key_c in pcc_list_c:
+                                    row_c = (len(zone_defs[z].v_bus_indices)
+                                             + pcc_list_c.index(key_c))
+                                    dq_itf_ts = float(
+                                        H_z[row_c, shunt_offset + k_sh]
+                                    ) * float(commit.direction)
                             rec.shunt_commits.append({
                                 "zone": z, "shunt_idx": commit.shunt_idx,
                                 "dso_id": commit.dso_id, "kind": commit.kind,
@@ -4255,6 +4272,7 @@ def run_multi_tso_dso(
                                 "new_level": commit.new_level,
                                 "interface_indices": [key_c],
                                 "delta_q_mvar": [dq_itf],
+                                "delta_q_mvar_ts_model": [dq_itf_ts],
                             })
                             if verbose >= 1:
                                 print(
@@ -4262,7 +4280,8 @@ def run_multi_tso_dso(
                                     f"bus={commit.bus_idx} ℓ "
                                     f"{commit.old_level}→{commit.new_level} "
                                     f"(Δ={commit.direction:+d})  "
-                                    f"dQ_itf={dq_itf:+.2f} Mvar"
+                                    f"dQ_itf={dq_itf:+.2f} Mvar "
+                                    f"(TS model {dq_itf_ts:+.2f})"
                                 )
 
                         # Dispatch a per-DSO ShuntDisturbanceMessage so each

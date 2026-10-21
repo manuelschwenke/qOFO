@@ -23,19 +23,17 @@ Two boundary conventions are used (chosen to match the user prompt of
   zone (the original IEEE 39 slack-gen if it is in the zone, otherwise
   the largest gen is promoted).  Boundaries are:
 
-  - Tie-line far-end bus  → PQ load representing the rest-of-system draw.
-  - 3W-trafo primary (HV/TS) bus of every DSO whose sub-network attaches
-    in this zone → PQ load = cached ``(p_hv_mw, q_hv_mvar)`` of that
-    coupling 3W trafo; the trafo itself and the HV sub-network are
-    dropped.
+  - Tie-line far-end bus  → boundary equivalent of the neighbouring area
+    (``tie_boundary``: PQ load, PV gen, constant Z or Thevenin source).
+  - Every coupling 3W trafo of a DSO whose sub-network attaches in this
+    zone is KEPT with its primary, MV and LV (tertiary) buses; the HV
+    sub-network behind the MV bus is dropped and replaced by a PQ load
+    at the MV bus = cached MV-side flow of that coupler.
 
-  TSO-owned bipolar shunts originally sit on the LV (20 kV tertiary) side
-  of the 3W coupler.  Under reduction the tertiary is gone, so the TSO
-  controller's sensitivity Jacobian instead sees a *synthetic shunt at
-  the 3W primary bus* with the same ``q_mvar`` per step and the same
-  cached step value.  The mapping ``synthetic_shunt_map`` (returned
-  alongside the net) tells the runner how to translate between the
-  plant tertiary shunt bus and the local synthetic primary bus.
+  TSO-owned switched banks sit on the LV (20 kV tertiary) bus of the 3W
+  coupler.  That bus is kept, so the banks stay where they are and the
+  TSO controller's bank columns, its rank-1 update at a switching commit
+  and its per-measurement V² rescaling all act at the tertiary bus.
 
 * **DSO sub-network (``build_dso_local_net``):** the boundary is a
   *virtual slack-gen* at the 3W primary bus pinned to ``V_cached``.  No
@@ -60,12 +58,12 @@ Notes
   numerically, and the reduced DSO has none.  The Jacobian we extract
   later runs ``run_control=False, distributed_slack=False`` internally
   inside :class:`JacobianSensitivities.__init__`.
-* Synthetic shunts are placed at the 3W primary bus with the same
-  ``q_mvar`` per step as the original tertiary shunt.  The 3W coupler's
-  series impedance is low enough that the susceptance effect on TN
-  voltages is approximately the same magnitude as if the shunt were
-  placed at the tertiary, so this approximation preserves the *sign*
-  and *order of magnitude* of the TSO MIQP's shunt actuator column.
+* Until 2026-10-21 the TSO reduction also added a *synthetic* copy of each
+  tertiary bank at the 3W primary bus and took the bank columns there.
+  Since the tertiary is kept, that copy duplicated the bank (twice its
+  injection at the linearisation point once energised) and put
+  dQ_PCC/d(step) at ~0.01 instead of ~26 Mvar per 25 Mvar step.  Removed;
+  see ``qOFO_2027/docs/daily_log/10_2026/2026-10-21_parent_bank_rank_one.md``.
 
 Author: Manuel Schwenke / Claude Code
 Date: 2026-05-27
@@ -96,10 +94,6 @@ class TSOLocalNetResult:
     ----------
     net : pp.pandapowerNet
         Reduced pandapower net, converged at the cached operating point.
-    synthetic_shunt_map : Dict[int, int]
-        Maps each TSO-owned tertiary shunt bus (plant index) to the
-        synthetic shunt bus in the reduced net (always the matching 3W
-        primary bus).  Empty when the zone has no TSO-owned shunts.
     slack_gen_idx : Optional[int]
         ``net.gen`` index of the slack-gen used in the reduced net.
         ``None`` if no gen was needed as slack (degenerate zone).
@@ -113,7 +107,6 @@ class TSOLocalNetResult:
         zone (no promotion needed).
     """
     net: pp.pandapowerNet
-    synthetic_shunt_map: Dict[int, int] = field(default_factory=dict)
     slack_gen_idx: Optional[int] = None
     promoted_slack_oltc_indices: Tuple[int, ...] = field(default_factory=tuple)
 
@@ -414,10 +407,10 @@ def build_tso_local_net(
     * every generator + its machine 2W trafo + LV terminal bus,
     * every tie line (the in-zone endpoint stays, the far-end bus is
       kept as a "stub" PQ-load bus),
-    * every 3W primary bus (HV/TS side) of every DSO in the zone, as a
-      PQ-load stub (the 3W trafo and HV sub-network are dropped),
-    * one synthetic shunt per TSO-owned tertiary shunt, placed on the
-      corresponding 3W primary bus.
+    * every coupling 3W trafo of every DSO in the zone with its primary,
+      MV and tertiary bus; the HV sub-network behind the MV bus is
+      replaced by a PQ load at the cached MV-side flow,
+    * every TSO-owned tertiary bank, unchanged on its tertiary bus.
 
     Everything else is deleted.  The slack is the existing IEEE 39 slack-
     gen if it lives in the zone, otherwise the largest gen in the zone is
@@ -443,12 +436,16 @@ def build_tso_local_net(
         ``tie_line_indices``).
     hv_networks_in_zone : Iterable[HVNetworkInfo]
         HV sub-network metadata objects whose ``zone`` matches this zone.
-        Their coupling 3W trafos are *dropped*; their primary buses are
-        kept as PQ-load stubs.
+        Their coupling 3W trafos are kept; the sub-network behind each
+        MV bus becomes a PQ load.
     tso_shunt_buses_in_zone : Iterable[int]
         Plant tertiary bus index of each TSO-owned shunt in this zone.
+        Used only to check that every bank survives the reduction on its
+        tertiary bus (raises otherwise).
     tso_shunt_q_steps_mvar_in_zone : Iterable[float]
-        Per-shunt rated Mvar per step (same order).
+        Per-shunt rated Mvar per step (same order).  Not used since the
+        synthetic primary-bus copy was removed (2026-10-21); accepted so
+        existing callers keep working.
     tie_boundary : {"pq", "pv", "z"}
         Boundary condition placed at each tie-line far-end stub bus,
         i.e. how the neighbouring TSO area is condensed.  All three
@@ -549,7 +546,6 @@ def build_tso_local_net(
     tie_in_endpoints: List[int] = [int(b) for b in tie_line_endpoint_buses]
     hv_list: List[HVNetworkInfo] = list(hv_networks_in_zone)
     shunt_buses: List[int] = [int(b) for b in tso_shunt_buses_in_zone]
-    shunt_q_steps: List[float] = [float(q) for q in tso_shunt_q_steps_mvar_in_zone]
 
     # ── 1. Compute keep-bus set ───────────────────────────────────────────
     keep_buses: set = set(zone_bus_set)
@@ -629,12 +625,6 @@ def build_tso_local_net(
         p_hv = float(sub.res_trafo3w.at[t3w, "p_hv_mw"])
         q_hv = float(sub.res_trafo3w.at[t3w, "q_hv_mvar"])
         primary_load_specs.append((primary, p_hv, q_hv, t3w))
-
-    # Cached voltage at every primary bus (for synthetic-shunt q_mvar
-    # scaling, if we choose to scale; currently we use a 1:1 mapping).
-    primary_v_cached: Dict[int, float] = {}
-    for _, primary in primary_bus_for_3w.items():
-        primary_v_cached[primary] = float(sub.res_bus.at[primary, "vm_pu"])
 
     # ── 3. Keep the in-zone PCC 3W trafos (with their primary/MV/LV) ──
     # The user prompt asked for "primary-side PQ injection" but the TSO
@@ -882,45 +872,18 @@ def build_tso_local_net(
             pp.create_load(sub, bus=int(mv_bus), p_mw=p_load, q_mvar=q_load,
                            name="WARD_3W_MV")
 
-    # ── 8. Synthetic shunts at 3W primary buses ───────────────────────────
-    synthetic_shunt_map: Dict[int, int] = {}
-    if shunt_buses:
-        # For each TSO-owned tertiary shunt, look up which 3W trafo it
-        # belongs to (via the plant net's res_trafo3w), then map to the
-        # corresponding primary bus we've kept.  hv_list already restricts
-        # to this zone's DSOs.
-        plant_3w_lv: Dict[int, int] = {}
-        for hv in hv_list:
-            for t3w, lv_bus, hv_bus in zip(
-                hv.coupling_trafo_indices,
-                hv.coupling_lv_bus_indices,
-                hv.coupling_ieee_buses,
-            ):
-                plant_3w_lv[int(lv_bus)] = int(hv_bus)
-        for tert_bus, q_step in zip(shunt_buses, shunt_q_steps):
-            primary = plant_3w_lv.get(int(tert_bus))
-            if primary is None or primary not in sub.bus.index:
-                continue
-            # Read the cached step from the plant net so the synthetic
-            # susceptance matches the plant susceptance at the cached
-            # operating point.
-            plant_shunt_mask = net.shunt["bus"] == int(tert_bus)
-            cached_step = 0
-            # The synthetic device stands in for the plant device, so it copies
-            # the plant's signed q_mvar: a capacitor (q_mvar < 0) must inject
-            # here too, while ``q_step`` from the zone configuration is an
-            # unsigned magnitude.
-            q_mvar_signed = float(q_step)
-            if plant_shunt_mask.any():
-                plant_shunt_idx = net.shunt.index[plant_shunt_mask][0]
-                cached_step = int(net.shunt.at[plant_shunt_idx, "step"])
-                q_mvar_signed = float(net.shunt.at[plant_shunt_idx, "q_mvar"])
-            pp.create_shunt(
-                sub, bus=int(primary), q_mvar=q_mvar_signed, p_mw=0.0,
-                step=cached_step, max_step=10,
-                name="SYNTH_TSO_TERTIARY_SHUNT",
+    # ── 8. TSO-owned banks stay on their tertiary bus ─────────────────────
+    # Step 3 keeps the tertiary and step 4 keeps the banks on it, so the
+    # reduced net holds each bank exactly once, with the plant's step.  The
+    # controller takes the bank columns there, applies the rank-1 update
+    # there at a commit and rescales them with the measured tertiary voltage.
+    # Fail fast if a bank did not survive -- its column would silently be 0.
+    for tert_bus in shunt_buses:
+        if not (sub.shunt["bus"] == int(tert_bus)).any():
+            raise ValueError(
+                f"[build_tso_local_net] TSO-owned bank at bus {tert_bus} is "
+                f"not in the reduced net; its tertiary must be kept."
             )
-            synthetic_shunt_map[int(tert_bus)] = int(primary)
 
     # ── 9. Slack handling ─────────────────────────────────────────────────
     # Pick a slack gen inside the zone (preserve existing slack-gen if
@@ -1006,8 +969,7 @@ def build_tso_local_net(
         # JacobianSensitivities.
         if verbose >= 1:
             print("  [build_tso_local_net] no slack candidate; returning empty result")
-        return TSOLocalNetResult(net=sub, synthetic_shunt_map=synthetic_shunt_map,
-                                  slack_gen_idx=None)
+        return TSOLocalNetResult(net=sub, slack_gen_idx=None)
 
     # ── 9c. Generators: use CACHED OUTPUT, not the scheduled setpoint ─────
     # The plant solves with ``distributed_slack=True``, so a generator's actual
@@ -1071,7 +1033,6 @@ def build_tso_local_net(
 
     return TSOLocalNetResult(
         net=sub,
-        synthetic_shunt_map=synthetic_shunt_map,
         slack_gen_idx=slack_gen_idx,
         promoted_slack_oltc_indices=tuple(promoted_slack_oltc_indices),
     )

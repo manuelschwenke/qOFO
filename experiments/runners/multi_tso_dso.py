@@ -2259,19 +2259,19 @@ def run_multi_tso_dso(
     # ── Optional: per-controller local-net Jacobians (Ward-style boundary) ─
     # When ``config.local_sensitivities_tso`` is True, each TSO controller
     # gets a Jacobian built from its own reduced zone net (tie-line far-
-    # end + 3W primary boundaries as PQ loads; synthetic shunts at the
-    # 3W primary).  Same idea for DSOs when ``local_sensitivities_dso``
-    # is True (HV sub-network only, 3W primary as virtual slack).  When
-    # both are False, every controller shares ``shared_jac`` (the
-    # historical behaviour).  See :mod:`sensitivity.network_reduction`.
+    # end boundary equivalents; coupling 3W trafos and their tertiary banks
+    # kept, HV sub-network as a PQ load at the MV bus).  Same idea for DSOs
+    # when ``local_sensitivities_dso`` is True (HV sub-network only, 3W
+    # primary as virtual slack).  When both are False, every controller
+    # shares ``shared_jac`` (the historical behaviour).  See
+    # :mod:`sensitivity.network_reduction`.  Built ONCE: a bank switch is a
+    # rank-1 update of the cached model, never a rebuild.
     _per_zone_local_jac: Dict[int, JacobianSensitivities] = {}
-    _per_zone_synth_shunt_map: Dict[int, Dict[int, int]] = {}
     _per_dso_local_jac: Dict[str, JacobianSensitivities] = {}
     _zone_promoted_oltcs: Dict[int, Tuple[int, ...]] = {}
 
     # Build a per-zone "all 2W trafos to keep in the reduced TSO net" list
-    # once (used by both the initial build and any later rebuild on shunt
-    # switching).  Includes:
+    # once.  Includes:
     #   * every machine 2W trafo whose gen is in the zone (for the gen's
     #     terminal bus to survive the selective drop, INCLUDING the slack-
     #     gen's trafo which ``zone_defs[z].oltc_trafo_indices`` excludes);
@@ -2301,11 +2301,10 @@ def run_multi_tso_dso(
 
         Returns
         -------
-        (JacobianSensitivities, Dict[int,int], Tuple[int,...])
-            Jacobian, {tertiary_bus -> primary_bus} synthetic shunt remap,
-            and the tuple of OLTC trafo indices that need to be flagged
-            OOS on the controller (because a promoted slack-gen sits on
-            their bus, killing the dV/ds sensitivity column).
+        (JacobianSensitivities, Tuple[int,...])
+            Jacobian, and the tuple of OLTC trafo indices that need to be
+            flagged OOS on the controller (because a promoted slack-gen
+            sits on their bus, killing the dV/ds sensitivity column).
         """
         zd = zone_defs[z]
         result = build_tso_local_net(
@@ -2324,7 +2323,6 @@ def run_multi_tso_dso(
         )
         return (
             JacobianSensitivities(result.net),
-            dict(result.synthetic_shunt_map),
             tuple(result.promoted_slack_oltc_indices),
         )
 
@@ -2346,36 +2344,23 @@ def run_multi_tso_dso(
             print("  [local_sensitivities_tso=True] building per-zone reduced "
                   "TSO Jacobians ...")
         for z, ctrl in tso_controllers.items():
-            _jz, _syn_map, _promoted_oltcs = _build_tso_local_jac(z)
+            _jz, _promoted_oltcs = _build_tso_local_jac(z)
             _per_zone_local_jac[z] = _jz
-            _per_zone_synth_shunt_map[z] = _syn_map
             _zone_promoted_oltcs[z] = _promoted_oltcs
             ctrl.sensitivities = _jz
             ctrl.invalidate_sensitivity_cache()
             _apply_promoted_oos_oltc(ctrl, _promoted_oltcs)
-            # Plumb the synthetic-shunt remapping into the controller
-            # config so build_sensitivity_matrix_H reads shunt columns at
-            # the synthetic primary bus rather than the (dropped) tertiary.
-            if _syn_map:
-                ctrl.config.shunt_sensitivity_bus_indices = [
-                    _syn_map.get(int(b), int(b))
-                    for b in ctrl.config.shunt_bus_indices
-                ]
-            else:
-                ctrl.config.shunt_sensitivity_bus_indices = None
             if verbose >= 2:
                 print(f"    Zone {z}: reduced net has "
                       f"{len(_jz.net.bus)} buses, "
                       f"{len(_jz.net.gen)} gens, "
                       f"{len(_jz.net.line)} lines, "
                       f"{len(_jz.net.shunt)} shunts; "
-                      f"synthetic shunts: {len(_syn_map)}; "
                       f"promoted-slack OOS OLTCs: {_promoted_oltcs}")
     else:
         for ctrl in tso_controllers.values():
             ctrl.sensitivities = shared_jac
             ctrl.invalidate_sensitivity_cache()
-            ctrl.config.shunt_sensitivity_bus_indices = None
 
     if config.local_sensitivities_dso:
         if verbose >= 1:
@@ -4159,38 +4144,26 @@ def run_multi_tso_dso(
                                     f"[{tag}]"
                                 )
 
-                        if config.local_sensitivities_tso:
-                            # Under local-net mode the TSO's Jacobian has a
-                            # *synthetic* shunt at the 3W primary bus, not
-                            # the (dropped) tertiary; the SMW lookup would
-                            # miss it.  Rebuild the reduced Jacobian from
-                            # scratch instead — the cached step on the
-                            # synthetic shunt then matches the plant.
-                            _jz_new, _syn_map_new, _promoted_oltcs_new = (
-                                _build_tso_local_jac(z)
+                        # Rank-1 update of the TSO's cached model at the
+                        # bank's own tertiary bus, in the local-net and the
+                        # full-net mode alike (the reduced zone net keeps the
+                        # tertiary).  The cached operating point is kept: no
+                        # power flow, no rebuild, no relinearisation.  The
+                        # bank columns then follow the measured tertiary
+                        # voltage through the per-step V² rescaling.
+                        for sb, s_new, k_sh in changed:
+                            applied = tso_ctrl_z.sensitivities.apply_shunt_step_change_smw(
+                                sb, s_new,
+                                shunt_idx=zone_banks[z][k_sh].config.shunt_idx,
                             )
-                            _per_zone_local_jac[z] = _jz_new
-                            _per_zone_synth_shunt_map[z] = _syn_map_new
-                            _zone_promoted_oltcs[z] = _promoted_oltcs_new
-                            tso_ctrl_z.sensitivities = _jz_new
-                            if _syn_map_new:
-                                tso_ctrl_z.config.shunt_sensitivity_bus_indices = [
-                                    _syn_map_new.get(int(b), int(b))
-                                    for b in tso_ctrl_z.config.shunt_bus_indices
-                                ]
-                            _apply_promoted_oos_oltc(
-                                tso_ctrl_z, _promoted_oltcs_new
-                            )
-                            tso_ctrl_z.invalidate_sensitivity_cache()
-                        else:
-                            any_smw = False
-                            for sb, s_new, _ in changed:
-                                applied = tso_ctrl_z.sensitivities.apply_shunt_step_change_smw(
-                                    sb, s_new,
+                            if not applied:
+                                raise ValueError(
+                                    f"Rank-1 update of the zone-{z} TSO model "
+                                    f"failed for the bank at bus {sb} "
+                                    f"(step -> {s_new}); the cached model "
+                                    f"would no longer match the plant."
                                 )
-                                any_smw = any_smw or applied
-                            if any_smw:
-                                tso_ctrl_z.invalidate_sensitivity_cache()
+                        tso_ctrl_z.invalidate_sensitivity_cache()
 
                         # ── Commit the selected level change(s) ───────
                         # The plant was toggled by ``writes_from_zone_tso``

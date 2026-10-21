@@ -117,17 +117,6 @@ class TSOControllerConfig:
     shunt_q_steps_mvar: List[float]
     voltage_bus_indices: List[int]
     current_line_indices: List[int]
-    shunt_sensitivity_bus_indices: Optional[List[int]] = None
-    """Optional remapping of shunt bus indices for the *sensitivity*
-    Jacobian only.  When ``None`` (default), the same indices in
-    ``shunt_bus_indices`` are used both for the apply path
-    (writing ``net.shunt.step``) and for ``JacobianSensitivities``
-    lookups.  Under the local-network sensitivity option
-    (``MultiTSOConfig.local_sensitivities_tso=True``) the runner sets
-    this field to the synthetic 3W primary bus indices, so the per-zone
-    reduced Jacobian's shunt column is built at the kept boundary bus
-    rather than at the (dropped) tertiary bus.  Same length as
-    ``shunt_bus_indices``."""
 
     v_min_pu: float = 0.90
     v_max_pu: float = 1.10
@@ -1937,21 +1926,14 @@ class TSOController(BaseOFOController):
             t for k, t in enumerate(self.config.oltc_trafo_indices)
             if not self._oos_oltc_mask[k]
         ]
-        # Under the local-net sensitivity mode the runner remaps tertiary
-        # shunt indices to synthetic primary-bus shunts; honour that
-        # remapping when present.  Falls back to ``shunt_bus_indices``
-        # otherwise (legacy / full-net mode).
-        _shunt_buses_for_sens = (
-            self.config.shunt_sensitivity_bus_indices
-            if self.config.shunt_sensitivity_bus_indices is not None
-            else self.config.shunt_bus_indices
-        )
+        # Bank columns are taken at the bank's own (tertiary) bus in both the
+        # full-net and the local-net mode: the reduced zone net keeps it.
         kw = dict(
             der_bus_indices=der_bus_indices,
             observation_bus_indices=self.config.voltage_bus_indices,
             line_indices=self.config.current_line_indices,
             oltc_trafo_indices=is_oltc_indices,
-            shunt_bus_indices=_shunt_buses_for_sens,
+            shunt_bus_indices=self.config.shunt_bus_indices,
             shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
         )
         if pcc_in_trafo:
@@ -2249,7 +2231,7 @@ class TSOController(BaseOFOController):
                 dQgen_dShunt, _, _ = \
                     self.sensitivities.compute_dQgen_dQ_shunt_matrix(
                         gen_bus_indices_pp=gen_terminal_buses,
-                        shunt_bus_indices=_shunt_buses_for_sens,
+                        shunt_bus_indices=self.config.shunt_bus_indices,
                         shunt_q_steps_mvar=self.config.shunt_q_steps_mvar,
                     )
                 col_sh_start = n_der + n_pcc + n_gen + n_oltc

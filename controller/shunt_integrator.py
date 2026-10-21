@@ -1,48 +1,39 @@
 """
-Switched-shunt integrator (MSC / MSR) for the TSO OFO controller
+Switched-shunt bank model (MSC / MSR) for the TSO OFO controller
 ================================================================
 
-This module implements a *separate integrating dispatcher* for mechanically
-switched shunt banks owned by the TSO at the DSO tertiary windings.  It is
-deliberately kept OUTSIDE the OLTC MIQP: a per-instant MIQP engages a large
-bulk device only when the full step improves the snapshot objective, which —
-with a sizeable step and the switching penalty needed for stability — rarely
-holds, so the bank is engaged very seldom or chatters.  An integrating
-continuous-relaxation state instead accumulates the time-integral of the
-reactive "pressure" projected onto the bank's boundary sensitivity and commits
-a physical step only on *sustained* need, which is the correct behaviour for a
-slow bulk device.
+Holds the state of one mechanically switched shunt bank owned by the TSO at a
+DSO tertiary winding. The *dispatch decision* is not here: the bank level is an
+integer variable of the TSO MIQP, so the bank is chosen jointly with the
+continuous actuators and the OLTCs. This module supplies what that decision
+needs — the committed level, which directions are currently permitted, and the
+predicted-voltage guard — plus the commit record the runner applies.
 
 Two device classes are provided:
 
-* :class:`MSC` — mechanically switched capacitor.  Engaging a step *injects*
-  reactive power at the tertiary (raises voltage); the boundary voltage
-  sensitivity per step is therefore expected to be non-negative.
-* :class:`MSR` — mechanically switched reactor.  Engaging a step *absorbs*
-  reactive power (lowers voltage); the expected per-step voltage sensitivity is
-  non-positive.
+* :class:`MSC` — mechanically switched capacitor. Engaging a step *injects*
+  reactive power at the tertiary (raises voltage), so the boundary voltage
+  sensitivity per step is expected to be non-negative.
+* :class:`MSR` — mechanically switched reactor. Engaging a step *absorbs*
+  reactive power (lowers voltage); the expected sensitivity is non-positive.
 
-Each bank carries ``n_levels`` discrete levels (lattice ``ℓ ∈ {0 … N}``).  The
-device sign is carried by the measured sensitivity column, so the update law is
-identical for both classes; the subclasses differ only in the pandapower step
-mapping and the expected sensitivity sign used by the fail-fast guards.
+Each bank carries ``n_levels`` discrete levels (lattice ``l in {0 ... N}``). The
+device sign is carried by the measured sensitivity column, so the two classes
+differ only in the pandapower step mapping and the expected sensitivity sign
+used by the fail-fast guard.
 
 Conventions
 -----------
 * ``Q_eq`` is the *nameplate* equivalent reactive injection in Mvar; the
-  committed physical level satisfies ``Q_eq_phys = ℓ · q_step_mvar`` and the
-  per-step increment is ``dQ_eq_step = q_step_mvar``.
-* The boundary sensitivity ``h_H`` passed in is ``∂y_H / ∂Q_eq`` (per Mvar of
-  nameplate injection), evaluated by the online estimator with a unit step.
-* Normally ``grad_g = h_Hᵀ · ∇_y f`` uses the shared TSO objective. The
-  optional STS supervisor supplies an explicitly separate tracking or reserve
-  cost and identifies it through ``request_kind``.
-* Positive ``t_persistence_s`` requires consecutive observations of demand in
-  the same direction and for the same reason. Lost demand resets the pending
-  state. Zero retains the original accumulation rule.
+  committed physical level satisfies ``Q_eq_phys = l * q_step_mvar`` and the
+  per-step increment is ``q_step_mvar``.
+* The boundary sensitivity ``h_H`` is ``dy_H / dQ_eq`` per Mvar of nameplate
+  injection, evaluated by the online estimator with a unit step.
+* Wear is limited by the minimum holding time alone. The daily switching budget
+  was removed on 2026-10-22: it used reset windows rather than a rolling
+  counter, and it was never a binding constraint in the studies.
 
-Fail-fast: every constructor and update validates shapes, ranges, and the
-hysteresis condition ``delta ∈ (0, q_step/2)``; inconsistencies raise
+Fail-fast: every constructor validates shapes and ranges and raises
 ``ValueError`` rather than silently degrading (see project CLAUDE.md).
 
 Author: Manuel Schwenke
@@ -52,17 +43,11 @@ Date: 2026-06-22
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List
 
 import numpy as np
 from numpy.typing import NDArray
-
-#: Length of the rolling window over which the daily switching budget is
-#: counted [s].  One calendar day; exposed as a module constant so tests can
-#: shrink it without touching the public API.
-SECONDS_PER_DAY: float = 86_400.0
-
 
 @dataclass(frozen=True)
 class ShuntBankConfig:
@@ -93,32 +78,14 @@ class ShuntBankConfig:
         the measured sensitivity, not by this magnitude).
     n_levels :
         Number of discrete steps ``N`` (lattice ``ℓ ∈ {0 … N}``), ``≥ 1``.
-    g_w :
-        Quadratic step weight for the continuous-relaxation update, strictly
-        positive.  Consistent with the rest of the controller (which fixes
-        ``alpha = 1`` and tunes step amplitude purely via the ``g_w`` weights):
-        the integrator advances by the OFO step ``Delta = g_H / (2*g_w)``, i.e.
-        smaller ``g_w`` gives a larger step (mirrors the MIQP's unconstrained
-        step ``du = -grad_f / (2*g_w)``).
-    delta :
-        Hysteresis half-width [Mvar]; must satisfy ``0 < delta < q_step/2`` so
-        the commit band is well posed and cannot straddle a level.
     t_dwell_s :
-        Minimum dwell time between commits of this bank [s], ``≥ 0``.
-    daily_switch_budget :
-        Maximum number of commits allowed within any
-        :data:`SECONDS_PER_DAY` window, ``≥ 0``.
+        Minimum holding time between commits of this bank [s], ``≥ 0``.  The
+        MIQP sees it through :meth:`ShuntBank.available_directions`, so a bank
+        inside its holding time is simply bounded to its current level.
     y_h_min, y_h_max :
         HV-boundary voltage band [p.u.] used by the overshoot feasibility
         guard (uniform across the observed boundary buses).  ``y_h_min <
         y_h_max``.
-    t_persistence_s :
-        Minimum observed duration of unchanged demand [s]. Zero disables the
-        confirmation rule and preserves the original dispatcher.
-    gradient_deadband :
-        Confirmed demand clears when the total gradient is within this band.
-    max_sample_gap_s :
-        A longer gap restarts confirmation. The runner uses 1.5 TSO periods.
     """
 
     shunt_idx: int
@@ -128,23 +95,11 @@ class ShuntBankConfig:
     kind: str
     q_step_mvar: float
     n_levels: int
-    g_w: float
-    delta: float
     t_dwell_s: float
-    daily_switch_budget: int
     y_h_min: float
     y_h_max: float
-    t_persistence_s: float = 0.0
-    gradient_deadband: float = 0.0
-    max_sample_gap_s: float = math.inf
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.t_persistence_s) or self.t_persistence_s < 0.0:
-            raise ValueError("t_persistence_s must be finite and non-negative")
-        if not math.isfinite(self.gradient_deadband) or self.gradient_deadband < 0.0:
-            raise ValueError("gradient_deadband must be finite and non-negative")
-        if math.isnan(self.max_sample_gap_s) or self.max_sample_gap_s <= 0.0:
-            raise ValueError("max_sample_gap_s must be positive")
         if self.kind not in ("MSC", "MSR"):
             raise ValueError(
                 f"ShuntBankConfig.kind must be 'MSC' or 'MSR', got {self.kind!r}"
@@ -157,19 +112,8 @@ class ShuntBankConfig:
             raise ValueError(
                 f"n_levels must be >= 1, got {self.n_levels}"
             )
-        if not (self.g_w > 0.0):
-            raise ValueError(f"g_w must be > 0, got {self.g_w}")
-        if not (0.0 < self.delta < 0.5 * self.q_step_mvar):
-            raise ValueError(
-                f"delta must lie in (0, q_step/2) = (0, {0.5 * self.q_step_mvar}), "
-                f"got {self.delta}"
-            )
         if self.t_dwell_s < 0.0:
             raise ValueError(f"t_dwell_s must be >= 0, got {self.t_dwell_s}")
-        if int(self.daily_switch_budget) < 0:
-            raise ValueError(
-                f"daily_switch_budget must be >= 0, got {self.daily_switch_budget}"
-            )
         if not (float(self.y_h_min) < float(self.y_h_max)):
             raise ValueError(
                 f"y_h_min ({self.y_h_min}) must be strictly less than "
@@ -196,14 +140,13 @@ class ShuntCommit:
     pp_step_new: int
     q_step_mvar: float
     direction: int  # +1 = engage one more step, -1 = release one step
-    request_kind: str = "objective"
 
 
 class ShuntBank:
-    """One switched-shunt bank with an integrating continuous-relaxation state.
+    """One switched-shunt bank: committed level, holding time and guard.
 
-    Subclassed by :class:`MSC` and :class:`MSR`; the base class holds all of the
-    update logic and the only difference is :meth:`pp_step_for_level` and
+    Subclassed by :class:`MSC` and :class:`MSR`; the base class holds the state
+    and the only difference is :meth:`pp_step_for_level` and
     :attr:`expected_h_sign`.
     """
 
@@ -216,17 +159,8 @@ class ShuntBank:
         self.config = config
         # Committed physical level ℓ ∈ {0 … N}; banks start de-energised.
         self.level: int = 0
-        # Continuous-relaxation (auxiliary) state in nameplate Mvar.
-        self.q_eq_aux: float = 0.0
-        # Dwell / budget bookkeeping.  -inf so the first commit is always
-        # dwell-eligible.
+        # -inf so the first commit is always outside the holding time.
         self._last_switch_t: float = -math.inf
-        self._budget_window_start_t: float = -math.inf
-        self._switches_in_window: int = 0
-        self._need_direction: int = 0
-        self._need_since: Optional[float] = None
-        self._need_kind: str = ""
-        self._last_sample_t: Optional[float] = None
 
     # -- Derived quantities ------------------------------------------------
 
@@ -246,14 +180,6 @@ class ShuntBank:
         return int(level)
 
     # -- Internal helpers --------------------------------------------------
-
-    def _budget_remaining(self, t_now: float) -> bool:
-        """Roll the daily window forward and report whether budget remains."""
-        if t_now - self._budget_window_start_t >= SECONDS_PER_DAY:
-            # Open a fresh window anchored at the current instant.
-            self._budget_window_start_t = t_now
-            self._switches_in_window = 0
-        return self._switches_in_window < self.config.daily_switch_budget
 
     def _dwell_elapsed(self, t_now: float) -> bool:
         return (t_now - self._last_switch_t) >= self.config.t_dwell_s
@@ -278,191 +204,33 @@ class ShuntBank:
     # -- Public update -----------------------------------------------------
 
     def available_directions(self, t_now: float) -> List[int]:
-        """Directions permitted by physical limits and shared wear guards."""
+        """Directions permitted by the level limits and the holding time.
+
+        This is what the MIQP is given as bounds on the bank variable, so a
+        bank inside its holding time cannot be selected at all.
+        """
         if not math.isfinite(t_now):
             raise ValueError("Switch time must be finite")
-        if not self._dwell_elapsed(t_now) or not self._budget_remaining(t_now):
+        if not self._dwell_elapsed(t_now):
             return []
         return [d for d in (-1, 1) if 0 <= self.level+d <= self.config.n_levels]
 
-    def commit_selected(self, direction: int, t_now: float,
-                        request_kind: str) -> ShuntCommit:
-        """Commit a jointly optimised step after its feasibility check.
+    def commit_selected(self, direction: int, t_now: float) -> ShuntCommit:
+        """Commit the step the MIQP selected for this bank.
 
-        Used by hybrid dispatch. Both regular and slow requests share this
-        physical level, dwell clock and budget. The MIQP checks output limits.
+        The MIQP has already checked the output limits and the one-step-per-zone
+        restriction; this records the level change and restarts the holding
+        clock.
         """
         if direction not in self.available_directions(t_now):
-            raise ValueError("Selected shunt step violates a shared switching guard")
-        if request_kind not in ("objective", "sts_tracking", "sts_reserve",
-                                "ts_reserve"):
-            raise ValueError("Invalid shunt request kind")
+            raise ValueError("Selected shunt step violates the holding time or a level limit")
         old = self.level
         self.level += direction
         self._last_switch_t = t_now
-        self._switches_in_window += 1
-        self.q_eq_aux = self.q_eq_phys
-        self._need_direction, self._need_since, self._need_kind = 0, None, ""
         c = self.config
         return ShuntCommit(c.shunt_idx, c.bus_idx, c.interface_trafo3w_idx,
             c.dso_id, c.kind, old, self.level, self.pp_step_for_level(self.level),
-            c.q_step_mvar, direction, request_kind)
-
-    def step(
-        self,
-        *,
-        grad_g: float,
-        v_meas: NDArray[np.float64],
-        h_v: NDArray[np.float64],
-        t_now: float,
-        df_dq_eq: float = 0.0,
-        request_kind: str = "objective",
-        commit_allowed: bool = True,
-    ) -> Optional[ShuntCommit]:
-        """Advance the integrator one control iteration and maybe commit a step.
-
-        Parameters
-        ----------
-        grad_g :
-            Gradient along this bank's coordinate [cost units per Mvar].
-            Normally the projected shared objective gradient. The optional
-            STS supervisor can supply a separate cost.
-        v_meas :
-            Boundary voltage baseline [p.u.] used by the feasibility guard.
-            Confirmed mode in the runner includes the simultaneous local MIQP
-            move in this baseline.
-        h_v :
-            ``∂V/∂Q_eq`` (per Mvar) at the same boundary buses (same ordering as
-            ``v_meas`` and the configured band).
-        t_now :
-            Current simulation time [s] for dwell / budget bookkeeping.
-        df_dq_eq :
-            Optional direct partial ``∂f/∂Q_eq`` (default 0.0 — the present TSO
-            objective has no direct shunt term; the hook is kept for a future
-            loss term).
-        request_kind :
-            Source of demand. A change restarts confirmation.
-        commit_allowed :
-            False prevents a commit while continuing demand observation.
-
-        Returns
-        -------
-        commit : ShuntCommit or None
-            A commit record if a physical step was committed this iteration,
-            otherwise ``None``.
-        """
-        cfg = self.config
-        v_meas = np.atleast_1d(np.asarray(v_meas, dtype=np.float64))
-        h_v = np.atleast_1d(np.asarray(h_v, dtype=np.float64))
-        if v_meas.size == 0:
-            raise ValueError("v_meas must contain at least one boundary bus")
-        if h_v.shape != v_meas.shape:
-            raise ValueError(
-                f"h_v shape {h_v.shape} does not match v_meas shape {v_meas.shape}"
-            )
-        if not math.isfinite(grad_g):
-            raise ValueError(f"grad_g must be finite, got {grad_g}")
-        if not math.isfinite(df_dq_eq) or not math.isfinite(t_now):
-            raise ValueError("df_dq_eq and t_now must be finite")
-        if not np.all(np.isfinite(v_meas)) or not np.all(np.isfinite(h_v)):
-            raise ValueError("v_meas and h_v must be finite")
-        if request_kind not in ("objective", "sts_tracking", "sts_reserve"):
-            raise ValueError(f"Unknown shunt request kind: {request_kind}")
-
-        # 1) Integrate the reactive pressure into the auxiliary state, then
-        #    apply the anti-windup clamp: the relaxation may not run more than
-        #    one physical step ahead of the committed level in either direction.
-        g_h = float(grad_g) + float(df_dq_eq)
-        q_phys = self.q_eq_phys
-        if cfg.t_persistence_s > 0.0:
-            # A positive persistence duration opts into confirmed demand.
-            # The clock starts with the first observed sample, not before it.
-            if self._last_sample_t is not None and t_now < self._last_sample_t:
-                raise ValueError("Shunt sample times must be non-decreasing")
-            gap = (self._last_sample_t is not None
-                   and t_now - self._last_sample_t > cfg.max_sample_gap_s)
-            self._last_sample_t = t_now
-            need = (-1 if g_h > cfg.gradient_deadband else
-                    +1 if g_h < -cfg.gradient_deadband else 0)
-            available = ((need > 0 and self.level < cfg.n_levels)
-                         or (need < 0 and self.level > 0))
-            if not available:
-                self.q_eq_aux = q_phys
-                self._need_direction = 0
-                self._need_since = None
-                self._need_kind = ""
-                return None
-            if (gap or need != self._need_direction
-                    or request_kind != self._need_kind):
-                self.q_eq_aux = q_phys
-                self._need_since = t_now
-                self._need_direction = need
-                self._need_kind = request_kind
-        lo = q_phys - cfg.q_step_mvar
-        hi = q_phys + cfg.q_step_mvar
-        # OFO step in the g_w convention: Delta = g_H / (2*g_w) (alpha fixed = 1).
-        self.q_eq_aux = float(
-            np.clip(self.q_eq_aux - g_h / (2.0 * cfg.g_w), lo, hi)
-        )
-
-        # 2) Round-to-nearest with a hysteresis dead-band: a commit is proposed
-        #    only once the auxiliary state has accumulated past the half-step
-        #    plus the hysteresis half-width.
-        up_thresh = q_phys + 0.5 * cfg.q_step_mvar + cfg.delta
-        down_thresh = q_phys - 0.5 * cfg.q_step_mvar - cfg.delta
-
-        direction = 0
-        if self.q_eq_aux >= up_thresh and self.level < cfg.n_levels:
-            direction = +1
-        elif self.q_eq_aux <= down_thresh and self.level > 0:
-            direction = -1
-        if direction == 0:
-            return None
-        if cfg.t_persistence_s > 0.0:
-            if (direction != self._need_direction or self._need_since is None
-                    or t_now - self._need_since < cfg.t_persistence_s):
-                return None
-        if not commit_allowed:
-            return None
-
-        # 3) Commit guards — all must hold, else the proposal is suppressed and
-        #    the auxiliary state is held (it stays clamped, so it does not wind
-        #    up indefinitely against a blocked rail).
-        if not self._dwell_elapsed(t_now):
-            return None
-        if not self._budget_remaining(t_now):
-            return None
-        if not self._feasible(direction, v_meas, h_v):
-            return None
-
-        # 4) Commit: move the physical level, record the switch for dwell /
-        #    budget, and emit the record for the atomic plant / feedforward /
-        #    sensitivity update performed by the caller.
-        old_level = self.level
-        new_level = old_level + direction
-        self.level = new_level
-        self._last_switch_t = t_now
-        self._switches_in_window += 1
-        if cfg.t_persistence_s > 0.0:
-            # Each physical step requires a fresh, observed demand interval.
-            self.q_eq_aux = self.q_eq_phys
-            self._need_direction = 0
-            self._need_since = None
-            self._need_kind = ""
-        return ShuntCommit(
-            shunt_idx=cfg.shunt_idx,
-            bus_idx=cfg.bus_idx,
-            interface_trafo3w_idx=cfg.interface_trafo3w_idx,
-            dso_id=cfg.dso_id,
-            kind=cfg.kind,
-            old_level=old_level,
-            new_level=new_level,
-            pp_step_new=self.pp_step_for_level(new_level),
-            q_step_mvar=cfg.q_step_mvar,
-            direction=direction,
-            request_kind=request_kind,
-        )
-
+            c.q_step_mvar, direction)
 
 class MSC(ShuntBank):
     """Mechanically switched capacitor: engaging a step injects reactive power
@@ -485,66 +253,3 @@ def make_bank(config: ShuntBankConfig) -> ShuntBank:
     if config.kind == "MSR":
         return MSR(config)
     raise ValueError(f"Unknown shunt kind {config.kind!r}")
-
-
-@dataclass
-class ShuntIntegrator:
-    """Per-zone container holding the zone's switched-shunt banks.
-
-    Thin convenience wrapper: the runner builds, for each bank, the projected
-    gradient ``grad_g`` and the voltage feasibility inputs, then calls
-    :meth:`update`.  The banks own all state; this object only iterates them.
-    """
-
-    banks: List[ShuntBank] = field(default_factory=list)
-
-    @classmethod
-    def from_configs(cls, configs: List[ShuntBankConfig]) -> "ShuntIntegrator":
-        return cls(banks=[make_bank(c) for c in configs])
-
-    def update(
-        self,
-        grad_g: List[float],
-        v_meas: List[NDArray[np.float64]],
-        h_v: List[NDArray[np.float64]],
-        t_now: float,
-        df_dq_eq: Optional[List[float]] = None,
-        request_kinds: Optional[List[str]] = None,
-        max_commits: Optional[int] = None,
-    ) -> List[ShuntCommit]:
-        """Advance every bank one iteration; return the list of commits.
-
-        The three list arguments are parallel to :attr:`banks`.
-        """
-        n = len(self.banks)
-        if not (len(grad_g) == len(v_meas) == len(h_v) == n):
-            raise ValueError(
-                f"update() arguments must each have length {n} (one per bank); "
-                f"got grad_g={len(grad_g)}, v_meas={len(v_meas)}, h_v={len(h_v)}"
-            )
-        if df_dq_eq is None:
-            df_dq_eq = [0.0] * n
-        elif len(df_dq_eq) != n:
-            raise ValueError(
-                f"df_dq_eq must have length {n}, got {len(df_dq_eq)}"
-            )
-        commits: List[ShuntCommit] = []
-        if request_kinds is None:
-            request_kinds = ["objective"] * n
-        if len(request_kinds) != n:
-            raise ValueError(f"request_kinds must have length {n}")
-        if max_commits is not None and max_commits < 0:
-            raise ValueError("max_commits must be non-negative")
-        for k, bank in enumerate(self.banks):
-            commit = bank.step(
-                grad_g=grad_g[k],
-                v_meas=v_meas[k],
-                h_v=h_v[k],
-                t_now=t_now,
-                df_dq_eq=df_dq_eq[k],
-                request_kind=request_kinds[k],
-                commit_allowed=(max_commits is None or len(commits) < max_commits),
-            )
-            if commit is not None:
-                commits.append(commit)
-        return commits

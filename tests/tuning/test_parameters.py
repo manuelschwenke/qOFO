@@ -114,8 +114,10 @@ def test_partial_overlay_raises(weights) -> None:
 
 
 def test_unknown_key_raises(weights) -> None:
+    # ``g_w_tso_shunt`` used to be the example here; since 2026-10-22 it is a
+    # valid gauge-coupled field, so the example has to name nothing at all.
     with pytest.raises(ValueError, match="unknown parameter-set keys"):
-        apply_to_config(MultiTSOConfig(), {**weights, "g_w_tso_shunt": 1.0})
+        apply_to_config(MultiTSOConfig(), {**weights, "g_w_not_a_field": 1.0})
 
 
 @pytest.mark.parametrize("bad", [0.0, -1.0, math.inf, math.nan])

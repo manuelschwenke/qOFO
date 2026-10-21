@@ -904,6 +904,65 @@ class TSOController(BaseOFOController):
         oltc_start = n_der + n_pcc + n_gen
         return list(range(oltc_start, oltc_start + n_oltc))
 
+    #: Per-bank ``(lower, upper)`` level bounds and the shared predicted-voltage
+    #: guard band, supplied by the runner before each solve. ``None`` while no
+    #: switched-shunt banks are dispatched.
+    _shunt_level_bounds = None
+    _shunt_voltage_guard = None
+
+    def set_shunt_bank_state(self, lower, upper, voltage_guard) -> None:
+        """Hand the MIQP this instant's bank bounds and voltage guard band.
+
+        The runner owns the banks, so it supplies ``lower``/``upper`` from
+        :meth:`controller.shunt_integrator.ShuntBank.available_directions` —
+        which already accounts for the minimum holding time and the level
+        limits — and the band from the banks' own guard. The controller
+        therefore stays free of switching-wear state.
+        """
+        lo = np.asarray(lower, dtype=np.float64)
+        hi = np.asarray(upper, dtype=np.float64)
+        n_shunt = len(self.config.shunt_bus_indices)
+        if lo.shape != (n_shunt,) or hi.shape != (n_shunt,):
+            raise ValueError(
+                f"Bank bounds must have one entry per bank ({n_shunt})"
+            )
+        if np.any(hi < lo):
+            raise ValueError("Bank upper bounds must not fall below the lower bounds")
+        guard_lo, guard_hi = (float(v) for v in voltage_guard)
+        if not guard_lo < guard_hi:
+            raise ValueError("Bank voltage guard band must be non-empty")
+        self._shunt_level_bounds = (lo, hi)
+        self._shunt_voltage_guard = (guard_lo, guard_hi)
+
+    def _solver_restrictions(self, problem) -> Dict[str, object]:
+        """One bank step per solve, and a hard predicted voltage corridor.
+
+        The bank variables are the tail of the solver's reordered vector:
+        ``build_miqp_problem`` places the integer block last, in the order given
+        by ``_integer_indices``, and the banks are the last integer actuators of
+        the control vector. The corridor is made hard on the observed voltage
+        rows and tightened to the banks' guard band, so a step that would push a
+        monitored bus out of band cannot be selected; ``_hold_restricted`` is the
+        fallback should that make the problem infeasible.
+        """
+        n_shunt = len(self.config.shunt_bus_indices)
+        if n_shunt == 0 or self._shunt_level_bounds is None:
+            return {}
+        n_total = problem.n_continuous + problem.n_integer
+        rows = tuple(range(len(self.config.voltage_bus_indices)))
+        guard_lo, guard_hi = self._shunt_voltage_guard
+        y_lower = problem.y_lower.copy()
+        y_upper = problem.y_upper.copy()
+        idx = list(rows)
+        y_lower[idx] = np.maximum(y_lower[idx], guard_lo)
+        y_upper[idx] = np.minimum(y_upper[idx], guard_hi)
+        return {
+            "one_step_indices": tuple(range(n_total - n_shunt, n_total)),
+            "hard_output_indices": rows,
+            "y_lower": y_lower,
+            "y_upper": y_upper,
+        }
+
     def _actuator_class_indices(self) -> Dict[str, NDArray[np.int64]]:
         """Per-class index map for adaptive ``g_w`` (paper Eq. 16).
 
@@ -1224,11 +1283,21 @@ class TSOController(BaseOFOController):
         u_lower[tap_start:tap_end] = tap_min.astype(np.float64)
         u_upper[tap_start:tap_end] = tap_max.astype(np.float64)
 
-        # --- Shunt state bounds (fixed: -1, 0, +1) ---
-        state_min, state_max = self.actuator_bounds.get_shunt_state_bounds()
+        # --- Switched-shunt bank level bounds -------------------------------
+        # The level is an integer variable of this MIQP, and its bounds carry
+        # the device's own restrictions: a bank inside its minimum holding time,
+        # or already at a level limit, is bounded to its current level and
+        # therefore cannot be selected at all.
         shunt_start = tap_end
-        u_lower[shunt_start:] = state_min.astype(np.float64)
-        u_upper[shunt_start:] = state_max.astype(np.float64)
+        if n_shunt > 0:
+            if self._shunt_level_bounds is None:
+                raise ValueError(
+                    "Switched-shunt dispatch requires set_shunt_bank_state() "
+                    "before each solve"
+                )
+            lo, hi = self._shunt_level_bounds
+            u_lower[shunt_start:] = lo
+            u_upper[shunt_start:] = hi
 
         # --- Freeze OOS generators and OLTCs (contingency masking) ---
         if self._u_current is not None:

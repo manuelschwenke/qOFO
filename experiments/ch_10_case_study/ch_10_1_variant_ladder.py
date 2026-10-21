@@ -28,9 +28,11 @@ literals below.**
 Consequences of running on the validated set
 --------------------------------------------
 * Switched shunts (MSC/MSR) EXIST and are dispatched, which they are not under
-  the paper's set.  They run on the separate ``ShuntIntegrator`` (hysteresis +
-  dwell), NOT as MIQP integers -- ``zone_shunt_buses`` is left empty unless
-  ``shunt_dispatch == 'miqp'``.
+  the paper's set.  Since 2026-10-22 they are dispatched as MIQP integers under
+  ``shunt_dispatch == 'miqp'`` -- the bank level is a variable of the zone
+  problem, bounded by the device's holding time and level limits.  Runs before
+  that date used the separate integrating dispatcher (hysteresis + dwell)
+  outside the MIQP, with ``zone_shunt_buses`` left empty.
 * They are NOT a common layer beneath every variant, and assuming so was wrong:
   the integrator skips any zone whose TSOController has no cached measurement,
   and that cache is filled only when the TSO **OFO** runs.  The banks are
@@ -162,12 +164,12 @@ PILOT_BUSES: Dict[int, int] = {1: 25, 2: 7, 3: 20}
 #: The ladder.  Names are the thesis names; there is no V1..V5 here.
 #: Switched shunts OFF for every rung up to and including O1.
 #:
-#: This is not a free choice -- it repairs a confound.  The ShuntIntegrator
-#: skips any zone whose TSOController has no ``_last_measurement``
-#: (multi_tso_dso.py: "if meas_i is None: continue"), and that attribute is set
-#: only inside ``TSOController.step`` (tso_controller.py:2623), i.e. only when
-#: the TSO **OFO** runs.  So on the validated config the banks are inert in L1,
-#: L2 and S1 -- which have no TSO OFO -- but LIVE in O1, which does.  Left
+#: This is not a free choice -- it repairs a confound.  A bank can only be
+#: dispatched where the TSO MIQP runs -- its level is a variable of that
+#: problem -- so on the validated config the banks are inert in L1, L2 and S1,
+#: which have no TSO OFO, but LIVE in O1, which does.  (Before 2026-10-22 the
+#: same asymmetry arose through the integrating dispatcher, which skipped any
+#: zone whose TSOController had no ``_last_measurement``.)  Left
 #: alone, the S1->O1 step would change the control law AND switch on a discrete
 #: actuator class, and it is the one step the chapter's argument rests on.
 #:
@@ -305,10 +307,10 @@ STEP_ALLOWED: Dict[str, set] = {
     "S1->O1": {"tso_mode", "svr_pilot_buses", "svr_t_rvr_s", "svr_t_rpr_s",
                 "svr_k_p_rvr", "svr_k_p_rpr", "svr_rvr_p_every_step", "svr_deadband_pu",
                "svr_rpr_voltage_priority"},
-    # O1->O2 is "TS discrete devices enter the loop": the OLTCs join the
-    # MIQP integer block AND the switched shunts become dispatched by the
-    # ShuntIntegrator.  Two device classes, ONE mechanism -- discrete
-    # actuation moves from planning into the control loop.  Splitting it
+    # O1->O2 is "TS discrete devices enter the loop": the OLTCs AND the
+    # switched-shunt banks join the MIQP integer block.  Two device classes,
+    # ONE mechanism -- discrete actuation moves from planning into the control
+    # loop.  Splitting it
     # would need an eighth rung for little argumentative return.
     "O1->O2": {"tso_oltc_mode", "install_tso_tertiary_shunts",
                "shunt_dispatch"},

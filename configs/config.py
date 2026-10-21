@@ -379,7 +379,7 @@ class MultiTSOConfig:
     g_w_gen:        Optional[float] = None
     g_w_pcc:        Optional[float] = None
     g_w_tso_oltc:   Optional[float] = None
-    g_w_tso_shunt:  float = 3600.0  # runner default (2026-08-21)
+    g_w_tso_shunt:  float = 10.0  # 2026-10-21 campaign (was 3600)
     """Regularisation penalty on TSO bipolar shunt step changes.  Set
     relatively low (~ ``g_w_tso_oltc``) so the discrete actuator can
     engage when continuous DERs cannot satisfy voltage / Q targets, but
@@ -1746,22 +1746,28 @@ class MultiTSOConfig:
     injects +q_mvar (reactor), ``step = -1`` injects −q_mvar (capacitor).
     Used only by the legacy bipolar (``shunt_dispatch='miqp'``) build."""
 
-    # -- Switched-shunt dispatch mode + MSC/MSR integrator ---------------------
+    # -- Switched-shunt dispatch -----------------------------------------------
     shunt_dispatch: str = "off"
-    """How TSO-owned tertiary shunts are dispatched:
-      * ``'off'``        — no tertiary shunts (legacy no-shunt topology).
-      * ``'miqp'``       — legacy bipolar ±1 bank as an integer variable inside
-                           the OLTC MIQP (``install_tso_tertiary_shunts`` build).
-      * ``'integrator'`` — N-step MSC + MSR banks dispatched by the separate
-                           integrating mechanism in
-                           :mod:`controller.shunt_integrator`, OUTSIDE the MIQP.
-      * ``'hybrid'``     — experimental joint MIQP bank decisions, with separate
-                           memories for STS tracking and near-limit reserve.
-    Hybrid mode appends bank integers through a solver adapter. The original
-    TSO control vector carries shunts only in legacy ``'miqp'`` mode."""
+    """How TSO-owned tertiary shunt banks are dispatched:
+      * ``'off'``   — the banks are installed in the plant (when
+                      :attr:`install_tso_tertiary_shunts`) and held at their
+                      initial level: not control variables.
+      * ``'miqp'``  — the bank level ``ℓ ∈ {0 … N}`` is an integer variable of
+                      the zone MIQP, so it is chosen jointly with the
+                      continuous actuators and the OLTCs. The device's own
+                      restrictions enter as bounds (minimum holding time, level
+                      limits), at most one bank steps per zone and iteration,
+                      and the predicted voltage corridor is hard.
+
+    The supervisory variants of October 2026 — an integrating dispatcher
+    outside the MIQP, separate memories for subordinate tracking and
+    near-limit reserve, a confirmation count and an autonomous local drive —
+    were removed on 2026-10-22. None of them beat this law on the selected
+    parameter set; see ``docs/tuning/2026-10-21_three_way_shunt_comparison.md``
+    and ``docs/method/shunt_dispatch_method.md``."""
 
     tso_shunt_kind: str = "msc_msr"
-    """Network-build device class for integrator and hybrid dispatch, passed
+    """Network-build device class for the switched-shunt banks, passed
     to :func:`network.ieee39.hv_networks.add_hv_networks`.  ``'msc_msr'``
     installs one capacitor (MSC) and one reactor (MSR) bank per DSO, placed by
     :attr:`tso_shunt_msc_coupling_pos` / :attr:`tso_shunt_msr_coupling_pos`."""
@@ -1772,7 +1778,9 @@ class MultiTSOConfig:
     coupler (default since 2026-10-15: one compensation device per tertiary).
     ``0`` together with :attr:`tso_shunt_msr_coupling_pos` ``= 0`` reproduces
     runs before 2026-10-15, where MSC and MSR shared the first tertiary and
-    their independent integrators cycled as a 50 Mvar pair."""
+    cycled as a 50 Mvar pair.  In-MIQP dispatch rejects that layout: the
+    control vector and the sensitivity queries address a bank by its bus, so
+    two banks on one tertiary are indistinguishable there."""
 
     tso_shunt_msr_coupling_pos: int = 0  # added 2026-10-15
     """Position of the coupling transformer whose tertiary hosts the MSR bank;
@@ -1790,49 +1798,39 @@ class MultiTSOConfig:
     tso_shunt_msr_q_step_mvar: float = 25.0  # runner default (2026-08-21)
     """MSR nameplate reactive power per step at V = 1 pu [Mvar] (magnitude)."""
 
-    shunt_int_g_w: float = 1.0
-    """Quadratic step weight for the integrator's continuous-relaxation update,
-    per bank.  Consistent with the rest of the controller (alpha fixed = 1,
-    step amplitude tuned via ``g_w``): the relaxation advances by
-    ``g_H / (2 * g_w)`` each TSO iteration, so a SMALLER weight gives a LARGER
-    step.  Tune so a sustained reactive pressure crosses the half-step +
-    hysteresis band over several TSO iterations (slow bulk commit), not in one.
-    NOTE: the boundary voltage sensitivity is small, so the gradient ``g_H`` is
-    small — expect ``g_w`` well below 1 in practice."""
-
-    shunt_int_delta_mvar: float = 10.0  # runner default (2026-08-21)
-    """Hysteresis half-width [Mvar].  Must satisfy
-    ``0 < delta < q_step/2`` for both the MSC and MSR step sizes."""
-
     shunt_int_t_dwell_s: float = 30 * 60.0  # runner default (2026-08-21)
-    """Minimum dwell time between commits of the same bank [s]."""
+    """Minimum holding time between commits of the same bank [s].
+
+    The MIQP sees it as a bound: a bank inside its holding time is bounded to
+    its current level and cannot be selected.  The 2026-10-21 campaign found
+    this to be the parameter the law's benefit turns on — at 1800 s the single
+    engagement is kept and interface-Q RMSE improves 1.5%, at 900 s an
+    engage-release cycle costs 5.6%."""
 
     shunt_int_v_min_pu: float = 0.90  # runner default (2026-08-21)
-    """Lower HV-boundary voltage limit [p.u.] used by the integrator's
-    overshoot feasibility guard."""
+    """Lower observed-voltage limit [p.u.] of the bank corridor.  While banks
+    are dispatched, the predicted voltage rows are constrained *hard* (no
+    slack) and tightened to this band, so a step that would push a monitored
+    bus out of band cannot be selected."""
 
     shunt_int_v_max_pu: float = 1.10
-    """Upper HV-boundary voltage limit [p.u.] used by the integrator's
-    overshoot feasibility guard."""
+    """Upper observed-voltage limit [p.u.] of the bank corridor; see
+    :attr:`shunt_int_v_min_pu`."""
 
     shunt_int_v_rescale: bool = True  # added 2026-10-14
-    """Rescale the integrator's bank sensitivities by ``(V_meas / V_0)²`` at the
-    bank bus at every TSO iteration, i.e. evaluate the per-step injection
-    ``q_step · V²`` at the measured instead of the cached linearisation voltage
-    (thesis ``eq:shunt_rescaling``).  Applies to the boundary voltage,
-    interface-Q and SG-Q parts of the gradient ``g_H``, to the overshoot guard
-    (through ``h_v``) and to the interface feed-forward at a commit.  Runs made
-    before 2026-10-14 correspond to ``False``."""
-
-    shunt_int_gradient_deadband: float = 0.0
-    """Magnitude below which confirmed-demand mode clears a pending request."""
+    """Rescale the bank's interface feedforward by ``(V_meas / V_0)²`` at the
+    bank bus, i.e. evaluate the per-step injection ``q_step · V²`` at the
+    measured instead of the cached linearisation voltage (thesis
+    ``eq:shunt_rescaling``).  The sensitivity columns inside the MIQP are
+    rescaled by :class:`sensitivity.sensitivity_updater.SensitivityUpdater`
+    regardless.  Runs made before 2026-10-14 correspond to ``False``."""
 
     def validate_integrator_mode(self) -> None:
         """Fail-fast consistency check for the switched-shunt dispatch mode.
 
         Raises ``ValueError`` on any inconsistent or out-of-range setting; the
-        per-bank numeric guards (``delta ∈ (0, q_step/2)`` etc.) are additionally
-        enforced by :class:`controller.shunt_integrator.ShuntBankConfig`."""
+        per-bank numeric guards are additionally enforced by
+        :class:`controller.shunt_integrator.ShuntBankConfig`."""
         if self.shunt_dispatch not in ("off", "miqp"):
             raise ValueError(
                 f"shunt_dispatch must be 'off' or 'miqp', "
@@ -1850,24 +1848,9 @@ class MultiTSOConfig:
                 f"shunt_dispatch={self.shunt_dispatch!r} requires tso_shunt_kind='msc_msr', "
                 f"got {self.tso_shunt_kind!r}"
             )
-        q_min = min(self.tso_shunt_msc_q_step_mvar, self.tso_shunt_msr_q_step_mvar)
-        if not (0.0 < self.shunt_int_delta_mvar < 0.5 * q_min):
-            raise ValueError(
-                f"shunt_int_delta_mvar must lie in (0, q_step/2) = "
-                f"(0, {0.5 * q_min}), got {self.shunt_int_delta_mvar}"
-            )
-        if self.shunt_int_g_w <= 0.0:
-            raise ValueError(
-                f"shunt_int_g_w must be > 0, got {self.shunt_int_g_w}"
-            )
         if self.shunt_int_t_dwell_s < 0.0:
             raise ValueError(
                 f"shunt_int_t_dwell_s must be >= 0, got {self.shunt_int_t_dwell_s}"
-            )
-        if self.shunt_int_daily_budget < 0:
-            raise ValueError(
-                f"shunt_int_daily_budget must be >= 0, got "
-                f"{self.shunt_int_daily_budget}"
             )
         if self.shunt_int_v_min_pu >= self.shunt_int_v_max_pu:
             raise ValueError(

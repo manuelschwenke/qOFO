@@ -117,8 +117,8 @@ def build_benchmark_net():
     """Rebuild the plant of the selected config, as ``run_multi_tso_dso`` does.
 
     Mirrors the runner's steps 1-2, INCLUDING its shunt branching: the
-    validated set installs MSC/MSR banks and dispatches them through the
-    ShuntIntegrator, the frozen paper set installs none.  Hardcoding either
+    validated set installs MSC/MSR banks and dispatches them in the zone
+    MIQP, the frozen paper set installs none.  Hardcoding either
     would select pilot nodes on a plant the campaigns never run -- which is the
     class of error this whole script exists downstream of.
     """

@@ -69,9 +69,10 @@ __all__ = [
 #: only as a ratio to this one.  Pinned, never searched.
 GAUGE_FIELD: str = "g_v"
 
-#: The nine controller weights.  ``g_w_tso_shunt`` is deliberately absent: the
-#: shunt is dispatched by a separate integrator outside the MIQP, so it is a
-#: structural choice rather than a tuned weight.
+#: The nine controller weights.  ``g_w_tso_shunt`` is deliberately absent from
+#: the *search*: the bank price is set by the admission rule against the
+#: recorded gradient distribution rather than by the optimiser.  It is still
+#: gauge-coupled, so it travels in :data:`GAUGE_COUPLED_FIELDS`.
 WEIGHT_FIELDS: tuple[str, ...] = (
     "g_v",              # TS voltage tracking            [1/pu^2]   (gauge)
     "g_q",              # STS interface-Q tracking       [1/Mvar^2]
@@ -97,27 +98,28 @@ SEARCHED_FIELDS: tuple[str, ...] = tuple(
 #: originally left out of the parameter set entirely.  That was a defect.
 #:
 #: Measured 2026-09-11: pinning the gauge at ``g_v = 40000`` (from ``1e7``)
-#: while ``shunt_int_g_w`` stayed at its old-gauge value of 10 made the
-#: integrator advance ~250x too slowly for its own commit threshold.  The
-#: accumulated state peaked at 0.395 Mvar against a threshold of 22.5, so the
-#: eight shunt banks **never committed once** -- an entire actuator class was
-#: silently absent from the whole campaign.
+#: while the shunt weight stayed at its old-gauge value made the banks
+#: **never commit once** -- an entire actuator class was silently absent from
+#: the whole campaign.  The same coupling holds for the in-MIQP price: the
+#: admission rule compares ``|g_H · q_step|``, which scales with the gauge,
+#: against ``g_w_tso_shunt``, which does not unless it is carried here.
 #:
 #: Carrying them in the parameter set is what stops that recurring: the gauge
 #: and everything coupled to it now move together or not at all.
 GAUGE_COUPLED_FIELDS: tuple[str, ...] = (
-    "shunt_int_g_w",
+    "g_w_tso_shunt",
 )
 
-#: Switched-shunt integrator design, carried in the parameter set for the same
-#: reason as the cadence: the commit behaviour of the bulk banks is part of the
-#: design, and leaving it in ``configs.config`` defaults is how it came to be
-#: silently wrong.  ``shunt_int_g_w`` is NOT here -- it is gauge-coupled and
-#: lives in :data:`GAUGE_COUPLED_FIELDS`; these three are free design choices.
+#: Switched-shunt design, carried in the parameter set for the same reason as
+#: the cadence: the commit behaviour of the bulk banks is part of the design,
+#: and leaving it in ``configs.config`` defaults is how it came to be silently
+#: wrong.  The step price is NOT here -- it is gauge-coupled and lives in
+#: :data:`GAUGE_COUPLED_FIELDS`.  What remains is the wear limit: the minimum
+#: holding time, which the 2026-10-21 study found to be the one parameter the
+#: law's benefit actually turns on (1800 s keeps the engagement, 900 s pays
+#: +5.6% interface RMSE for an engage-release cycle).
 SHUNT_FIELDS: tuple[str, ...] = (
-    "shunt_int_delta_mvar",
     "shunt_int_t_dwell_s",
-    "shunt_int_daily_budget",
 )
 
 #: Cadence, carried in a parameter set so that a weight set and the periods it
@@ -185,12 +187,8 @@ def apply_to_config(cfg: MultiTSOConfig, params: dict[str, float]) -> MultiTSOCo
                 f"non-positive value for {k}: {v}. Every weight divides or "
                 f"scales a curvature term; zero is not a valid price.")
 
-    # ``shunt_int_daily_budget`` is an int on the dataclass; casting every key
-    # to float would hand the bank config a float where it validates an int.
-    _int_fields = {"shunt_int_daily_budget"}
     overlay: dict[str, Any] = {
-        **{k: (int(v) if k in _int_fields else float(v))
-           for k, v in params.items()},
+        **{k: float(v) for k, v in params.items()},
         **FIXED_OVERRIDES,
     }
     return dataclasses.replace(cfg, **overlay)

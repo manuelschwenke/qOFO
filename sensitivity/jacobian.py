@@ -1886,6 +1886,37 @@ class JacobianSensitivities:
     # F. Shunt Reactive Power Sensitivity (for switchable shunts)
     # =========================================================================
 
+    def shunt_step_sign(self, shunt_bus_idx: int) -> float:
+        """Direction of one positive step of the shunt at ``shunt_bus_idx``.
+
+        ``net.shunt.q_mvar`` is in load convention, so its sign *is* the device
+        class: positive absorbs per positive step (a reactor, or the bipolar
+        shunt whose direction is carried by a signed step), negative injects (a
+        capacitor). The callers pass ``q_step_mvar`` as the nameplate magnitude
+        at ``V = 1`` pu, so this returns the factor that turns it into the
+        device's own signed step.
+
+        Returns ``+1`` when the bus hosts no shunt, which keeps the queries
+        usable on an arbitrary bus. Raises when the bus hosts more than one
+        in-service shunt, because the bus alone then does not identify the
+        device (an MSC and an MSR on one tertiary: see
+        ``tso_shunt_msc_coupling_pos``).
+        """
+        shunts = self.net.shunt
+        mask = (shunts["bus"] == int(shunt_bus_idx))
+        if "in_service" in shunts.columns:
+            mask &= shunts["in_service"].astype(bool)
+        indices = shunts.index[mask]
+        if len(indices) == 0:
+            return 1.0
+        if len(indices) > 1:
+            raise ValueError(
+                f"Bus {shunt_bus_idx} hosts {len(indices)} in-service shunts; "
+                f"a bus-keyed sensitivity cannot identify the device. Put the "
+                f"banks on separate tertiaries."
+            )
+        return -1.0 if float(shunts.at[indices[0], "q_mvar"]) < 0.0 else 1.0
+
     def compute_dV_dQ_shunt(
         self,
         shunt_bus_idx: int,
@@ -1937,7 +1968,8 @@ class JacobianSensitivities:
         # reactive power per step at the current operating point is
         # q_step_mvar * V_pu².
         V_pu = self.net.res_bus.at[shunt_bus_idx, 'vm_pu']
-        dV_dQ_shunt = -dV_dQ[:, 0] * q_step_mvar * V_pu ** 2
+        dV_dQ_shunt = (-dV_dQ[:, 0] * q_step_mvar * V_pu ** 2
+                       * self.shunt_step_sign(shunt_bus_idx))
 
         return dV_dQ_shunt, obs_map
 
@@ -1977,7 +2009,8 @@ class JacobianSensitivities:
         # Negate to account for load-convention sign, then scale by step size.
         # Shunts are constant-susceptance: Q_shunt = B * V².
         V_pu = self.net.res_bus.at[shunt_bus_idx, 'vm_pu']
-        dI_dQ_shunt = -dI_dQ[:, 0] * q_step_mvar * V_pu ** 2
+        dI_dQ_shunt = (-dI_dQ[:, 0] * q_step_mvar * V_pu ** 2
+                       * self.shunt_step_sign(shunt_bus_idx))
 
         return dI_dQ_shunt, line_map
 
@@ -2502,6 +2535,7 @@ class JacobianSensitivities:
             -self.compute_dQtrafo3w_hv_dQ_der(trafo3w_idx, shunt_bus_idx)
             * q_step_mvar
             * V_pu ** 2
+            * self.shunt_step_sign(shunt_bus_idx)
         )
 
     def compute_dQtrafo3w_hv_dVgen(
@@ -3095,8 +3129,11 @@ class JacobianSensitivities:
             V_pu = float(self.net.res_bus.at[shunt_bus, 'vm_pu'])
             if not np.isfinite(V_pu):
                 continue  # de-energised shunt bus: zero column, not NaN
-            # Shunt Q is load-convention: negate for injection sign.
-            matrix[:, j] = -base_matrix[:, j] * shunt_q_steps_mvar[j] * V_pu**2
+            # Shunt Q is load-convention: negate for injection sign, and
+            # the device's own sign turns the nameplate magnitude into its
+            # signed step (see shunt_step_sign).
+            matrix[:, j] = (-base_matrix[:, j] * shunt_q_steps_mvar[j] * V_pu**2
+                            * self.shunt_step_sign(shunt_bus))
 
         return matrix, list(gen_bus_indices_pp), list(shunt_bus_indices)
 
@@ -3425,10 +3462,14 @@ class JacobianSensitivities:
                 dQtr2w_col = np.zeros(n_trafo2w_out)
                 for i, mt in enumerate(trafo_map):
                     try:
-                        # Negate for shunt load-convention sign
-                        dQtr2w_col[i] = -self.compute_dQtrafo_dQder_2w(
-                            trafo_idx=mt, der_bus_idx=shunt_bus
-                        ) * q_step * V_pu_shunt ** 2
+                        # Negate for shunt load-convention sign, times
+                        # the device's own step direction.
+                        dQtr2w_col[i] = (
+                            -self.compute_dQtrafo_dQder_2w(
+                                trafo_idx=mt, der_bus_idx=shunt_bus
+                            ) * q_step * V_pu_shunt ** 2
+                            * self.shunt_step_sign(shunt_bus)
+                        )
                     except ValueError:
                         dQtr2w_col[i] = 0.0
                 # 3W trafo Q_HV w.r.t. shunt

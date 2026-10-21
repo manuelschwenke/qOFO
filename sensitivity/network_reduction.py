@@ -906,12 +906,17 @@ def build_tso_local_net(
             # operating point.
             plant_shunt_mask = net.shunt["bus"] == int(tert_bus)
             cached_step = 0
+            # The synthetic device stands in for the plant device, so it copies
+            # the plant's signed q_mvar: a capacitor (q_mvar < 0) must inject
+            # here too, while ``q_step`` from the zone configuration is an
+            # unsigned magnitude.
+            q_mvar_signed = float(q_step)
             if plant_shunt_mask.any():
-                cached_step = int(
-                    net.shunt.at[net.shunt.index[plant_shunt_mask][0], "step"]
-                )
+                plant_shunt_idx = net.shunt.index[plant_shunt_mask][0]
+                cached_step = int(net.shunt.at[plant_shunt_idx, "step"])
+                q_mvar_signed = float(net.shunt.at[plant_shunt_idx, "q_mvar"])
             pp.create_shunt(
-                sub, bus=int(primary), q_mvar=q_step, p_mw=0.0,
+                sub, bus=int(primary), q_mvar=q_mvar_signed, p_mw=0.0,
                 step=cached_step, max_step=10,
                 name="SYNTH_TSO_TERTIARY_SHUNT",
             )

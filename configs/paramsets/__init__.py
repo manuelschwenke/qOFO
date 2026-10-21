@@ -95,6 +95,25 @@ def _coerce(field_name: str, value: Any) -> Any:
     return value
 
 
+#: Fields that a stored parameter set may still name although the config no
+#: longer has them.  A parameter set is the record of what a controller was, so
+#: the files are not rewritten when a parameter is retired; the loader ignores
+#: these and says so, while any other unknown key is still a hard error (it is
+#: almost always a typo).
+#:
+#: Retired 2026-10-22 with the switched-shunt supervisory layer: the
+#: integrating dispatcher that owned them is gone, and the kept law prices a
+#: bank step with ``g_w_tso_shunt`` inside the MIQP.
+RETIRED_FIELDS: frozenset[str] = frozenset({
+    "shunt_int_g_w",
+    "shunt_int_delta_mvar",
+    "shunt_int_gradient_deadband",
+    "shunt_int_daily_budget",
+    "shunt_int_t_persistence_s",
+    "shunt_int_drive",
+})
+
+
 def apply_paramset(cfg, name: str, *, verbose: bool = True):
     """Return ``cfg`` with the named parameter set applied.
 
@@ -107,16 +126,22 @@ def apply_paramset(cfg, name: str, *, verbose: bool = True):
     doc = load_paramset(name)
     fields = doc["fields"]
     known = {f.name for f in dataclasses.fields(cfg)}
-    unknown = sorted(set(fields) - known)
+    retired = sorted(set(fields) & RETIRED_FIELDS - known)
+    unknown = sorted(set(fields) - known - RETIRED_FIELDS)
     if unknown:
         raise SystemExit(
             f"parameter set {name!r}: not MultiTSOConfig fields: "
             f"{', '.join(unknown)}")
-    overlay = {k: _coerce(k, v) for k, v in fields.items()}
+    overlay = {k: _coerce(k, v) for k, v in fields.items() if k in known}
     out = dataclasses.replace(cfg, **overlay)
     if verbose:
         title = doc.get("title", name)
         print(f"[paramset] {name}: {title}")
         print(f"[paramset] {len(overlay)} field(s) overridden: "
               f"{', '.join(sorted(overlay))}")
+    if retired:
+        # The file stays the record of what that controller was; the parameter
+        # itself no longer exists, so it cannot be applied.
+        print(f"[paramset] {name}: ignoring retired field(s): "
+              f"{', '.join(retired)}")
     return out

@@ -879,10 +879,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="With --design: write the result to "
                         "configs/paramsets/NAME.json with full provenance. "
                         "Refuses to overwrite an existing file.")
-    p.add_argument("--shunt-int-g-w", type=float, default=0.03,
-                   help="With --design: carried into the written parameter "
-                        "set. It sits in the gauge-invariance group with the "
-                        "nine weights, so it must travel with them.")
+    p.add_argument("--g-w-tso-shunt", type=float, default=10.0,
+                   help="With --design: the switched-shunt step price carried "
+                        "into the written parameter set. It sits in the "
+                        "gauge-invariance group with the nine weights, so it "
+                        "must travel with them. Default 10 (2026-10-21 "
+                        "campaign; 10 and 20 gave identical trajectories).")
     p.add_argument("--d-engage-ts", type=float, default=0.010,
                    help="With --design: systematic voltage deviation [pu] at "
                         "which the strongest TS tap column commits (commit "
@@ -983,7 +985,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if design_report is None:
             p.error("--write-paramset requires --design")
         _write_design_paramset(args.write_paramset, weights, design_report,
-                               base, rows, float(args.shunt_int_g_w),
+                               base, rows, float(args.g_w_tso_shunt),
                                [r[0] for r in rows_wanted])
 
     return 0 if worst(rows).lambda_max <= screen_ceiling() else 2
@@ -991,7 +993,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 def _write_design_paramset(name: str, weights: Dict[str, float],
                            report: Dict[str, Any], base_cfg,
-                           rows: Sequence[Any], shunt_int_g_w: float,
+                           rows: Sequence[Any], g_w_tso_shunt: float,
                            conditions: Sequence[str]) -> None:
     """Persist an analytic design point as a parameter set, with provenance.
 
@@ -1012,7 +1014,7 @@ def _write_design_paramset(name: str, weights: Dict[str, float],
     der = dict(getattr(base_cfg, "dso_der_scale", None) or {})
     load_p = dict(getattr(base_cfg, "dso_load_p_scale", None) or {})
     fields = dict(weights)
-    fields["shunt_int_g_w"] = float(shunt_int_g_w)
+    fields["g_w_tso_shunt"] = float(g_w_tso_shunt)
 
     doc = {
         "name": name,

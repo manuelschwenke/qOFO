@@ -357,17 +357,14 @@ class MultiTSOIterationRecord:
     # Per-zone TSO shunt states (MSC/MSR tap positions; empty array if none).
     zone_tso_shunt_states: Dict[int, NDArray] = field(default_factory=dict)
     zone_tso_shunt_g_h: Dict[int, NDArray] = field(default_factory=dict)
-    """Per-zone array of the projected objective gradient ``g_H`` fed to each
-    switched-shunt bank's integrator (``controller.shunt_integrator``), in the
-    bank order of ``zone_tso_shunt_states``.  Written only on TSO iterations of
-    the integrator mode; empty otherwise.  Added 2026-10-16 to measure the p90
-    boundary pressure that sets ``shunt_int_g_w`` (protocol D2b); the earlier
-    reference value 0.133 was not recorded with its procedure."""
-    zone_tso_shunt_drive: Dict[int, NDArray] = field(default_factory=dict)
-    """Actual gradient supplied to the bank, including optional STS support."""
-    zone_tso_shunt_request_kind: Dict[int, List[str]] = field(default_factory=dict)
+    """Per-zone array of the objective gradient along each bank's column,
+    ``∇_y f ᵀ H[:, j] / q_step`` [1/Mvar], in the bank order of
+    ``zone_tso_shunt_states``.  Written on every TSO iteration that dispatches
+    banks.  This is the quantity the step price ``g_w_tso_shunt`` is read
+    against: an isolated one-level step lowers the objective iff
+    ``|g_H · q_step| > g_w_tso_shunt``."""
     shunt_commits: List[Dict[str, Any]] = field(default_factory=list)
-    """Committed bank, reason, interface contribution and delegated transfer."""
+    """Committed bank, direction, new level and interface contribution."""
 
     # Per-HV-group line loading stats and balance aggregates.
     dso_group_i_max_pct:    Dict[str, float] = field(default_factory=dict)

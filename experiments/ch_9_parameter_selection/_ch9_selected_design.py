@@ -253,7 +253,7 @@ if __name__ == "__main__":
     print(f"\ntso_period_s={cfg.tso_period_s} dso_period_s={cfg.dso_period_s} "
           f"dt_s={cfg.dt_s} scenario={cfg.scenario}")
     print(f"shunts={cfg.install_tso_tertiary_shunts}/{cfg.shunt_dispatch} "
-          f"shunt_int_g_w={cfg.shunt_int_g_w} "
+          f"g_w_tso_shunt={cfg.g_w_tso_shunt} "
           f"boundary={cfg.tie_boundary_equivalent} "
           f"local_sens={cfg.local_sensitivities_tso}/"
           f"{cfg.local_sensitivities_dso}")

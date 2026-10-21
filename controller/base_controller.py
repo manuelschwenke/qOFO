@@ -24,7 +24,7 @@ Date: 2025-02-06
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, List, Tuple, Dict, Mapping, Union
 import numpy as np
 from numpy.typing import NDArray
@@ -581,7 +581,19 @@ class BaseOFOController(ABC):
             g_u_vector=g_u_vector,
         )
 
-        result = self.solver.solve(problem)
+        # Optional per-controller restrictions. The TSO's switched-shunt law
+        # uses them to allow at most one bank step per solve and to make the
+        # predicted voltage corridor hard; see
+        # TSOController._solver_restrictions.
+        restrictions = self._solver_restrictions(problem)
+        result = self.solver.solve(
+            replace(problem, **restrictions) if restrictions else problem)
+
+        if not result.is_feasible and restrictions:
+            # An unavoidable voltage violation must not block the ordinary
+            # recovery action: retry with the restricted actuators held at
+            # their current value and the corridor soft again.
+            result = self.solver.solve(self._hold_restricted(problem, restrictions))
 
         if not result.is_feasible:
             raise RuntimeError(
@@ -1014,6 +1026,30 @@ class BaseOFOController(ABC):
         g_u_vec[:n_der] = g_u_base * mapping.weights
 
         return g_w_vec, g_u_vec
+
+    def _solver_restrictions(self, problem: MIQPProblem) -> Dict[str, object]:
+        """Extra ``MIQPProblem`` fields for this controller, or an empty dict.
+
+        Overridden by :class:`controller.tso_controller.TSOController` for the
+        switched-shunt law. Returning a dict keeps the restriction visible in
+        the problem the solver receives rather than hidden inside the solver.
+        """
+        return {}
+
+    @staticmethod
+    def _hold_restricted(problem: MIQPProblem,
+                         restrictions: Dict[str, object]) -> MIQPProblem:
+        """The same problem with the one-step variables pinned, no hard rows.
+
+        Used when the restrictions make the problem infeasible: the ordinary
+        actuators must still be dispatched, so only the restricted actuators
+        are held.
+        """
+        u_lower = problem.u_lower.copy()
+        u_upper = problem.u_upper.copy()
+        for i in restrictions.get("one_step_indices", ()):  # type: ignore[union-attr]
+            u_lower[i] = u_upper[i] = problem.u_current[i]
+        return replace(problem, u_lower=u_lower, u_upper=u_upper)
 
     def _get_per_variable_weights(
         self,

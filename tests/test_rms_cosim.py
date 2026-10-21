@@ -214,7 +214,7 @@ def test_gate_e_summary_blocks_non_equivalent_qv_plant(tmp_path):
     config = SimpleNamespace(
         coordination_mode="sbx",
         install_tso_tertiary_shunts=True,
-        shunt_dispatch="integrator",
+        shunt_dispatch="miqp",
     )
     plant = SimpleNamespace(
         t=20.0,

@@ -162,7 +162,8 @@ class Limits:
     #
     # It is a scope statement with teeth, because the numbers are not small.
     # Measured on ``results/THESIS_ch9_3_shunt_live`` at the selected weights
-    # (12 h per window, ``shunt_int_g_w = 0.03``)::
+    # (12 h per window; the shunt price was then the retired
+    # ``shunt_int_g_w = 0.03``)::
     #
     #     window     W1   W2   W3   W4    W5   W6
     #     commits     8   12   17   49   112   15

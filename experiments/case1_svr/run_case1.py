@@ -80,7 +80,7 @@ HORIZON_MIN = 360
 #: thesis ``tab:svr:pilots``.
 PILOT_BUSES: Dict[int, int] = {1: 25, 2: 7, 3: 20}
 
-#: Switched shunts off below O2: the ShuntIntegrator only runs where a TSO OFO
+#: Switched shunts off below O2: a bank is only dispatched where the TSO MIQP
 #: runs, so leaving them installed would switch a discrete device class on in
 #: O1 but not in S1 (see the ladder script for the full record).
 _NO_SHUNTS = dict(install_tso_tertiary_shunts=False, shunt_dispatch="off")

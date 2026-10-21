@@ -291,9 +291,8 @@ def make_config() -> MultiTSOConfig:
         zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},
         # -- TSO tertiary shunts (MSC/MSR) -----------------------------------
         install_tso_tertiary_shunts=True,
-        shunt_dispatch="integrator",
+        shunt_dispatch="miqp",
         # step = g_H/(2*g_w); SMALLER = bigger step -- TUNE THIS.
-        shunt_int_g_w=10,
         # -- Diagnostics -----------------------------------------------------
         live_plot_controller=True,
         live_plot_cascade=True,

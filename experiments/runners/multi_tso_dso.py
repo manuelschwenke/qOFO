@@ -72,10 +72,7 @@ from controller.central_controller import CentralControllerConfig, CentralOFOCon
 from controller.dso_controller import DSOController, DSOControllerConfig
 from controller.multi_tso_coordinator import MultiTSOCoordinator, ZoneDefinition
 from controller.tso_controller import TSOController, TSOControllerConfig
-from controller.shunt_integrator import ShuntBankConfig, ShuntIntegrator
-from controller.shunt_support import (
-    STSFeedbackTracker, STSShuntSupportConfig, support_request,
-)
+from controller.shunt_integrator import ShuntBank, ShuntBankConfig, make_bank
 from core.actuator_bounds import (
     ActuatorBounds,
     GeneratorParameters,
@@ -134,8 +131,6 @@ from core.plant import (
 )
 from sensitivity.jacobian import JacobianSensitivities
 from sensitivity.sensitivity_updater import bank_voltage_ratio
-from controller.shunt_hybrid import HybridShuntSolver
-from experiments.helpers.shunt_hybrid import build_hybrid_context
 from sensitivity.network_reduction import (
     build_dso_local_net,
     build_tso_local_net,
@@ -530,11 +525,13 @@ def run_multi_tso_dso(
     # sets ``install_tso_tertiary_shunts=True`` (leaving shunt_dispatch at its
     # 'off' default) is treated as the legacy MIQP-dispatched bipolar bank.
     config.validate_integrator_mode()
+    # ``shunt_dispatch`` decides whether the banks are dispatched; the device
+    # family is ``tso_shunt_kind``, so 'off' still installs the banks and leaves
+    # them held (the reference arm of the 2026-10-21 comparison).  Until
+    # 2026-10-22 an ``install_tso_tertiary_shunts`` build silently implied
+    # dispatch; it now has to be asked for.
     _shunt_mode = config.shunt_dispatch
-    if _shunt_mode == "off" and config.install_tso_tertiary_shunts:
-        _shunt_mode = "miqp"
-
-    if _shunt_mode in ("integrator", "hybrid"):
+    if config.install_tso_tertiary_shunts and config.tso_shunt_kind == "msc_msr":
         meta = add_hv_networks(
             net, meta,
             install_tso_tertiary_shunts=True,
@@ -922,10 +919,10 @@ def run_multi_tso_dso(
     # (see meta.tso_tertiary_shunt_zones, populated by add_hv_networks).  The
     # DSO controllers are blind to these shunts; the bus indices flow into
     # ZoneDefinition.shunt_bus_indices and from there into TSOControllerConfig.
-    # Only the legacy MIQP path puts shunt buses into the TSO control vector.
-    # In 'integrator' mode the banks are driven by the separate ShuntIntegrator
-    # (built below) and must NOT appear as MIQP integers, so the per-zone shunt
-    # lists are left empty (→ TSOControllerConfig.shunt_bus_indices == []).
+    # Under ``shunt_dispatch='miqp'`` the bank levels are integer variables of
+    # the zone MIQP, so their buses enter the TSO control vector here.  Under
+    # 'off' the lists stay empty: the devices are installed in the plant but
+    # held at their initial level.
     zone_shunt_buses:  Dict[int, List[int]]   = {z: [] for z in zone_map}
     zone_shunt_qsteps: Dict[int, List[float]] = {z: [] for z in zone_map}
     if _shunt_mode == "miqp":
@@ -2702,14 +2699,7 @@ def run_multi_tso_dso(
             tie_line_pairs=sorted(tie_line_map.keys()),
             n_oltc_per_zone={z: len(zd.oltc_trafo_indices) for z, zd in zone_defs.items()},
             n_shunt_per_zone={
-                # In integrator mode the banks are dispatched outside the MIQP,
-                # so zd.shunt_bus_indices is empty; count the integrator banks
-                # owned by the zone from meta instead.
-                z: (
-                    sum(1 for sz in meta.tso_tertiary_shunt_zones if sz == z)
-                    if _shunt_mode in ("integrator", "hybrid")
-                    else len(getattr(zd, "shunt_bus_indices", []) or [])
-                )
+                z: len(getattr(zd, "shunt_bus_indices", []) or [])
                 for z, zd in zone_defs.items()
             },
             v_setpoint_pu=config.v_setpoint_pu,
@@ -3257,27 +3247,16 @@ def run_multi_tso_dso(
                 print("[pre_loop_hook] returned truthy -- skipping main loop.")
             return []
 
-    # ── Build per-zone switched-shunt integrators (integrator mode only) ──────
-    # Each MSC / MSR bank is dispatched by the integrating mechanism OUTSIDE the
-    # MIQP.  ``q_itf_sh_offset`` is the persistent per-interface feedforward
-    # offset [Mvar] added to the Q_PCC setpoints sent to the DSO, so the DSO
-    # does not counteract a committed switch (it then rejects only the residual).
-    zone_integrators: Dict[int, ShuntIntegrator] = {}
+    # ── Build the per-zone switched-shunt banks ───────────────────────────────
+    # The banks hold the committed level, the holding clock and the predicted-
+    # voltage guard; the dispatch decision itself is the zone MIQP's, which sees
+    # the level as an integer variable.  ``q_itf_sh_offset`` is the persistent
+    # per-interface feedforward offset [Mvar] added to the Q_PCC setpoints sent
+    # to the DSO, so the DSO does not counteract a committed switch (it then
+    # rejects only the residual).
+    zone_banks: Dict[int, List[ShuntBank]] = {}
     q_itf_sh_offset: Dict[int, float] = {}
-    sts_shunt_feedback = {}
-    sts_feedback_trackers = {}
-    sts_support_config = None
-    if config.shunt_sts_support:
-        sts_support_config = STSShuntSupportConfig(
-            tracking_weight=config.shunt_sts_tracking_weight,
-            reserve_weight=config.shunt_sts_reserve_weight,
-            tracking_deadband_mvar=config.shunt_sts_tracking_deadband_mvar,
-            tracking_scale_mvar=config.shunt_sts_tracking_scale_mvar,
-            reserve_start=config.shunt_sts_reserve_start,
-            response_wait_s=config.shunt_sts_response_wait_s,
-            max_feedback_age_s=1.5 * config.dso_period_s,
-        )
-    if _shunt_mode in ("integrator", "hybrid"):
+    if _shunt_mode == "miqp":
         _banks_by_zone: Dict[int, List[ShuntBankConfig]] = {z: [] for z in zone_defs}
         for sh_idx, sb, q_step, sz, kind, nlev in zip(
             meta.tso_tertiary_shunt_indices,
@@ -3317,46 +3296,40 @@ def run_multi_tso_dso(
                     kind=str(kind),
                     q_step_mvar=float(q_step),
                     n_levels=int(nlev),
-                    g_w=float(config.shunt_int_g_w),
-                    delta=float(config.shunt_int_delta_mvar),
                     t_dwell_s=float(config.shunt_int_t_dwell_s),
-                    daily_switch_budget=int(config.shunt_int_daily_budget),
                     y_h_min=float(config.shunt_int_v_min_pu),
                     y_h_max=float(config.shunt_int_v_max_pu),
-                    t_persistence_s=float(config.shunt_int_t_persistence_s),
-                    gradient_deadband=float(config.shunt_int_gradient_deadband),
-                    max_sample_gap_s=1.5 * float(config.tso_period_s),
                 )
             )
             q_itf_sh_offset.setdefault(interface_t3w, 0.0)
         for z_b, bclist in _banks_by_zone.items():
-            if bclist:
-                zone_integrators[z_b] = ShuntIntegrator.from_configs(bclist)
+            if not bclist:
+                continue
+            # The MIQP addresses a bank by its bus (the control vector is built
+            # from ``shunt_bus_indices``), so two banks on one tertiary would be
+            # indistinguishable there — and in the bus-keyed sensitivity
+            # queries.  Default layout: MSC and MSR on different couplers.
+            buses_b = [bc.bus_idx for bc in bclist]
+            if len(set(buses_b)) != len(buses_b):
+                raise ValueError(
+                    f"Zone {z_b} has two switched-shunt banks on one tertiary "
+                    f"bus {buses_b}; in-MIQP dispatch addresses banks by bus. "
+                    f"Use different tso_shunt_msc_coupling_pos / "
+                    f"tso_shunt_msr_coupling_pos."
+                )
+            # The bank order must match the zone's control vector, which is
+            # built from the same meta iteration order.
+            if buses_b != [int(b) for b in zone_defs[z_b].shunt_bus_indices]:
+                raise ValueError(
+                    f"Zone {z_b} bank order {buses_b} does not match the "
+                    f"control vector "
+                    f"{list(zone_defs[z_b].shunt_bus_indices)}"
+                )
+            zone_banks[z_b] = [make_bank(bc) for bc in bclist]
         if verbose >= 1:
-            _n_banks = sum(len(i.banks) for i in zone_integrators.values())
-            print(f"  [shunt-integrator] built {_n_banks} MSC/MSR banks "
-                  f"across {len(zone_integrators)} zone(s).")
-
-    hybrid_solvers = {}
-    hybrid_clock = {"time_s": 0.0}
-    if _shunt_mode == "hybrid":
-        for z, integ in zone_integrators.items():
-            ctrl = tso_controllers[z]
-            provider = lambda z=z: build_hybrid_context(
-                tso_controllers[z], zone_integrators[z].banks, dso_controllers,
-                sts_shunt_feedback, q_itf_sh_offset, hybrid_clock["time_s"],
-                config.shunt_int_v_rescale)
-            adapter = HybridShuntSolver(ctrl.solver, provider,
-                movement_weight=config.g_w_tso_shunt,
-                support_config=sts_support_config,
-                voltage_error_allowance_pu=config.shunt_hybrid_voltage_error_allowance_pu,
-                support_gate=config.shunt_hybrid_support_gate,
-                support_exchange=config.shunt_hybrid_support_exchange,
-                ts_reserve_weight=config.shunt_ts_reserve_weight,
-                ts_reserve_margin_steps=config.shunt_ts_reserve_margin_steps,
-                regular_confirmations=config.shunt_hybrid_regular_confirmations)
-            ctrl.solver = adapter
-            hybrid_solvers[z] = adapter
+            _n_banks = sum(len(b) for b in zone_banks.values())
+            print(f"  [shunt] {_n_banks} MSC/MSR bank(s) across "
+                  f"{len(zone_banks)} zone(s), dispatched in the MIQP.")
 
     # Features below that still act on ``net`` directly (recovery ladders
     # included) are only correct for the quasi-static plant; fail fast for
@@ -3957,7 +3930,22 @@ def run_multi_tso_dso(
                             n_der_z:n_der_z + n_pcc_z
                         ].copy()
 
-            hybrid_clock["time_s"] = time_s
+            # ── Switched-shunt bank state → the zone MIQPs ────────────
+            # The bounds carry the device's own restrictions, so a bank inside
+            # its holding time or at a level limit cannot be selected at all,
+            # and the guard band makes the predicted voltage corridor hard.
+            for z_b, banks_b in zone_banks.items():
+                lower_b, upper_b = [], []
+                for bank_b in banks_b:
+                    directions_b = bank_b.available_directions(time_s)
+                    lower_b.append(bank_b.level + min([0] + directions_b))
+                    upper_b.append(bank_b.level + max([0] + directions_b))
+                tso_controllers[z_b].set_shunt_bank_state(
+                    lower_b, upper_b,
+                    (max(b.config.y_h_min for b in banks_b),
+                     min(b.config.y_h_max for b in banks_b)),
+                )
+
             # Run decentralised TSO step for all zones
             tso_outputs = coordinator.step(
                 measurements,
@@ -4073,6 +4061,24 @@ def run_multi_tso_dso(
                 diag = coordinator.last_coupling_diagnostics.get(z, {})
                 rec.zone_contraction_lhs[z] = diag.get("contraction_lhs", float("nan"))
 
+                # ── Bank gradient diagnostic ──────────────────────────────
+                # ``g_H`` along each bank column, per Mvar of nameplate step:
+                # the quantity the step price is read against, recorded on
+                # every iteration so the price can be re-derived offline from
+                # a run (tuning/shunt_weight_calibration.py).
+                if n_shunt > 0:
+                    ctrl_g = tso_controllers[z]
+                    H_g = getattr(ctrl_g, "_H_cache", None)
+                    meas_g = getattr(ctrl_g, "_last_measurement", None)
+                    if H_g is not None and meas_g is not None:
+                        grad_y_g = ctrl_g._compute_output_gradient(meas_g)
+                        col_g = n_der + n_pcc + n_gen + n_oltc
+                        rec.zone_tso_shunt_g_h[z] = np.array([
+                            float(grad_y_g @ H_g[:, col_g + k_g])
+                            / float(zone_defs[z].shunt_q_steps_mvar[k_g])
+                            for k_g in range(n_shunt)
+                        ], dtype=np.float64)
+
                 # ── TSO-owned shunt switching: detect and propagate ───────
                 # When the MIQP switches a shunt step, apply a rank-1 SMW
                 # update to the TSO's own cached J⁻¹ (no pp.runpp), drop
@@ -4186,6 +4192,79 @@ def run_multi_tso_dso(
                             if any_smw:
                                 tso_ctrl_z.invalidate_sensitivity_cache()
 
+                        # ── Commit the selected level change(s) ───────
+                        # The plant was toggled by ``writes_from_zone_tso``
+                        # above; this advances the bank's holding clock and
+                        # steps the DSO interface feedforward, in the same
+                        # instant and without a power flow.  At most one bank
+                        # per zone can appear here, because the MIQP is given a
+                        # one-step restriction over the whole bank block.
+                        for sb, s_new, k_sh in changed:
+                            bank_c = zone_banks[z][k_sh]
+                            if bank_c.config.bus_idx != int(sb):
+                                raise ValueError(
+                                    f"Bank order mismatch in zone {z}: bank "
+                                    f"{k_sh} is at bus "
+                                    f"{bank_c.config.bus_idx}, not {sb}"
+                                )
+                            direction_c = int(s_new) - int(prev_shunt_steps[k_sh])
+                            commit = bank_c.commit_selected(direction_c, time_s)
+                            # The feedforward comes from the DSO's OWN 3W model
+                            # at the current (pre-switch) operating point: it is
+                            # added to the setpoint that DSO tracks, so it has
+                            # to be expressed in that controller's own view of
+                            # the interface.
+                            dso_ctrl_c = dso_controllers.get(commit.dso_id)
+                            dq_itf = 0.0
+                            if dso_ctrl_c is not None:
+                                # The per-step injection inside the query is
+                                # evaluated at the DSO model's cached V_0; r_c
+                                # brings it to the tertiary voltage measured at
+                                # this instant.
+                                r_c = 1.0
+                                if (config.shunt_int_v_rescale
+                                        and last_meas is not None):
+                                    r_c = bank_voltage_ratio(
+                                        last_meas,
+                                        dso_ctrl_c.sensitivities.net,
+                                        commit.bus_idx,
+                                    )
+                                dq_itf = float(
+                                    dso_ctrl_c.sensitivities
+                                    .compute_dQtrafo3w_hv_dQ_shunt(
+                                        trafo3w_idx=commit.interface_trafo3w_idx,
+                                        shunt_bus_idx=commit.bus_idx,
+                                        q_step_mvar=commit.q_step_mvar,
+                                    )
+                                ) * float(commit.direction) * r_c
+                            if not np.isfinite(dq_itf):
+                                raise ValueError(
+                                    f"dQ_itf_sh not finite for {commit.kind} "
+                                    f"commit at bus {commit.bus_idx} "
+                                    f"(interface "
+                                    f"{commit.interface_trafo3w_idx})"
+                                )
+                            key_c = int(commit.interface_trafo3w_idx)
+                            q_itf_sh_offset[key_c] = (
+                                q_itf_sh_offset.get(key_c, 0.0) + dq_itf
+                            )
+                            rec.shunt_commits.append({
+                                "zone": z, "shunt_idx": commit.shunt_idx,
+                                "dso_id": commit.dso_id, "kind": commit.kind,
+                                "direction": commit.direction,
+                                "new_level": commit.new_level,
+                                "interface_indices": [key_c],
+                                "delta_q_mvar": [dq_itf],
+                            })
+                            if verbose >= 1:
+                                print(
+                                    f"  [shunt-commit z{z}] {commit.kind} "
+                                    f"bus={commit.bus_idx} ℓ "
+                                    f"{commit.old_level}→{commit.new_level} "
+                                    f"(Δ={commit.direction:+d})  "
+                                    f"dQ_itf={dq_itf:+.2f} Mvar"
+                                )
+
                         # Dispatch a per-DSO ShuntDisturbanceMessage so each
                         # affected DSO updates its own cached J⁻¹.
                         per_dso: Dict[str, List[Tuple[int, int, float]]] = {}
@@ -4217,309 +4296,6 @@ def run_multi_tso_dso(
                             )
                             dso_ctrl_aff.receive_disturbance_message(msg)
 
-            if _shunt_mode == "hybrid":
-                for z, adapter in hybrid_solvers.items():
-                    rec.zone_tso_shunt_hybrid[z] = adapter.diagnostics.copy()
-                    ctx = adapter.last_context
-                    rec.zone_tso_shunt_g_h[z] = np.array([
-                        float(ctx.output_gradient @ m.output_step)/m.bank.config.q_step_mvar
-                        for m in ctx.models])
-                    selected = adapter.take_commit()
-                    if selected is None:
-                        continue
-                    commit, interface_ids, delta_q = selected
-                    # The selected bank and ordinary controls were optimised
-                    # together. A support solution already contains the
-                    # delegated-request reduction, so it must not be applied twice.
-                    plant.apply_u(ActuatorWrites(shunt_step={
-                        int(commit.shunt_idx): int(commit.pp_step_new)}))
-                    for interface_id, dq in zip(interface_ids, delta_q):
-                        key = int(interface_id)
-                        q_itf_sh_offset[key] = q_itf_sh_offset.get(key, 0.0)+float(dq)
-                    sts_shunt_feedback.pop(commit.dso_id, None)
-                    ctrl = tso_controllers[z]
-                    if ctrl.sensitivities.apply_shunt_step_change_smw(
-                            commit.bus_idx, commit.pp_step_new, shunt_idx=commit.shunt_idx):
-                        ctrl.invalidate_sensitivity_cache()
-                    dso_controllers[commit.dso_id].receive_disturbance_message(
-                        ShuntDisturbanceMessage(
-                            source_controller_id=ctrl.controller_id,
-                            target_controller_id=commit.dso_id, iteration=step,
-                            shunt_bus_indices=np.array([commit.bus_idx], dtype=np.int64),
-                            shunt_steps=np.array([commit.pp_step_new], dtype=np.int64),
-                            shunt_q_steps_mvar=np.array([commit.q_step_mvar]),
-                            shunt_indices=np.array([commit.shunt_idx], dtype=np.int64)))
-                    rec.shunt_commits.append({
-                        "zone": z, "shunt_idx": commit.shunt_idx, "dso_id": commit.dso_id,
-                        "kind": commit.kind, "reason": commit.request_kind,
-                        "direction": commit.direction, "new_level": commit.new_level,
-                        "interface_indices": interface_ids.tolist(),
-                        "delta_q_mvar": delta_q.tolist(),
-                        "delegated_delta_q_mvar": (
-                            (-delta_q).tolist() if commit.request_kind != "objective"
-                            else np.zeros_like(delta_q).tolist())})
-
-            # ── Switched-shunt integrator dispatch (integrator mode) ──────────
-            # Runs on the SAME measurement / cached operating point the MIQP used
-            # this TSO instant, OUTSIDE the MIQP.  Each commit is applied
-            # atomically in this instant: physical toggle (plant) + DSO interface
-            # feedforward + rank-1 SMW refresh of the TSO and DSO cached Jacobians
-            # (NO power flow).  The three nets (plant, TSO cache, DSO cache) are
-            # independent deep copies, so the toggle and the SMW reads do not
-            # interfere.
-            if _shunt_mode == "integrator":
-                for z_i, integ in zone_integrators.items():
-                    tso_ctrl_i = tso_controllers[z_i]
-                    meas_i = getattr(tso_ctrl_i, "_last_measurement", None)
-                    if meas_i is None:
-                        continue
-                    zd_i = zone_defs[z_i]
-                    n_v_i = len(zd_i.v_bus_indices)
-                    vb_i = list(zd_i.v_bus_indices)
-                    pcc_i = list(zd_i.pcc_trafo_indices)
-                    grad_y_i = tso_ctrl_i._compute_output_gradient(meas_i)
-                    sens_i = tso_ctrl_i.sensitivities
-                    n_pcc_i = len(pcc_i)
-                    n_i_i = len(zd_i.line_indices)
-                    n_gen_i = len(zd_i.gen_indices)
-                    gen_buses_i = list(zd_i.gen_bus_indices)
-                    use_reserve = (config.tso_g_res_sg != 0.0 and n_gen_i > 0)
-
-                    grad_g_list: List[float] = []
-                    objective_grad_list: List[float] = []
-                    request_kinds: List[str] = []
-                    sts_bank_columns = {}
-                    current_interface_targets = {
-                        int(t): float(q) + q_itf_sh_offset.get(int(t), 0.0)
-                        for msg in tso_ctrl_i.generate_setpoint_messages()
-                        for t, q in zip(msg.interface_transformer_indices,
-                                        msg.q_setpoints_mvar)
-                    } if sts_support_config is not None else {}
-                    v_meas_list: List[NDArray[np.float64]] = []
-                    h_v_list: List[NDArray[np.float64]] = []
-                    for bank in integ.banks:
-                        bc = bank.config
-                        sign_b = -1.0 if bc.kind == "MSC" else +1.0
-                        # ── Voltage rescaling (2026-10-14, thesis
-                        # eq:shunt_rescaling): the compute_*_shunt functions
-                        # evaluate the per-step injection q_step·V² at the
-                        # CACHED voltage V_0 of the TSO model; r_b = (V_meas/V_0)²
-                        # at the bank bus brings every part of h_b (voltage,
-                        # Q_PCC, Q_gen) -- and through h_v the overshoot guard --
-                        # to the measured voltage.  config.shunt_int_v_rescale =
-                        # False reproduces runs before 2026-10-14.
-                        r_b = (bank_voltage_ratio(meas_i, sens_i.net, bc.bus_idx)
-                               if config.shunt_int_v_rescale else 1.0)
-                        # ── Voltage term: ∂V/∂Q_eq at the zone's EHV obs buses,
-                        # in physical [pu/Mvar] (compute_dV_dQ_shunt now divides
-                        # by the system base at source).
-                        h_col, obs_map = sens_i.compute_dV_dQ_shunt(
-                            shunt_bus_idx=bc.bus_idx,
-                            observation_bus_indices=vb_i,
-                            q_step_mvar=sign_b,
-                        )
-                        h_col = np.asarray(h_col, dtype=np.float64) * r_b
-                        if h_col.size == 0:
-                            # No voltage coupling from any zone PQ bus this instant.
-                            grad_g_list.append(0.0)
-                            objective_grad_list.append(0.0)
-                            request_kinds.append("objective")
-                            v_meas_list.append(np.array([1.0]))
-                            h_v_list.append(np.array([0.0]))
-                            continue
-                        v_meas_b = np.array([
-                            float(meas_i.voltage_magnitudes_pu[
-                                np.where(meas_i.bus_indices == b)[0][0]
-                            ]) for b in obs_map
-                        ], dtype=np.float64)
-                        if config.shunt_int_t_persistence_s > 0.0:
-                            # Check the combined local MIQP and bank prediction.
-                            # Confirmed mode permits at most one bank per zone.
-                            out_i = tso_outputs.get(z_i)
-                            if out_i is not None:
-                                v_meas_b = np.asarray([
-                                    out_i.y_predicted[vb_i.index(b)] for b in obs_map
-                                ], dtype=np.float64)
-                        grad_v_obs = np.array([
-                            float(grad_y_i[vb_i.index(b)]) for b in obs_map
-                        ], dtype=np.float64)
-                        g_h = float(grad_v_obs @ h_col)
-                        if config.shunt_int_drive == "local_voltage":
-                            # Classic autonomous substation rule: accumulate the
-                            # bank's OWN bus voltage deviation outside a
-                            # deadband, projected on its voltage sensitivity so
-                            # the device sign carried by h_col sets the
-                            # direction (CIGRE CSE 026 §2.6).  Replaces the
-                            # shared-objective drive entirely: no zone target,
-                            # no interface term, no coordination.
-                            _dev = np.asarray(v_meas_b, dtype=np.float64) - float(
-                                config.shunt_local_v_ref_pu)
-                            _db = float(config.shunt_local_v_deadband_pu)
-                            _dev = np.sign(_dev)*np.maximum(np.abs(_dev)-_db, 0.0)
-                            g_h = float(config.shunt_local_g * (_dev @ h_col))
-                        # ── Q_PCC term (dimensionless Mvar/Mvar interface ratio —
-                        # base-independent, no s_base scaling).  Active only when
-                        # the bank's interface is a monitored PCC.
-                        t_if = bc.interface_trafo3w_idx
-                        _local = config.shunt_int_drive == "local_voltage"
-                        if pcc_i and t_if in pcc_i and not _local:
-                            h_qpcc = float(sens_i.compute_dQtrafo3w_hv_dQ_shunt(
-                                trafo3w_idx=t_if, shunt_bus_idx=bc.bus_idx,
-                                q_step_mvar=sign_b,
-                            )) * r_b
-                            g_h += float(grad_y_i[n_v_i + pcc_i.index(t_if)]) * h_qpcc
-                        # ── SG reactive-reserve term: ∂Q_gen/∂Q_eq (dimensionless
-                        # Mvar/Mvar ratio — base-independent).  Lets the reserve
-                        # objective (tso_g_res_sg) drive the bulk shunt to offload
-                        # generator reactive loading on sustained need.  Opt-in via
-                        # tso_g_res_sg != 0.
-                        if use_reserve and not _local:
-                            Hg, _, _ = sens_i.compute_dQgen_dQ_shunt_matrix(
-                                gen_buses_i, [int(bc.bus_idx)], [sign_b],
-                            )
-                            qg0 = n_v_i + n_pcc_i + n_i_i
-                            g_h += float(grad_y_i[qg0:qg0 + n_gen_i] @ Hg[:, 0]) * r_b
-                        objective_grad_list.append(g_h)
-                        request_kind = "objective"
-                        if sts_support_config is not None:
-                            dso_support = dso_controllers[bc.dso_id]
-                            interface_ids = np.asarray(
-                                dso_support.config.interface_trafo_indices, dtype=np.int64)
-                            if any(int(t) not in current_interface_targets for t in interface_ids):
-                                raise ValueError("STS shunt support requires all STS interfaces in its TSO zone")
-                            r_sts = (bank_voltage_ratio(
-                                meas_i, dso_support.sensitivities.net, bc.bus_idx)
-                                if config.shunt_int_v_rescale else 1.0)
-                            h_q_sts = np.asarray([
-                                dso_support.sensitivities.compute_dQtrafo3w_hv_dQ_shunt(
-                                    trafo3w_idx=int(t), shunt_bus_idx=bc.bus_idx,
-                                    q_step_mvar=sign_b,
-                                ) for t in interface_ids
-                            ], dtype=float) * r_sts
-                            sts_bank_columns[bc.shunt_idx] = (interface_ids, h_q_sts)
-                            support = support_request(
-                                sts_shunt_feedback.get(bc.dso_id), h_q=h_q_sts,
-                                q_step_mvar=bc.q_step_mvar, level=bank.level,
-                                n_levels=bc.n_levels, t_now=time_s,
-                                config=sts_support_config,
-                                current_q_requested=np.asarray([
-                                    current_interface_targets[int(t)] for t in interface_ids]),
-                            )
-                            if support is not None:
-                                g_h, request_kind = support.gradient, support.kind
-                        grad_g_list.append(g_h)
-                        request_kinds.append(request_kind)
-                        v_meas_list.append(v_meas_b)
-                        h_v_list.append(h_col)
-
-                    # Boundary pressure per bank, recorded for the p90 that sets
-                    # shunt_int_g_w (2026-10-16, protocol D2b).
-                    rec.zone_tso_shunt_g_h[z_i] = np.asarray(
-                        objective_grad_list, dtype=np.float64)
-                    rec.zone_tso_shunt_drive[z_i] = np.asarray(grad_g_list, dtype=float)
-                    rec.zone_tso_shunt_request_kind[z_i] = request_kinds.copy()
-
-                    commits = integ.update(
-                        grad_g_list, v_meas_list, h_v_list, t_now=time_s,
-                        request_kinds=request_kinds,
-                        max_commits=(1 if config.shunt_int_t_persistence_s > 0.0 else None),
-                    )
-                    for commit in commits:
-                        # (i) Toggle the physical bank (ground truth, plant net).
-                        plant.apply_u(ActuatorWrites(shunt_step={
-                            int(commit.shunt_idx): int(commit.pp_step_new),
-                        }))
-                        # (ii) Step the DSO interface feedforward from the DSO's
-                        #      OWN 3W model at the current (pre-switch) operating
-                        #      point — atomically with the toggle.
-                        dso_ctrl_c = dso_controllers.get(commit.dso_id)
-                        sign_c = -1.0 if commit.kind == "MSC" else +1.0
-                        if dso_ctrl_c is not None:
-                            # Voltage rescaling (2026-10-14): the per-step
-                            # injection inside compute_dQtrafo3w_hv_dQ_shunt is
-                            # evaluated at the DSO model's cached V_0; r_c brings
-                            # it to the tertiary voltage measured at this
-                            # (pre-switch) instant.
-                            r_c = (bank_voltage_ratio(
-                                       meas_i, dso_ctrl_c.sensitivities.net,
-                                       commit.bus_idx)
-                                   if config.shunt_int_v_rescale else 1.0)
-                            dq_itf = float(
-                                dso_ctrl_c.sensitivities.compute_dQtrafo3w_hv_dQ_shunt(
-                                    trafo3w_idx=commit.interface_trafo3w_idx,
-                                    shunt_bus_idx=commit.bus_idx,
-                                    q_step_mvar=sign_c * commit.q_step_mvar,
-                                )
-                            ) * float(commit.direction) * r_c
-                        else:
-                            dq_itf = 0.0
-                        if not np.isfinite(dq_itf):
-                            raise ValueError(
-                                f"dQ_itf_sh not finite for {commit.kind} commit at "
-                                f"bus {commit.bus_idx} (interface "
-                                f"{commit.interface_trafo3w_idx})"
-                            )
-                        if sts_support_config is not None:
-                            interface_ids, h_q_sts = sts_bank_columns[commit.shunt_idx]
-                            delta_q = h_q_sts * (commit.direction * commit.q_step_mvar)
-                            # Every coupled STS interface is shifted, not just
-                            # the transformer which physically hosts the bank.
-                            for interface_id, dq in zip(interface_ids, delta_q):
-                                key = int(interface_id)
-                                q_itf_sh_offset[key] = q_itf_sh_offset.get(key, 0.0) + float(dq)
-                            if commit.request_kind != "objective":
-                                tso_ctrl_i.transfer_pcc_request_to_shunt(interface_ids, delta_q)
-                            sts_shunt_feedback.pop(commit.dso_id, None)
-                        else:
-                            interface_ids = np.array([commit.interface_trafo3w_idx])
-                            delta_q = np.array([dq_itf])
-                            q_itf_sh_offset[int(commit.interface_trafo3w_idx)] = (
-                                q_itf_sh_offset.get(int(commit.interface_trafo3w_idx), 0.0)
-                                + dq_itf
-                            )
-                        rec.shunt_commits.append({
-                            "zone": z_i, "shunt_idx": commit.shunt_idx,
-                            "dso_id": commit.dso_id, "kind": commit.kind,
-                            "reason": commit.request_kind, "direction": commit.direction,
-                            "new_level": commit.new_level,
-                            "interface_indices": interface_ids.tolist(),
-                            "delta_q_mvar": delta_q.tolist(),
-                            "delegated_delta_q_mvar": (
-                                (-delta_q).tolist() if commit.request_kind != "objective"
-                                else np.zeros_like(delta_q).tolist()),
-                        })
-                        # (iii) Refresh the TSO's cached Jacobian (rank-1 SMW, no
-                        #       power flow), then drop its H cache.
-                        if sens_i.apply_shunt_step_change_smw(
-                            commit.bus_idx, commit.pp_step_new,
-                            shunt_idx=commit.shunt_idx,
-                        ):
-                            tso_ctrl_i.invalidate_sensitivity_cache()
-                        # (iv) Tell the DSO (SMW-only refresh, no power flow).
-                        if dso_ctrl_c is not None:
-                            dso_ctrl_c.receive_disturbance_message(
-                                ShuntDisturbanceMessage(
-                                    source_controller_id=tso_ctrl_i.controller_id,
-                                    target_controller_id=commit.dso_id,
-                                    iteration=step,
-                                    shunt_bus_indices=np.array(
-                                        [commit.bus_idx], dtype=np.int64),
-                                    shunt_steps=np.array(
-                                        [commit.pp_step_new], dtype=np.int64),
-                                    shunt_q_steps_mvar=np.array(
-                                        [commit.q_step_mvar], dtype=np.float64),
-                                    shunt_indices=np.array(
-                                        [commit.shunt_idx], dtype=np.int64),
-                                )
-                            )
-                        if verbose >= 1:
-                            print(
-                                f"  [shunt-commit z{z_i}] {commit.kind} "
-                                f"bus={commit.bus_idx} ℓ {commit.old_level}→"
-                                f"{commit.new_level} (Δ={commit.direction:+d})  "
-                                f"dQ_itf={dq_itf:+.2f} Mvar"
-                            )
-
             # TSO sends Q setpoints to DSOs via grouped setpoint messages
             for z, ctrl in tso_controllers.items():
                 for msg in ctrl.generate_setpoint_messages():
@@ -4534,7 +4310,7 @@ def run_multi_tso_dso(
                         # other puts the dispatched value outside the DSO's
                         # reported capability by exactly the offset — the
                         # 2026-08-13 fault.
-                        if _shunt_mode in ("integrator", "hybrid") and q_itf_sh_offset:
+                        if q_itf_sh_offset:
                             q_adj = msg.q_setpoints_mvar.copy()
                             for _ii, _t in enumerate(
                                 msg.interface_transformer_indices
@@ -4642,15 +4418,6 @@ def run_multi_tso_dso(
                     target_controller_id=tso_id,
                     measurement=meas_dso,
                 )
-                if sts_support_config is not None:
-                    tracker = sts_feedback_trackers.setdefault(dso_id, STSFeedbackTracker())
-                    sts_shunt_feedback[dso_id] = tracker.observe(
-                        interface_indices=cap_msg.interface_transformer_indices,
-                        q_measured=dso_ctrl._extract_trafo_reactive_power(meas_dso),
-                        q_requested=dso_ctrl.q_setpoint_mvar,
-                        delta_min=cap_msg.q_min_mvar, delta_max=cap_msg.q_max_mvar,
-                        t_now=time_s,
-                    )
                 # ── Switched-shunt feedforward: shift the capability band ─────
                 # PAIRED WITH the ``q_adj`` block in the TSO setpoint dispatch
                 # below — keep the two together, they must move as one.
@@ -4674,7 +4441,7 @@ def run_multi_tso_dso(
                 # sensitivity model.  With the shift: -57.7 -> +1.7 Mvar, and
                 # the setpoint tracks the reported rail to ~0.1 Mvar.
                 # See 00_daily_log/2026-08-13_capability_open_loop.md.
-                if _shunt_mode in ("integrator", "hybrid") and q_itf_sh_offset:
+                if q_itf_sh_offset:
                     _cap_min = np.asarray(cap_msg.q_min_mvar, dtype=np.float64).copy()
                     _cap_max = np.asarray(cap_msg.q_max_mvar, dtype=np.float64).copy()
                     for _ci, _ct in enumerate(
@@ -5195,24 +4962,6 @@ def run_multi_tso_dso(
                 dso_controllers,
                 dso_group_map,
             )
-        # Integrator mode: the recorder reads zd.shunt_bus_indices (empty here),
-        # so populate the live-plot shunt states from the integrator banks'
-        # committed pandapower steps (read by explicit shunt index — a tertiary
-        # hosts both an MSC and an MSR).  Order matches the bank ordering.
-        if _shunt_mode in ("integrator", "hybrid"):
-            for z_s, integ_s in zone_integrators.items():
-                # Sign the committed step by device class for the live plot,
-                # matching the legacy bipolar convention (+ = inductive/reactor,
-                # - = capacitive): MSR positive, MSC negative.
-                rec.zone_tso_shunt_states[z_s] = np.asarray(
-                    [
-                        int(net.shunt.at[b.config.shunt_idx, "step"])
-                        * (-1 if b.config.kind == "MSC" else 1)
-                        for b in integ_s.banks
-                    ],
-                    dtype=np.int64,
-                )
-
         # ── Print progress ────────────────────────────────────────────────────
         if verbose >= 1 and run_tso:
             min_num = int(time_s / 60)

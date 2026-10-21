@@ -656,6 +656,8 @@ def add_hv_networks(
     msr_n_levels: int = 4,
     msc_q_step_mvar: float = 50.0,
     msr_q_step_mvar: float = 50.0,
+    msc_coupling_pos: int = 1,
+    msr_coupling_pos: int = 0,
     dso_generation_scenario: str | None = None,
     verbose: bool = True,
 ) -> IEEE39NetworkMeta:
@@ -685,6 +687,13 @@ def add_hv_networks(
         IEEE 39-bus network from ``build_ieee39_net()`` (modified in-place).
     meta : IEEE39NetworkMeta
         Existing metadata (replaced with updated copy).
+    msc_coupling_pos, msr_coupling_pos : int
+        ``tso_shunt_kind='msc_msr'`` only: position, in each DSO's list of
+        coupling transformers, of the transformer whose tertiary hosts the
+        MSC / MSR bank.  Default 1 / 0 (since 2026-10-15): MSC at the second
+        coupler, MSR at the first, so each tertiary carries one compensation
+        device.  ``0 / 0`` reproduces the earlier build (both banks on the
+        first tertiary).
     dso_generation_scenario : str, optional
         Installed DER capacity scenario. By default it is inherited from
         ``net["ieee39_scenario"]``; valid values are ``"base_410"`` and
@@ -800,11 +809,15 @@ def add_hv_networks(
         hv_nets.append(hv)
 
     # =====================================================================
-    # 4. TSO-owned bipolar shunts at first tertiary of each DSO
+    # 4. TSO-owned shunts at the coupling-transformer tertiaries of each DSO
     # =====================================================================
-    # One bipolar 50 Mvar shunt per active DSO sub-network at the 20 kV
-    # tertiary bus of the FIRST coupling 3-winding transformer.  These are
-    # TSO actuators (state ∈ {-1, 0, +1}); the DSO controllers see them as
+    # 'bipolar' (legacy): one 50 Mvar shunt per active DSO sub-network at the
+    # 20 kV tertiary bus of the FIRST coupling 3-winding transformer
+    # (state ∈ {-1, 0, +1}).
+    # 'msc_msr': one MSC and one MSR per DSO, each on its own tertiary
+    # (msc_coupling_pos / msr_coupling_pos; default MSC on the second coupler,
+    # MSR on the first -- one compensation device per tertiary, 2026-10-15).
+    # Both kinds are TSO actuators; the DSO controllers see them as
     # disturbances only (DSOControllerConfig.shunt_bus_indices stays []).
     # Installed at step=0 so the operating point is unchanged at build time.
     tso_sh_idx: List[int] = []
@@ -839,16 +852,34 @@ def add_hv_networks(
                 tso_sh_nlev.append(1)
             else:
                 # Integrator-dispatched MSC (capacitor) + MSR (reactor) banks,
-                # both at the same tertiary bus.  Sign convention follows the
-                # pandapower load convention (see test_pp_bipolar_step):
+                # each at the tertiary of the coupler selected by
+                # msc_coupling_pos / msr_coupling_pos.  Until 2026-10-14 both
+                # sat on the first tertiary, where their two independent
+                # integrators energised both together and moved as a 50 Mvar
+                # pair (docs/daily_log/10_2026/
+                # 2026-10-14_shunt_gw_and_msc_msr_sibling_cycle.md).  Sign
+                # convention follows the pandapower load convention (see
+                # test_pp_bipolar_step):
                 #   res_shunt.q = q_mvar · step · V².
                 #   MSC injects Q (raises V)  -> q_mvar < 0, step ∈ {0 … N_C}
                 #   MSR absorbs Q (lowers V)  -> q_mvar > 0, step ∈ {0 … N_R}
-                # The two banks are distinguished downstream by their net.shunt
+                # The banks are distinguished downstream by their net.shunt
                 # index (NOT just the bus), so the SMW refresh and toggle target
-                # the correct device.
+                # the correct device even when both share a bus (pos 0 / 0).
+                # Build order stays MSC, MSR per DSO: the recorder's
+                # zone_tso_shunt_states relies on it.
+                n_cpl = len(hv.coupling_lv_bus_indices)
+                for _pos, _kind in ((msc_coupling_pos, "MSC"),
+                                    (msr_coupling_pos, "MSR")):
+                    if not (0 <= int(_pos) < n_cpl):
+                        raise ValueError(
+                            f"{hv.net_id}: {_kind} coupling position {_pos} "
+                            f"out of range, the DSO has {n_cpl} coupling "
+                            f"transformer(s)")
+                tert_bus_c = int(hv.coupling_lv_bus_indices[int(msc_coupling_pos)])
+                tert_bus_r = int(hv.coupling_lv_bus_indices[int(msr_coupling_pos)])
                 sh_c = pp.create_shunt(
-                    net, bus=tert_bus,
+                    net, bus=tert_bus_c,
                     q_mvar=-float(msc_q_step_mvar),
                     p_mw=0.0, vn_kv=20.0,
                     step=0, max_step=int(msc_n_levels),
@@ -856,14 +887,14 @@ def add_hv_networks(
                     in_service=True,
                 )
                 tso_sh_idx.append(int(sh_c))
-                tso_sh_buses.append(tert_bus)
+                tso_sh_buses.append(tert_bus_c)
                 tso_sh_q.append(float(msc_q_step_mvar))
                 tso_sh_zone.append(int(hv.zone))
                 tso_sh_kind.append("MSC")
                 tso_sh_nlev.append(int(msc_n_levels))
 
                 sh_r = pp.create_shunt(
-                    net, bus=tert_bus,
+                    net, bus=tert_bus_r,
                     q_mvar=+float(msr_q_step_mvar),
                     p_mw=0.0, vn_kv=20.0,
                     step=0, max_step=int(msr_n_levels),
@@ -871,7 +902,7 @@ def add_hv_networks(
                     in_service=True,
                 )
                 tso_sh_idx.append(int(sh_r))
-                tso_sh_buses.append(tert_bus)
+                tso_sh_buses.append(tert_bus_r)
                 tso_sh_q.append(float(msr_q_step_mvar))
                 tso_sh_zone.append(int(hv.zone))
                 tso_sh_kind.append("MSR")

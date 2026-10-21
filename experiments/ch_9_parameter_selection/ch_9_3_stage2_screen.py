@@ -121,9 +121,28 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
     try:
         result, records = run_scenario_with_records(sc, base, MetricScales())
         m = result.metrics
+        # Ranking voltage metric (2026-10-16, protocol D1).  'areamean' is the
+        # RMS over areas of (area-mean V - v_set), the definition of every
+        # campaign before 2026-10-16; 'bus' is the per-bus spatial RMS
+        # (v_rms_ts / v_rms_ds), which is what the thesis text describes and
+        # what the controllers minimise.  Both are always stored; e_v_ts /
+        # e_v_ds carry the one the campaign ranks on.
+        _areamean = (float(getattr(m, "rmsd_v_ts", float("nan"))),
+                     float(getattr(m, "rmsd_v_ds", float("nan"))))
+        _bus = (float(getattr(m, "v_rms_ts", float("nan"))),
+                float(getattr(m, "v_rms_ds", float("nan"))))
+        v_metric = job.get("v_metric", "areamean")
+        if v_metric not in ("areamean", "bus"):
+            raise ValueError(f"v_metric must be 'areamean' or 'bus', got {v_metric!r}")
+        _rank = _bus if v_metric == "bus" else _areamean
         row = {
-            "e_v_ts": float(getattr(m, "rmsd_v_ts", float("nan"))),
-            "e_v_ds": float(getattr(m, "rmsd_v_ds", float("nan"))),
+            "e_v_ts": _rank[0],
+            "e_v_ds": _rank[1],
+            "v_metric": v_metric,
+            "e_v_ts_areamean": _areamean[0],
+            "e_v_ds_areamean": _areamean[1],
+            "e_v_ts_bus": _bus[0],
+            "e_v_ds_bus": _bus[1],
             "e_q": float(getattr(m, "itae_q_pcc", float("nan"))),
             "v_band_excess_ts": float(getattr(m, "v_band_excess_ts", 0.0) or 0.0),
             "v_band_excess_ds": float(getattr(m, "v_band_excess_ds", 0.0) or 0.0),
@@ -207,6 +226,18 @@ def main(argv: List[str] | None = None) -> int:
                         "a limit cycle.")
     p.add_argument("--no-wear-limits", action="store_true",
                    help="Force wear limits off (implied for --hours < 6).")
+    p.add_argument("--v-metric", choices=("areamean", "bus"), default="areamean",
+                   help="Voltage metric the candidates are ranked on. "
+                        "'areamean' (default, every campaign before 2026-10-16): "
+                        "RMS over areas of the area-mean deviation. 'bus': "
+                        "per-bus spatial RMS (v_rms_ts / v_rms_ds), as the "
+                        "thesis text reads; required by the 2026-10-16 "
+                        "protocol (D1). Both are stored either way.")
+    p.add_argument("--span", action="append", default=[], metavar="NAME=DECADES",
+                   help="Override one log-span of the search box (repeatable), "
+                        "e.g. --span g_w_pcc=1.5. Unlisted coordinates keep "
+                        "tuning.stage2_search.DEFAULT_SPANS. The resolved spans "
+                        "are written to run_meta.json.")
     args = p.parse_args(argv)
 
     from configs.paramsets import load_paramset
@@ -223,6 +254,17 @@ def main(argv: List[str] | None = None) -> int:
     win_dir.mkdir(parents=True, exist_ok=True)
 
     centre = dict(load_paramset(args.paramset)["fields"])
+
+    # Search-box spans: defaults, overridden per coordinate by --span.
+    spans = dict(DEFAULT_SPANS)
+    for item in args.span:
+        name, sep, value = item.partition("=")
+        if not sep or name not in SEARCHED_FIELDS:
+            raise SystemExit(f"--span {item!r}: expected NAME=DECADES with NAME "
+                             f"in {list(SEARCHED_FIELDS)}")
+        spans[name] = float(value)
+        if not spans[name] > 0.0:
+            raise SystemExit(f"--span {item!r}: span must be > 0")
 
     # Operating points, selected BY NETWORK.  A bare ``glob("op_*.npz")`` was
     # correct only while one network existed on disk: since 2026-09-15 the
@@ -265,7 +307,7 @@ def main(argv: List[str] | None = None) -> int:
         print(f"[stage2] {len(kept)} explicit candidates from "
               f"{args.candidates_json.name}")
     else:
-        box = Box(centre=centre, spans=DEFAULT_SPANS)
+        box = Box(centre=centre, spans=spans)
         cands = sobol_candidates(box, args.n, seed=args.seed)
         for w in cands:
             lam = worst(screen_weights(ops, w)).lambda_max
@@ -302,7 +344,8 @@ def main(argv: List[str] | None = None) -> int:
                     else "symmetric"),
         "seed": args.seed, "hours": args.hours, "workers": args.workers,
         "screen_ceiling": ceiling, "n_survivors": len(kept),
-        "box_centre": centre, "box_spans": DEFAULT_SPANS,
+        "box_centre": centre, "box_spans": spans,
+        "v_metric": args.v_metric,
         "searched": list(SEARCHED_FIELDS),
         "conditions": [o.condition for o in ops],
         "lambda_max_all": lam_all,
@@ -339,6 +382,7 @@ def main(argv: List[str] | None = None) -> int:
                 "paramset": args.paramset, "hours": args.hours,
                 "evented": bool(args.evented),
                 "frozen_network": bool(args.frozen_network),
+                "v_metric": args.v_metric,
                 "out": str(win_dir / f"{key}__{wname}.json"),
                 "force": args.force,
             })

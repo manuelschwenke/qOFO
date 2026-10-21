@@ -312,8 +312,8 @@ def make_config() -> MultiTSOConfig:
             ContingencyEvent(minute=180, element_type="gen",  element_index=2, action="restore"),
             ContingencyEvent(minute=120,  element_type="load", bus=11, p_mw=0,   q_mvar=250, action="connect"),
             ContingencyEvent(minute=330, element_type="load", bus=11, p_mw=0,   q_mvar=250, action="trip"),
-            # ContingencyEvent(minute=150, element_type="load", bus=11, p_mw=150, q_mvar=100, action="connect"),
-            # ContingencyEvent(minute=360, element_type="load", bus=11, p_mw=150, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=150, element_type="load", bus=5, p_mw=150, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=400, element_type="load", bus=5, p_mw=150, q_mvar=100, action="trip"),
             ContingencyEvent(minute=210, element_type="line", element_index=25, action="trip"),
             ContingencyEvent(minute=300, element_type="line", element_index=25, action="restore"),
         ],
@@ -337,13 +337,15 @@ def main() -> None:
     :func:`main_comparison` is the coordinated-vs-uncoordinated study and
     builds its own paired config; call it directly.
     """
+    # 2026-10-20 (author decision): back to the chapter's controller identity,
+    # now the re-run Experiment B result ch9_selected_10_2026
+    # (docs/tuning/2026-10-16_protocol_experiment_B_rerun.md).  The hand-set
+    # variants used here 2026-10-14..19 ("ch9_selected_shunt_gw006",
+    # "ch9_selected_pcc27", "ch9_selected_pcc27_gqceil",
+    # "ch9_selected_pcc27_gqceil_comp_q_off") remain as parameter sets.
     from experiments.ch_9_parameter_selection._ch9_selected_design import (
         SELECTED_PARAMSET,
     )
-    # Was hard-coded to 'ch9_selected' with SELECTED_PARAMSET commented out,
-    # from the days when that constant still said 'stage1_start'.  It says
-    # 'ch9_selected' now, so the constant is the single place the chapter's
-    # controller identity is declared and the literal is gone.
     cfg = apply_paramset(make_config(), SELECTED_PARAMSET)
     run_dir = new_run_dir("run_multi_system_ofo", cfg)
     log = run_multi_tso_dso(cfg)

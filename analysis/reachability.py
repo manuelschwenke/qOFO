@@ -221,6 +221,40 @@ def _extract_dense_jacobian(net: "pp.pandapowerNet") -> np.ndarray:
     return J_dense
 
 
+def _last_enforce_q_lims(net: "pp.pandapowerNet") -> bool:
+    """The ``enforce_q_lims`` setting of the solve that produced ``net``'s
+    results (pandapower keeps the last options in ``net._options``)."""
+    opts = getattr(net, "_options", None) or {}
+    return bool(opts.get("enforce_q_lims", False))
+
+
+def single_slack_copy(net: "pp.pandapowerNet") -> "pp.pandapowerNet":
+    """Deep copy of a converged ``net`` whose single-slack solve reproduces
+    the SAME operating point.
+
+    Corrected 2026-10-08.  The previous copy kept the scheduled machine
+    powers ``gen.p_mw``.  After a distributed-slack solve the machines deliver
+    ``res_gen.p_mw`` instead, so a single-slack re-solve moved the whole
+    imbalance onto the slack machine.  In steady operation that imbalance is a
+    few MW of losses and the difference was negligible; after a machine trip it
+    is the tripped machine's output (several hundred MW), the copy described a
+    much more stressed operating point than the plant, and its power flow could
+    fail although the plant's had converged (Monte-Carlo seeds 20261008,
+    20261028, 20261096 of THESIS_part3_mc).
+
+    Here every in-service machine is given the active power it delivers in the
+    converged solution, so the slack only covers what it covers there; the
+    caller re-solves with the plant's own ``enforce_q_lims`` setting, so that
+    machines at a reactive limit are again treated as such.
+    """
+    work = copy.deepcopy(net)
+    if len(work.gen) and "res_gen" in work and len(work.res_gen):
+        res = work.res_gen["p_mw"].reindex(work.gen.index)
+        use = res.notna() & work.gen["in_service"].astype(bool)
+        work.gen.loc[use, "p_mw"] = res[use].to_numpy(dtype=np.float64)
+    return work
+
+
 # ---------------------------------------------------------------------------
 #  Per-step reachability check
 # ---------------------------------------------------------------------------
@@ -301,20 +335,21 @@ def check_reachability(
                 "Re-converge with distributed_slack=False, run_control=False "
                 "or call with ensure_standard_structure=True."
             )
-        work_net = copy.deepcopy(net)
+        work_net = single_slack_copy(net)
         try:
             # A flat (default) start is used deliberately rather than
             # init="results": when Newton-Raphson is warm-started exactly at
             # the solution it can converge at iteration 0 without ever forming
             # the Jacobian, so net._ppc["internal"]["J"] would be absent.  A
             # flat start always performs at least one iteration and therefore
-            # always stores J.  The operating point is unchanged (single slack
-            # only redistributes the slack power).
+            # always stores J.  single_slack_copy() makes the operating point
+            # the plant's own (see there; corrected 2026-10-08).
             pp.runpp(
                 work_net,
                 run_control=False,
                 calculate_voltage_angles=True,
                 distributed_slack=False,
+                enforce_q_lims=_last_enforce_q_lims(net),
                 max_iteration=100,
             )
         except Exception as exc:  # noqa: BLE001 - re-raise with context

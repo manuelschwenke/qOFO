@@ -1,0 +1,60 @@
+{
+  "name": "ch9_selected_pcc27_gqceil",
+  "title": "ch9_selected_pcc27 with the STS interface weight g_q raised per area for DSO_1-3 to their contraction ceilings",
+  "description": [
+    "Identical to ch9_selected_pcc27 (g_w_pcc = 27 x g_w_der, shunt_int_g_w 0.06)",
+    "plus a per-area interface-Q weight for DSO_1, DSO_2 and DSO_3; DSO_4 keeps",
+    "the global g_q = 0.4977.",
+    "",
+    "Why: pricing the interface setpoints lower (pcc27) makes the TSO call on",
+    "the STS more and raised e_q by 19 %. g_q / g_w_dso_der sets how fast an STS",
+    "follows its interface setpoint. A global raise is capped at ~x1.22 by",
+    "DSO_4 (binding STS row, W6); per area, DSO_1-3 can go to their own",
+    "select ceilings.",
+    "",
+    "Per-area values = largest multiplier with the area's worst STS",
+    "lambda_max(B) <= the select ceiling 1.546 (bisection, method of",
+    "ch_8_D1_settling_screen.analytic; TS rows verified independent of g_q):",
+    "DSO_1 x1.556, DSO_2 x1.448, DSO_3 x1.617. Overall worst lambda_max(B)",
+    "1.546, i.e. DSO_1-3 sit at the select ceiling (author decision 2026-10-16,",
+    "chosen over the x1.25 variant that kept the certificate at 1.357).",
+    "",
+    "Sweep (results/THESIS_pcc_ratio_sweep_20261015, candidate 'pcc27_gqceil'),",
+    "ranked windows W1-W4, W6, 12 h, DSO_3 x2: e_v(TS) 0.00129 (as pcc27,",
+    "-4.4 % vs ch9_selected_shunt_gw006), e_v(DS) 0.00540 (+2.7 % vs pcc27,",
+    "+13 % vs gw006), e_q 112 964 (-16 % vs pcc27, equal to gw006), recruited",
+    "flow 15.8 Mvar per STS median, no corridor violations, DSO taps worst 6 /d.",
+    "",
+    "NOT part of the Chapter-9 parameter space, which carries one global g_q."
+  ],
+  "provenance": {
+    "derived_from": "ch9_selected_pcc27",
+    "created": "2026-10-16",
+    "changed_fields": {"dso_g_q_per_area": [null, {"DSO_1": 0.7747, "DSO_2": 0.7206, "DSO_3": 0.8046}]},
+    "per_area_ceiling_multiplier": {"DSO_1": 1.556, "DSO_2": 1.448, "DSO_3": 1.617, "DSO_4": 1.238},
+    "lambda_max_B": {"overall": 1.5459, "TS": 1.3573, "DSO_4": 1.2751},
+    "select_ceiling": 1.5459,
+    "screen": "results/THESIS_pcc_ratio_sweep_20261015/screen_gq_perarea.json",
+    "sweep": "results/THESIS_pcc_ratio_sweep_20261015 (candidate 'pcc27_gqceil')",
+    "log": "docs/daily_log/10_2026/2026-10-15_pcc_ratio_sweep.md",
+    "aggregate_ranked_windows": {
+      "e_v_ts": 0.00129, "e_v_ds": 0.00540, "e_q": 112964,
+      "reference_ch9_selected_pcc27": {"e_v_ts": 0.00129, "e_v_ds": 0.00526, "e_q": 134359},
+      "reference_ch9_selected_shunt_gw006": {"e_v_ts": 0.00135, "e_v_ds": 0.00477, "e_q": 112780}
+    },
+    "closed_loop_validated": true
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0,
+    "dso_g_v": 8915.334668564183,
+    "g_w_der": 0.006085568121399567,
+    "g_w_pcc": 1E8,
+    "g_w_gen": 15481813.581071282,
+    "g_w_tso_oltc": 17.667971143245353,
+    "g_w_dso_der": 1.9410237301217468,
+    "g_w_dso_oltc": 15.716142227958981,
+    "shunt_int_g_w": 0.06,
+    "dso_g_q_per_area": {"DSO_1": 0.7747, "DSO_2": 0.7206, "DSO_3": 0.8046}
+  }
+}

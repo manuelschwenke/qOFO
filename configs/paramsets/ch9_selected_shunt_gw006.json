@@ -1,0 +1,43 @@
+{
+  "name": "ch9_selected_shunt_gw006",
+  "title": "ch9_selected with a slower shunt integrator (shunt_int_g_w 0.03 -> 0.06)",
+  "description": [
+    "Identical to ch9_selected (399e30d3b60b) in every controller weight; only",
+    "shunt_int_g_w is doubled, 0.03 -> 0.06.",
+    "",
+    "The integrator advances by g_H / (2 shunt_int_g_w) per TS iteration and",
+    "commits at q/2 + delta = 22.5 Mvar from the committed level, so the time to",
+    "a commit under constant boundary pressure is",
+    "    T = 2 shunt_int_g_w (q/2 + delta) / |g_H| * T_TS.",
+    "At the reference p90 pressure |g_H| = 0.133 and T_TS = 180 s this moves the",
+    "commit persistence from 30 min (the 2026-09-11 derivation) to 61 min.",
+    "Zero-mean fluctuations of g_H are integrated with half the step, so their",
+    "contribution to commits falls further (about with shunt_int_g_w^2 for white",
+    "fluctuations; hypothesis, the loop-filtered noise is not white).",
+    "",
+    "Purpose: reduce MSC/MSR switching. At ch9_selected the Stage-II bank",
+    "recorded 210 commits and 144 reversals within 2 h over 6 x 12 h.",
+    "NOT a re-selection: the Chapter-9 selection rule did not see shunt wear,",
+    "and this variant was not passed through it."
+  ],
+  "provenance": {
+    "derived_from": "ch9_selected / 399e30d3b60b",
+    "created": "2026-10-14",
+    "changed_fields": {"shunt_int_g_w": [0.03, 0.06]},
+    "commit_persistence_at_p90_min": {"before": 30.5, "after": 60.9},
+    "closed_loop_validated": false,
+    "validation_run": "results/THESIS_shunt_gw_compare_20261014 (W4, W5 evented 12 h, DSO_3 x2; make_config scenario 6 h)"
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.49769499165313763,
+    "dso_g_v": 8915.334668564183,
+    "g_w_der": 0.006085568121399567,
+    "g_w_pcc": 0.493553441555076,
+    "g_w_gen": 15481813.581071282,
+    "g_w_tso_oltc": 17.667971143245353,
+    "g_w_dso_der": 1.9410237301217468,
+    "g_w_dso_oltc": 15.716142227958981,
+    "shunt_int_g_w": 0.06
+  }
+}

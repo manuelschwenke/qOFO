@@ -29,7 +29,7 @@ def _build_msc_msr(n_c: int = 4, n_r: int = 4):
     from network.ieee39.build import build_ieee39_net
     from network.ieee39.hv_networks import add_hv_networks
 
-    net, meta = build_ieee39_net(scenario="base", verbose=False)
+    net, meta = build_ieee39_net(scenario="rural_700", verbose=False)
     meta = add_hv_networks(
         net, meta,
         install_tso_tertiary_shunts=True,
@@ -69,9 +69,10 @@ def test_two_banks_per_dso_with_metadata():
 
 def test_msc_raises_v_msr_lowers_v():
     net, meta = _build_msc_msr()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
-    # First DSO's MSC and MSR (they share the tertiary bus).
+    # First DSO's MSC and MSR.  Since 2026-10-15 they sit on different
+    # tertiaries, so each is checked against the voltage of its own bus.
     msc_idx = next(
         i for i, k in zip(
             meta.tso_tertiary_shunt_indices, meta.tso_tertiary_shunt_kinds
@@ -82,30 +83,79 @@ def test_msc_raises_v_msr_lowers_v():
             meta.tso_tertiary_shunt_indices, meta.tso_tertiary_shunt_kinds
         ) if k == "MSR"
     )
-    bus = int(net.shunt.at[msc_idx, "bus"])
-    assert int(net.shunt.at[msr_idx, "bus"]) == bus  # same tertiary
-    assert float(net.bus.at[bus, "vn_kv"]) == 20.0
+    bus_c = int(net.shunt.at[msc_idx, "bus"])
+    bus_r = int(net.shunt.at[msr_idx, "bus"])
+    assert float(net.bus.at[bus_c, "vn_kv"]) == 20.0
+    assert float(net.bus.at[bus_r, "vn_kv"]) == 20.0
 
-    v0 = float(net.res_bus.at[bus, "vm_pu"])
+    v0_c = float(net.res_bus.at[bus_c, "vm_pu"])
+    v0_r = float(net.res_bus.at[bus_r, "vm_pu"])
 
-    # Engage one MSC step → tertiary voltage rises.
+    # Engage one MSC step → its tertiary voltage rises.
     net.shunt.at[msc_idx, "step"] = 1
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
-    v_msc = float(net.res_bus.at[bus, "vm_pu"])
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
+    v_msc = float(net.res_bus.at[bus_c, "vm_pu"])
     net.shunt.at[msc_idx, "step"] = 0
 
-    # Engage one MSR step → tertiary voltage drops.
+    # Engage one MSR step → its tertiary voltage drops.
     net.shunt.at[msr_idx, "step"] = 1
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
-    v_msr = float(net.res_bus.at[bus, "vm_pu"])
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
+    v_msr = float(net.res_bus.at[bus_r, "vm_pu"])
     net.shunt.at[msr_idx, "step"] = 0
 
-    assert v_msc > v0 + 1e-4, (
-        f"MSC step should raise V: v0={v0:.5f}, v_msc={v_msc:.5f}"
+    assert v_msc > v0_c + 1e-4, (
+        f"MSC step should raise V: v0={v0_c:.5f}, v_msc={v_msc:.5f}"
     )
-    assert v_msr < v0 - 1e-4, (
-        f"MSR step should lower V: v0={v0:.5f}, v_msr={v_msr:.5f}"
+    assert v_msr < v0_r - 1e-4, (
+        f"MSR step should lower V: v0={v0_r:.5f}, v_msr={v_msr:.5f}"
     )
+
+
+def test_one_device_per_tertiary_by_default():
+    """Default placement (2026-10-15): MSC on the second coupler's tertiary,
+    MSR on the first; no tertiary carries two banks."""
+    net, meta = _build_msc_msr()
+    for hv in meta.hv_networks:
+        lv = [int(b) for b in hv.coupling_lv_bus_indices]
+        banks = [
+            (k, int(b)) for b, k in zip(
+                meta.tso_tertiary_shunt_buses, meta.tso_tertiary_shunt_kinds
+            ) if int(b) in lv
+        ]
+        kinds = dict(banks)
+        assert kinds["MSC"] == lv[1], f"{hv.net_id}: MSC not on 2nd tertiary"
+        assert kinds["MSR"] == lv[0], f"{hv.net_id}: MSR not on 1st tertiary"
+        buses = [b for _, b in banks]
+        assert len(buses) == len(set(buses)) == 2
+
+
+def test_shared_tertiary_placement_reproducible():
+    """``msc_coupling_pos=0`` restores the pre-2026-10-15 build (both banks on
+    the first tertiary); an out-of-range position fails fast."""
+    from network.ieee39.build import build_ieee39_net
+    from network.ieee39.hv_networks import add_hv_networks
+
+    net, meta = build_ieee39_net(scenario="rural_700", verbose=False)
+    meta = add_hv_networks(
+        net, meta, install_tso_tertiary_shunts=True, tso_shunt_kind="msc_msr",
+        msc_n_levels=2, msr_n_levels=2, msc_coupling_pos=0, msr_coupling_pos=0,
+        verbose=False,
+    )
+    for hv in meta.hv_networks:
+        first = int(hv.coupling_lv_bus_indices[0])
+        on_first = [
+            k for b, k in zip(
+                meta.tso_tertiary_shunt_buses, meta.tso_tertiary_shunt_kinds
+            ) if int(b) == first
+        ]
+        assert sorted(on_first) == ["MSC", "MSR"]
+
+    net2, meta2 = build_ieee39_net(scenario="rural_700", verbose=False)
+    with pytest.raises(ValueError, match="coupling position"):
+        add_hv_networks(
+            net2, meta2, install_tso_tertiary_shunts=True,
+            tso_shunt_kind="msc_msr", msc_coupling_pos=9, verbose=False,
+        )
 
 
 def test_bipolar_still_default():
@@ -113,7 +163,7 @@ def test_bipolar_still_default():
     from network.ieee39.build import build_ieee39_net
     from network.ieee39.hv_networks import add_hv_networks
 
-    net, meta = build_ieee39_net(scenario="base", verbose=False)
+    net, meta = build_ieee39_net(scenario="rural_700", verbose=False)
     meta = add_hv_networks(
         net, meta, install_tso_tertiary_shunts=True, verbose=False,
     )

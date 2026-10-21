@@ -1,0 +1,113 @@
+{
+  "name": "ch9_selected_10_2026",
+  "title": "Chapter-8 Experiment B weights, re-selected 2026-10 on the final configuration",
+  "description": [
+    "Selected by the procedure of Ch 8 (Experiment B) under the protocol",
+    "docs/tuning/2026-10-16_protocol_experiment_B_rerun.md (Amendments 1-3):",
+    "analytical starting weights (stage1_start_10_2026_r2); 512 Sobol draws within",
+    "0.5-1.5 decades of them, seed 20260910; the 118 draws passing lambda_max(B) <= 1.546",
+    "plus the starting weights simulated 12 h in W1-W6 (evented, DSO_3 x2); limits as a",
+    "filter (45 / 119 feasible); ranking on the per-bus RMS voltage deviation in the TS",
+    "with a 2 % band on the STS; settling requirement (p95 n_settle <= 27, median",
+    "residual <= 1 Mvar) as an additional limit: the ranking winner f879539ceec5 and",
+    "c268ac6737ed failed it, the repeated selection ranks this candidate first (within",
+    "the 2 % band of 99ea756282bf on e_v(TS), better on e_v(DS)).",
+    "It lies 0.04 decades from the September selection 399e30d3b60b: the procedure",
+    "re-finds the same optimum on the final configuration.",
+    "shunt_int_g_w from the persistence rule, T_p = 60 min at the p90 boundary pressure",
+    "of the ranked windows -> 0.1605. Tap engagement 0.0075 / 0.015 pu (Stage I).",
+    "Network rural_700 with DSO_3 x2; MSC on the second coupler tertiary; tap lock 5."
+  ],
+  "provenance": {
+    "producer": "ch_9_3_select.py + Experiment C (ch_9_1_ninner_isolated_sts.py), repeated selection per Ch 8",
+    "protocol": "docs/tuning/2026-10-16_protocol_experiment_B_rerun.md (Amendments 1-3)",
+    "campaign_dir": "results\\THESIS_ch8_expB_10_2026\\run2",
+    "code_state": "results\\THESIS_ch8_expB_10_2026\\run2\\code_state",
+    "starting_paramset": "stage1_start_10_2026_r2",
+    "selected_key": "df17c0c32904",
+    "n_candidates": 119,
+    "n_feasible": 45,
+    "failed_settling": [
+      "f879539ceec5",
+      "c268ac6737ed"
+    ],
+    "lambda_max_B": 1.2595827775830422,
+    "ratio_g_w_pcc_over_g_w_der": 81.10227865489212,
+    "aggregate_ranked_windows_per_bus": {
+      "e_v_ts": 0.0050950282599142825,
+      "e_v_ds": 0.006417933764349168,
+      "e_q": 112838.125552174,
+      "worst_tap_ops_per_day_tso": 4.001852709587773,
+      "worst_tap_ops_per_day_dso": 4.001852709587773,
+      "worst_tap_rev_per_day_tso": 2.0009263547938865,
+      "worst_tap_rev_per_day_dso": 0.0,
+      "worst_avr_max_step_pu": 0.00025371011200392424,
+      "worst_v_band_excess_ts": 0.00010699050676334131,
+      "worst_v_band_excess_ds": 0.0017842897732936248,
+      "n_hunting": 0.0,
+      "n_hunting_1h": 0.0,
+      "n_event_explained": 3.0,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "worst_v_worst_ts": 0.01913620573180481,
+      "worst_v_worst_ds": 0.0290645193469485,
+      "pf_failures": 0.0,
+      "n_failed_windows": 0
+    },
+    "baseline_aggregate": {
+      "e_v_ts": 0.005333011570329357,
+      "e_v_ds": 0.007842064211223423,
+      "e_q": 1156489.2080101306,
+      "worst_tap_ops_per_day_tso": 4.001852709587773,
+      "worst_tap_ops_per_day_dso": 4.001852709587773,
+      "worst_tap_rev_per_day_tso": 2.0009263547938865,
+      "worst_tap_rev_per_day_dso": 0.0,
+      "worst_avr_max_step_pu": 2.7079655659179025e-05,
+      "worst_v_band_excess_ts": 5.015505968859442e-05,
+      "worst_v_band_excess_ds": 0.00881246497232199,
+      "n_hunting": 0.0,
+      "n_hunting_1h": 0.0,
+      "n_event_explained": 2.0,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "worst_v_worst_ts": 0.019273243275174733,
+      "worst_v_worst_ds": 0.04294699881171457,
+      "pf_failures": 0.0,
+      "n_failed_windows": 0
+    },
+    "experiment_C": {
+      "run": "results\\THESIS_ch8_expB_10_2026\\run2\\expC\\rank3_df17c0c32904\\20261020-043357",
+      "n_steps": 120,
+      "p95": 23.049999999999997,
+      "per_dso_p95": {
+        "DSO_1": 20.0,
+        "DSO_2": 15.65,
+        "DSO_3": 25.55,
+        "DSO_4": 11.55
+      },
+      "n_over": 3,
+      "censored": 0,
+      "max": 34,
+      "median_residual_mvar": 0.3770882387300265,
+      "pass": true
+    },
+    "distance_to_399e30d3b60b_decades": 0.03868122518826791,
+    "d_engage_pu": {
+      "oltc": 0.0075,
+      "dso_oltc": 0.015
+    },
+    "weight_fingerprint": "df17c0c32904"
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.49769499165313763,
+    "dso_g_v": 8915.334668564183,
+    "g_w_der": 0.0063476534228820705,
+    "g_w_pcc": 0.5148091567072615,
+    "g_w_gen": 15481813.581071282,
+    "g_w_tso_oltc": 18.261677053431182,
+    "g_w_dso_der": 1.9705988017444318,
+    "g_w_dso_oltc": 14.8709084033458,
+    "shunt_int_g_w": 0.16049926078643714
+  }
+}

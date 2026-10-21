@@ -131,7 +131,10 @@ TIMING_FIELDS: tuple[str, ...] = ("tso_period_s", "dso_period_s", "dt_s")
 FIXED_OVERRIDES: dict[str, Any] = {
     # Structural choices, not tuned.
     "int_max_step":            1,
-    "int_cooldown":            1,
+    # 1 -> 5 on 2026-10-14 (author decision): aligned with the evaluated runs
+    # (configs/config.py int_cooldown = 5).  Campaigns before this date,
+    # including the one that selected 399e30d3b60b, ran with 1.
+    "int_cooldown":            5,
     # Headless / deterministic.
     "verbose":                 0,
     "live_plot_controller":    False,

@@ -257,7 +257,7 @@ class CascadeConfig:
     continuous sub-problem contracts the discrete perturbation
     below epsilon."""
 
-    int_cooldown: int = 6
+    int_cooldown: int = 5  # 6 -> 5 on 2026-10-14 (thesis Ch 3)
     """Number of OFO iterations a discrete actuator is locked after switching.
     Used both by the controller (BaseOFOController) and the stability
     analysis (compared against the theoretically required T_dwell)."""

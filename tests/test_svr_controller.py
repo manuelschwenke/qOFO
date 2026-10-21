@@ -267,3 +267,111 @@ def test_pi_gains_must_be_nonnegative_and_finite(field):
     with pytest.raises(ValueError, match=field):
         SVRZoneController(ctrl.zone_def, CapabilityBounds(), SVRZoneConfig(**values))
 
+
+# ---------------------------------------------------------------------------
+#  OFO form of the two loops (variant O0, thesis Case 1), added 2026-10-06.
+#  The derivation says: with matched weights and no binding output
+#  constraint, the one-input OFO steps ARE the integral RVR / RPR updates.
+# ---------------------------------------------------------------------------
+
+from controller.svr_controller import _ofo_scalar_step  # noqa: E402
+
+
+def make_o0(law, *, v6=1.05, q11=10.0, v11=1.012):
+    """Controller with two monitored buses (pilot 5, bus 6) for the O0 tests."""
+    net = SimpleNamespace(
+        gen=pd.DataFrame({"vm_pu": [1.0, v11], "in_service": [True, True]},
+                         index=[10, 11]),
+        res_gen=pd.DataFrame({"p_mw": [0.0, 0.0], "q_mvar": [40.0, q11]},
+                             index=[10, 11]),
+        res_bus=pd.DataFrame({"vm_pu": [1.00, v6]}, index=[5, 6]),
+        sgen=pd.DataFrame(columns=["p_mw", "q_mvar"]),
+        res_sgen=pd.DataFrame(columns=["q_mvar"]),
+    )
+    zone = SimpleNamespace(zone_id=1, gen_indices=[10, 11], tso_der_indices=[],
+                           pcc_trafo_indices=[], oltc_trafo_indices=[],
+                           shunt_bus_indices=[], v_bus_indices=[5, 6])
+    cfg = SVRZoneConfig(pilot_bus=5, deadband_pu=0.0, rvr_law=law,
+                        rpr_law=law, ofo_w_p=4e4)
+    ctrl = SVRZoneController(zone, CapabilityBounds(), cfg)
+    ctrl.dv_pilot_dq = np.array([1e-4, 1e-4])
+    ctrl.dq_dvset = np.array([1000.0, 1000.0])
+    ctrl.pilot_sensitivity = 0.04          # = sum(dv_pilot_dq * 200 Mvar)
+    ctrl.dv_bus_dq = np.array([[1e-4, 1e-4], [2e-4, 2e-4]])
+    ctrl.state.q_level = ctrl.state.integrator = 0.2
+    ctrl._initialised = True
+    return ctrl, net
+
+
+def test_ofo_rvr_equals_integral_rvr_when_no_constraint_binds():
+    pi, net_pi = make_o0("pi")
+    ofo, net_ofo = make_o0("ofo")
+    out_pi = pi.step(net_pi, 20.0, rvr_due=True, dt_rvr_s=180.0)
+    out_ofo = ofo.step(net_ofo, 20.0, rvr_due=True, dt_rvr_s=180.0)
+    # 0.2 + 180/300 * 0.03/0.04 = 0.65 for both laws.
+    assert out_pi.q_level == pytest.approx(0.65, rel=1e-12)
+    assert out_ofo.q_level == pytest.approx(out_pi.q_level, rel=1e-12)
+    np.testing.assert_allclose(out_ofo.u_new, out_pi.u_new, rtol=0, atol=1e-12)
+    assert out_ofo.ofo_rvr_n_active == 0 and not out_ofo.ofo_rvr_box_active
+
+
+def test_ofo_rpr_equals_integral_rpr_when_capability_does_not_bind():
+    pi, net_pi = make_o0("pi")
+    ofo, net_ofo = make_o0("ofo")
+    out_pi = pi.step(net_pi, 20.0, rvr_due=False, dt_rvr_s=180.0)
+    out_ofo = ofo.step(net_ofo, 20.0, rvr_due=False, dt_rvr_s=180.0)
+    # Machine 11: Q 10 -> target 40, step (20/60)*30/1000 = 0.01 pu.
+    assert out_pi.u_new[1] == pytest.approx(1.022)
+    np.testing.assert_allclose(out_ofo.u_new, out_pi.u_new, rtol=0, atol=1e-12)
+    assert not out_ofo.ofo_rpr_active.any()
+
+
+def test_ofo_rvr_keeps_a_monitored_voltage_limit_the_integral_law_ignores():
+    pi, net_pi = make_o0("pi", v6=1.09)
+    ofo, net_ofo = make_o0("ofo", v6=1.09)
+    out_pi = pi.step(net_pi, 20.0, rvr_due=True, dt_rvr_s=180.0)
+    out_ofo = ofo.step(net_ofo, 20.0, rvr_due=True, dt_rvr_s=180.0)
+    # Bus 6 moves 0.08 pu per unit level: the integral step (0.45) would take
+    # it to 1.126 pu; the OFO step stops at the 1.10 pu limit (w ~ 0.125).
+    assert out_pi.q_level == pytest.approx(0.65)
+    assert out_ofo.q_level == pytest.approx(0.2 + 0.01 / 0.08, rel=1e-3)
+    assert out_ofo.ofo_rvr_n_active == 1
+
+
+def test_ofo_rpr_pulls_a_machine_back_inside_its_capability():
+    # Machine 11 at 290 Mvar, capability 200, target 40, AVR reference 1.05 pu
+    # (so the 0.95 pu reference bound leaves room and does not bind first).
+    pi, net_pi = make_o0("pi", q11=290.0, v11=1.05)
+    ofo, net_ofo = make_o0("ofo", q11=290.0, v11=1.05)
+    out_pi = pi.step(net_pi, 20.0, rvr_due=False, dt_rvr_s=180.0)
+    out_ofo = ofo.step(net_ofo, 20.0, rvr_due=False, dt_rvr_s=180.0)
+    # Integral law: step (20/60)*(40-290)/1000 -> Q = 290 - 83.3 = 206.7 Mvar,
+    # still above the 200 Mvar capability; the OFO step stops at about 200.
+    q_pi = 290.0 + 1000.0 * (out_pi.u_new[1] - 1.05)
+    q_ofo = 290.0 + 1000.0 * (out_ofo.u_new[1] - 1.05)
+    assert q_pi == pytest.approx(290.0 - 250.0 / 3.0)
+    assert q_ofo == pytest.approx(200.0, abs=1.0)
+    assert out_ofo.ofo_rpr_active[1]
+
+
+@pytest.mark.parametrize("values", [
+    dict(rvr_law="ofo", k_p_rvr=0.2),
+    dict(rpr_law="ofo", k_p_rpr=0.2),
+    dict(rpr_law="ofo", rpr_voltage_priority=True),
+    dict(rvr_law="pid"),
+])
+def test_ofo_form_rejects_what_the_ofo_step_does_not_contain(values):
+    ctrl, _ = make_controller()
+    with pytest.raises(ValueError):
+        SVRZoneController(ctrl.zone_def, CapabilityBounds(),
+                          SVRZoneConfig(pilot_bus=5, **values))
+
+
+def test_scalar_step_returns_the_unconstrained_step_exactly():
+    w, n, box = _ofo_scalar_step(0.3, -1.0, 1.0, 5.0, np.zeros(0), np.zeros(0),
+                                 np.zeros(0), 1e9)
+    assert w == 0.3 and n == 0 and not box
+    w, n, box = _ofo_scalar_step(1.7, -1.0, 1.0, 5.0, np.array([0.1]),
+                                 np.array([-1.0]), np.array([1.0]), 1e9)
+    assert w == 1.0 and n == 0 and box
+

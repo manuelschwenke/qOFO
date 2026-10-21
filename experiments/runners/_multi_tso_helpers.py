@@ -619,6 +619,10 @@ def _record_dso_group_and_transformer_data(
     group_v_min: Dict[str, List[float]] = {}
     group_v_mean: Dict[str, List[float]] = {}
     group_v_max: Dict[str, List[float]] = {}
+    # Sum of squared deviations from the controllers' own voltage setpoints and
+    # the bus count, so a group of several controllers pools its buses.
+    group_v_sq_dev: Dict[str, List[float]] = {}
+    group_v_n: Dict[str, List[int]] = {}
 
     for dso_id in dso_ids:
         if dso_id not in dsocontrollers:
@@ -688,6 +692,19 @@ def _record_dso_group_and_transformer_data(
             group_v_min.setdefault(group_id, []).append(float(np.min(vm_pu)))
             group_v_mean.setdefault(group_id, []).append(float(np.mean(vm_pu)))
             group_v_max.setdefault(group_id, []).append(float(np.max(vm_pu)))
+            # Per-bus deviation from the controller's own references (2026-10-16,
+            # protocol D1).  Without references there is nothing to deviate
+            # from, so the group gets no RMS entry rather than a guessed one.
+            if dsocfg.v_setpoints_pu is not None:
+                v_ref = np.asarray(dsocfg.v_setpoints_pu, dtype=float)
+                if v_ref.shape != vm_pu.shape:
+                    raise ValueError(
+                        f"{dso_id}: v_setpoints_pu has {v_ref.size} entries for "
+                        f"{vm_pu.size} voltage buses"
+                    )
+                group_v_sq_dev.setdefault(group_id, []).append(
+                    float(np.sum((vm_pu - v_ref) ** 2)))
+                group_v_n.setdefault(group_id, []).append(int(vm_pu.size))
 
     for group_id, values in group_q_der.items():
         rec.dso_group_q_der_mvar[group_id] = float(np.sum(values))
@@ -701,6 +718,10 @@ def _record_dso_group_and_transformer_data(
         rec.dso_group_v_mean_pu[group_id] = float(np.mean(values))
     for group_id, values in group_v_max.items():
         rec.dso_group_v_max_pu[group_id] = float(np.max(values))
+    for group_id, sq in group_v_sq_dev.items():
+        n_bus = int(np.sum(group_v_n[group_id]))
+        if n_bus > 0:
+            rec.dso_group_v_rms_dev_pu[group_id] = float(np.sqrt(np.sum(sq) / n_bus))
 
     # ── HV-group live-plot aggregates (line loading %, DER P, load P/Q) ─────
     _record_hv_group_observables(rec, net, hv_info_map)

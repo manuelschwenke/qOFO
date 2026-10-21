@@ -194,7 +194,9 @@ class HVNetworkInfo:
     coupling_lv_bus_indices: Tuple[int, ...] = field(default_factory=tuple)
     """20 kV tertiary bus index for each entry in ``coupling_trafo_indices``.
     Populated by ``_create_hv_subnetwork``; used by ``add_hv_networks``
-    to attach TSO-owned bipolar shunts at the first tertiary."""
+    to attach TSO-owned shunts: the legacy bipolar bank at the first
+    tertiary, MSC / MSR at the positions ``msc_coupling_pos`` /
+    ``msr_coupling_pos`` (default second / first, since 2026-10-15)."""
 
     internal_aux_bus_indices: Tuple[int, ...] = field(default_factory=tuple)
     """Internal load-separation buses owned by this DSO."""

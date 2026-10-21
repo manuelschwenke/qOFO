@@ -34,7 +34,7 @@ def _build():
     from network.ieee39.build import build_ieee39_net
     from network.ieee39.hv_networks import add_hv_networks
 
-    net, meta = build_ieee39_net(scenario="base", verbose=False)
+    net, meta = build_ieee39_net(scenario="rural_700", verbose=False)
     meta = add_hv_networks(
         net, meta, install_tso_tertiary_shunts=True, verbose=False,
     )
@@ -124,7 +124,7 @@ def _make_tso(net, meta, *, g_loss, line_coeff=None):
 def test_loss_gradient_invariant_holds():
     """grad_f == ∇_y f · H with the loss term active (g_loss > 0)."""
     net, meta = _build()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
     tso, meas, _ = _make_tso(net, meta, g_loss=5.0)
 
     grad_f = tso._compute_objective_gradient(meas)
@@ -138,7 +138,7 @@ def test_loss_gradient_invariant_holds():
 def test_loss_coeff_default_is_three_r():
     """Default per-line coefficient c_ℓ = 3·R_ℓ from the cached net."""
     net, meta = _build()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
     tso, _, line_idx = _make_tso(net, meta, g_loss=1.0)
 
     c = tso._loss_line_coeffs()
@@ -156,7 +156,7 @@ def test_loss_term_is_current_reducing_and_nonzero():
     """The I-block of ∇_y f equals 2·g_loss·c·|I_meas| (≥ 0, non-trivial),
     and zeroing g_loss removes exactly that contribution from grad_f."""
     net, meta = _build()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     g_loss = 5.0
     tso, meas, line_idx = _make_tso(net, meta, g_loss=g_loss)
@@ -193,7 +193,7 @@ def test_loss_term_is_current_reducing_and_nonzero():
 def test_loss_line_coeff_override_can_exclude_a_line():
     """A zero override coefficient drops that line from the loss sum."""
     net, meta = _build()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     # First discover how many lines the helper picks, then override with a
     # vector that zeroes the first line only.

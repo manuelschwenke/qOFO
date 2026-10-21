@@ -30,10 +30,12 @@ from numpy.typing import NDArray
 
 from configs.config import MultiTSOConfig
 from experiments.helpers.comparison_metrics import (
+    has_ds_rms_dev,
     loss_series,
     voltage_envelope_ds,
     voltage_envelope_ts,
     voltage_rms_err_all,
+    voltage_rms_err_all_ds,
     voltage_rmsd_ds,
     voltage_rmsd_ts,
     voltage_violation_counts_ds,
@@ -652,7 +654,11 @@ def _v_quality(
     ``v_rms_ts`` / ``v_rms_ds``
         Time-mean of the **spatial RMS** deviation from ``v_set``, read from
         ``zone_v_rms_err_pu`` via
-        :func:`~experiments.helpers.comparison_metrics.voltage_rms_err_per_zone`.
+        :func:`~experiments.helpers.comparison_metrics.voltage_rms_err_per_zone`
+        (TS) and from ``dso_group_v_rms_dev_pu`` via
+        :func:`~experiments.helpers.comparison_metrics.voltage_rms_err_all_ds`
+        (DS, logs recorded since 2026-10-16; older logs fall back to
+        ``|mean - v_set|``).
         The legacy metric used the spatial *mean* voltage, under which a zone
         half at 1.00 pu and half at 1.06 pu scores as perfect.  Also identical
         to ``rms_v_ts_pu`` in ``cigre_summary_table``, so the tuning objective
@@ -679,10 +685,16 @@ def _v_quality(
     if rms_ts.size and bool(np.isfinite(rms_ts).any()):
         out["v_rms_ts"] = float(np.nanmean(rms_ts))
 
-    # DSO groups report only min/mean/max, so the spatial RMS is unavailable;
-    # |mean - v_set| is the honest fallback and is what the DS envelope gives.
+    # DS: the per-bus spatial RMS, built like the TS figure, wherever the log
+    # carries it (recorded since 2026-10-16, protocol D1).  Older logs report
+    # only group min/mean/max, so for them |mean - v_set| stays the fallback --
+    # unchanged, so a re-scored old pickle keeps its old value.
     env_ds = voltage_envelope_ds(records)
-    if env_ds["v_mean"].size and bool(np.isfinite(env_ds["v_mean"]).any()):
+    if has_ds_rms_dev(records):
+        rms_ds = voltage_rms_err_all_ds(records)["rms_err_pu"]
+        if rms_ds.size and bool(np.isfinite(rms_ds).any()):
+            out["v_rms_ds"] = float(np.nanmean(rms_ds))
+    elif env_ds["v_mean"].size and bool(np.isfinite(env_ds["v_mean"]).any()):
         out["v_rms_ds"] = float(np.nanmean(np.abs(env_ds["v_mean"] - v_set)))
 
     def _worst_and_excess(

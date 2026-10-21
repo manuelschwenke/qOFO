@@ -81,7 +81,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: Experiment B and for the initial-weight leg of Experiment C -- pass it
 #: explicitly (``--paramset stage1_start``) rather than by editing this
 #: constant, so that a run record always names the controller it ran at.
-SELECTED_PARAMSET = "ch9_selected"
+#:
+#: 2026-10-20 (author decision): ``ch9_selected_10_2026`` -- Experiment B re-run
+#: on the final configuration under docs/tuning/2026-10-16_protocol_experiment_
+#: B_rerun.md (candidate df17c0c32904, every weight within +-5.4 % of the
+#: September selection 399e30d3b60b; shunt_int_g_w 0.1605).  Was "ch9_selected".
+SELECTED_PARAMSET = "ch9_selected_10_2026"
 
 #: The Stage-I analytic design point, for the initial-weight legs (B and C).
 INITIAL_PARAMSET = "stage1_start"

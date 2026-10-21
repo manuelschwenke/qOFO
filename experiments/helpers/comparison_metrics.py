@@ -454,6 +454,64 @@ def voltage_rms_err_all(records: List[MultiTSOIterationRecord],
     return {"t_min": t, "rms_err_pu": rms}
 
 
+def has_ds_rms_dev(records: List[MultiTSOIterationRecord]) -> bool:
+    """True if the log carries the per-bus DS deviation (recorded since
+    2026-10-16).  Older pickles only have group min/mean/max."""
+    return any(getattr(r, "dso_group_v_rms_dev_pu", None) for r in records)
+
+
+def voltage_rms_err_per_group_ds(records: List[MultiTSOIterationRecord],
+                                 ) -> Dict[str, object]:
+    """Per-STS-group voltage tracking error time series, the DS counterpart of
+    :func:`voltage_rms_err_per_zone`.
+
+    For each group, the spatial RMS of ``(V_i - V_i^set)`` over the group's
+    voltage-observed buses at every step, read from ``dso_group_v_rms_dev_pu``.
+    Steps without the field are NaN; there is deliberately no fallback to the
+    group mean here (use :func:`has_ds_rms_dev` to choose the metric), so a
+    per-bus figure is never silently replaced by a mean-based one.
+
+    Returns
+    -------
+    dict with keys
+        ``t_min``      -- time axis [min].
+        ``groups``     -- sorted list of group ids.
+        ``rms_err_pu`` -- ``{group: ndarray[n_steps]}`` of the RMS error [p.u.].
+    """
+    t = _times_min(records)
+    groups = sorted({g for r in records
+                     for g in (getattr(r, "dso_group_v_rms_dev_pu", None) or {})})
+    out = {g: np.full(len(records), np.nan, dtype=np.float64) for g in groups}
+    for i, r in enumerate(records):
+        d = getattr(r, "dso_group_v_rms_dev_pu", None) or {}
+        for g in groups:
+            if g in d:
+                out[g][i] = float(d[g])
+    return {"t_min": t, "groups": groups, "rms_err_pu": out}
+
+
+def voltage_rms_err_all_ds(records: List[MultiTSOIterationRecord],
+                           ) -> Dict[str, object]:
+    """System-wide DS voltage tracking error per step: the quadratic mean of
+    the per-group spatial RMS errors, ``sqrt(mean_g (rms_err_g)^2)``.
+
+    Groups are weighted equally, exactly as :func:`voltage_rms_err_all` weights
+    TS zones, so the TS and DS figures are the same construction.
+    """
+    import warnings
+
+    per = voltage_rms_err_per_group_ds(records)
+    t = per["t_min"]
+    groups = per["groups"]
+    if not groups:
+        return {"t_min": t, "rms_err_pu": np.full(len(records), np.nan)}
+    stack = np.vstack([per["rms_err_pu"][g] for g in groups])  # (n_group, n)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        rms = np.sqrt(np.nanmean(stack ** 2, axis=0))
+    return {"t_min": t, "rms_err_pu": rms}
+
+
 def q_iface_per_trafo(records: List[MultiTSOIterationRecord]
                       ) -> Dict[str, object]:
     """Per-interface-trafo reactive-power setpoint & actual flows, grouped.

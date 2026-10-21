@@ -184,16 +184,53 @@ def test_raises_when_not_converged() -> None:
         check_reachability(net)
 
 
-def test_distributed_slack_canonicalisation_matches_single_slack() -> None:
-    """A distributed-slack solve augments the internal Jacobian; the guard must
-    canonicalise it and return the same margin as a single-slack solve."""
+def _case9_shared_slack_after_trip() -> pp.pandapowerNet:
+    """IEEE 9 with every machine sharing the slack and one machine tripped:
+    the distributed-slack solution then differs materially from the single-
+    slack solution with the scheduled machine powers (the situation after a
+    machine outage in the Monte-Carlo campaign, 2026-10-08)."""
     import pandapower.networks as pn
 
     net = pn.case9()
+    net.ext_grid["slack_weight"] = 1.0
+    net.gen["slack_weight"] = 1.0
+    net.gen.at[net.gen.index[0], "in_service"] = False
     pp.runpp(net, calculate_voltage_angles=True, distributed_slack=True)
+    return net
+
+
+def test_single_slack_copy_reproduces_the_distributed_operating_point() -> None:
+    """The canonical copy must describe the plant's operating point, not the
+    single-slack point with the scheduled machine powers (corrected
+    2026-10-08)."""
+    import copy as _copy
+    from analysis.reachability import single_slack_copy
+
+    net = _case9_shared_slack_after_trip()
+    work = single_slack_copy(net)
+    pp.runpp(work, calculate_voltage_angles=True, distributed_slack=False)
+    np.testing.assert_allclose(work.res_bus.vm_pu, net.res_bus.vm_pu, atol=1e-8)
+    np.testing.assert_allclose(work.res_bus.va_degree, net.res_bus.va_degree,
+                               atol=1e-6)
+
+    # The previous copy (scheduled machine powers) lands elsewhere.
+    old = _copy.deepcopy(net)
+    pp.runpp(old, calculate_voltage_angles=True, distributed_slack=False)
+    assert np.max(np.abs(old.res_bus.va_degree - net.res_bus.va_degree)) > 1e-3
+
+
+def test_distributed_slack_canonicalisation_matches_single_slack() -> None:
+    """A distributed-slack solve augments the internal Jacobian; the guard must
+    canonicalise it and return the margin of a single-slack solve AT THE SAME
+    OPERATING POINT (machines at their solved powers).  Until 2026-10-08 this
+    test compared against a single-slack solve with the scheduled powers, which
+    only coincided because no machine shared the slack."""
+    net = _case9_shared_slack_after_trip()
     res_dist = check_reachability(net)
 
-    net2 = pn.case9()
+    net2 = _case9_shared_slack_after_trip()
+    on = net2.gen["in_service"].astype(bool)
+    net2.gen.loc[on, "p_mw"] = net2.res_gen.loc[on, "p_mw"]
     pp.runpp(net2, calculate_voltage_angles=True, distributed_slack=False)
     res_single = check_reachability(net2)
 

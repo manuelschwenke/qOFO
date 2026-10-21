@@ -1,0 +1,73 @@
+{
+  "name": "stage1_start_10_2026_r2",
+  "title": "Stage-I analytic design point (contraction screen + tap engagement), doubled-DSO_3 network",
+  "description": [
+    "Produced by tuning/stage1_screen.py --design.",
+    "NOT a tuned point: this is the starting point for a Stage-II search.",
+    "Gauge g_v is pinned so the supervisory voltage priority pi = g*sigma^2 equals 1.",
+    "Continuous scale placed by bisection against the layer contraction targets; tap weights priced from the stated engagement deviations.",
+    "The per-DSO scenario multipliers are NOT part of this parameter set -- they are network, not weights -- but the curvature this point was designed against was captured on the network recorded under provenance.network. Screening these weights on a different network does not reproduce the reported lambda_max(B)."
+  ],
+  "provenance": {
+    "producer": "tuning/stage1_screen.py --design",
+    "date": "2026-10-19",
+    "network": "rural_700",
+    "dso_der_scale": {
+      "DSO_3": 2.0
+    },
+    "dso_load_p_scale": {
+      "DSO_3": 2.0
+    },
+    "conditions": [
+      "W1",
+      "W2",
+      "W3",
+      "W4",
+      "W5",
+      "W6"
+    ],
+    "priorities": {
+      "pi_v_ts": 1.0,
+      "pi_q": 1.0,
+      "pi_v_ds": 1.0
+    },
+    "tau": 1.0,
+    "d_engage_pu": {
+      "oltc": 0.0075,
+      "dso_oltc": 0.015
+    },
+    "lambda_targets": {
+      "TS": 1.0,
+      "STS": 1.0
+    },
+    "kappa": {
+      "TS": 0.05266158793322372,
+      "STS": 0.5017022264122892
+    },
+    "integer_floors": {
+      "TS_1": 0.5000750556082352,
+      "TS_2": 0.15075772527448922,
+      "TS_3": 0.3618605327516488,
+      "STS_DSO_1": 0.3438042300791653,
+      "STS_DSO_2": 0.3514246208766367,
+      "STS_DSO_3": 0.3448154864101466,
+      "STS_DSO_4": 0.3734527091986572
+    },
+    "screen_ceiling": 1.6,
+    "select_ceiling": 1.5458937198067635,
+    "worst_lambda_max_B": 0.9999999999985634,
+    "n_area_condition_rows": 42
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.04,
+    "dso_g_v": 10000.0,
+    "g_w_gen": 100000000.0,
+    "g_w_tso_oltc": 21.373399217440355,
+    "g_w_dso_oltc": 16.641735593176268,
+    "g_w_der": 0.05266158793322372,
+    "g_w_pcc": 0.05266158793322372,
+    "g_w_dso_der": 0.5017022264122892,
+    "shunt_int_g_w": 0.16049926078643714
+  }
+}

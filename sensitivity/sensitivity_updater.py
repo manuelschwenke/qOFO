@@ -21,12 +21,72 @@ References
 [1] Schwenke et al., PSCC 2026, Section II (Linearised Power System Model)
 """
 
+import warnings
+
 import numpy as np
 from numpy.typing import NDArray
 from typing import Optional
 
 from core.measurement import Measurement
 from sensitivity.jacobian import JacobianSensitivities
+
+
+def voltage_rescaling_ratios(
+    v_measured_sq: NDArray[np.float64],
+    v_cached_sq: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Return the shunt rescaling factors ``(V_measured / V_cached)²``.
+
+    A constant-susceptance bank injects ``q_step · V²`` per step, so every
+    sensitivity of a bank, computed at the cached voltage ``V_cached``, is
+    brought to the measured voltage by this factor (thesis
+    ``eq:shunt_rescaling``).  Shared by :class:`SensitivityUpdater` (shunt
+    columns of an MIQP's H) and the switched-shunt integrator in the
+    multi-zone runner.
+
+    Repeated Newton-Raphson solves can leave round-off-level voltage
+    differences even when the physical operating point is unchanged; ratios
+    within a 1e-10 relative V² tolerance of one are set to exactly one so the
+    sensitivities are not needlessly changed.
+
+    Parameters
+    ----------
+    v_measured_sq, v_cached_sq : NDArray[np.float64]
+        Squared measured and cached bus-voltage magnitudes [pu²], same shape.
+    """
+    ratios = (np.atleast_1d(np.asarray(v_measured_sq, dtype=np.float64))
+              / np.atleast_1d(np.asarray(v_cached_sq, dtype=np.float64)))
+    ratios[np.isclose(ratios, 1.0, rtol=1e-10, atol=0.0)] = 1.0
+    return ratios
+
+
+def bank_voltage_ratio(
+    measurement: Measurement,
+    cached_net,
+    bus_idx: int,
+) -> float:
+    """Return ``(V_measured / V_cached)²`` at one shunt-bank bus.
+
+    ``V_cached`` is read from ``cached_net.res_bus`` -- the linearisation point
+    of the controller model that evaluates the bank's sensitivities -- and
+    ``V_measured`` from ``measurement``.  If the bus is not in the measurement,
+    a warning is issued and 1.0 is returned (the same fallback as
+    :class:`SensitivityUpdater`), i.e. the cached voltage is kept.
+    """
+    idx = np.where(measurement.bus_indices == int(bus_idx))[0]
+    if len(idx) == 0:
+        warnings.warn(
+            f"Shunt bus {bus_idx} not in measurement; voltage rescaling of its "
+            f"sensitivities skipped (cached voltage kept).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return 1.0
+    v_meas = float(measurement.voltage_magnitudes_pu[idx[0]])
+    v_cached = float(cached_net.res_bus.at[int(bus_idx), "vm_pu"])
+    return float(voltage_rescaling_ratios(
+        np.array([v_meas ** 2]), np.array([v_cached ** 2]),
+    )[0])
 
 
 class SensitivityUpdater:
@@ -152,13 +212,8 @@ class SensitivityUpdater:
                 # If voltage not available, assume no change (ratio = 1)
                 v_measured_sq[i] = self._v_cached_sq[i]
 
-        ratios = v_measured_sq / self._v_cached_sq  # shape (n_shunt,)
-        # Repeated Newton-Raphson solves can leave round-off-level voltage
-        # differences even when the physical operating point is unchanged.
-        # Preserve exact identity in that case so H is not needlessly changed.
-        # A 1e-10 relative V^2 threshold is far below measurement/model
-        # resolution while covering solver repeatability noise.
-        ratios[np.isclose(ratios, 1.0, rtol=1e-10, atol=0.0)] = 1.0
+        # shape (n_shunt,); identity guard inside (see voltage_rescaling_ratios)
+        ratios = voltage_rescaling_ratios(v_measured_sq, self._v_cached_sq)
 
         col_start = self._col_shunt_start
         col_end = col_start + self._n_shunt

@@ -207,6 +207,9 @@ def _tap_lockout_flags(records: Sequence[Any], trafo: str,
 
     The binding one is whichever is longer, which at the selected design is the
     iteration count (6 iterations x 20 s = 120 s against a 30 s wall clock).
+    Since 2026-10-14 the OFO path uses 5 iterations (100 s) and no wall-clock
+    lock (``ofo_oltc_cooldown_s = 0``); the 30 s still passed here is then
+    dominated by the iteration lock, so the inference is unchanged.
     This is an inference and is labelled as such wherever it is reported: a tap
     that did not move because the controller chose not to move it is
     indistinguishable here from one that could not.

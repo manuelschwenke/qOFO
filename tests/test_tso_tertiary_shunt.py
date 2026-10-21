@@ -80,7 +80,7 @@ def _build_ieee39_with_shunts():
     from network.ieee39.build import build_ieee39_net
     from network.ieee39.hv_networks import add_hv_networks
 
-    net, meta = build_ieee39_net(scenario="base", verbose=False)
+    net, meta = build_ieee39_net(scenario="rural_700", verbose=False)
     meta = add_hv_networks(
         net, meta,
         install_tso_tertiary_shunts=True,
@@ -133,7 +133,7 @@ def test_install_flag_disables_shunts():
     from network.ieee39.build import build_ieee39_net
     from network.ieee39.hv_networks import add_hv_networks
 
-    net, meta = build_ieee39_net(scenario="base", verbose=False)
+    net, meta = build_ieee39_net(scenario="rural_700", verbose=False)
     meta = add_hv_networks(
         net, meta,
         install_tso_tertiary_shunts=False,
@@ -149,7 +149,7 @@ def test_install_flag_disables_shunts():
 
 def test_shunt_q_iface_delta_at_pcc():
     net, meta = _build_ieee39_with_shunts()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     # Pick the first DSO's first 3W coupler and its tertiary shunt
     hv = meta.hv_networks[0]
@@ -160,12 +160,12 @@ def test_shunt_q_iface_delta_at_pcc():
     deltas = {}
     for s in (+1, -1):
         net.shunt.at[sh_idx, "step"] = int(s)
-        pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+        pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
         q_s = float(net.res_trafo3w.at[t_first, "q_hv_mvar"])
         deltas[s] = q_s - q0
         # Restore for next iteration
         net.shunt.at[sh_idx, "step"] = 0
-        pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+        pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     # Each step is ~50 Mvar at the tertiary.  The Q split between the HV
     # and MV windings of the 3W coupler depends on local impedances and
@@ -228,7 +228,7 @@ def test_apply_zone_tso_controls_writes_step():
         # prev list has length 1
         assert isinstance(prev, list) and len(prev) == 1
         # Try a runpp to confirm the network still solves with this step
-        pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+        pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
 
 # =====================================================================
@@ -248,7 +248,7 @@ def test_smw_matches_direct_reinversion():
     from sensitivity.index_helper import get_jacobian_indices
 
     net, meta = _build_ieee39_with_shunts()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     sh_bus = int(meta.tso_tertiary_shunt_buses[0])
 
@@ -307,7 +307,7 @@ def test_disturbance_message_smw_updates_jacobian_no_runpp():
        ``net._ppc`` identity to detect a re-solve).
     """
     net, meta = _build_ieee39_with_shunts()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     sh_bus = int(meta.tso_tertiary_shunt_buses[0])
     sens = JacobianSensitivities(net)
@@ -381,7 +381,7 @@ def test_dso_receive_disturbance_message_method_directly():
     from experiments.helpers.utils import _network_state
 
     net, meta = _build_ieee39_with_shunts()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     hv = meta.hv_networks[0]
     sh_bus = int(meta.tso_tertiary_shunt_buses[0])
@@ -498,7 +498,7 @@ def test_shunt_v_gradient_sign():
     the optimiser's direction for shunt switching after a contingency.
     """
     net, meta = _build_ieee39_with_shunts()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     sh_bus = int(meta.tso_tertiary_shunt_buses[0])
     hv = meta.hv_networks[0]
@@ -555,7 +555,7 @@ def test_q_pcc_rows_reenabled_basic_shape():
     from experiments.helpers.utils import _network_state
 
     net, meta = _build_ieee39_with_shunts()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     sh_buses_z2 = [
         int(b) for b, z in zip(
@@ -632,7 +632,7 @@ def test_q_pcc_rows_shunt_column_matches_jacobian():
     from experiments.helpers.utils import _network_state
 
     net, meta = _build_ieee39_with_shunts()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     # Use DSO_1: pick its first 3W coupler (the one with the shunt) as
     # the only PCC for this zone setup.
@@ -701,7 +701,7 @@ def test_q_pcc_output_band_when_capability_on_output_true():
     from experiments.helpers.utils import _network_state
 
     net, meta = _build_ieee39_with_shunts()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     hv0 = meta.hv_networks[0]
     pcc_trafo = int(hv0.coupling_trafo_indices[0])
@@ -795,7 +795,7 @@ def test_shunt_v_gradient_sign_via_TSO_H():
     from experiments.helpers.utils import _network_state
 
     net, meta = _build_ieee39_with_shunts()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     # Pick zone-2 shunts: first 3 (DSO_1 / DSO_2 / DSO_3 all in zone 2)
     sh_buses_z2 = [

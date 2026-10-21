@@ -1,0 +1,57 @@
+{
+  "name": "ch9_selected_pcc27",
+  "title": "ch9_selected_shunt_gw006 with the interface setpoints priced at 27 x g_w_der (was 81)",
+  "description": [
+    "Identical to ch9_selected_shunt_gw006 except g_w_pcc: 0.4936 -> 0.1643,",
+    "i.e. g_w_pcc / g_w_der = 27 instead of 81.1. g_w_der and every other weight",
+    "are unchanged, so the TS IBG respond as before and the STS are called more.",
+    "",
+    "Why: the per-actuator OFO step is -(H^T grad Phi)_i / (2 g_w,i). An interface",
+    "column and an STS-IBG column have the same norm at the TS buses, so the",
+    "price ratio decides how much the TSO asks of the STS. The ratio 81 of",
+    "ch9_selected is a by-product of the Stage-II rule, which has no criterion",
+    "on resource allocation (Stage-I start point: 1). Author goal 2026-10-16:",
+    "more STS contribution; TS-IBG activity need not be reduced.",
+    "",
+    "Sweep 2026-10-15/16 (results/THESIS_pcc_ratio_sweep_20261015), ranked",
+    "windows W1-W4, W6, 12 h, DSO_3 x2, against ch9_selected_shunt_gw006:",
+    "recruited flow (Ch 7 eq:setup:metrics:recruit, base in place of the",
+    "no-access variant) 15.7 Mvar per STS median, e_v(TS) -4.4 %, e_v(DS) +10 %,",
+    "e_q +19 %, DSO taps worst 6 /d (was 4), shunt commits 40 -> 26, no",
+    "corridor violations. lambda_max(B) 1.357 against the 1.546 select ceiling",
+    "(PCC-only ratios below 13.9 fail the screen).",
+    "",
+    "NOT a re-selection: the Chapter-9 rule (e_v(TS) first) would rank the",
+    "ceiling ratio 13.9 higher; ratio 27 is an author priority decision that",
+    "trades DS voltage cost and interface tracking for STS contribution."
+  ],
+  "provenance": {
+    "derived_from": "ch9_selected_shunt_gw006 (ch9_selected / 399e30d3b60b, shunt_int_g_w 0.06)",
+    "created": "2026-10-16",
+    "changed_fields": {"g_w_pcc": [0.493553441555076, 0.16431033927778832]},
+    "ratio_g_w_pcc_over_g_w_der": {"before": 81.1, "after": 27.0},
+    "lambda_max_B": 1.3573,
+    "select_ceiling": 1.5459,
+    "network": "rural_700, DSO_3 x2 (Chapter-9 batch); MSC on the second coupler tertiary (2026-10-15)",
+    "sweep": "results/THESIS_pcc_ratio_sweep_20261015 (candidate 'pcc27')",
+    "log": "docs/daily_log/10_2026/2026-10-15_pcc_ratio_sweep.md",
+    "aggregate_ranked_windows": {
+      "e_v_ts": 0.00129, "e_v_ds": 0.00526, "e_q": 134359,
+      "reference_ch9_selected_shunt_gw006": {"e_v_ts": 0.00135, "e_v_ds": 0.00477, "e_q": 112780}
+    },
+    "recruited_flow_vs_reference_mvar_median_per_sts": {"windows": 15.7, "scenario_6h": 16.8},
+    "closed_loop_validated": true
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.49769499165313763,
+    "dso_g_v": 8915.334668564183,
+    "g_w_der": 0.006085568121399567,
+    "g_w_pcc": 0.16431033927778832,
+    "g_w_gen": 15481813.581071282,
+    "g_w_tso_oltc": 17.667971143245353,
+    "g_w_dso_der": 1.9410237301217468,
+    "g_w_dso_oltc": 15.716142227958981,
+    "shunt_int_g_w": 0.06
+  }
+}

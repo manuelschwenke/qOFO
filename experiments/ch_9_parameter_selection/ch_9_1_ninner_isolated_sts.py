@@ -169,6 +169,19 @@ FLAT_SWEEP_MVAR: Tuple[float, ...] = (
     0.02, 0.05, 0.1, 0.15, 0.25, 0.35, 0.5, 0.7, 1.0,
 )
 
+#: Band [Mvar] around the FINAL interface flow for the settling count
+#: ``n_settle_final_1mvar`` (author decision 2026-09-28, handoff
+#: ``HANDOFF_D_settling_rerun.md`` section 2).
+SETTLE_FINAL_BAND_MVAR = 1.0
+
+#: Iterations before the end of the observation over which the final value
+#: must itself be steady; otherwise the step is censored.
+SETTLE_FINAL_GUARD_ITER = 10
+
+#: The subordinate iteration budget per supervisory period, ``N_inner``.  Used
+#: only to report the share of steps settled within it.
+N_INNER_BUDGET = 9
+
 V_MIN_PU, V_MAX_PU = 0.9, 1.1
 
 #: Design-bank strata in which the DER reactive capability is structurally
@@ -281,6 +294,36 @@ def provenance(args: argparse.Namespace, design: Dict[str, Any]) -> Dict[str, An
 #  Measurement
 # =====================================================================
 
+def n_settle_final(q_seq: Sequence[float], *,
+                   band_mvar: float = SETTLE_FINAL_BAND_MVAR,
+                   guard_iter: int = SETTLE_FINAL_GUARD_ITER,
+                   ) -> Tuple[int, bool]:
+    """``(n_settle, censored)`` against the FINAL interface flow.
+
+    ``q_seq[k]`` is the interface flow at subordinate iteration ``k`` after
+    the step (index 0 = first dispatch after the step).  ``n_settle`` is the
+    first ``k`` from which ``|q(j) - q_final| <= band_mvar`` for every
+    ``j >= k``, with ``q_final = q_seq[-1]``.
+
+    Settling to the final value rather than to the request: each STS
+    controller trades interface tracking against its own voltages, so the
+    flow settles at a compromise that may differ from ``q_set``.  The distance
+    to the request is the residual, reported separately and never used here.
+
+    Guard: if ``|q_final - q(end - guard_iter)| > band_mvar`` the final value
+    is itself not settled, and the step is censored at ``len(q_seq)``.
+    Reference implementation: handoff 2026-09-28, section 2.
+    """
+    q = [float(v) for v in q_seq]
+    n_cap = len(q)
+    if not q or not all(math.isfinite(v) for v in q):
+        return n_cap, True
+    if n_cap > guard_iter and abs(q[-1] - q[-1 - guard_iter]) > band_mvar:
+        return n_cap, True
+    bad = [k for k, v in enumerate(q) if abs(v - q[-1]) > band_mvar]
+    return (0 if not bad else bad[-1] + 1), False
+
+
 def measure_n_inner(records: Sequence[Any], *, step_time_s: float,
                     sts_period_s: float, band_mvar: float,
                     direction: str = "up", flat_mvar: float = DEFAULT_FLAT_MVAR,
@@ -351,6 +394,7 @@ def measure_n_inner(records: Sequence[Any], *, step_time_s: float,
 
         n_inner = _first_stable(delta, flat_mvar)
         censored = n_inner is None
+        n_settle, settle_censored = n_settle_final(q_seq)
         by_flat = {}
         for tol in sorted(set(FLAT_SWEEP_MVAR) | {flat_mvar}):
             v = _first_stable(delta, tol)
@@ -410,6 +454,8 @@ def measure_n_inner(records: Sequence[Any], *, step_time_s: float,
 
         out.append({
             **by_flat,
+            "n_settle_final_1mvar": n_settle,
+            "n_settle_censored": settle_censored,
             "n_inner_tracking": cap if track_censored else n_track,
             "tracking_censored": track_censored,
             "steady_state_offset_mvar": offset,
@@ -647,6 +693,16 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
     cfg, _prov = build_selected_config(
         paramset=job.get("paramset", SELECTED_PARAMSET),
         apply_frozen_network=bool(job.get("frozen_network", True)))
+    if job.get("weights"):
+        # Complete weight vector on top of the paramset, exactly as the
+        # Stage-II screen builds its candidates (apply_to_config raises on a
+        # partial vector).  Used by the D1 settling screen.
+        from tuning.parameters import apply_to_config
+        cfg = apply_to_config(cfg, dict(job["weights"]))
+    if job.get("cfg_overrides"):
+        # Existing MultiTSOConfig fields only (e.g. dso_g_q_per_area for a
+        # per-area DIAGNOSTIC); replace() raises on an unknown field.
+        cfg = dataclasses.replace(cfg, **dict(job["cfg_overrides"]))
     if job.get("no_measurement_noise"):
         # dataclasses.replace on the nested config, not in-place: the cfg is
         # shared by the probe and measurement passes below.
@@ -916,7 +972,46 @@ def aggregate(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def aggregate_settle(rows: Sequence[Dict[str, Any]],
+                     budget: int = N_INNER_BUDGET) -> List[Dict[str, Any]]:
+    """``n_settle_final_1mvar`` distributions per DSO (both directions) and pooled.
+
+    Also the residual ``|q_final - q_set|``, which is reported and never used
+    as a settling limit (handoff 2026-09-28, section 2).
+    """
+    out: List[Dict[str, Any]] = []
+    dsos = sorted({r["dso"] for r in rows})
+    for dso in dsos + ["__pooled__"]:
+        sub = (list(rows) if dso == "__pooled__"
+               else [r for r in rows if r["dso"] == dso])
+        n = [float(r["n_settle_final_1mvar"]) for r in sub
+             if "n_settle_final_1mvar" in r]
+        if not n:
+            continue
+        res = [float(r["residual_mvar"]) for r in sub]
+        out.append({
+            "dso": dso, "n_steps": len(n),
+            "n_settle_median": _quantile(n, 0.50),
+            "n_settle_p90": _quantile(n, 0.90),
+            "n_settle_p95": _quantile(n, 0.95),
+            "n_settle_max": max(n),
+            f"share_le_{budget}": sum(1 for v in n if v <= budget) / len(n),
+            "n_settle_censored": sum(1 for r in sub
+                                     if r.get("n_settle_censored")),
+            "residual_median_mvar": _quantile(res, 0.50),
+            "residual_p95_mvar": _quantile(res, 0.95),
+            "residual_max_mvar": max((x for x in res if math.isfinite(x)),
+                                     default=float("nan")),
+            "n_residual_gt_1mvar": sum(1 for x in res
+                                       if math.isfinite(x) and x > 1.0),
+            "v_violations": sum(1 for r in sub if r.get("v_violation")),
+            "tap_moves_total": sum(int(r.get("tap_moves", 0)) for r in sub),
+        })
+    return out
+
+
 _ROW_COLS = ["window", "dso", "direction", "variant", "trafo", "group",
+             "n_settle_final_1mvar", "n_settle_censored",
              "n_inner", "censored", "n_inner_tracking", "tracking_censored",
              "steady_state_offset_mvar", "final_delta_mvar",
              "capability_limited", "headroom_end_mvar",
@@ -966,6 +1061,15 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
             for r in agg:
                 w.writerow(r)
 
+    settle = aggregate_settle(rows)
+    if settle:
+        with (out_dir / "n_settle_summary.csv").open(
+                "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(settle[0].keys()))
+            w.writeheader()
+            for r in settle:
+                w.writerow(r)
+
     ov = (meta or {}).get("constants", {}).get("der_q_override_pu")
     md = ["# N_inner on the isolated subordinate loop (thesis eq. 9.2)", ""]
     if ov is not None:
@@ -994,6 +1098,30 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
           "choice -- raise `T_TS`, or recalibrate the weights and repeat -- is "
           "an author decision, not a script output.", "",
           "## Result", "",
+          f"### Settling to the final value (`n_settle_final_1mvar`)", "",
+          f"First iteration `k` after the step (iteration 0 = first "
+          f"subordinate dispatch after the step) from which the interface "
+          f"flow stays within {SETTLE_FINAL_BAND_MVAR:g} Mvar of its FINAL "
+          f"value (value at the end of the observation). If the flow moves "
+          f"more than {SETTLE_FINAL_BAND_MVAR:g} Mvar within the last "
+          f"{SETTLE_FINAL_GUARD_ITER} iterations the final value is not "
+          f"settled and the step is censored at the observation length. The "
+          f"residual `|q_final - q_set|` is reported, never used as a limit. "
+          f"Not a flatness count.", "",
+          f"| DSO | steps | median | p90 | p95 | max | share <= "
+          f"{N_INNER_BUDGET} | censored | residual med [Mvar] | residual p95 | "
+          f"residual max | residual > 1 Mvar |",
+          "|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|"]
+    for s in settle:
+        md.append(
+            f"| {s['dso']} | {s['n_steps']} | {s['n_settle_median']:.1f} | "
+            f"{s['n_settle_p90']:.1f} | {s['n_settle_p95']:.1f} | "
+            f"{s['n_settle_max']:.0f} | "
+            f"{100 * s[f'share_le_{N_INNER_BUDGET}']:.0f} % | "
+            f"{s['n_settle_censored']} | {s['residual_median_mvar']:.2f} | "
+            f"{s['residual_p95_mvar']:.2f} | {s['residual_max_mvar']:.2f} | "
+            f"{s['n_residual_gt_1mvar']} |")
+    md += ["",
           "### Capability-limited steps are separated, not mixed in", "",
           "A step is **capability-limited** when the subordinate layer's own "
           "reported headroom in the commanded direction, at the end of the "
@@ -1141,6 +1269,28 @@ def self_test() -> int:
           f"got {ro['steady_state_offset_mvar']}")
     check("the TRACKING view still calls that unsettled, and is kept apart",
           ro["tracking_censored"], f"got {ro['n_inner_tracking']}")
+
+    # SETTLING to the final value (handoff 2026-09-28): the slow creep that
+    # flatness cannot see.  0.5 Mvar per iteration is "flat" at 1 Mvar but the
+    # flow is still travelling towards a final value 10 Mvar away.
+    creep = [0.5 * min(k, 20) for k in range(46)]
+    n_s, c_s = n_settle_final(creep)
+    check("n_settle counts from the final value, not from flatness",
+          n_s == 18 and not c_s, f"got {n_s}, censored={c_s}")
+    n_s, c_s = n_settle_final([5.0] * 46)
+    check("a flow already at its final value settles at 0",
+          n_s == 0 and not c_s, f"got {n_s}")
+    drift = [0.2 * k for k in range(46)]          # 2 Mvar over the last 10
+    n_s, c_s = n_settle_final(drift)
+    check("a final value still moving > 1 Mvar in 10 iterations is censored",
+          c_s and n_s == 46, f"got {n_s}, censored={c_s}")
+    n_s, c_s = n_settle_final([0.0, 10.0, 3.0] + [3.5] * 43)
+    check("an excursion outside the band delays settling past it",
+          n_s == 2 and not c_s, f"got {n_s}")
+    check("the row carries n_settle_final_1mvar",
+          "n_settle_final_1mvar" in rows[0]
+          and rows[0]["n_settle_final_1mvar"] == 3,
+          f"got {rows[0].get('n_settle_final_1mvar')}")
 
     # A loop that keeps moving has NOT converged, however close it is.
     recs_osc = ([_R(0.0, 0.0, 0.0)]
@@ -1325,6 +1475,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "the default; the Stage-II search that produced "
                          "ch9_selected ran symmetric, so this flag is what "
                          "makes a run comparable with the selection bank.")
+    ap.add_argument("--weights-json", type=Path, default=None,
+                    help="JSON object with a COMPLETE weight vector applied on "
+                         "top of --paramset via tuning.parameters."
+                         "apply_to_config (as the Stage-II screen does). The "
+                         "fingerprint is recorded as the candidate key.")
     ap.add_argument("--label", default="ninner_isolated")
     ap.add_argument("--out", type=Path,
                     default=REPO_ROOT / "results" / "THESIS_ch9_1_ninner")
@@ -1394,6 +1549,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     cfg, design = build_selected_config(
         paramset=a.paramset,
         apply_frozen_network=not a.symmetric_network)
+    weights_override: Optional[Dict[str, float]] = None
+    if a.weights_json is not None:
+        from tuning.parameters import apply_to_config, weight_fingerprint
+        weights_override = {
+            k: float(v) for k, v in
+            json.loads(a.weights_json.read_text(encoding="utf-8")).items()}
+        cfg = apply_to_config(cfg, weights_override)
+        design["weights_override"] = weights_override
+        design["candidate_key"] = weight_fingerprint(weights_override)
     print(f"[design] paramset {design['paramset']} candidate "
           f"{design['candidate_key']} from {design['campaign']}")
     print(f"[design] base {design['base_config']}; "
@@ -1481,6 +1645,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "save_trajectories": a.save_trajectories,
                         "trafo": f"{d}|trafo_{i}",
                         "paramset": a.paramset,
+                        "weights": weights_override,
                         "frozen_network": not bool(a.symmetric_network),
                         "bank": a.bank,
                         "no_measurement_noise": bool(a.no_measurement_noise),

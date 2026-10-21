@@ -53,6 +53,10 @@ def main():
     ap.add_argument("--ts-reserve-weight", type=float, default=0.)
     ap.add_argument("--ts-reserve-margin-steps", type=float, default=1.)
     ap.add_argument("--regular-confirmations", type=int, default=1)
+    ap.add_argument("--dwell-s", type=float, default=None,
+                    help="minimum holding time per bank; None keeps the paramset value")
+    ap.add_argument("--verbose", type=int, default=0,
+                    help="1 prints a per-TS-instant progress line to run.log")
     # Fleet-stress scenario: replace the 150 Mvar connect/trip pair with ONE
     # sustained reactive load, so the zone's machines are driven up their Q
     # curve and stay there instead of being relieved at minute 30.
@@ -79,6 +83,9 @@ def main():
         cfg = build_config(
             "legacy" if case in ("legacy", "off", "local") else "reserve",
             args.seconds, args.paramset, True, args.frozen_network)
+        cfg = replace(cfg, verbose=args.verbose)
+        if args.dwell_s is not None:
+            cfg = replace(cfg, shunt_int_t_dwell_s=args.dwell_s)
         if case == "off":
             # Banks installed and held: the baseline of the three-way study.
             cfg = replace(cfg, shunt_int_daily_budget=0)

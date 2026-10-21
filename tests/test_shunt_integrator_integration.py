@@ -30,7 +30,7 @@ def _build():
     from network.ieee39.build import build_ieee39_net
     from network.ieee39.hv_networks import add_hv_networks
 
-    net, meta = build_ieee39_net(scenario="base", verbose=False)
+    net, meta = build_ieee39_net(scenario="rural_700", verbose=False)
     meta = add_hv_networks(
         net, meta,
         install_tso_tertiary_shunts=True,
@@ -39,7 +39,7 @@ def _build():
         msc_q_step_mvar=50.0, msr_q_step_mvar=50.0,
         verbose=False,
     )
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
     return net, meta
 
 
@@ -53,6 +53,14 @@ def _first_bank(meta, kind):
         if k == kind:
             return int(sh_idx), int(bus)
     raise AssertionError(f"no {kind} bank found")
+
+
+def _host_trafo(hv, bus):
+    """The coupling 3W transformer whose tertiary hosts ``bus`` (the bank's
+    interface).  Since 2026-10-15 the MSC sits on the second coupler, so the
+    first coupler is no longer the right interface for it."""
+    lv = [int(b) for b in hv.coupling_lv_bus_indices]
+    return int(hv.coupling_trafo_indices[lv.index(int(bus))])
 
 
 def test_boundary_sensitivity_signs():
@@ -89,8 +97,8 @@ def test_interface_feedforward_finite_and_signed():
     net, meta = _build()
     sens = JacobianSensitivities(net)
     hv0 = meta.hv_networks[0]
-    t_iface = int(hv0.coupling_trafo_indices[0])
     _, msc_bus = _first_bank(meta, "MSC")
+    t_iface = _host_trafo(hv0, msc_bus)
 
     dq_msc = sens.compute_dQtrafo3w_hv_dQ_shunt(
         trafo3w_idx=t_iface, shunt_bus_idx=msc_bus, q_step_mvar=-50.0,
@@ -114,7 +122,7 @@ def test_msc_commits_on_sustained_undervoltage_from_real_sensitivities():
     sens = JacobianSensitivities(net)
     hv0 = meta.hv_networks[0]
     msc_idx, msc_bus = _first_bank(meta, "MSC")
-    t_iface = int(hv0.coupling_trafo_indices[0])
+    t_iface = _host_trafo(hv0, msc_bus)
 
     obs = list(hv0.bus_indices)
     h_col, obs_map = sens.compute_dV_dQ_shunt(
@@ -178,7 +186,7 @@ def test_feasibility_guard_blocks_when_band_tight():
     sens = JacobianSensitivities(net)
     hv0 = meta.hv_networks[0]
     msc_idx, msc_bus = _first_bank(meta, "MSC")
-    t_iface = int(hv0.coupling_trafo_indices[0])
+    t_iface = _host_trafo(hv0, msc_bus)
     obs = list(hv0.bus_indices)
     h_col, obs_map = sens.compute_dV_dQ_shunt(
         shunt_bus_idx=msc_bus, observation_bus_indices=obs, q_step_mvar=-1.0,

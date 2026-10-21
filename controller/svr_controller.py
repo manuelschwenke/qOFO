@@ -61,6 +61,27 @@ screen that fixes the OFO weights.  ``s_p,a`` is estimated ONCE at
 initialisation by perturbation on a *copy* of the plant, then frozen: classical
 SVR computes its participation structure offline and does not refresh it.
 
+OFO form of the two loops (variant O0)
+--------------------------------------
+Added 2026-10-06 for Case 1 of the thesis (``ch:case_svr``).  With
+``rvr_law='ofo'`` the regional update is the OFO step (``eq:ofo_qp``) of a
+controller with ONE input, the reactive level q_a, and ONE tracked output, the
+pilot voltage::
+
+    sigma = argmin_w  g_w w^2 - 2 w_p s_p e_p w + g_z ||z||^2
+            s.t.  q_min <= q_a + w <= q_max
+                  v_min - z <= v_j + (dv_j/dq_a) w <= v_max + z   (monitored buses)
+
+with ``g_w = w_p s_p^2 T_RVR / T_TS`` (the match condition of the thesis).
+Without a violated output constraint its solution is the integral RVR
+increment ``T_TS e_p / (T_RVR s_p)``, saturated exactly as the RVR saturates
+its level.  ``rpr_law='ofo'`` does the same per machine: input v_set, output
+Q_i, ``g_w = w_Q h_i^2 T_RPR / dt``, the machine capability as soft output
+constraint.  Both require the integral form (``k_p = 0``) and no
+voltage-priority guard: the OFO step has no proportional path, and the guard is
+not part of it.  The voltage limits and slack weights are the TS-OFO's own, so
+the OFO form differs from the TS-OFO only in objective and structure.
+
 Author: added 2026-09-01 for the S1 reference variant.
 """
 
@@ -107,6 +128,83 @@ class SVROutput:
     rpr_blocked: NDArray[np.bool_] = field(default_factory=lambda: np.zeros(0, dtype=bool))
     rvr_p_term_level: float = 0.0
     rpr_p_term_pu: NDArray[np.float64] = field(default_factory=lambda: np.zeros(0))
+    # -- OFO form (variant O0): active sets of the one-input steps -----------
+    ofo_rvr_n_active: int = 0
+    ofo_rvr_box_active: bool = False
+    #: Per machine: its OUTPUT constraint (capability) binds.  Only this can
+    #: make the OFO form depart from the integral law.
+    ofo_rpr_active: NDArray[np.bool_] = field(default_factory=lambda: np.zeros(0, dtype=bool))
+    #: Per machine: its AVR-reference bound binds -- the same saturation the
+    #: integral law applies, so it never causes a departure.
+    ofo_rpr_box_active: NDArray[np.bool_] = field(default_factory=lambda: np.zeros(0, dtype=bool))
+
+
+# ---------------------------------------------------------------------------
+#  One-input OFO step (variant O0)
+# ---------------------------------------------------------------------------
+
+
+def _ofo_scalar_step(
+    w0: float,
+    lo: float,
+    hi: float,
+    g: float,
+    rows: NDArray[np.float64],
+    a: NDArray[np.float64],
+    b: NDArray[np.float64],
+    g_z: float,
+) -> tuple:
+    """Exact OFO step of a controller with one input.
+
+    Minimises ``g (w - w0)^2 + g_z * sum(max(0, a - r w)^2 + max(0, r w - b)^2)``
+    over ``lo <= w <= hi``.  This is ``eq:ofo_qp`` with the slack variables
+    eliminated -- for a quadratic slack penalty the optimal slack is the
+    constraint violation itself -- and with ``w0`` the unconstrained step.
+
+    The objective is convex and piecewise quadratic, so its derivative is
+    monotone and bisection on it is exact to machine precision.  When the
+    box-clipped unconstrained step violates no output constraint it is returned
+    unchanged; this keeps the equivalence with the integral law exact rather
+    than approximate.
+
+    Returns ``(w, n_out_active, box_active)``.
+    """
+    rows = np.asarray(rows, dtype=float)
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+
+    def violations(w: float):
+        y = rows * w
+        return np.maximum(0.0, a - y), np.maximum(0.0, y - b)
+
+    w_c = float(min(max(w0, lo), hi))
+    under, over = violations(w_c)
+    if rows.size == 0 or not (np.any(under > 0.0) or np.any(over > 0.0)):
+        return w_c, 0, bool(w_c != w0)
+
+    def slope(w: float) -> float:
+        u_, o_ = violations(w)
+        return 2.0 * g * (w - w0) + 2.0 * g_z * float(np.sum(rows * (o_ - u_)))
+
+    if slope(lo) >= 0.0:
+        w = float(lo)
+    elif slope(hi) <= 0.0:
+        w = float(hi)
+    else:
+        left, right = float(lo), float(hi)
+        for _ in range(200):
+            mid = 0.5 * (left + right)
+            if slope(mid) > 0.0:
+                right = mid
+            else:
+                left = mid
+            if right - left <= 1e-15 * max(1.0, abs(left), abs(right)):
+                break
+        w = 0.5 * (left + right)
+    under, over = violations(w)
+    n_active = int(np.sum((under > 1e-12) | (over > 1e-12)))
+    box_active = bool(w <= lo + 1e-15 or w >= hi - 1e-15)
+    return w, n_active, box_active
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +232,21 @@ class SVRZoneConfig:
     n_rpr_substeps: int = 1
     calib_dv_pu: float = 5e-3
     calib_dq_mvar: float = 5.0
+    # -- OFO form of the two loops (variant O0, 2026-10-06) ------------------
+    #: "pi" = classical regional regulator, "ofo" = one-input OFO step.
+    rvr_law: str = "pi"
+    #: "pi" = classical plant regulator, "ofo" = one-input OFO step per machine.
+    rpr_law: str = "pi"
+    #: Pilot tracking weight; the runner passes the TS-OFO's voltage weight g_v.
+    ofo_w_p: float = 1.0
+    #: Machine-Q tracking weight of the OFO plant step.
+    ofo_w_q: float = 1.0
+    #: Voltage limits of the monitored buses; the runner passes the TS-OFO's.
+    ofo_v_min_pu: float = 0.90
+    ofo_v_max_pu: float = 1.10
+    #: Slack weights; the runner passes the TS-OFO's g_z_voltage / g_z_q_gen.
+    ofo_g_z_v: float = 1e9
+    ofo_g_z_q: float = 1e2
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +283,19 @@ class SVRZoneController:
             raise ValueError("k_p_rvr must be finite and non-negative")
         if not np.isfinite(cfg.k_p_rpr) or cfg.k_p_rpr < 0.0:
             raise ValueError("k_p_rpr must be finite and non-negative")
+        for _law in ("rvr_law", "rpr_law"):
+            if getattr(cfg, _law) not in ("pi", "ofo"):
+                raise ValueError(
+                    f"{_law} must be 'pi' or 'ofo', got {getattr(cfg, _law)!r}")
+        if cfg.rvr_law == "ofo" and cfg.k_p_rvr > 0.0:
+            raise ValueError("rvr_law='ofo' requires k_p_rvr == 0: the OFO step "
+                             "has no proportional path")
+        if cfg.rpr_law == "ofo" and cfg.k_p_rpr > 0.0:
+            raise ValueError("rpr_law='ofo' requires k_p_rpr == 0: the OFO step "
+                             "has no proportional path")
+        if cfg.rpr_law == "ofo" and cfg.rpr_voltage_priority:
+            raise ValueError("rpr_law='ofo' excludes rpr_voltage_priority: the "
+                             "guard is not part of the OFO step")
         self.state = _ZoneState()
         self._initialised = False
 
@@ -203,6 +329,14 @@ class SVRZoneController:
         self.dq_dvset: Optional[NDArray[np.float64]] = None
         #: Aggregate pilot sensitivity s_p,a [pu per unit reactive level].
         self.pilot_sensitivity: float = float("nan")
+        #: Monitored buses of the zone (the TS-OFO's ``v_bus_indices``).  Only
+        #: the OFO form of the RVR uses them, as soft voltage constraints.
+        self.v_bus_indices: List[int] = [
+            int(b) for b in (getattr(zone_def, "v_bus_indices", None) or [])
+        ]
+        #: dV_bus / dQ_i for the monitored buses [pu / Mvar], shape
+        #: (n_vbus, n_gen + n_der).  Calibrated with s_p,a and frozen with it.
+        self.dv_bus_dq: Optional[NDArray[np.float64]] = None
 
     # -- calibration -------------------------------------------------------
 
@@ -224,6 +358,15 @@ class SVRZoneController:
 
         dv_pilot_dq = np.zeros(n_gen + n_der, dtype=float)
         dq_dvset = np.zeros(n_gen, dtype=float)
+        # The same perturbations also give the monitored-bus columns used by the
+        # OFO form of the RVR; reading more result rows costs no extra solve.
+        vb = list(self.v_bus_indices)
+        dv_bus_dq = np.zeros((len(vb), n_gen + n_der), dtype=float)
+
+        def _vbus() -> NDArray[np.float64]:
+            if not vb:
+                return np.zeros(0)
+            return probe.res_bus.loc[vb, "vm_pu"].to_numpy(dtype=float)
 
         # -- synchronous machines: perturb the AVR setpoint ----------------
         # Withheld machines keep dq_dvset = 0, which makes step() pass their
@@ -240,15 +383,19 @@ class SVRZoneController:
                 readings[sign] = (
                     float(probe.res_gen.at[g, "q_mvar"]),
                     float(probe.res_bus.at[p, "vm_pu"]),
+                    _vbus(),
                 )
             probe.gen.at[g, "vm_pu"] = v0
             _solve()
 
             dq = (readings[+1.0][0] - readings[-1.0][0]) / (2 * self.cfg.calib_dv_pu)
             dvp = (readings[+1.0][1] - readings[-1.0][1]) / (2 * self.cfg.calib_dv_pu)
+            dvb = (readings[+1.0][2] - readings[-1.0][2]) / (2 * self.cfg.calib_dv_pu)
             dq_dvset[k] = dq
             # dV_p/dQ_i = (dV_p/dV_set,i) / (dQ_i/dV_set,i)
             dv_pilot_dq[k] = dvp / dq if abs(dq) > 1e-9 else 0.0
+            if vb:
+                dv_bus_dq[:, k] = dvb / dq if abs(dq) > 1e-9 else 0.0
 
         # -- converter DER: perturb the reactive command directly ----------
         for k, s in enumerate(self.der_indices):
@@ -257,15 +404,20 @@ class SVRZoneController:
             for sign in (+1.0, -1.0):
                 probe.sgen.at[s, "q_mvar"] = q0 + sign * self.cfg.calib_dq_mvar
                 _solve()
-                readings[sign] = float(probe.res_bus.at[p, "vm_pu"])
+                readings[sign] = (float(probe.res_bus.at[p, "vm_pu"]), _vbus())
             probe.sgen.at[s, "q_mvar"] = q0
             _solve()
             dv_pilot_dq[n_gen + k] = (
-                readings[+1.0] - readings[-1.0]
+                readings[+1.0][0] - readings[-1.0][0]
             ) / (2 * self.cfg.calib_dq_mvar)
+            if vb:
+                dv_bus_dq[:, n_gen + k] = (
+                    readings[+1.0][1] - readings[-1.0][1]
+                ) / (2 * self.cfg.calib_dq_mvar)
 
         self.dv_pilot_dq = dv_pilot_dq
         self.dq_dvset = dq_dvset
+        self.dv_bus_dq = dv_bus_dq
 
         q_max = self._headroom(net, upper=True)
         self.pilot_sensitivity = float(np.sum(dv_pilot_dq * q_max))
@@ -329,6 +481,55 @@ class SVRZoneController:
         if upper:
             return np.concatenate([g_hi, np.asarray(d_hi, float)])
         return np.abs(np.concatenate([g_lo, np.asarray(d_lo, float)]))
+
+    def _gen_q_limits(self, net: pp.pandapowerNet) -> tuple:
+        """Signed capability band ``(Q_min, Q_max)`` [Mvar] of the machines.
+
+        Used only by the OFO form of the plant loop, as its soft output
+        constraint.  Unavailable machines get a zero band, as in ``_headroom``.
+        """
+        active_gen = self._active_generators(net)
+        if not self.gen_indices:
+            return np.zeros(0), np.zeros(0)
+        gen_p = np.array(
+            [float(net.res_gen.at[g, "p_mw"]) if active_gen[k] else 0.0
+             for k, g in enumerate(self.gen_indices)], dtype=float)
+        gen_v = np.array(
+            [float(net.gen.at[g, "vm_pu"]) if active_gen[k] else 1.0
+             for k, g in enumerate(self.gen_indices)], dtype=float)
+        g_lo, g_hi = self.bounds.compute_gen_q_bounds(gen_p, gen_v)
+        g_lo = np.where(active_gen, np.asarray(g_lo, float), 0.0)
+        g_hi = np.where(active_gen, np.asarray(g_hi, float), 0.0)
+        return g_lo, g_hi
+
+    def _ofo_rvr_step(
+        self, net: pp.pandapowerNet, err: float, dt_rvr_s: float,
+    ) -> tuple:
+        """New reactive level from the one-input OFO step (variant O0).
+
+        Weights follow the match condition ``g_w / w_p = T_RVR s_p^2 / T_TS``,
+        so the unconstrained step equals the integral RVR increment.  The
+        monitored-bus voltages are soft output constraints, anchored at their
+        MEASURED values and predicted through the frozen calibration columns
+        along the headroom branch the level is heading for.
+
+        Returns ``(new_level, n_out_active, box_active)``.
+        """
+        cfg, st = self.cfg, self.state
+        s = float(self.pilot_sensitivity)
+        g = cfg.ofo_w_p * s * s * cfg.t_rvr_s / dt_rvr_s     # match condition
+        w0 = cfg.ofo_w_p * s * err / g                        # unconstrained step
+        q = float(st.integrator)
+        lo, hi = cfg.q_level_min - q, cfg.q_level_max - q
+        rows = a = b = np.zeros(0)
+        if self.v_bus_indices and self.dv_bus_dq is not None:
+            head = self._headroom(net, upper=(q + w0 >= 0.0))
+            rows = self.dv_bus_dq @ head
+            v = net.res_bus.loc[self.v_bus_indices, "vm_pu"].to_numpy(dtype=float)
+            a = cfg.ofo_v_min_pu - v
+            b = cfg.ofo_v_max_pu - v
+        w, n_act, box = _ofo_scalar_step(w0, lo, hi, g, rows, a, b, cfg.ofo_g_z_v)
+        return q + w, n_act, box
 
     # -- initialisation ----------------------------------------------------
 
@@ -449,6 +650,7 @@ class SVRZoneController:
         err = self._deadband(cfg.v_ref_pu - v_pilot)
 
         rvr_p_term = st.rvr_p_term
+        ofo_rvr_n_active, ofo_rvr_box_active = 0, False
         p_update = rvr_due or (cfg.rvr_p_every_step and cfg.k_p_rvr > 0.0)
         if p_update:
             # q_level -> V_pilot must have positive local gain for both terms
@@ -461,7 +663,14 @@ class SVRZoneController:
                 )
             rvr_p_term = cfg.k_p_rvr * err / sensitivity
             st.rvr_p_term = rvr_p_term
-            if rvr_due:
+            if rvr_due and cfg.rvr_law == "ofo":
+                # One-input OFO step (variant O0).  k_p_rvr == 0 is enforced at
+                # construction, so there is no P path and level == state.
+                candidate_x, ofo_rvr_n_active, ofo_rvr_box_active = (
+                    self._ofo_rvr_step(net, err, dt_rvr_s))
+                raw_level = candidate_x
+                st.integrator = candidate_x
+            elif rvr_due:
                 # The P term is algebraic; only the separate state receives dt.
                 previous_x = st.integrator
                 candidate_x = float(np.clip(
@@ -516,6 +725,10 @@ class SVRZoneController:
         active_gen = self._active_generators(net)
         rpr_blocked = np.zeros(n_gen, dtype=bool)
         rpr_p_term = np.zeros(n_gen, dtype=float)
+        rpr_ofo_active = np.zeros(n_gen, dtype=bool)
+        rpr_ofo_box = np.zeros(n_gen, dtype=bool)
+        if cfg.rpr_law == "ofo":
+            g_lo_all, g_hi_all = self._gen_q_limits(net)
         for k, g in enumerate(self.gen_indices):
             v_now = float(net.gen.at[g, "vm_pu"])
             if not active_gen[k]:
@@ -538,15 +751,37 @@ class SVRZoneController:
                 # creates no extra bump at start-up or restoration.
                 self._rpr_integrator[k] = v_now - rpr_p_term[k]
             previous_y = float(self._rpr_integrator[k])
-            delta_y = gain * q_error / slope
-            candidate_y = float(np.clip(
-                previous_y + delta_y, cfg.v_set_min_pu, cfg.v_set_max_pu,
-            ))
-            raw_v = candidate_y + rpr_p_term[k]
-            if ((raw_v > cfg.v_set_max_pu and delta_y > 0.0) or
-                    (raw_v < cfg.v_set_min_pu and delta_y < 0.0)):
-                candidate_y = previous_y
+            if cfg.rpr_law == "ofo":
+                # One-input OFO step per machine (variant O0): input v_set,
+                # output Q_i, g_w / w_Q = T_RPR h^2 / dt, capability as a soft
+                # output constraint anchored at the measured Q.  k_p_rpr == 0
+                # is enforced at construction, so there is no P path.
+                g_k = cfg.ofo_w_q * slope * slope * cfg.t_rpr_s / dt_rpr_s
+                d0 = cfg.ofo_w_q * slope * q_error / g_k
+                d, n_k, box_k = _ofo_scalar_step(
+                    d0,
+                    cfg.v_set_min_pu - previous_y,
+                    cfg.v_set_max_pu - previous_y,
+                    g_k,
+                    np.array([slope]),
+                    np.array([float(g_lo_all[k]) - q_now]),
+                    np.array([float(g_hi_all[k]) - q_now]),
+                    cfg.ofo_g_z_q,
+                )
+                candidate_y = previous_y + d
+                raw_v = candidate_y
+                rpr_ofo_active[k] = bool(n_k > 0)
+                rpr_ofo_box[k] = bool(box_k)
+            else:
+                delta_y = gain * q_error / slope
+                candidate_y = float(np.clip(
+                    previous_y + delta_y, cfg.v_set_min_pu, cfg.v_set_max_pu,
+                ))
                 raw_v = candidate_y + rpr_p_term[k]
+                if ((raw_v > cfg.v_set_max_pu and delta_y > 0.0) or
+                        (raw_v < cfg.v_set_min_pu and delta_y < 0.0)):
+                    candidate_y = previous_y
+                    raw_v = candidate_y + rpr_p_term[k]
             v_new = float(np.clip(raw_v, cfg.v_set_min_pu, cfg.v_set_max_pu))
             if cfg.rpr_voltage_priority:
                 # The two cached derivatives recover the pilot response to
@@ -586,6 +821,10 @@ class SVRZoneController:
             rpr_blocked=rpr_blocked,
             rvr_p_term_level=rvr_p_term,
             rpr_p_term_pu=rpr_p_term,
+            ofo_rvr_n_active=ofo_rvr_n_active,
+            ofo_rvr_box_active=ofo_rvr_box_active,
+            ofo_rpr_active=rpr_ofo_active,
+            ofo_rpr_box_active=rpr_ofo_box,
         )
 
 

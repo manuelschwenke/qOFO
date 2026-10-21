@@ -32,7 +32,7 @@ def _build():
     from network.ieee39.build import build_ieee39_net
     from network.ieee39.hv_networks import add_hv_networks
 
-    net, meta = build_ieee39_net(scenario="base", verbose=False)
+    net, meta = build_ieee39_net(scenario="rural_700", verbose=False)
     meta = add_hv_networks(
         net, meta, install_tso_tertiary_shunts=True, verbose=False,
     )
@@ -48,7 +48,7 @@ def test_output_gradient_projects_to_objective_gradient():
     from experiments.helpers.utils import _network_state
 
     net, meta = _build()
-    pp.runpp(net, run_control=False, calculate_voltage_angles=True)
+    pp.runpp(net, run_control=False, calculate_voltage_angles=True, distributed_slack=True)
 
     # Zone-2 PCC couplers and HV observation buses (no DER / gen / OLTC / shunt
     # controls → the only controls are the Q_PCC setpoints).

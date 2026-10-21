@@ -642,6 +642,30 @@ class TSOController(BaseOFOController):
             self.pcc_capability_min_mvar[i] = message.q_min_mvar[msg_idx]
             self.pcc_capability_max_mvar[i] = message.q_max_mvar[msg_idx]
 
+    def transfer_pcc_request_to_shunt(self, interface_indices, delta_q_mvar) -> None:
+        """Transfer a bank contribution out of the delegated STS request.
+
+        The runner must increase the shunt feedforward by the same vector in
+        the same instant. Then ``delegated_request + shunt_offset`` is invariant.
+        This is used only for explicit STS assistance/reserve commits. Normal
+        TS-objective commits retain the existing feedforward-only action.
+        """
+        if self._u_current is None:
+            raise RuntimeError("Controller not initialised")
+        indices = np.asarray(interface_indices, dtype=np.int64)
+        delta = np.asarray(delta_q_mvar, dtype=float)
+        if (indices.ndim != 1 or delta.shape != indices.shape
+                or not np.all(np.isfinite(delta))
+                or len(set(indices)) != len(indices)):
+            raise ValueError("Invalid shunt transfer vector")
+        pcc = list(self.config.pcc_trafo_indices)
+        if any(int(i) not in pcc for i in indices):
+            raise ValueError("Shunt transfer references an unknown PCC")
+        mapping = self.config.der_mapping
+        n_der = mapping.n_der if mapping is not None else len(self.config.der_indices)
+        positions = np.asarray([n_der + pcc.index(int(i)) for i in indices], dtype=int)
+        self._u_current[positions] -= delta
+
     def generate_setpoint_messages(
         self,
     ) -> List[SetpointMessage]:
@@ -879,6 +903,37 @@ class TSOController(BaseOFOController):
 
         oltc_start = n_der + n_pcc + n_gen
         return list(range(oltc_start, oltc_start + n_oltc))
+
+    def fleet_reserve_state(self, measurement: Measurement):
+        """Reactive-reserve state of this zone's synchronous machines.
+
+        Uses the same capability source, band definition
+        (``Q_mid = ½(Q_min+Q_max)``, ``Q_half = ½(Q_max−Q_min)``), half-width
+        epsilon and out-of-service mask as the ``Q_gen`` block of
+        :meth:`_output_objective_gradient`, so a *supervisory* cost built on
+        this cannot drift from the controller's own reserve term — the failure
+        mode the DER capability override in :mod:`core.actuator_bounds` warns
+        about.  Returns ``None`` when the fleet state is unavailable; the
+        supervisory consumer then simply makes no request.
+        """
+        from controller.shunt_support import TSFleetReserveState
+
+        n_gen = len(self.config.gen_indices)
+        if (n_gen == 0
+                or self.actuator_bounds.gen_params is None
+                or len(measurement.gen_p_mw) != n_gen
+                or len(measurement.gen_vm_pu) != n_gen
+                or len(measurement.gen_q_mvar) != n_gen):
+            return None
+        q_min_g, q_max_g = self.actuator_bounds.compute_gen_q_bounds(
+            measurement.gen_p_mw, measurement.gen_vm_pu,
+        )
+        q_half_g = 0.5 * (q_max_g - q_min_g)
+        eligible = (q_half_g > 1e-6) & ~np.asarray(self._oos_gen_mask, dtype=bool)
+        return TSFleetReserveState(
+            np.asarray(measurement.gen_q_mvar, dtype=np.float64).copy(),
+            0.5 * (q_max_g + q_min_g), q_half_g, eligible,
+        )
 
     def _actuator_class_indices(self) -> Dict[str, NDArray[np.int64]]:
         """Per-class index map for adaptive ``g_w`` (paper Eq. 16).

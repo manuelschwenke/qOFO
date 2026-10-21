@@ -793,6 +793,23 @@ class TestTSOController:
         with pytest.raises(RuntimeError, match="not initialised"):
             controller.step(measurement)
 
+    def test_prediction_includes_additional_solver_actuator(self, tso_setup):
+        """A joint bank contribution must reach the public output prediction."""
+        from dataclasses import replace
+        controller, _, measurement = tso_setup
+        controller.initialise(measurement)
+        solve = controller.solver.solve
+        extra = np.array([.001, .002, .003, 2., .01])
+
+        def with_bank(problem):
+            return replace(solve(problem), additional_output_change=extra)
+
+        controller.solver.solve = with_bank
+        result = controller.step(measurement)
+        expected = (controller._extract_outputs(measurement)
+                    + controller._build_sensitivity_matrix() @ result.sigma + extra)
+        assert_allclose(result.y_predicted, expected)
+
     def test_receive_capability(self, tso_setup) -> None:
         """Test receiving a capability message from a DSO."""
         controller, _, _ = tso_setup

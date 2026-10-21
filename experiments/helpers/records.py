@@ -190,6 +190,16 @@ class MultiTSOIterationRecord:
     zone_svr_saturated: Dict[int, bool] = field(default_factory=dict)
     zone_svr_rvr_p_term_level: Dict[int, float] = field(default_factory=dict)
     zone_svr_rpr_p_term_pu: Dict[int, NDArray] = field(default_factory=dict)
+    # OFO form of the SVR loops (variant O0, added 2026-10-06): active sets of
+    # the one-input OFO steps.  n_active = number of monitored-bus voltage
+    # constraints binding at the regional step; box = the level bound binds;
+    # rpr_active = per machine, its capability (output) constraint binds;
+    # rpr_box = per machine, its AVR-reference bound binds (the same
+    # saturation the integral law applies).  Empty or zero for classical laws.
+    zone_svr_ofo_rvr_n_active: Dict[int, int] = field(default_factory=dict)
+    zone_svr_ofo_rvr_box_active: Dict[int, bool] = field(default_factory=dict)
+    zone_svr_ofo_rpr_active: Dict[int, NDArray] = field(default_factory=dict)
+    zone_svr_ofo_rpr_box_active: Dict[int, NDArray] = field(default_factory=dict)
 
     # Plant voltages per zone (after PF)
     zone_v_min:  Dict[int, float] = field(default_factory=dict)
@@ -257,6 +267,14 @@ class MultiTSOIterationRecord:
     dso_group_v_min_pu:       Dict[str, float] = field(default_factory=dict)
     dso_group_v_mean_pu:      Dict[str, float] = field(default_factory=dict)
     dso_group_v_max_pu:       Dict[str, float] = field(default_factory=dict)
+    dso_group_v_rms_dev_pu:   Dict[str, float] = field(default_factory=dict)
+    """Per-group spatial RMS of ``(V_i - V_i^set)`` over the voltage-observed
+    buses of the group's DSO controllers (true plant values after the power
+    flow), ``V_i^set`` from ``DSOControllerConfig.v_setpoints_pu``.  The DS
+    counterpart of ``zone_v_rms_err_pu``.  Added 2026-10-16 so the DS voltage
+    metric can be the per-bus RMS the thesis text describes (protocol
+    ``docs/tuning/2026-10-16_protocol_experiment_B_rerun.md``, D1); before it,
+    only min/mean/max were recorded.  Defaulted so older pickles load."""
 
     # Noisy, controller-facing DSO measurement snapshot (pre-control).
     dso_group_q_der_meas_mvar:     Dict[str, float] = field(default_factory=dict)
@@ -338,6 +356,19 @@ class MultiTSOIterationRecord:
 
     # Per-zone TSO shunt states (MSC/MSR tap positions; empty array if none).
     zone_tso_shunt_states: Dict[int, NDArray] = field(default_factory=dict)
+    zone_tso_shunt_g_h: Dict[int, NDArray] = field(default_factory=dict)
+    """Per-zone array of the projected objective gradient ``g_H`` fed to each
+    switched-shunt bank's integrator (``controller.shunt_integrator``), in the
+    bank order of ``zone_tso_shunt_states``.  Written only on TSO iterations of
+    the integrator mode; empty otherwise.  Added 2026-10-16 to measure the p90
+    boundary pressure that sets ``shunt_int_g_w`` (protocol D2b); the earlier
+    reference value 0.133 was not recorded with its procedure."""
+    zone_tso_shunt_drive: Dict[int, NDArray] = field(default_factory=dict)
+    zone_tso_shunt_hybrid: Dict[int, dict] = field(default_factory=dict)
+    """Actual gradient supplied to the bank, including optional STS support."""
+    zone_tso_shunt_request_kind: Dict[int, List[str]] = field(default_factory=dict)
+    shunt_commits: List[Dict[str, Any]] = field(default_factory=list)
+    """Committed bank, reason, interface contribution and delegated transfer."""
 
     # Per-HV-group line loading stats and balance aggregates.
     dso_group_i_max_pct:    Dict[str, float] = field(default_factory=dict)

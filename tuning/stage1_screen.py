@@ -58,23 +58,37 @@ by a layer-gain scalar but by the **commit-threshold rule**, so they contribute
 an irreducible floor that no continuous weight can scale away.
 
 The relaxed eigenvalue cannot see quantisation, so the integer columns get a
-second, exact statement.  With one unit increment the MIQP commits column ``i``
-iff
+second, exact statement.  The MIQP step objective is
+``w^T G_w w + c^T w + z^T G_z z`` with diagonal ``G_w`` and no ``H^T Q H``
+term (``optimisation/miqp_solver.py``).  With no output limit active it splits
+into one term per actuator, so a free integer column ``i`` commits one unit
+step iff
 
 .. math::
 
-    2\,|a_i^{\top} z| > \|a_i\|^2 + g_{w,i},
-    \qquad a_i = (Q^{1/2}H)_{:,i}
+    |c_i| = 2\,|a_i^{\top} z| > g_{w,i},
+    \qquad a_i = (Q^{1/2}H)_{:,i},
 
-so the deviation at which the tap engages, and its inverse, are
+i.e. iff the relaxed step ``-c_i / (2 g_{w,i})`` exceeds half a step: the MIQP
+step of a free column is its relaxed step rounded (thesis
+``eq:ofo_tap_engagement``).  The deviation at which the tap engages, and its
+inverse, are
 
 .. math::
 
     \Delta v_{\mathrm{eng},i}
-      = \frac{g_{w,i} + \|a_i\|^2}{2 g_V\,|\sum_j H_V[j,i]|},
+      = \frac{g_{w,i}}{2 g_V\,|\sum_j H_V[j,i]|},
     \qquad
-    g_{w,i} = 2 g_V \Big|\sum_j H_V[j,i]\Big|\,
-                \Delta v_{\mathrm{eng}} - \|a_i\|^2 .
+    g_{w,i} = 2 g_V \Big|\sum_j H_V[j,i]\Big|\, \Delta v_{\mathrm{eng}} .
+
+CORRECTED 2026-10-14: until this date the commit condition read
+``2|a_i^T z| > ||a_i||^2 + g_{w,i}`` (numerator ``g_{w,i} + ||a_i||^2``,
+inverse ``... - ||a_i||^2``).  That is the condition for an objective with the
+curvature term ``w^T H^T Q H w``, which the controllers' MIQP does not contain;
+checked with ``MIQPSolver`` on a one-tap problem (tap moves iff
+``|c_i| > g_{w,i}``).  Integer weights designed before this date (Stage-I
+starting point ``stage1_start``) are smaller by ``||a_i||^2`` than the stated
+``d_engage`` requires, so their taps engage earlier than stated.
 
 The column sum is the **systematic-offset** reading — an offset
 :math:`e = \Delta v\,\mathbf{1}` across the area, which is the case an OLTC
@@ -309,6 +323,11 @@ def engage_deviation(
     whole area — the case an OLTC exists for); ``'single_bus'`` uses
     ``max_j |H_V[j,i]|`` (an error concentrated on the tap's strongest bus,
     the pessimistic diagnostic).  Non-integer columns return ``nan``.
+
+    Commit rule of the MIQP for a free column with no output limit active:
+    ``|c_i| > g_w[i]`` (module docstring).  ``g_q`` is kept in the signature
+    for the callers but no longer enters: the ``||a_i||^2`` term it fed was
+    removed on 2026-10-14.
     """
     if reading == "systematic":
         h = lc.colsum_V
@@ -316,7 +335,6 @@ def engage_deviation(
         h = lc.maxabs_V
     else:
         raise ValueError(f"reading must be 'systematic' or 'single_bus', got {reading!r}")
-    col_sq = lc.column_norm_sq(g_v, g_q)
     g_w = np.asarray(g_w, dtype=float)
     out = np.full(lc.n_u, np.nan, dtype=float)
     for i, cls in enumerate(lc.classes):
@@ -324,7 +342,7 @@ def engage_deviation(
             continue
         den = 2.0 * float(g_v) * float(h[i])
         if den > 0.0:
-            out[i] = (g_w[i] + col_sq[i]) / den
+            out[i] = g_w[i] / den
     return out
 
 
@@ -338,18 +356,19 @@ def g_w_for_engage(
 ) -> np.ndarray:
     """Inverse of :func:`engage_deviation`: the weight meeting a requirement.
 
-    Returns ``nan`` for non-integer columns and a **non-positive** value where
-    the requirement is infeasible — the column already commits below
-    ``d_engage`` at ``g_w = 0``, because ``||a_i||^2`` alone exceeds the
-    threshold.  Callers must treat ``<= 0`` as "not achievable", not clip it.
+    ``g_w = 2 g_V |h_i| d_engage`` (module docstring).  Returns ``nan`` for
+    non-integer columns and ``0`` for a column that does not move the
+    monitored voltages in the chosen reading (``h_i = 0``): no weight makes
+    such a column commit at ``d_engage``.  Callers must treat ``<= 0`` as
+    "not achievable", not clip it.  ``g_q`` no longer enters (2026-10-14,
+    ``||a_i||^2`` term removed).
     """
     h = lc.colsum_V if reading == "systematic" else lc.maxabs_V
-    col_sq = lc.column_norm_sq(g_v, g_q)
     out = np.full(lc.n_u, np.nan, dtype=float)
     for i, cls in enumerate(lc.classes):
         if cls not in INTEGER_CLASSES:
             continue
-        out[i] = 2.0 * float(g_v) * float(h[i]) * float(d_engage) - col_sq[i]
+        out[i] = 2.0 * float(g_v) * float(h[i]) * float(d_engage)
     return out
 
 
@@ -464,6 +483,7 @@ def build_operating_point(cfg, condition: str) -> OperatingPoint:
     and simulates nothing.  ``cfg`` supplies the operating point; its weights
     are irrelevant to what is captured, which is the whole point.
     """
+    _check_shunt_screen_support(cfg)
     from tuning._sim_loader import get_run_multi_tso_dso
 
     captured: Dict[str, Any] = {}
@@ -625,6 +645,14 @@ def _cache_path(root: Path, condition: str, scenario: str,
     return root / f"op_{tag}_{condition}.npz"
 
 
+def _check_shunt_screen_support(cfg) -> None:
+    if getattr(cfg, "shunt_dispatch", "off") == "hybrid":
+        raise ValueError(
+            "Stage-I screening does not yet include the hybrid bank columns "
+            "and g_w_tso_shunt. Extend the curvature capture and cache identity "
+            "before screening this controller.")
+
+
 def load_or_build_operating_points(
     base_cfg,
     conditions: Sequence[tuple],
@@ -640,6 +668,7 @@ def load_or_build_operating_points(
     means the benchmark name *and* the per-DSO scenario multipliers; see
     :func:`_network_key` for why the second half is not optional.
     """
+    _check_shunt_screen_support(base_cfg)
     import dataclasses as _dc
     import pickle
 
@@ -854,6 +883,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="With --design: carried into the written parameter "
                         "set. It sits in the gauge-invariance group with the "
                         "nine weights, so it must travel with them.")
+    p.add_argument("--d-engage-ts", type=float, default=0.010,
+                   help="With --design: systematic voltage deviation [pu] at "
+                        "which the strongest TS tap column commits (commit "
+                        "rule, corrected 2026-10-14). Default 0.010.")
+    p.add_argument("--d-engage-sts", type=float, default=0.020,
+                   help="With --design: the same for the STS coupling-"
+                        "transformer taps. Default 0.020. Added 2026-10-16 so "
+                        "the protocol input D7 is stated on the command line.")
     p.add_argument("--rebuild", action="store_true",
                    help="Ignore the cached operating points and rebuild.")
     p.add_argument("--cache-dir", type=Path,
@@ -913,7 +950,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     design_report: Optional[Dict[str, Any]] = None
     if args.design:
-        weights, design_report = design_stage1(ops)
+        weights, design_report = design_stage1(
+            ops, d_engage_ts=float(args.d_engage_ts),
+            d_engage_sts=float(args.d_engage_sts))
         print()
         print("[stage1] analytic design point:")
         for k in sorted(weights):
@@ -1058,8 +1097,10 @@ def design_integer_weights(
 
     Taken over every supplied layer, so one class weight serves every area --
     which is what the config carries.  Raises if a class cannot meet its
-    requirement at any positive weight, i.e. the columns own contribution to
-    the objective already commits them below ``d_engage``.
+    requirement at any positive weight, i.e. none of its columns moves the
+    monitored voltages in the chosen reading (2026-10-14: the former reason,
+    "the columns own contribution already commits them below d_engage", came
+    from the removed ``||a_i||^2`` term).
     """
     out: Dict[str, float] = {}
     for cls in sorted({c for lc in lcs for c in lc.classes} & INTEGER_CLASSES):
@@ -1075,9 +1116,8 @@ def design_integer_weights(
         if not np.isfinite(best) or best <= 0.0:
             raise ValueError(
                 f"class {cls!r}: no positive weight meets an engagement "
-                f"threshold of {d_engage[cls]:g} pu -- the columns own cost "
-                f"already commits them earlier. Raise the threshold, or accept "
-                f"that this class engages sooner than stated.")
+                f"threshold of {d_engage[cls]:g} pu -- no column of this class "
+                f"moves the monitored voltages in the {reading!r} reading.")
         out[cls] = best
     return out
 

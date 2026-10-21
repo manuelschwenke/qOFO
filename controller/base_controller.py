@@ -93,7 +93,10 @@ class OFOParameters:
     max_iter_per_step: int = 100
     solver_verbose: bool = False
     int_max_step: int = 1
-    int_cooldown: int = 6
+    int_cooldown: int = 5
+    """Number of controller iterations an integer actuator is locked after
+    switching (lock until iteration k+1+int_cooldown).  5 since 2026-10-14
+    (thesis Ch 3: 100 s at T_STS = 20 s, 15 min at T_TS = 180 s)."""
     int_cooldown_s: float = 0.0
     """Wall-clock cooldown (simulation seconds) for OLTC integer
     variables.  When > 0 and the caller threads ``sim_time_s`` into
@@ -621,6 +624,14 @@ class BaseOFOController(ABC):
         # Step 10: Predict new outputs.
         #   Δy ≈ H · σ
         y_predicted = y_current + H @ sigma
+        # A solver extension may optimise additional physical actuators while
+        # retaining the existing controller vector. Include their selected
+        # effect in the public prediction, as in the joint MIQP constraints.
+        if result.additional_output_change is not None:
+            extra = np.asarray(result.additional_output_change, dtype=float)
+            if extra.shape != y_predicted.shape or not np.all(np.isfinite(extra)):
+                raise ValueError("Invalid additional actuator output prediction")
+            y_predicted = y_predicted + extra
 
         # Step 11: Cooldown bookkeeping for integer switches.
         if int_idx.size > 0:

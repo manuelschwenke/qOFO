@@ -47,11 +47,24 @@ merely present:
 - the two §9.1 drivers and the four §9.2 launchers;
 - `export/` in full again — `dynamic_snapshot.py`, `make_snapshots.py` and the
   12 reference snapshots under `export/snapshots/`;
-- 17 of the 45 `pf/` files: the session/COM layer, `screening`, `plant`,
+- **all 45 `pf/` files.** The restore first took the 17 the chapter-9
+  producers actually need — the session/COM layer, `screening`, `plant`,
   `replay`, `pf_sync`, `pf_parity`, `naming`, `result_export`, `tap_ctrl`,
-  `profile_playback`, `live_view`, `plot_pages`, `wecc_apply`, and the modal
-  chain (`modal_participation`, `modal_window`, `modal_campaign`);
-- `run_comparison_rms_cosim_qss.py` with `rms_replay` and `rms_cosim_config`;
+  `profile_playback`, `live_view`, `plot_pages`, `wecc_apply` and the modal
+  chain (`modal_participation`, `modal_window`, `modal_campaign`). The author
+  then decided to keep the package whole, which brought back the 15 one-off
+  API probes under `pf/probes/`, the PowerFactory setup and introspection
+  one-shots (`hello_pf`, `setup_study_cases`, `wecc_introspect`,
+  `add_g01_avr`/`gov`, `plant_smoke`, `gate1_record`, `gate_b_diagnostics`,
+  `make_frozen_profile`, `deactivate_stale_elmfiles`,
+  `pin_profile_sources_to_loadflow`) and `pf/timescale_study.py`, a breadcrumb
+  since 2026-08-06 pointing at the chapter-9 module that replaced it. Those
+  are not producers, but they are where the measured PowerFactory API findings
+  live as runnable code, and after two corrections in one day the balance
+  favours keeping them;
+- all four RMS entry points — `run_comparison_rms_cosim_qss.py` with
+  `rms_replay` and `rms_cosim_config`, plus `run_rms_cosim.py`,
+  `run_openloop_qss_to_rms.py` and `postprocess_rms_cosim.py`;
 - `analysis/gate_e_diagnostics.py` (a **required import** of the RMS comparison
   driver, not the standalone diagnostic I had taken it for),
   `analysis/modal_residue.py`, `analysis/build_modal_bundle.py` and
@@ -66,16 +79,28 @@ Also reverted: the split of `export/make_snapshots.py` into
 of `build_snapshot_state`, so the original is restored and the three plant
 tests point at it again.
 
-**Still removed, and these are the defensible part of the pass:** 28 of the 45
-`pf/` files — the 15 one-off API probes under `pf/probes/`, the PowerFactory
-setup and introspection one-shots (`hello_pf`, `setup_study_cases`,
-`wecc_introspect`, `add_g01_avr`/`gov`, `plant_smoke`, `gate1_record`,
-`gate_b_diagnostics`, `make_frozen_profile`, `deactivate_stale_elmfiles`,
-`pin_profile_sources_to_loadflow`) and `pf/timescale_study.py`, which since
-2026-08-06 has been a breadcrumb pointing at the chapter-9 module rather than
-code. Plus Nordic 32, `tools/`, the 15 launchers that are not §9.2 producers,
-the colloquium scripts, `demo_wind_replace_observer` (it targets two paths that
-do not exist), and `tuning_mc` (folded into `tuning`).
+**What the pass actually removed, after both corrections:** Nordic 32 (isolated,
+and its own builder converted the network out of a PowerFactory project);
+`tools/` and the generated architecture inventories nothing can regenerate
+without it; the 15 campaign launchers that are not §9.2 producers; the
+colloquium scripts; `analysis/observer/demo_wind_replace_observer.py`, which
+targets two paths that do not exist; the three write-only Q(V) channels in
+`core/actuator_bounds.py`; and `tuning_mc`, folded into `tuning`.
+
+Worth saying plainly: that is a far smaller result than the pass set out to
+produce. The large number — 131k lines — was mostly `pf/`, `export/` and the
+snapshots, and nearly all of it is back. The durable products of the day are
+the two defects found along the way (the inert `der_qv_deadband_override_pu`
+and the broken `doc_audit.py`) rather than the deletions.
+
+One group deliberately left out and worth the author's eye: the dead-band
+launchers that are **not** §9.2 producers — `run_deadband_sweep.ps1`,
+`run_deadband_2d.ps1`, `run_deadband_n1.ps1` and the overnight/resume
+scaffolding. They drive `run_comparison_rms_cosim_qss` and feed
+`results/deadband_selection/`, which the chapter-9 README describes as "earlier
+work that the thesis does not report". The eleven `analysis/deadband_*` scripts
+that read those results are all kept, so restoring the launchers is a one-line
+request if that reading is wrong.
 
 Net test accounting: **867 collected against the 876 baseline, and the only
 removal left is the 9 colloquium tests.** Nothing else in the suite is gone and

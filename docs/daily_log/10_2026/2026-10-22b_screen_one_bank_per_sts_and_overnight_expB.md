@@ -1,6 +1,6 @@
 # Stage-I screen counts one bank per STS; Experiment B with banks launched overnight
 
-Timestamp: 2026-10-22, ~22:50 Europe/Berlin.
+Timestamp: 2026-10-22, ~22:30 Europe/Berlin.
 
 Reason: author decision after the Δv_eng,sh table of
 `2026-10-22_bank_price_searched_weight.md`: the screen with every bank column

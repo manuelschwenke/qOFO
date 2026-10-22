@@ -1,6 +1,6 @@
 # Protocol: Experiment B (weight selection) with the banks in the TS-MIQP
 
-**Status:** FROZEN 2026-10-22 ~22:45 for an overnight run under the author's
+**Status:** FROZEN 2026-10-22 22:30 for an overnight run under the author's
 delegation ("run the full tuning suite over night", 2026-10-22). Decisions
 marked **(C)** were set by Claude under that delegation and are for the author
 to confirm; **(A)** are the author's. Execution:
@@ -111,7 +111,14 @@ first. If no candidate passes, the protocol stops and reports it.
 (none)
 
 ## 11. Execution record
-- 2026-10-22 22:20 — Operating points rebuilt with bank columns and STS
+- 2026-10-22 ~22:20 — Operating points rebuilt with bank columns and STS
   groups, key `net82afed5b`.
-- 2026-10-22 22:25 — Stage I, `stage1_start_10_2026_banks` written.
+- 2026-10-22 ~22:26 — Stage I, `stage1_start_10_2026_banks` written.
 - 2026-10-22 22:28 — Stage II dry run: 119 / 512 survivors (23.2 %).
+- 2026-10-22 22:30 — Code state `code_state/` (HEAD a3ce523 on
+  `minimal/thesis-core` + verified patch of `experiments/run_multi_system_ofo.py`).
+  Driver launched detached (pid 128912): 120 candidates × 6 windows = 720
+  units, 30 workers.
+- 2026-10-22 ~22:40 — Smoke of the per-window path (start weights, W4, 1 h,
+  outside the campaign): row complete incl. bank-wear fields, 302 s wall per
+  simulated hour under the current load, i.e. ~20–25 h for the bank.

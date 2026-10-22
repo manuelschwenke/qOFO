@@ -625,7 +625,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     data = collect(args.results_root, args.scenario)
     if not data:
         print(f"\nNo admitted runs for scenario={args.scenario!r}.")
-        print("Run the sweep first:  experiments/run_deadband_sweep.ps1")
+        print("No sweep driver remains: experiments/run_deadband_sweep.ps1 "
+              "drove the RMS co-simulation, removed with the PowerFactory "
+              "adapter on 2026-10-22. This reads recorded runs under results/.")
         return 1
 
     print_tables(data)

@@ -361,7 +361,8 @@ def main(argv=None) -> int:
     rows = collect(args.results_root, args.scenario, args.window or None)
     print(f"[threshold] {len(rows)} stepped run(s) at {args.window}")
     if not rows:
-        print("none yet -- run experiments/run_deadband_threshold.ps1")
+        print("none recorded; the run_deadband_threshold.ps1 driver was "
+              "removed with the PowerFactory adapter on 2026-10-22")
         return 1
     report(rows)
 

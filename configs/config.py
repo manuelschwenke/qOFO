@@ -1056,7 +1056,8 @@ class MultiTSOConfig:
       generator *setpoints* instead of actual dispatch under distributed slack.
     * **rev 2** — 2026-08-01. DSO reductions reproduce the combined solution
       exactly (0.000000 pu); TSO zone 0 improved up to 5x. Verified by
-      ``tools/check_reduction_fidelity.py``.
+      ``tools/check_reduction_fidelity.py``, removed 2026-10-22 with ``tools/``
+      because it drove the RMS co-simulation.
 
     Measured effect on results: at 2016-01-05 08:00, delta = 0.005, the
     interface-Q metric moved 0.4410 -> 0.4929 Mvar (~12%).

@@ -62,74 +62,18 @@ def set_der_q_capability_override(value: Optional[float]) -> None:
     )
 
 
-#: Diagnostic override of the DER Q(V) *deadband* [pu], applied to BOTH plants
-#: (static QVLocalLoop via ``net.sgen.qv_deadband_pu`` and RMS QVPRE via
-#: ``_anchor_qv_precontrollers``).  The nominal 0.01 pu deadband puts the parks
-#: at their dead-zone edge at the profiled operating point, where the droop is
-#: multi-valued (with the ZIP loads): the two solvers settle in different
-#: basins and the DSO_4 interface-Q setpoints diverge (2026-07-24 finding).
-#: Setting this to 0 removes the dead zone so the droop is single-valued and
-#: both plants converge to the same equilibrium.  ``None`` keeps each park's
-#: own snapshot/config deadband.
-DER_QV_DEADBAND_OVERRIDE_PU: Optional[float] = None
-
-
-def set_der_qv_deadband_override(value: Optional[float]) -> None:
-    """Set (or clear with ``None``) the global DER Q(V) deadband override."""
-    global DER_QV_DEADBAND_OVERRIDE_PU
-    DER_QV_DEADBAND_OVERRIDE_PU = (
-        None if value is None else float(value)
-    )
-
-
-#: Per-park DER Q(V) deadband [pu], keyed by pandapower sgen index.
+#: The DER Q(V) deadband and droop reach the static plant through
+#: ``net.sgen.qv_deadband_pu`` / ``qv_slope_pu``, written by
+#: ``tag_der_q_modes`` and read by ``controller.der_qv_local_loop``.
 #:
-#: The RMS plant anchored its Q(V) pre-controllers from the *exported snapshot*,
-#: which the snapshot builder writes using ``MultiTSOConfig()`` DEFAULTS --
-#: not the deadband of the run being executed.  The blanket scalar above was
-#: therefore the only channel by which a per-run deadband reached PowerFactory,
-#: and being a single number it cannot express ``delta_TS != delta_DS``.
-#:
-#: This map carries the per-level (and per-park-override) values that
-#: ``tag_der_q_modes`` has already written into ``net.sgen.qv_deadband_pu`` on
-#: the static side, so both plants are driven from ONE column rather than from
-#: two independently-derived numbers.  Precedence in ``pf.plant``:
-#: blanket scalar > this map > snapshot value.
-DER_QV_DEADBAND_BY_SGEN_PU: Dict[int, float] = {}
-
-
-def set_der_qv_deadband_by_sgen(mapping: Optional[Dict[int, float]]) -> None:
-    """Publish the per-sgen Q(V) deadband map (``None``/empty clears it)."""
-    global DER_QV_DEADBAND_BY_SGEN_PU
-    DER_QV_DEADBAND_BY_SGEN_PU = (
-        {} if not mapping else {int(k): float(v) for k, v in mapping.items()}
-    )
-
-
-#: Per-park DER Q(V) DROOP [pu], keyed by pandapower sgen index.
-#:
-#: Same defect, same remedy as the deadband map above: the RMS plant anchors
-#: its Q(V) pre-controllers from the exported snapshot, which the snapshot
-#: builder writes using ``MultiTSOConfig()`` DEFAULTS.  So
-#: ``--der-slope`` changed the static plant (via ``tag_der_q_modes`` ->
-#: ``net.sgen.qv_slope_pu``) while the RMS plant silently kept the snapshot's
-#: 0.06, and a droop sweep would have compared two different plants.  Harmless
-#: until now only because both defaults happened to be 0.06.
-#:
-#: NOTE ON THE NAME: ``qv_slope_pu`` is the DROOP, not a gain.  It enters as a
-#: divisor of the voltage error -- static ``R = S_n/slope`` [Mvar/pu_v], RMS
-#: ``Kdroop = 1/slope`` -- so ``slope = 0.06`` means 0.06 pu of voltage
-#: deviation commands full rated Q, i.e. a 6 % droop.  The grid code permits
-#: 5-15 %.
-DER_QV_SLOPE_BY_SGEN_PU: Dict[int, float] = {}
-
-
-def set_der_qv_slope_by_sgen(mapping: Optional[Dict[int, float]]) -> None:
-    """Publish the per-sgen Q(V) droop map (``None``/empty clears it)."""
-    global DER_QV_SLOPE_BY_SGEN_PU
-    DER_QV_SLOPE_BY_SGEN_PU = (
-        {} if not mapping else {int(k): float(v) for k, v in mapping.items()}
-    )
+#: Three further channels used to exist here -- a blanket deadband override
+#: and two per-sgen maps -- and all three existed solely to carry those values
+#: into the RMS plant, which anchored its Q(V) pre-controllers from the
+#: exported snapshot rather than from the running config.  ``pf.plant`` was
+#: their only reader, so when the PowerFactory adapter was removed on
+#: 2026-10-22 they became write-only state and went with it.  The runner now
+#: rejects ``der_qv_deadband_override_pu`` instead of accepting a value it
+#: could no longer honour.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

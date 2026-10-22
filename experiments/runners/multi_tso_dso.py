@@ -78,9 +78,6 @@ from core.actuator_bounds import (
     GeneratorParameters,
     generator_parameters_for_type,
     set_der_q_capability_override,
-    set_der_qv_deadband_by_sgen,
-    set_der_qv_slope_by_sgen,
-    set_der_qv_deadband_override,
 )
 from core.measurement import (
     Measurement,
@@ -398,15 +395,19 @@ def run_multi_tso_dso(
     # static side is driven through tso_/dso_qv_deadband_pu into net.sgen by
     # tag_der_q_modes below.  Both must share one value or the plants settle in
     # different droop basins at the deadband edge (2026-07-24).
-    # Clear any map left behind by a previous run in this process; step [4]
-    # republishes it once net.sgen has been tagged.
-    set_der_qv_deadband_by_sgen(None)
-    set_der_qv_slope_by_sgen(None)
-    set_der_qv_deadband_override(config.der_qv_deadband_override_pu)
+    # ``der_qv_deadband_override_pu`` reached only the RMS plant: the static
+    # side takes its deadband from net.sgen.qv_deadband_pu, written by
+    # tag_der_q_modes from tso_/dso_qv_deadband_pu.  With the PowerFactory
+    # adapter gone (2026-10-22) nothing honours it, so it fails fast rather
+    # than printing "OVERRIDDEN ... on both plants" and doing nothing.  Set
+    # tso_qv_deadband_pu / dso_qv_deadband_pu instead.
     if config.der_qv_deadband_override_pu is not None:
-        print(f"  [!] DER Q(V) deadband OVERRIDDEN to "
-              f"{config.der_qv_deadband_override_pu:g} pu on both plants "
-              f"(removes the deadband-edge multi-equilibrium).")
+        raise ValueError(
+            "der_qv_deadband_override_pu is no longer honoured: its only "
+            "consumer was the RMS plant's Q(V) anchor pass, removed with the "
+            "PowerFactory adapter on 2026-10-22. Set tso_qv_deadband_pu / "
+            "dso_qv_deadband_pu, which drive net.sgen.qv_deadband_pu."
+        )
 
     measurement_noise_model = MeasurementNoiseModel(config.measurement_noise)
 
@@ -638,45 +639,6 @@ def run_multi_tso_dso(
         verbose=(verbose >= 1),
     )
 
-    # Publish the tagged per-park deadbands for the RMS plant.  Its QVPRE
-    # anchor pass otherwise reads the exported snapshot, which carries the
-    # MultiTSOConfig() DEFAULT deadband rather than this run's -- so without
-    # this the two plants disagree whenever tso_/dso_qv_deadband_pu is not the
-    # default, and delta_TS != delta_DS cannot be represented at all.
-    if "qv_deadband_pu" in net.sgen.columns:
-        _db_by_sgen = {
-            int(s): float(net.sgen.at[s, "qv_deadband_pu"])
-            for s in net.sgen.index
-            if not pd.isna(net.sgen.at[s, "qv_deadband_pu"])
-        }
-        set_der_qv_deadband_by_sgen(_db_by_sgen)
-        if verbose >= 1:
-            _ts = sorted({round(float(net.sgen.at[s, "qv_deadband_pu"]), 6)
-                          for s in meta.tso_der_indices})
-            _ds = sorted({round(float(net.sgen.at[s, "qv_deadband_pu"]), 6)
-                          for s in meta.dso_der_indices})
-            print(f"[4a] Q(V) deadband published to both plants: "
-                  f"TS={_ts} DS={_ds} pu ({len(_db_by_sgen)} parks)")
-
-    # Same for the DROOP.  Without this --der-slope moves only the static
-    # plant: the RMS anchor pass reads qv_slope_pu from the exported snapshot,
-    # which carries MultiTSOConfig() defaults, so a droop sweep would have
-    # compared a static plant at the swept value against an RMS plant pinned
-    # at 0.06.
-    if "qv_slope_pu" in net.sgen.columns:
-        _sl_by_sgen = {
-            int(s): float(net.sgen.at[s, "qv_slope_pu"])
-            for s in net.sgen.index
-            if not pd.isna(net.sgen.at[s, "qv_slope_pu"])
-        }
-        set_der_qv_slope_by_sgen(_sl_by_sgen)
-        if verbose >= 1:
-            _ts = sorted({round(float(net.sgen.at[s, "qv_slope_pu"]), 6)
-                          for s in meta.tso_der_indices})
-            _ds = sorted({round(float(net.sgen.at[s, "qv_slope_pu"]), 6)
-                          for s in meta.dso_der_indices})
-            print(f"[4a] Q(V) droop published to both plants: "
-                  f"TS={_ts} DS={_ds} pu ({len(_sl_by_sgen)} parks)")
 
     # NB: install_der_q_loops is deferred to step [10.3], AFTER the
     # Phase 1/2 OLTC init.  If we install now, the plant-side QVLocalLoops

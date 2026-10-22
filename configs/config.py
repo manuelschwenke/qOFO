@@ -1639,13 +1639,20 @@ class MultiTSOConfig:
     """Per-DER override of the qv deadband half-width."""
 
     der_qv_deadband_override_pu: Optional[float] = None
-    """Diagnostic blanket override of the DER Q(V) deadband [pu] applied to
-    BOTH the static and RMS plants (see
-    ``core.actuator_bounds.set_der_qv_deadband_override``).  ``0.0`` removes the
-    dead zone so the droop is single-valued -- fixes the deadband-edge
-    multi-equilibrium that makes the RMS DERs settle in a different droop basin
-    from the static plant under profiles (2026-07-24).  ``None`` keeps each
-    park's own deadband."""
+    """RETIRED 2026-10-22; the runner raises if this is not ``None``.
+
+    It was a diagnostic blanket override of the DER Q(V) deadband [pu] whose
+    purpose was to make the RMS plant agree with the static one: ``0.0``
+    removed the dead zone so the droop was single-valued, fixing the
+    deadband-edge multi-equilibrium that made the RMS DERs settle in a
+    different droop basin from the static plant under profiles (2026-07-24).
+
+    Its only consumer was the RMS plant's Q(V) anchor pass, so it has had no
+    effect since the PowerFactory adapter was removed.  The static plant takes
+    its deadband from ``net.sgen.qv_deadband_pu``, which ``tag_der_q_modes``
+    writes from :attr:`tso_qv_deadband_pu` / :attr:`dso_qv_deadband_pu` -- set
+    those instead.  Kept as a field, rather than deleted, so a stored config
+    that carries it fails loudly instead of being silently reinterpreted."""
 
     disable_qv_seed: bool = False
     """Diagnostic: skip ``seed_qv_equilibrium`` (the linear, deadband-ignoring

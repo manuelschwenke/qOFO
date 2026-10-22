@@ -4182,18 +4182,52 @@ def run_multi_tso_dso(
                                 )
                             direction_c = int(s_new) - int(prev_shunt_steps[k_sh])
                             commit = bank_c.commit_selected(direction_c, time_s)
-                            # The feedforward comes from the DSO's OWN 3W model
-                            # at the current (pre-switch) operating point: it is
-                            # added to the setpoint that DSO tracks, so it has
-                            # to be expressed in that controller's own view of
-                            # the interface.
+                            # The feedforward comes from the hosting STS's OWN
+                            # 3W models at the current (pre-switch) operating
+                            # point: it is added to the setpoints that
+                            # controller tracks, so it has to be expressed in
+                            # its own view of the interfaces.
+                            #
+                            # EVERY coupler of that subordinate system is
+                            # shifted, not just the one hosting the bank: a
+                            # tertiary step redistributes flow across all of
+                            # them (measured 2026-10-22: 1-5 Mvar at the
+                            # siblings against ~20-24 Mvar at the host, per 25
+                            # Mvar level).  Shifting only the host under-
+                            # relieves the subordinate actuators -- Sum|q-c|
+                            # improved 0.74% against the 3.69% of the
+                            # 21 October campaign, which shifted all couplers.
+                            key_c = int(commit.interface_trafo3w_idx)
                             dso_ctrl_c = dso_controllers.get(commit.dso_id)
-                            dq_itf = 0.0
+                            itf_ids_c: List[int] = []
+                            dq_itf_c: List[float] = []
                             if dso_ctrl_c is not None:
+                                pcc_list_c = [int(i) for i
+                                              in zone_defs[z].pcc_trafo_indices]
+                                itf_ids_c = [
+                                    int(i) for i in
+                                    dso_ctrl_c.config.interface_trafo_indices
+                                ]
+                                if key_c not in itf_ids_c:
+                                    raise ValueError(
+                                        f"Bank at bus {commit.bus_idx} hosts on "
+                                        f"coupler {key_c}, which is not an "
+                                        f"interface of {commit.dso_id}"
+                                    )
+                                _absent = [i for i in itf_ids_c
+                                           if i not in pcc_list_c]
+                                if _absent:
+                                    raise ValueError(
+                                        f"Couplers {_absent} of "
+                                        f"{commit.dso_id} are outside TS zone "
+                                        f"{z}; the feedforward would shift an "
+                                        f"interface this zone does not dispatch"
+                                    )
                                 # The per-step injection inside the query is
-                                # evaluated at the DSO model's cached V_0; r_c
+                                # evaluated at that model's cached V_0; r_c
                                 # brings it to the tertiary voltage measured at
-                                # this instant.
+                                # this instant.  Rescaling only -- no rebuild
+                                # and no relinearisation after a switch.
                                 r_c = 1.0
                                 if (config.shunt_int_v_rescale
                                         and last_meas is not None):
@@ -4202,59 +4236,70 @@ def run_multi_tso_dso(
                                         dso_ctrl_c.sensitivities.net,
                                         commit.bus_idx,
                                     )
-                                dq_itf = float(
-                                    dso_ctrl_c.sensitivities
-                                    .compute_dQtrafo3w_hv_dQ_shunt(
-                                        trafo3w_idx=commit.interface_trafo3w_idx,
-                                        shunt_bus_idx=commit.bus_idx,
-                                        q_step_mvar=commit.q_step_mvar,
-                                    )
-                                ) * float(commit.direction) * r_c
-                            if not np.isfinite(dq_itf):
+                                dq_itf_c = [
+                                    float(
+                                        dso_ctrl_c.sensitivities
+                                        .compute_dQtrafo3w_hv_dQ_shunt(
+                                            trafo3w_idx=t_c,
+                                            shunt_bus_idx=commit.bus_idx,
+                                            q_step_mvar=commit.q_step_mvar,
+                                        )
+                                    ) * float(commit.direction) * r_c
+                                    for t_c in itf_ids_c
+                                ]
+                            if not all(np.isfinite(dq) for dq in dq_itf_c):
                                 raise ValueError(
                                     f"dQ_itf_sh not finite for {commit.kind} "
                                     f"commit at bus {commit.bus_idx} "
-                                    f"(interface "
-                                    f"{commit.interface_trafo3w_idx})"
+                                    f"(couplers {itf_ids_c}: {dq_itf_c})"
                                 )
-                            key_c = int(commit.interface_trafo3w_idx)
-                            q_itf_sh_offset[key_c] = (
-                                q_itf_sh_offset.get(key_c, 0.0) + dq_itf
-                            )
+                            for t_c, dq_c in zip(itf_ids_c, dq_itf_c):
+                                q_itf_sh_offset[t_c] = (
+                                    q_itf_sh_offset.get(t_c, 0.0) + dq_c
+                                )
+                            dq_itf = (dq_itf_c[itf_ids_c.index(key_c)]
+                                      if itf_ids_c else 0.0)
                             # The same physical step as the TSO's OWN reduced
-                            # model predicts it. The two models are independent
-                            # reductions of the same plant, and the MIQP priced
-                            # the step with this row while the feedforward above
-                            # uses the DSO's; recording both is what makes the
-                            # discrepancy measurable (2026-10-22 decision: keep
-                            # the TS row in the column, measure the gap).
-                            dq_itf_ts = float("nan")
-                            if H_z is not None:
-                                pcc_list_c = [int(i) for i
-                                              in zone_defs[z].pcc_trafo_indices]
-                                if key_c in pcc_list_c:
+                            # model predicts it, per coupler and in the same
+                            # order.  The two models are independent reductions
+                            # of the same plant, and the MIQP priced the step
+                            # with these rows while the feedforward above uses
+                            # the subordinate system's; recording both is what
+                            # makes the gap measurable (2026-10-22 decision:
+                            # keep the TS rows in the column, measure the gap).
+                            dq_itf_ts_c: List[float] = []
+                            for t_c in itf_ids_c:
+                                value_c = float("nan")
+                                if H_z is not None and t_c in pcc_list_c:
                                     row_c = (len(zone_defs[z].v_bus_indices)
-                                             + pcc_list_c.index(key_c))
-                                    dq_itf_ts = float(
+                                             + pcc_list_c.index(t_c))
+                                    value_c = float(
                                         H_z[row_c, shunt_offset + k_sh]
                                     ) * float(commit.direction)
+                                dq_itf_ts_c.append(value_c)
                             rec.shunt_commits.append({
                                 "zone": z, "shunt_idx": commit.shunt_idx,
                                 "dso_id": commit.dso_id, "kind": commit.kind,
                                 "direction": commit.direction,
                                 "new_level": commit.new_level,
-                                "interface_indices": [key_c],
-                                "delta_q_mvar": [dq_itf],
-                                "delta_q_mvar_ts_model": [dq_itf_ts],
+                                "host_interface_index": key_c,
+                                "interface_indices": list(itf_ids_c),
+                                "delta_q_mvar": list(dq_itf_c),
+                                "delta_q_mvar_ts_model": list(dq_itf_ts_c),
                             })
                             if verbose >= 1:
+                                _ts_host = (dq_itf_ts_c[itf_ids_c.index(key_c)]
+                                            if itf_ids_c else float("nan"))
                                 print(
                                     f"  [shunt-commit z{z}] {commit.kind} "
                                     f"bus={commit.bus_idx} ℓ "
                                     f"{commit.old_level}→{commit.new_level} "
                                     f"(Δ={commit.direction:+d})  "
-                                    f"dQ_itf={dq_itf:+.2f} Mvar "
-                                    f"(TS model {dq_itf_ts:+.2f})"
+                                    f"dQ_itf(host {key_c})={dq_itf:+.2f} Mvar "
+                                    f"(TS row {_ts_host:+.2f})  "
+                                    f"all {len(itf_ids_c)} coupler(s): "
+                                    + ", ".join(f"{i}:{v:+.2f}" for i, v
+                                                in zip(itf_ids_c, dq_itf_c))
                                 )
 
                         # Dispatch a per-DSO ShuntDisturbanceMessage so each

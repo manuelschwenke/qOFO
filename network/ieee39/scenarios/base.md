@@ -1,7 +1,15 @@
-# Scenario: `base`
+# Build target: `bare` (the `base` phase)
 
 All 9 PV generators and the slack generator remain active.
 No modifications to the IEEE 39-bus New England network.
+
+This is **not** a study scenario and is not a member of `SCENARIO_REGISTRY` --
+it is the non-study build target `network.ieee39.scenarios.BARE_SCENARIO`, used
+as the PowerFactory Gate-0 parity baseline (the empty variation stack in
+`pf.pf_parity`, and the `base` phase of `export.make_snapshots` /
+`pf.pf_sync`). It was named `"base"` until that registry entry was dropped in
+favour of `base_410`; the two are different networks, so `base_410` is not a
+substitute for it.
 
 ## Synchronous Generators
 

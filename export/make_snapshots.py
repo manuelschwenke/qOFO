@@ -66,6 +66,7 @@ from network.ieee39 import add_hv_networks, build_ieee39_net, tag_der_q_modes
 from network.ieee39.dso_overrides import apply_dso_overrides
 from network.ieee39.load_model import apply_zip_load_model
 from network.ieee39.meta import IEEE39NetworkMeta
+from network.ieee39.scenarios import BARE_SCENARIO
 from network.ieee39.zonal_balancing import (
     apply_gen_dispatch,
     compute_zonal_gen_dispatch,
@@ -355,8 +356,17 @@ def build_snapshot_state(
     # DER capacity became a scenario choice, a reference snapshot built for a
     # ``rural_700`` study must say so -- otherwise the PowerFactory checkpoint
     # is parity-validated at 410 MW while the RMS runs at 700 MW.
+    #
+    # The ``base`` phase builds the bare IEEE 39 case, which it used to name
+    # ``"base"`` -- a no-op SCENARIO_REGISTRY entry that was dropped when
+    # ``base_410`` was introduced.  Every ``base``-phase build has raised
+    # ``Unknown scenario: 'base'`` since.  The bare case is now named by
+    # ``BARE_SCENARIO``; it must NOT be aliased to ``base_410``, which applies
+    # the wind replacement and would give the Gate-0 parity baseline a
+    # different machine fleet and a non-empty sgen table (``pf_sync.sync_base``
+    # rejects exactly that).
     if scenario is None:
-        scenario = "base" if phase == "base" else DEFAULT_DSO_DER_SCENARIO
+        scenario = BARE_SCENARIO if phase == "base" else DEFAULT_DSO_DER_SCENARIO
     if verbose:
         print(f"[snapshot] phase={phase} scenario={scenario} at={at:%d.%m.%Y %H:%M}")
 

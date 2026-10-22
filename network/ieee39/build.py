@@ -62,7 +62,12 @@ from network.ieee39.constants import (
 )
 from network.ieee39.meta import IEEE39NetworkMeta
 from network.ieee39.helpers import fix_line_lengths, swap_slack_to_bus38
-from network.ieee39.scenarios import SCENARIO_REGISTRY
+from network.ieee39.scenarios import BARE_SCENARIO, SCENARIO_REGISTRY
+
+
+def _apply_bare(net, meta, **_kwargs):
+    """Apply no scenario transformation: the unmodified IEEE 39-bus case."""
+    return net, meta
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +92,13 @@ def build_ieee39_net(
         apply the validated transmission-side wind replacement and select
         410 MW or 700 MW installed DER per DSO when
         :func:`network.ieee39.hv_networks.add_hv_networks` is called.
+
+        :data:`network.ieee39.scenarios.BARE_SCENARIO` (``"bare"``) is also
+        accepted and applies no transformation at all -- the unmodified
+        IEEE 39 case used as the PowerFactory Gate-0 parity baseline.  It is
+        not a study scenario and carries no DSO installed capacity, so
+        ``add_hv_networks`` raises on it unless given an explicit
+        ``dso_generation_scenario``.
 
     Returns
     -------
@@ -379,12 +391,21 @@ def build_ieee39_net(
             DeprecationWarning, stacklevel=2,
         )
         scenario = "base_410"
-    if scenario not in SCENARIO_REGISTRY:
+    # ``BARE_SCENARIO`` is the unmodified IEEE 39 case (the PowerFactory
+    # Gate-0 parity baseline).  It is resolved here rather than carried as a
+    # no-op entry in SCENARIO_REGISTRY, which is the set of *study*
+    # scenarios -- see the note on BARE_SCENARIO for why an entry there would
+    # reopen the 2026-07-31 silent-failure defect in the tuning draws.
+    if scenario == BARE_SCENARIO:
+        apply_fn = _apply_bare
+    elif scenario not in SCENARIO_REGISTRY:
         raise ValueError(
             f"Unknown scenario: {scenario!r}. "
-            f"Valid: {sorted(SCENARIO_REGISTRY)}"
+            f"Valid: {sorted(SCENARIO_REGISTRY)} "
+            f"(or {BARE_SCENARIO!r} for the unmodified IEEE 39 case)"
         )
-    apply_fn = SCENARIO_REGISTRY[scenario]
+    else:
+        apply_fn = SCENARIO_REGISTRY[scenario]
     net, meta = apply_fn(net, meta, ext_grid_vm_pu=ext_grid_vm_pu,
                          new_gen_bus30_idx=_new_gen_bus30_idx)
     net["ieee39_scenario"] = scenario

@@ -110,8 +110,8 @@ to miss:
 **The PowerFactory adapter and the RMS co-simulation**, about 16.5k lines:
 `pf/` (43 modules), `export/dynamic_snapshot.py` with its 12 generated
 snapshots, the four RMS entry points, the two `rms_*` helpers, two
-`pf`-importing modal analyses, `analysis/gate_e_diagnostics.py`, and their
-tests (`tests/pf/`, `tests/export/`, four more).
+`pf`-importing modal analyses, and their tests (`tests/pf/`, `tests/export/`,
+four more).
 
 Two consequences the author should weigh, neither of them avoidable while
 removing `pf`:
@@ -177,14 +177,22 @@ answered the author's question directly: **`core`, `controller` and `configs`
 contain no unimported modules** — every file in them is reachable. The
 suspicion of dead single files there is not borne out.
 
-`analysis/` has nineteen modules that nothing imports, but that is the wrong
-test for it: these are standalone `python -m analysis.X` result producers, not
-libraries, and "unimported" does not mean unused. Eleven are the chapter-9
-dead-band family. Only the two tied to removed subsystems were deleted
-(`gate_e_diagnostics`, which compared a static run against an RMS run, and the
-colloquium report). **The remaining sixteen are left for the author**: deciding
-which analyses a thesis chapter still needs is not a judgement to make from the
-import graph, which is the mistake recorded below.
+`analysis/` has standalone modules that nothing imports, but that is the wrong
+test for it: these are `python -m analysis.X` result producers, not libraries,
+and "unimported" does not mean unused. Eleven are the chapter-9 dead-band
+family. The colloquium report was deleted as presentation rather than thesis
+material; the rest were put to the author rather than judged from the import
+graph. That review is the section below.
+
+### Correction: two earlier commit messages overstated a removal
+
+`94319df` lists `analysis/gate_e_diagnostics.py` among the PowerFactory
+removals and `36235aa` repeats it. **It was in neither commit's file list.** It
+was named in the prose and left out of the `git rm`, so it stayed tracked and
+present while two messages said otherwise. Found while enumerating `analysis/`
+for the review below, and removed there for real. The lesson is narrow but
+worth the line: a commit message is not evidence that a file is gone — the file
+list is.
 
 ## Three write-only globals, and a config knob that had gone inert
 
@@ -298,17 +306,72 @@ Two inventories, taken by the parallel session:
   is tracked anywhere. That directory is outside this sweep's path; it is
   recorded here so that nobody later reasons about it as if git protected it.
 
-## The lesson, third time today
+## The `analysis/` review: 3 of 17 removed
 
-Earlier today an `experiments/archived/` deletion broke a test because the
-check for importers was a static `from`/`import` grep, which cannot see
-`importlib.import_module` with a string literal — and four of those files
-turned out to be current experiments misfiled under a folder named `archived`.
-The same pattern repeated twice more here: a test that imported a deleted
-*experiment module* rather than `pf` (caught by collection, not by grep), and
-`analysis/`'s nineteen unimported-but-live scripts.
+Author's decision after the review below. `analysis/` holds 30 modules; eleven
+are libraries with live importers, seventeen are standalone scripts. Of those
+seventeen, three went:
 
-In this repository a file's location and name are weak evidence of its status.
-The reliable references are the live documentation, the printed runbook
-strings, the dynamic imports and the test collector. Each removal above was
-checked against those rather than against the directory it sat in.
+| removed | lines | why |
+|---|---:|---|
+| `gate_e_diagnostics.py` | 262 | compares a static run against an RMS run; the RMS plant is gone, so no new comparison can be produced |
+| `modal_residue.py` | 449 | derives settling from PowerFactory `ComRes` exports, and its premise is `pf/screening.py modal` |
+| `observer/demo_wind_replace_observer.py` | 283 | a demo targeting `experiments/000_M_TSO_M_DSO.py` and `network/ieee39/wind_replace.py`, **neither of which exists** |
+
+**The fourteen kept, and why the obvious test was the wrong one.** The
+dead-band family is a working pipeline over recorded results, not dead code:
+`deadband_selection` is its library (imported by five siblings),
+`deadband_anchor` is **Experiment F1**, a named chapter-9 measurement with its
+own instrumentation and a 15/15 self-test, and the four scripts with *zero*
+references — `deadband_figures`, `deadband_2d_figures`, `deadband_tables`,
+`deadband_pareto` — are the publication figure and table generators. They are
+terminal nodes, results CSV to thesis figure, so nothing imports them by
+construction. Part of their zero count is self-inflicted: this branch deleted
+the launchers that invoked them.
+
+Also kept: `e1_interface_column_norms` (the measurement behind the chapter-6
+sensitivity-aggregation argument), `dso_ts_coupling_geometry` (geometric
+consistency of the synthetic DSO attachment),
+`simbench_hv_generation_benchmark` (pairs with the imported
+`simbench_hv_benchmark`), and `result_comparison`.
+
+Two near-misses worth recording, because both would have been deletions on the
+import graph alone:
+
+- **`result_comparison` is live through a notebook.**
+  `analysis/compare_results.ipynb` does
+  `from analysis.result_comparison import create_dashboard`. The audit script
+  parsed only `.py`, so a notebook referrer was invisible to it.
+- **`deadband_anchor` would have looked like 768 unreferenced lines.** It is
+  documented in `2026-09-15b_ch9_network_decision_and_f1_instrumentation.md` —
+  the entry this morning's `_build_index.py` fix recovered after five weeks
+  missing from every generated index. Had the index gap stayed, the evidence
+  that it is Experiment F1 would not have surfaced.
+
+Also corrected: `modal_residue` appeared to have a current-doc reference, but
+the match was a substring of `pf/probes/probe_modal_residue.py` — a different
+file, already removed. It had no current-doc reference at all.
+
+## The lesson, four forms of it today
+
+A file's location and name are weak evidence of its status in this repository,
+and so is the import graph. Four distinct forms of "unimported or misfiled does
+not mean unused" turned up in one day:
+
+1. **a dynamic import** — `importlib.import_module` with a string literal,
+   invisible to a `from`/`import` grep, which is how the
+   `experiments/archived/` deletion broke a test. Four of those files turned
+   out to be current experiments misfiled under a folder named `archived`.
+2. **an import of a deleted module rather than of `pf`** — a test reaching
+   through the experiment module, caught by collection rather than by grep.
+3. **a printed runbook string** — `analysis/deadband_selection.py` naming a
+   PowerShell launcher in a `print`, which no static check sees.
+4. **a notebook referrer** — `compare_results.ipynb`, outside the `.py` files
+   the audit parsed.
+
+The references that proved reliable were the live documentation, the printed
+strings, the test collector, the node-ID diff, and reading what a script says
+it produces. Every removal on this branch was checked against those rather
+than against the directory it sat in — and the one slip, the
+`gate_e_diagnostics` commit message, was a bookkeeping error rather than a
+judgement one.

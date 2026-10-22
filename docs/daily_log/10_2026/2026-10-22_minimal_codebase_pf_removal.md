@@ -143,6 +143,36 @@ runner now **raises** if the field is set, and the field is kept (not deleted)
 so a stored config carrying it fails loudly rather than being silently
 reinterpreted.
 
+### Which recorded runs believed it
+
+"The runner printed that it had overridden the deadband on both plants" is the
+kind of statement that gets quoted, so the scope needs stating rather than
+worrying about. It is a **bounded, checkable question**: every archived run
+carries its resolved `config.json`, so the runs that believed an override that
+was never applied are exactly those whose config has a non-`None`
+`der_qv_deadband_override_pu`.
+
+Two things are known so far, both measured by the parallel session rather than
+here:
+
+- the four switched-shunt acceptance configs (pre- and post-repair, both arms)
+  all carry `der_qv_deadband_override_pu = None`, with
+  `der_qv_deadband_pu_overrides`, `der_qv_slope_pu_overrides` and
+  `der_qv_vref_pu_overrides` empty. **The accepted figures never depended on
+  it**, and the false claim in the log output did not reach them.
+- the earlier campaigns are the open part. Once the archive copy finishes, the
+  whole set sits at
+  `Z:\Python_Projekte\qOFO_results_archive\vault_results_2026-10-22\`, and
+  `docs/data/results_manifest_2026-10-22.md` maps each campaign to the
+  documents that cite it — so the grep answers not just which runs were
+  affected but which written claims rest on them.
+
+Worth noting what class of defect this was, because it is the same class the
+section above warns about: a claim the system made about itself with nothing in
+the codebase able to contradict it. The static plant could not disagree,
+because the override never reached it; the RMS plant could have, and is now
+gone.
+
 ## Risks and open points
 
 - The non-quasi-static validation path is gone (see above). The EvtTap and

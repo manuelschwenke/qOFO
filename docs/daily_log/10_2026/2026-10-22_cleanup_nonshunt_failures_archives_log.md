@@ -92,28 +92,42 @@ separate obsidian vault** but a second clone of this repository on another
 branch, with the same top-level tree. Both folders exist in both clones, so
 this was an in-repo consolidation rather than a transfer between places.
 
-Author decision: `00_daily_log/` is the single location. Moves only, nothing
-deleted or rewritten — the month folders and index tooling moved across, and
-the ten formerly flat entries were sorted into their month folders so the whole
-log follows one `MM_YYYY/YYYY-MM-DD_slug.md` convention. A signpost remains at
-`docs/daily_log/README.md`.
+**Author decision: `docs/daily_log/` is the single location** — which is what
+`.claude/CLAUDE.md` already instructs, so the decision restores consistency
+rather than breaking it. The ten entries that had been filed flat in
+`00_daily_log/` are now in their month folders, that folder is gone, and the
+whole log follows one `MM_YYYY/YYYY-MM-DD_slug.md` convention. Moves only;
+nothing deleted or rewritten. 223 entries.
+
+This was settled twice, and the record should say so plainly. This session was
+first told `00_daily_log/` and committed that direction in `fae83da` (225
+files, rename-only); the parallel session was then told `docs/daily_log/` and
+committed the reverse move in `35c18a5`. The second is the decision that
+stands. The two sessions had opposite instructions at the same time and the
+collision was caught before either overwrote the other, because the move was
+rename-only in both directions and no entry was ever edited in place. A revert
+of `fae83da` was attempted and abandoned: it conflicts rename-against-rename,
+because that commit both relocated the tree and re-filed the ten flat entries,
+and git cannot tell which half to undo. `35c18a5` reaches the wanted state
+without that ambiguity.
 
 - One filename existed in both places with **different content**: a short
-  summary in `00_daily_log/` whose body pointed at the detailed change log of
-  the same name under `docs/daily_log/10_2026/`. A summary/detail pair, not a
-  duplicate, so both are kept and the summary is now
-  `10_2026/2026-10-20_hybrid_shunt_dispatch_summary.md`.
+  summary whose body pointed at the detailed change log of the same name. A
+  summary/detail pair, not a duplicate, so both are kept —
+  `10_2026/2026-10-20_hybrid_shunt_dispatch.md` is the detail and
+  `..._summary.md` the summary beside it. Whether the summary is still wanted
+  now that both sit in one folder is for the author; it was not deleted here.
 - **A pre-existing hole in `_build_index.py`**, found while verifying the move
   lost nothing: `LOG_FILE` required `_` or `.` directly after the date, so an
   entry whose date carries a letter suffix for a second entry on the same day
   was silently skipped. The committed index read "211 entries" for 212 files,
   and `2026-09-15b_ch9_network_decision_and_f1_instrumentation.md` had been
-  absent from every generated index since 2026-09-15. The regenerated index
-  lists all 222 entries.
+  absent from every generated index since 2026-09-15. The fix survived both
+  moves and the index now counts the entry.
 
-Open: the project `.claude/CLAUDE.md` still instructs sessions to log to
-`docs/daily_log` "in this obsidian vault", which would send the next session to
-the retired location. Left to the author, since it is an instruction file.
+Open: only the **global** `~/.claude/CLAUDE.md` still says `00_daily_log`,
+which is the author's own file across all projects. That mismatch is theirs to
+resolve; neither cleanup session touched an instruction file.
 
 ## Archives removed
 
@@ -157,15 +171,14 @@ been runnable for some time: `tools/doc_audit.py` died with
   now returns the full key set.
 
 Because the audit had been failing, `tools/doc_coverage.json` was stale and the
-package docs were generated from it. Consequences now visible: **nine packages
+package docs were generated from it. Consequences now visible: **eight packages
 had never been documented** (`configs/paramsets`, `experiments/case1_svr`,
 `experiments/ch_9_parameter_selection`, `experiments/ch_10_case_study`,
 `experiments/part3_mc`, `experiments/reference_period`, `tests/experiments`,
-`tuning_mc`, `00_daily_log`), and **five generated docs described packages that
-no longer exist** (`tuning/reports`, `tuning/scripts`,
-`tuning/stability_certificate`, `tests/tuning/stability_certificate`, and the
-orphaned `docs/daily_log`), kept alive only by the stale JSON. Those are
-deleted with their dangling `PURPOSE` entries. The audit now reports 359
+`tuning_mc`), and **four generated docs described packages that no longer
+exist** (`tuning/reports`, `tuning/scripts`, `tuning/stability_certificate`,
+`tests/tuning/stability_certificate`), kept alive only by the stale JSON. Those
+are deleted with their dangling `PURPOSE` entries. The audit now reports 359
 modules across 40 packages. Seven packages remain flagged uncurated, which is
 the generator's intended way of making a missing purpose paragraph visible.
 
@@ -190,9 +203,57 @@ switched to explicit pathspecs, which is what made the recovery clean.
 - The deleted shim means any note or shell history invoking
   `run_rms_phase6_replay.py` now errors rather than delegating.
 - Seven packages have generated overviews without a curated purpose paragraph.
-- The `00_daily_log` move is a rename-only commit, but the second clone at
-  `qOFO_2027` is on another branch; daily-log work there should be committed
-  before the branches merge.
+- The daily log was moved twice in one day (`fae83da` then `35c18a5`), both
+  rename-only. The second clone at `qOFO_2027` is on another branch, so
+  daily-log work there should be committed before the branches merge.
 - The `shunt_dispatch` / `shunt_int_*` configuration in the CIGRE scripts and
   the chapter-9/10 design tables was left entirely to the parallel session,
   which owns those files.
+
+## Correction: the archive deletion was too broad
+
+Recorded after the fact, because the claim above that "nothing imports
+`experiments.archived`" was wider than what was actually checked. That check
+was a static `from`/`import` grep, which cannot see
+`importlib.import_module` with a string literal. The parallel session's
+isolated full-suite run caught the consequence — one failure out of 877:
+
+    FAILED tests/sbx_h/test_demo_config.py::test_single_demo_initializes_sbx_at_time_zero
+    ModuleNotFoundError: No module named 'experiments.archived'
+
+Investigating showed the deletion was worse than that one test. **Four of the
+eleven files under `experiments/archived/` were not archived material at all,
+only misfiled under that name:**
+
+- `014_SBX_SINGLE_DEMO.py` calls itself "300-minute SBX-H **v6** capability
+  demonstration ... the single thesis-oriented experiment for the retained
+  horizontal ex-post remuneration mechanism". It is the v6 replacement; the v5
+  original was separately under `_archive/sbx_h_v5/experiments/`. The
+  2026-07-12 v6-cleanup entry records that 014 was "REPLACED by a v6 version",
+  and the 2026-07-13 entry records the replacement being moved *into*
+  `archived/` — which is how the current demo came to sit in that folder.
+- `018_SBXV_E1.py` and `019_SBXV_E2.py` are the SBX-V Phase-5 E1/E2 case
+  studies. `docs/status/STATUS_SBXV.md` documents both as live one-command
+  re-runs ("`python experiments/018_SBXV_E1.py 360`") and names their output
+  directories under `results/`.
+- `017_SBX_PLANNING.py` is referenced from a live config docstring,
+  `configs/config.py:1007`.
+
+Every one of those references points at `experiments/<name>.py`, not at
+`experiments/archived/`, so the live documentation already placed them outside
+the archive. The author has since confirmed that `sbx_h` and `sbx_v` are
+retained (chapter 6 uses them; simplifying them is a later task), which settles
+that these are current thesis material.
+
+Restored to `experiments/` in `df11c2c` rather than recreating
+`experiments/archived/`: that folder was deleted deliberately, the four are not
+archived, and the status docs and config docstring already expect this path.
+The test's import and the two usage lines in 014's docstring are repointed.
+The five genuinely pre-refactor entry points (001, 002, 003, 004, 004b) and the
+`run_rms_phase6_replay.py` shim stay deleted. `tests/sbx_h/` and `tests/sbx_v/`
+pass, 152 tests.
+
+The lesson worth keeping: a folder named `archived/` is not evidence that its
+contents are archived, and a static import grep is not evidence that nothing
+loads a module. Both needed checking against what the live docs and tests
+actually reference.

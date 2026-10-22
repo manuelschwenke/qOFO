@@ -109,7 +109,7 @@ PURPOSE: Dict[str, str] = {
     "tuning": (
         "Offline Bayesian optimisation of the controller weights, plus the "
         "stability certificate machinery. See "
-        "`00_daily_log/07_2026/2026-07-31_bo_tuning_audit.md` for the audit of "
+        "`docs/daily_log/07_2026/2026-07-31_bo_tuning_audit.md` for the audit of "
         "why the search as parameterised was not identifiable."
     ),
     "sbx_h": (
@@ -152,10 +152,9 @@ PURPOSE: Dict[str, str] = {
         "probe bodies stay behind a `__main__` guard and are not part of the "
         "co-simulation import graph."
     ),
-    "00_daily_log": (
+    "docs/daily_log": (
         "Not a code package: holds `_build_index.py`, which regenerates "
-        "`00_daily_log/INDEX.md` from the log headings. The log moved here "
-        "from `docs/daily_log/` on 2026-10-22."
+        "`docs/daily_log/INDEX.md` from the log headings."
     ),
 }
 

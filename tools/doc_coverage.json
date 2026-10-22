@@ -1,19 +1,5 @@
 {
  "packages": {
-  "00_daily_log": {
-   "modules": 1,
-   "modules_doc": 1,
-   "loc": 114,
-   "pub_fn": 2,
-   "pub_fn_doc": 1,
-   "priv_fn": 0,
-   "priv_fn_doc": 0,
-   "cls": 0,
-   "cls_doc": 0,
-   "meth": 0,
-   "meth_doc": 0,
-   "syntax_errors": []
-  },
   "analysis": {
    "modules": 28,
    "modules_doc": 28,
@@ -98,14 +84,28 @@
    "meth_doc": 39,
    "syntax_errors": []
   },
+  "docs/daily_log": {
+   "modules": 1,
+   "modules_doc": 1,
+   "loc": 112,
+   "pub_fn": 2,
+   "pub_fn_doc": 1,
+   "priv_fn": 0,
+   "priv_fn_doc": 0,
+   "cls": 0,
+   "cls_doc": 0,
+   "meth": 0,
+   "meth_doc": 0,
+   "syntax_errors": []
+  },
   "experiments": {
-   "modules": 12,
-   "modules_doc": 11,
-   "loc": 3079,
-   "pub_fn": 38,
-   "pub_fn_doc": 14,
-   "priv_fn": 9,
-   "priv_fn_doc": 3,
+   "modules": 16,
+   "modules_doc": 15,
+   "loc": 4643,
+   "pub_fn": 62,
+   "pub_fn_doc": 23,
+   "priv_fn": 13,
+   "priv_fn_doc": 4,
    "cls": 3,
    "cls_doc": 3,
    "meth": 5,
@@ -507,7 +507,7 @@
   "tools": {
    "modules": 4,
    "modules_doc": 4,
-   "loc": 812,
+   "loc": 811,
    "pub_fn": 15,
    "pub_fn_doc": 1,
    "priv_fn": 2,
@@ -562,16 +562,6 @@
   }
  },
  "modules": [
-  {
-   "rel": "00_daily_log/_build_index.py",
-   "pkg": "00_daily_log",
-   "loc": 114,
-   "module_doc": true,
-   "summary": "00_daily_log/_build_index.py",
-   "n_pub_fn": 2,
-   "n_cls": 0,
-   "syntax_error": null
-  },
   {
    "rel": "analysis/__init__.py",
    "pkg": "analysis",
@@ -1189,6 +1179,56 @@
    "module_doc": true,
    "summary": "Results Storage",
    "n_pub_fn": 2,
+   "n_cls": 0,
+   "syntax_error": null
+  },
+  {
+   "rel": "docs/daily_log/_build_index.py",
+   "pkg": "docs/daily_log",
+   "loc": 112,
+   "module_doc": true,
+   "summary": "docs/daily_log/_build_index.py",
+   "n_pub_fn": 2,
+   "n_cls": 0,
+   "syntax_error": null
+  },
+  {
+   "rel": "experiments/014_SBX_SINGLE_DEMO.py",
+   "pkg": "experiments",
+   "loc": 462,
+   "module_doc": true,
+   "summary": "300-minute SBX-H v6 capability demonstration.",
+   "n_pub_fn": 3,
+   "n_cls": 0,
+   "syntax_error": null
+  },
+  {
+   "rel": "experiments/017_SBX_PLANNING.py",
+   "pkg": "experiments",
+   "loc": 455,
+   "module_doc": true,
+   "summary": "experiments/017_SBX_PLANNING.py",
+   "n_pub_fn": 3,
+   "n_cls": 0,
+   "syntax_error": null
+  },
+  {
+   "rel": "experiments/018_SBXV_E1.py",
+   "pkg": "experiments",
+   "loc": 280,
+   "module_doc": true,
+   "summary": "018_SBXV_E1 \u2014 SBX-V parity + economics (build plan \u00a79 Phase 5, E1)",
+   "n_pub_fn": 9,
+   "n_cls": 0,
+   "syntax_error": null
+  },
+  {
+   "rel": "experiments/019_SBXV_E2.py",
+   "pkg": "experiments",
+   "loc": 367,
+   "module_doc": true,
+   "summary": "019_SBXV_E2 \u2014 SBX-V band-width Pareto sweep (build plan \u00a79 Phase 5, E2)",
+   "n_pub_fn": 9,
    "n_cls": 0,
    "syntax_error": null
   },
@@ -3835,7 +3875,7 @@
   {
    "rel": "tools/gen_package_docs.py",
    "pkg": "tools",
-   "loc": 269,
+   "loc": 268,
    "module_doc": true,
    "summary": "Generate one markdown overview per Python package.",
    "n_pub_fn": 3,

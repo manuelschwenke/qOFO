@@ -17,12 +17,12 @@ Coverage figures for the whole codebase: [doc_coverage.md](../doc_coverage.md).
 | [`sensitivity`](sensitivity.md) | 6 | 6,271 | yes |
 | [`experiments/CIGRE_2026`](experiments_CIGRE_2026.md) | 15 | 6,082 | yes |
 | [`tuning`](tuning.md) | 13 | 5,186 | yes |
+| [`experiments`](experiments.md) | 16 | 4,643 | yes |
 | [`core`](core.md) | 12 | 4,449 | yes |
 | [`sbx_v`](sbx_v.md) | 16 | 3,899 | yes |
 | [`experiments/helpers`](experiments_helpers.md) | 9 | 3,589 | yes |
 | [`network/ieee39`](network_ieee39.md) | 10 | 3,582 | yes |
 | [`sbx_h`](sbx_h.md) | 11 | 3,108 | yes |
-| [`experiments`](experiments.md) | 12 | 3,079 | yes |
 | [`pf/probes`](pf_probes.md) | 14 | 3,077 | yes |
 | [`configs`](configs.md) | 4 | 2,858 | yes |
 | [`experiments/ch_10_case_study`](experiments_ch_10_case_study.md) | 8 | 2,594 | **no** |
@@ -35,7 +35,7 @@ Coverage figures for the whole codebase: [doc_coverage.md](../doc_coverage.md).
 | [`tests/tuning`](tests_tuning.md) | 7 | 1,097 | n/a |
 | [`experiments/part3_mc`](experiments_part3_mc.md) | 3 | 1,030 | **no** |
 | [`tests/pf`](tests_pf.md) | 8 | 975 | n/a |
-| [`tools`](tools.md) | 4 | 820 | yes |
+| [`tools`](tools.md) | 4 | 811 | yes |
 | [`tuning_mc`](tuning_mc.md) | 3 | 790 | **no** |
 | [`experiments/case1_svr`](experiments_case1_svr.md) | 4 | 750 | **no** |
 | [`network/ieee39/analysis`](network_ieee39_analysis.md) | 2 | 548 | yes |
@@ -46,7 +46,7 @@ Coverage figures for the whole codebase: [doc_coverage.md](../doc_coverage.md).
 | [`network/ieee39/scenarios`](network_ieee39_scenarios.md) | 2 | 270 | yes |
 | [`configs/paramsets`](configs_paramsets.md) | 1 | 164 | **no** |
 | [`tests/export`](tests_export.md) | 2 | 116 | n/a |
-| [`00_daily_log`](00_daily_log.md) | 1 | 114 | yes |
+| [`docs/daily_log`](docs_daily_log.md) | 1 | 112 | yes |
 
 ## Packages still lacking a curated description
 

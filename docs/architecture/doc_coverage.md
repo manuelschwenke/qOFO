@@ -5,10 +5,10 @@ imported). Regenerate with `python tools/doc_audit.py`.
 
 ## Totals
 
-- **359 modules**, 138,457 lines
-- module docstrings: **336/359** (94 %)
-- public functions: **701/1292** (54 %)
-- private functions: 378/686 (55 %)
+- **363 modules**, 140,018 lines
+- module docstrings: **340/363** (94 %)
+- public functions: **710/1316** (54 %)
+- private functions: 379/690 (55 %)
 - classes: **264/361** (73 %)
 - public methods: 636/1124 (57 %)
 
@@ -22,7 +22,7 @@ Sorted by public-API coverage, weakest first.
 | `network/nordic32` | 2 | 2/2 | 0/2 | 0/0 | 0/0 | 389 |
 | `tests/sbx_v` | 7 | 6/7 | 2/15 | 2/21 | 0/95 | 1,709 |
 | `tests/pf` | 8 | 3/8 | 3/29 | 2/21 | 0/31 | 975 |
-| `tools` | 4 | 4/4 | 1/15 | 0/0 | 0/0 | 812 |
+| `tools` | 4 | 4/4 | 1/15 | 0/0 | 0/0 | 811 |
 | `pf/probes` | 14 | 14/14 | 3/20 | 0/0 | 0/0 | 3,077 |
 | `tests/sbx_h` | 11 | 9/11 | 9/58 | 1/1 | 0/2 | 1,359 |
 | `experiments/case1_svr` | 4 | 3/4 | 4/12 | 0/0 | 0/0 | 750 |
@@ -30,11 +30,11 @@ Sorted by public-API coverage, weakest first.
 | `experiments/reference_period` | 2 | 1/2 | 3/9 | 0/0 | 0/0 | 482 |
 | `experiments/ch_10_case_study` | 8 | 7/8 | 19/52 | 0/0 | 0/0 | 2,594 |
 | `tests/observer` | 3 | 2/3 | 4/14 | 2/2 | 1/3 | 488 |
-| `experiments` | 12 | 11/12 | 14/38 | 3/3 | 0/5 | 3,079 |
 | `visualisation` | 14 | 13/14 | 21/33 | 7/9 | 15/74 | 7,840 |
+| `experiments` | 16 | 15/16 | 23/62 | 3/3 | 0/5 | 4,643 |
 | `tests/experiments` | 3 | 1/3 | 13/33 | 0/0 | 0/0 | 502 |
 | `tests/tuning` | 7 | 5/7 | 27/56 | 0/0 | 0/0 | 1,097 |
-| `00_daily_log` | 1 | 1/1 | 1/2 | 0/0 | 0/0 | 114 |
+| `docs/daily_log` | 1 | 1/1 | 1/2 | 0/0 | 0/0 | 112 |
 | `tests` | 51 | 48/51 | 64/179 | 63/104 | 223/389 | 13,637 |
 | `experiments/ch_9_parameter_selection` | 11 | 11/11 | 36/58 | 2/7 | 0/7 | 7,472 |
 | `analysis` | 28 | 28/28 | 102/201 | 16/17 | 7/14 | 13,115 |
@@ -59,10 +59,9 @@ Sorted by public-API coverage, weakest first.
 | `network/ieee39/scenarios` | 2 | 2/2 | 1/1 | 0/0 | 0/0 | 270 |
 | `optimisation` | 3 | 3/3 | 5/5 | 9/9 | 7/7 | 1,956 |
 
-## Undocumented public API (1067)
+## Undocumented public API (1082)
 
 ```
-00_daily_log/_build_index.py:64  main()
 analysis/annual_dso_pq_characterization.py:787  parse_args()
 analysis/annual_dso_pq_characterization.py:918  main()
 analysis/annual_dso_pq_characterization.py:143  ProfileApplicationMap.from_net()
@@ -190,6 +189,22 @@ core/plant.py:84  Plant.advance()
 core/plant.py:86  Plant.read_y()
 core/plant.py:265  PandapowerStaticPlant.apply_u()
 core/plant.py:296  PandapowerStaticPlant.read_y()
+docs/daily_log/_build_index.py:64  main()
+experiments/014_SBX_SINGLE_DEMO.py:319  main()
+experiments/017_SBX_PLANNING.py:233  main()
+experiments/018_SBXV_E1.py:59  make_config()
+experiments/018_SBXV_E1.py:87  run_arm()
+experiments/018_SBXV_E1.py:184  settlement_summary()
+experiments/018_SBXV_E1.py:206  assert_r1()
+experiments/018_SBXV_E1.py:221  main()
+experiments/019_SBXV_E2.py:106  make_config()
+experiments/019_SBXV_E2.py:136  voltage_violation_metrics()
+experiments/019_SBXV_E2.py:150  reserve_margin_metric()
+experiments/019_SBXV_E2.py:161  dso_tracking_metric()
+experiments/019_SBXV_E2.py:225  run_cell()
+experiments/019_SBXV_E2.py:267  write_sweep_csv()
+experiments/019_SBXV_E2.py:282  make_figure()
+experiments/019_SBXV_E2.py:328  main()
 experiments/case1_svr/figures_case1.py:93  fig_equivalence()
 experiments/case1_svr/figures_case1.py:136  fig_pareto()
 experiments/case1_svr/figures_case1.py:176  main()
@@ -447,20 +462,5 @@ tests/experiments/test_ch9_actuator_location_sweep.py:80  test_continuous_select
 tests/experiments/test_ch9_actuator_location_sweep.py:110  test_fixed_band_metric_settles_and_detects_subband_response()
 tests/experiments/test_ch9_actuator_location_sweep.py:127  test_fixed_band_metric_marks_unstable_tail_censored()
 tests/experiments/test_ch9_actuator_location_sweep.py:137  test_vde_capability_breakpoints_match_controller_rule()
-tests/experiments/test_ch9_actuator_location_sweep.py:191  test_family_columns_carry_both_worsts_and_split_q_by_layer()
-tests/experiments/test_ch9_actuator_location_sweep.py:221  test_worst_reduction_ranks_censored_first_then_excursion()
-tests/experiments/test_ch9_actuator_location_sweep.py:256  test_settle_cell_marks_censored_subband_and_missing()
-tests/experiments/test_ch9_timescale_seperation.py:28  results()
-tests/experiments/test_ch9_timescale_seperation.py:32  test_every_thesis_table_row_is_filled()
-tests/experiments/test_ch9_timescale_seperation.py:95  test_a_lost_case_is_reported_as_a_missing_row()
-tests/experiments/test_ch9_timescale_seperation.py:101  test_tap_split_is_the_two_step_minus_one_step_difference()
-tests/experiments/test_ch9_timescale_seperation.py:130  test_summary_reports_the_split_for_both_tap_classes()
-tests/experiments/test_ch9_timescale_seperation.py:138  test_single_tap_case_alone_is_flagged_as_unseparable()
-tests/experiments/test_ch9_timescale_seperation.py:171  test_disturbances_never_enter_the_bound()
-tests/experiments/test_ch9_timescale_seperation.py:178  test_summary_reports_measured_cases_that_have_no_table_row()
-tests/experiments/test_ch9_timescale_seperation.py:186  test_summary_does_not_pass_the_configured_ratio_off_as_N_inner()
-tests/experiments/test_ch9_timescale_seperation.py:194  test_censored_settling_times_are_marked_in_the_table_and_the_summary()
-tests/experiments/test_ch9_timescale_seperation.py:208  test_empty_battery_does_not_crash_the_derivation()
-tests/export/test_dynamic_snapshot_roundtrip.py:82  test_zone_map_roundtrip()
-... and 667 more
+... and 682 more
 ```

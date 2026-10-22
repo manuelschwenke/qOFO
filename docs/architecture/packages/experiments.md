@@ -7,9 +7,9 @@ Entry points. `run_comparison_rms_cosim_qss.py` runs the quasi-static and PowerF
 
 ## At a glance
 
-- modules: **12**, 3,079 lines
-- module docstrings: 11/12 (92%)
-- public functions documented: 14/38 (37%)
+- modules: **16**, 4,643 lines
+- module docstrings: 15/16 (94%)
+- public functions documented: 23/62 (37%)
 - classes documented: 3/3 (100%)
 
 ## Modules
@@ -18,8 +18,12 @@ Entry points. `run_comparison_rms_cosim_qss.py` runs the quasi-static and PowerF
 |---|---|---|---|---|
 | `comparison_none_vs_sbxh.py` | 706 | 17 | 0 | experiments/015_SBX_COMPARE.py |
 | `run_comparison_rms_cosim_qss.py` | 571 | 1 | 0 | Phase 6 Gate E closed-loop static-versus-RMS replay. |
+| `014_SBX_SINGLE_DEMO.py` | 462 | 3 | 0 | 300-minute SBX-H v6 capability demonstration. |
+| `017_SBX_PLANNING.py` | 455 | 3 | 0 | experiments/017_SBX_PLANNING.py |
 | `run_multi_system_ofo.py` | 392 | 4 | 0 | experiments/000_M_TSO_M_DSO.py |
+| `019_SBXV_E2.py` | 367 | 9 | 0 | 019_SBXV_E2 — SBX-V band-width Pareto sweep (build plan §9 Phase 5, E2) |
 | `run_openloop_qss_to_rms.py` | 285 | 1 | 2 | Open-loop u -> y plant-equivalence test (Gate E, 2026-07-22). |
+| `018_SBXV_E1.py` | 280 | 9 | 0 | 018_SBXV_E1 — SBX-V parity + economics (build plan §9 Phase 5, E1) |
 | `postprocess_rms_cosim.py` | 230 | 1 | 0 | Complete an interrupted RMS replay from its retained ComRes CSV. |
 | `shunt_dispatch_check.py` | 192 | 4 | 0 | AC comparison of the switched-shunt arms: banks held against banks dispatched. |
 | `run_rms_cosim.py` | 187 | 1 | 0 | Run the PowerFactory RMS co-simulation alone (no QSS reference). |

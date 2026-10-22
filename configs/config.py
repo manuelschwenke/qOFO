@@ -1819,15 +1819,14 @@ class MultiTSOConfig:
     engagement is kept and interface-Q RMSE improves 1.5%, at 900 s an
     engage-release cycle costs 5.6%."""
 
-    shunt_v_min_pu: float = 0.90  # runner default (2026-08-21)
-    """Lower observed-voltage limit [p.u.] of the bank corridor.  While banks
-    are dispatched, the predicted voltage rows are constrained *hard* (no
-    slack) and tightened to this band, so a step that would push a monitored
-    bus out of band cannot be selected."""
-
-    shunt_v_max_pu: float = 1.10
-    """Upper observed-voltage limit [p.u.] of the bank corridor; see
-    :attr:`shunt_v_min_pu`."""
+    shunt_sts_mutual_exclusion: bool = True  # added 2026-10-22
+    """Forbid engaging a bank while the opposite device (MSC vs MSR) of the
+    same STS is engaged; releasing stays allowed.  Enforced as a bound on the
+    bank variable (:meth:`controller.shunt_banks.ShuntBank.
+    available_directions`).  Without it, a capacitor inside its holding time
+    was answered by engaging the reactor of the same STS, and both stood
+    engaged for the rest of the run.  Runs made before 2026-10-22 correspond
+    to ``False``."""
 
     shunt_v_rescale: bool = True  # added 2026-10-14
     """Rescale the bank's interface feedforward by ``(V_meas / V_0)²`` at the
@@ -1863,11 +1862,6 @@ class MultiTSOConfig:
         if self.shunt_t_dwell_s < 0.0:
             raise ValueError(
                 f"shunt_t_dwell_s must be >= 0, got {self.shunt_t_dwell_s}"
-            )
-        if self.shunt_v_min_pu >= self.shunt_v_max_pu:
-            raise ValueError(
-                f"shunt_v_min_pu ({self.shunt_v_min_pu}) must be < "
-                f"shunt_v_max_pu ({self.shunt_v_max_pu})"
             )
         if min(self.tso_shunt_msc_n_levels, self.tso_shunt_msr_n_levels) < 1:
             raise ValueError("MSC/MSR n_levels must be >= 1")

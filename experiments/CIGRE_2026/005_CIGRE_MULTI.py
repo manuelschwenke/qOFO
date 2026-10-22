@@ -163,8 +163,6 @@ def make_cigre_config() -> MultiTSOConfig:
         zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},
         # integrator tuning
         shunt_t_dwell_s=30*60.0,  # min seconds between commits per bank (anti-chatter)
-        shunt_v_min_pu=0.90,  # HV feasibility band (overshoot guard)
-        shunt_v_max_pu=1.10,
         # ── DSO weights ──
         g_w_dso_der=1000,
         g_w_dso_oltc=200,

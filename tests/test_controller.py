@@ -730,9 +730,9 @@ class TestTSOController:
             sensitivities=sensitivities,
         )
         # The zone owns one switched-shunt bank, so the runner's per-instant
-        # bank state has to be supplied before a solve: level 0 of 1, both
-        # directions open, the device's own voltage guard.
-        controller.set_shunt_bank_state([0], [1], (0.90, 1.10))
+        # bank state has to be supplied before a solve: level 0 of 1, the
+        # engaging direction open.
+        controller.set_shunt_bank_state([0], [1])
 
         measurement = _make_dso_measurement(
             der_indices=der_buses,
@@ -797,33 +797,36 @@ class TestTSOController:
         with pytest.raises(RuntimeError, match="not initialised"):
             controller.step(measurement)
 
-    def test_bank_restrictions_reach_the_solver(self, tso_setup) -> None:
-        """The bank block must arrive restricted, not as a free integer.
+    def test_bank_is_an_ordinary_bounded_integer(self, tso_setup) -> None:
+        """The bank reaches the solver only through its level bounds.
 
-        One step per zone and instant, and the predicted voltage rows hard and
-        tightened to the bank's guard band.  The bank variables are the tail of
-        the reordered vector, so for this one-bank zone that is the last
-        position.
+        Since 2026-10-22 there is no one-step-per-zone restriction and no hard,
+        tightened voltage corridor: the solver is called once, the bank bounds
+        are the pushed ones, and the output band is the controller's own.  The
+        bank variables are the tail of the reordered vector, so for this
+        one-bank zone that is the last position.
         """
         controller, _, measurement = tso_setup
         controller.initialise(measurement)
-        seen = {}
+        seen = []
         solve = controller.solver.solve
 
         def capture(problem):
-            seen["problem"] = problem
+            seen.append(problem)
             return solve(problem)
 
         controller.solver.solve = capture
         controller.step(measurement)
 
-        problem = seen["problem"]
-        n_total = problem.n_continuous + problem.n_integer
-        assert problem.one_step_indices == (n_total - 1,)
-        rows = tuple(range(len(controller.config.voltage_bus_indices)))
-        assert problem.hard_output_indices == rows
-        assert np.all(problem.y_lower[list(rows)] >= 0.90)
-        assert np.all(problem.y_upper[list(rows)] <= 1.10)
+        assert len(seen) == 1
+        problem = seen[0]
+        assert not hasattr(problem, "one_step_indices")
+        assert not hasattr(problem, "hard_output_indices")
+        assert problem.u_lower[-1] == 0.0
+        assert problem.u_upper[-1] == 1.0
+        rows = list(range(len(controller.config.voltage_bus_indices)))
+        assert_allclose(problem.y_lower[rows], controller.config.v_min_pu)
+        assert_allclose(problem.y_upper[rows], controller.config.v_max_pu)
 
     def test_step_without_bank_state_raises(self, tso_setup) -> None:
         """A forgotten bank-state push must fail, not silently hold the banks.
@@ -840,11 +843,9 @@ class TestTSOController:
     def test_set_shunt_bank_state_validates(self, tso_setup) -> None:
         controller, _, _ = tso_setup
         with pytest.raises(ValueError, match="one entry per bank"):
-            controller.set_shunt_bank_state([0, 0], [1, 1], (0.9, 1.1))
+            controller.set_shunt_bank_state([0, 0], [1, 1])
         with pytest.raises(ValueError, match="must not fall below"):
-            controller.set_shunt_bank_state([1], [0], (0.9, 1.1))
-        with pytest.raises(ValueError, match="non-empty"):
-            controller.set_shunt_bank_state([0], [1], (1.1, 0.9))
+            controller.set_shunt_bank_state([1], [0])
 
     def test_receive_capability(self, tso_setup) -> None:
         """Test receiving a capability message from a DSO."""

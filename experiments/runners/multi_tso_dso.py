@@ -72,7 +72,9 @@ from controller.central_controller import CentralControllerConfig, CentralOFOCon
 from controller.dso_controller import DSOController, DSOControllerConfig
 from controller.multi_tso_coordinator import MultiTSOCoordinator, ZoneDefinition
 from controller.tso_controller import TSOController, TSOControllerConfig
-from controller.shunt_banks import ShuntBank, ShuntBankConfig, make_bank
+from controller.shunt_banks import (
+    ShuntBank, ShuntBankConfig, make_bank, opposite_engaged,
+)
 from core.actuator_bounds import (
     ActuatorBounds,
     GeneratorParameters,
@@ -3246,8 +3248,6 @@ def run_multi_tso_dso(
                     q_step_mvar=float(q_step),
                     n_levels=int(nlev),
                     t_dwell_s=float(config.shunt_t_dwell_s),
-                    y_h_min=float(config.shunt_v_min_pu),
-                    y_h_max=float(config.shunt_v_max_pu),
                 )
             )
             q_itf_sh_offset.setdefault(interface_t3w, 0.0)
@@ -3882,18 +3882,21 @@ def run_multi_tso_dso(
             # ── Switched-shunt bank state → the zone MIQPs ────────────
             # The bounds carry the device's own restrictions, so a bank inside
             # its holding time or at a level limit cannot be selected at all,
-            # and the guard band makes the predicted voltage corridor hard.
+            # and (shunt_sts_mutual_exclusion) a bank cannot engage while the
+            # opposite device of its STS is engaged. Otherwise a bank is an
+            # ordinary integer input of the MIQP.
+            _all_banks = [b for bs in zone_banks.values() for b in bs]
             for z_b, banks_b in zone_banks.items():
                 lower_b, upper_b = [], []
                 for bank_b in banks_b:
-                    directions_b = bank_b.available_directions(time_s)
+                    directions_b = bank_b.available_directions(
+                        time_s,
+                        opposite_engaged=(config.shunt_sts_mutual_exclusion
+                                          and opposite_engaged(bank_b, _all_banks)),
+                    )
                     lower_b.append(bank_b.level + min([0] + directions_b))
                     upper_b.append(bank_b.level + max([0] + directions_b))
-                tso_controllers[z_b].set_shunt_bank_state(
-                    lower_b, upper_b,
-                    (max(b.config.y_h_min for b in banks_b),
-                     min(b.config.y_h_max for b in banks_b)),
-                )
+                tso_controllers[z_b].set_shunt_bank_state(lower_b, upper_b)
 
             # Run decentralised TSO step for all zones
             tso_outputs = coordinator.step(
@@ -4133,9 +4136,12 @@ def run_multi_tso_dso(
                         # The plant was toggled by ``writes_from_zone_tso``
                         # above; this advances the bank's holding clock and
                         # steps the DSO interface feedforward, in the same
-                        # instant and without a power flow.  At most one bank
-                        # per zone can appear here, because the MIQP is given a
-                        # one-step restriction over the whole bank block.
+                        # instant and without a power flow.  Several banks of a
+                        # zone can appear here (no one-step-per-zone restriction
+                        # since 2026-10-22); each moves at most one level, by its
+                        # bounds.  All feedforwards are evaluated at the
+                        # pre-switch models, i.e. superposed to first order,
+                        # which is how the MIQP priced the joint step.
                         for sb, s_new, k_sh in changed:
                             bank_c = zone_banks[z][k_sh]
                             if bank_c.config.bus_idx != int(sb):
@@ -4145,7 +4151,18 @@ def run_multi_tso_dso(
                                     f"{bank_c.config.bus_idx}, not {sb}"
                                 )
                             direction_c = int(s_new) - int(prev_shunt_steps[k_sh])
-                            commit = bank_c.commit_selected(direction_c, time_s)
+                            # Evaluated after the earlier commits of this
+                            # instant, so two opposite devices of one STS that
+                            # were both free and both engaged fail fast here.
+                            commit = bank_c.commit_selected(
+                                direction_c, time_s,
+                                opposite_engaged=(
+                                    config.shunt_sts_mutual_exclusion
+                                    and opposite_engaged(
+                                        bank_c,
+                                        [b for bs in zone_banks.values()
+                                         for b in bs])),
+                            )
                             # The feedforward comes from the hosting STS's OWN
                             # 3W models at the current (pre-switch) operating
                             # point: it is added to the setpoints that

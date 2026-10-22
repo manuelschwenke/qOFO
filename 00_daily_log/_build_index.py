@@ -1,7 +1,7 @@
 r"""
-docs/daily_log/_build_index.py
-==============================
-Regenerate ``docs/daily_log/INDEX.md`` from the log files themselves.
+00_daily_log/_build_index.py
+============================
+Regenerate ``00_daily_log/INDEX.md`` from the log files themselves.
 
 The daily logs are filed in ``MM_YYYY`` folders (``07_2026``) and named
 ``YYYY-MM-DD_slug.md``.  This script walks those folders, reads each file's
@@ -10,7 +10,7 @@ newest entries first.
 
 Run from anywhere::
 
-    python docs\daily_log\_build_index.py
+    python 00_daily_log\_build_index.py
 
 It is idempotent and takes no arguments.  ``INDEX.md`` is generated output --
 edit the logs or this script, not the index.
@@ -26,8 +26,14 @@ INDEX_PATH = LOG_ROOT / "INDEX.md"
 
 #: ``MM_YYYY`` month folders.
 MONTH_DIR = re.compile(r"^(?P<m>\d{2})_(?P<y>\d{4})$")
-#: ``YYYY-MM-DD_slug.md`` log files.
-LOG_FILE = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})[_.](?P<slug>.*)\.md$")
+#: ``YYYY-MM-DD_slug.md`` log files.  The date may carry a lower-case letter
+#: suffix for a second entry on the same day (``2026-09-15b_...``); without it
+#: in this pattern such an entry is silently dropped from the index, which is
+#: what hid ``2026-09-15b_ch9_network_decision_and_f1_instrumentation.md``
+#: from every generated index between 2026-09-15 and 2026-10-22.
+LOG_FILE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})(?P<rev>[a-z]?)[_.](?P<slug>.*)\.md$"
+)
 
 MONTH_NAMES = {
     "01": "January", "02": "February", "03": "March", "04": "April",
@@ -97,7 +103,9 @@ def main() -> None:
         lines.append("")
 
     INDEX_PATH.write_text("\n".join(lines), encoding="utf-8")
-    print(f"wrote {INDEX_PATH.relative_to(LOG_ROOT.parents[1])}: "
+    # parents[0] is the repo root now that the logs live at 00_daily_log/;
+    # it was parents[1] while they were nested under docs/.
+    print(f"wrote {INDEX_PATH.relative_to(LOG_ROOT.parents[0])}: "
           f"{total} entries, {len(months)} month(s)")
 
 

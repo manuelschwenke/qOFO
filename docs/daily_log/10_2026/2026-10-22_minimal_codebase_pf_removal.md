@@ -1,4 +1,4 @@
-# Minimal codebase: the PowerFactory adapter, Nordic 32, tools and the campaign launchers removed
+# Minimal codebase: what came out, and the chapter-9 producers that had to go back in
 
 Timestamp: 2026-10-22, afternoon, Europe/Berlin.
 
@@ -16,7 +16,75 @@ branches there would have moved HEAD under that session. The branch lives in
 the same repository, so `git log minimal/thesis-core` works from either place.
 
 Changes: commits `94319df` (PowerFactory), `38f3557` (Nordic 32, tools,
-launchers), `36235aa` (dead Q(V) channels, the audit, colloquium).
+launchers), `36235aa` (dead Q(V) channels, the audit, colloquium),
+`08a8618` (three `analysis/` scripts), and the restore described next.
+
+## Correction, same day: chapter 9 needed PowerFactory, and it is back
+
+**The removal went too far, and the author caught it.** Asked why chapter 9
+was no longer reproducible, the honest answer turned out to be that §9.1 and
+§9.2 have no non-PowerFactory producer — and the README of
+`experiments/ch_9_parameter_selection/` says so explicitly, section by section.
+I had read "PowerFactory driver" as "not thesis material", which is wrong:
+
+| section | quantity | producer | status after the first pass |
+|---|---|---|---|
+| 9.1 | Table 9.1, `T_DS`/`T_STS` | `ch_9_1_actuator_location_sweep.py` (**current**), `ch_9_1_timescale_seperation.py` (earlier) | **both deleted** |
+| 9.1 | `N_inner` (eq. 9.2) | `ch_9_1_ninner_isolated_sts.py` | survived |
+| 9.1 | `T_TS` sweep | `ch_9_1_ts_period_sweep.py` | survived |
+| 9.2 | dead band `dU_db` | `run_qstep_sweep.ps1`, `run_e1_drift.ps1`, `run_e3_tracking.ps1` | **all three deleted** |
+| 9.3 | objective / step weights | `tuning/`, via `_ch9_selected_design.py` | survived |
+
+Two of the four filled sections had lost their producers. The §9.2 launchers
+are the sharper error: the README marks them "(not moved)", i.e. deliberately
+kept in `experiments/` as the chapter's producers, and I removed them in a
+commit that called them machine-specific scaffolding. They write straight into
+`results/THESIS_ch9_2_deadband_droop{,_e1_drift,_e3_tracking}/`.
+
+Restored, with the dependency closure that makes them runnable rather than
+merely present:
+
+- the two §9.1 drivers and the four §9.2 launchers;
+- `export/` in full again — `dynamic_snapshot.py`, `make_snapshots.py` and the
+  12 reference snapshots under `export/snapshots/`;
+- 17 of the 45 `pf/` files: the session/COM layer, `screening`, `plant`,
+  `replay`, `pf_sync`, `pf_parity`, `naming`, `result_export`, `tap_ctrl`,
+  `profile_playback`, `live_view`, `plot_pages`, `wecc_apply`, and the modal
+  chain (`modal_participation`, `modal_window`, `modal_campaign`);
+- `run_comparison_rms_cosim_qss.py` with `rms_replay` and `rms_cosim_config`;
+- `analysis/gate_e_diagnostics.py` (a **required import** of the RMS comparison
+  driver, not the standalone diagnostic I had taken it for),
+  `analysis/modal_residue.py`, `analysis/build_modal_bundle.py` and
+  `analysis/modal_observability.py` — the last two write the thesis table
+  bodies `modal_groups.tex`, `residue_settling.tex` and
+  `modal_settling_modes.tex`;
+- every corresponding test.
+
+Also reverted: the split of `export/make_snapshots.py` into
+`experiments/helpers/snapshot_state.py`. That split existed only because
+`export/` was going away; with `export/` back it would have been a second copy
+of `build_snapshot_state`, so the original is restored and the three plant
+tests point at it again.
+
+**Still removed, and these are the defensible part of the pass:** 28 of the 45
+`pf/` files — the 15 one-off API probes under `pf/probes/`, the PowerFactory
+setup and introspection one-shots (`hello_pf`, `setup_study_cases`,
+`wecc_introspect`, `add_g01_avr`/`gov`, `plant_smoke`, `gate1_record`,
+`gate_b_diagnostics`, `make_frozen_profile`, `deactivate_stale_elmfiles`,
+`pin_profile_sources_to_loadflow`) and `pf/timescale_study.py`, which since
+2026-08-06 has been a breadcrumb pointing at the chapter-9 module rather than
+code. Plus Nordic 32, `tools/`, the 15 launchers that are not §9.2 producers,
+the colloquium scripts, `demo_wind_replace_observer` (it targets two paths that
+do not exist), and `tuning_mc` (folded into `tuning`).
+
+Net test accounting: **867 collected against the 876 baseline, and the only
+removal left is the 9 colloquium tests.** Nothing else in the suite is gone and
+nothing was added.
+
+The lesson is recorded at the end of this entry with the others, because it is
+the same one in a new form: a module's *interface* — here "it drives
+PowerFactory" — is not evidence about its *role*. The README that maps thesis
+sections to scripts was the authority, and I had not read it before deleting.
 
 Baseline: the full suite passes at `fa94411`, the commit this branch diverges
 from — **862 passed, 15 skipped, nothing failed**. Measured twice
@@ -85,7 +153,15 @@ something reported twice or generated a case at runtime. The dangerous
 direction is collected-but-not-run — a test silently not executing — and that
 is not what either checkout shows.
 
-## The headline consequence
+## The headline consequence — as it stood before the restore
+
+> **Superseded by the correction above.** The RMS path is back: the co-simulation
+> driver, the RMS plant and the replay layer were restored with the chapter-9
+> producers, so the validation path exists again. The reasoning below is kept
+> because it is what made the cost of removing it legible, and because the
+> argument about a plant being its own only reference is the general form of the
+> `der_qv_deadband_override_pu` defect recorded further down — which remains
+> true.
 
 **This removes the project's only non-quasi-static validation path.** After it,
 every controller claim in the codebase — the switched-shunt law included — is
@@ -267,9 +343,12 @@ author's call rather than something to fold into a deletion branch.
 - The non-quasi-static validation path is gone (see above). The EvtTap and
   event-admission measurements of 2026-07-30 survive as reasoning in the daily
   logs but not as runnable code.
-- Table 9.1 and the actuator-location sweep are no longer reproducible, and
-  neither is the dead-band sweep data.
-- Sixteen `analysis/` scripts are kept pending the author's judgement.
+- ~~Table 9.1 and the actuator-location sweep are no longer reproducible, and
+  neither is the dead-band sweep data.~~ **Resolved the same day:** all three
+  producers and their dependency closure were restored (see the correction at
+  the top). Chapter 9 is reproducible end to end again.
+- Fourteen `analysis/` scripts are kept; three were removed and two of those
+  (`gate_e_diagnostics`, `modal_residue`) came back with the RMS path.
 - `sbx_h` and `sbx_v` are kept per the author's decision (chapter 6 uses
   them); simplifying them is a later task.
 - `docs/` was left alone apart from the generated inventories. It holds the

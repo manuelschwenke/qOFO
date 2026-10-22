@@ -15,7 +15,7 @@ from __future__ import annotations
 import pandapower as pp
 import pytest
 
-from experiments.helpers.snapshot_state import DEFAULT_T0, build_snapshot_state
+from export.make_snapshots import DEFAULT_T0, build_snapshot_state
 from network.ieee39.load_model import apply_zip_load_model
 
 ANCHOR = 1.03

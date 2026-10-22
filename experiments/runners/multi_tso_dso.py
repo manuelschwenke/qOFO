@@ -72,7 +72,7 @@ from controller.central_controller import CentralControllerConfig, CentralOFOCon
 from controller.dso_controller import DSOController, DSOControllerConfig
 from controller.multi_tso_coordinator import MultiTSOCoordinator, ZoneDefinition
 from controller.tso_controller import TSOController, TSOControllerConfig
-from controller.shunt_integrator import ShuntBank, ShuntBankConfig, make_bank
+from controller.shunt_banks import ShuntBank, ShuntBankConfig, make_bank
 from core.actuator_bounds import (
     ActuatorBounds,
     GeneratorParameters,
@@ -3281,9 +3281,9 @@ def run_multi_tso_dso(
                     kind=str(kind),
                     q_step_mvar=float(q_step),
                     n_levels=int(nlev),
-                    t_dwell_s=float(config.shunt_int_t_dwell_s),
-                    y_h_min=float(config.shunt_int_v_min_pu),
-                    y_h_max=float(config.shunt_int_v_max_pu),
+                    t_dwell_s=float(config.shunt_t_dwell_s),
+                    y_h_min=float(config.shunt_v_min_pu),
+                    y_h_max=float(config.shunt_v_max_pu),
                 )
             )
             q_itf_sh_offset.setdefault(interface_t3w, 0.0)
@@ -4229,7 +4229,7 @@ def run_multi_tso_dso(
                                 # this instant.  Rescaling only -- no rebuild
                                 # and no relinearisation after a switch.
                                 r_c = 1.0
-                                if (config.shunt_int_v_rescale
+                                if (config.shunt_v_rescale
                                         and last_meas is not None):
                                     r_c = bank_voltage_ratio(
                                         last_meas,

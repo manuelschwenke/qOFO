@@ -119,7 +119,7 @@ GAUGE_COUPLED_FIELDS: tuple[str, ...] = (
 #: law's benefit actually turns on (1800 s keeps the engagement, 900 s pays
 #: +5.6% interface RMSE for an engage-release cycle).
 SHUNT_FIELDS: tuple[str, ...] = (
-    "shunt_int_t_dwell_s",
+    "shunt_t_dwell_s",
 )
 
 #: Cadence, carried in a parameter set so that a weight set and the periods it

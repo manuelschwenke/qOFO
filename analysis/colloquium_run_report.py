@@ -54,7 +54,7 @@ def audit(folder):
     report["ts_machine_taps"] = movements(log, "zone_oltc_taps")
     report["ts_shunts"] = movements(log, "zone_tso_shunt_states")
     if cfg.tso_mode == "ofo":
-        if cfg.shunt_int_t_dwell_s != 10800.0:
+        if cfg.shunt_t_dwell_s != 10800.0:
             raise ValueError("The presentation OFO case must use exactly 3 h shunt dwell")
         prev, times_by_bank = {}, {}
         for r in log:
@@ -65,10 +65,10 @@ def audit(folder):
                         times_by_bank.setdefault(f"zone{z}_bank{k + 1}", []).append(r.time_s)
                 prev[z] = a
         for bank, times in times_by_bank.items():
-            if len(times) > 1 and np.min(np.diff(times)) < cfg.shunt_int_t_dwell_s - 1e-8:
+            if len(times) > 1 and np.min(np.diff(times)) < cfg.shunt_t_dwell_s - 1e-8:
                 raise ValueError(f"Shunt dwell violated in recorded trajectory: {bank}")
         report["shunt_dwell_audit"] = {
-            "configured_s": cfg.shunt_int_t_dwell_s,
+            "configured_s": cfg.shunt_t_dwell_s,
             "switch_times_s_by_bank": times_by_bank,
             "all_observed_inter_switch_intervals_compliant": True,
             "first_switch": "Eligible immediately; dwell applies between switches of the same bank",

@@ -903,7 +903,7 @@ class TSOController(BaseOFOController):
         """Hand the MIQP this instant's bank bounds and voltage guard band.
 
         The runner owns the banks, so it supplies ``lower``/``upper`` from
-        :meth:`controller.shunt_integrator.ShuntBank.available_directions` —
+        :meth:`controller.shunt_banks.ShuntBank.available_directions` —
         which already accounts for the minimum holding time and the level
         limits — and the band from the banks' own guard. The controller
         therefore stays free of switching-wear state.
@@ -1494,7 +1494,7 @@ class TSOController(BaseOFOController):
         acts on a control variable, not an output).
 
         This is the SINGLE source of the objective gradient: the switched-shunt
-        integrator (:mod:`controller.shunt_integrator`) dots this vector with a
+        integrator (:mod:`controller.shunt_banks`) dots this vector with a
         bank's boundary sensitivity column ``h_H`` to obtain ``g_H = h_Hᵀ ∇_y f``,
         so the integrator follows literally the same objective ``f`` as the rest
         of the TSO loop.  The consistency between this vector and

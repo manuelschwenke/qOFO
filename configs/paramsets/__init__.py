@@ -104,6 +104,18 @@ def _coerce(field_name: str, value: Any) -> Any:
 #: Retired 2026-10-22 with the switched-shunt supervisory layer: the
 #: integrating dispatcher that owned them is gone, and the kept law prices a
 #: bank step with ``g_w_tso_shunt`` inside the MIQP.
+#: Fields a stored parameter set may name under an older spelling. The value is
+#: applied under the current name rather than ignored, because a rename does not
+#: make the recorded number wrong. Renamed 2026-10-22 with the removal of the
+#: integrating shunt dispatcher the ``_int_`` infix referred to.
+RENAMED_FIELDS: dict[str, str] = {
+    "shunt_int_t_dwell_s": "shunt_t_dwell_s",
+    "shunt_int_v_min_pu": "shunt_v_min_pu",
+    "shunt_int_v_max_pu": "shunt_v_max_pu",
+    "shunt_int_v_rescale": "shunt_v_rescale",
+}
+
+
 RETIRED_FIELDS: frozenset[str] = frozenset({
     "shunt_int_g_w",
     "shunt_int_delta_mvar",
@@ -124,7 +136,8 @@ def apply_paramset(cfg, name: str, *, verbose: bool = True):
     move.  That re-derivation is idempotent, so it cannot compound.
     """
     doc = load_paramset(name)
-    fields = doc["fields"]
+    fields = {RENAMED_FIELDS.get(k, k): v for k, v in doc["fields"].items()}
+    renamed = sorted(k for k in doc["fields"] if k in RENAMED_FIELDS)
     known = {f.name for f in dataclasses.fields(cfg)}
     retired = sorted(set(fields) & RETIRED_FIELDS - known)
     unknown = sorted(set(fields) - known - RETIRED_FIELDS)
@@ -139,6 +152,9 @@ def apply_paramset(cfg, name: str, *, verbose: bool = True):
         print(f"[paramset] {name}: {title}")
         print(f"[paramset] {len(overlay)} field(s) overridden: "
               f"{', '.join(sorted(overlay))}")
+    if renamed and verbose:
+        print(f"[paramset] {name}: applying renamed field(s) under their "
+              f"current names: {', '.join(renamed)}")
     if retired:
         # The file stays the record of what that controller was; the parameter
         # itself no longer exists, so it cannot be applied.

@@ -47,7 +47,7 @@ def prepare(trip_gen=None, cases=("pi", "ofo")):
         ])
     configs = {
         name: replace(base, **VARIANTS[rung], n_total_s=14400.0,
-                      shunt_int_t_dwell_s=3 * 3600.0,
+                      shunt_t_dwell_s=3 * 3600.0,
                       verbose=1, run_stability_analysis=False)
         for name, rung in (("pi", "S1"), ("ofo", "O3")) if name in cases
     }

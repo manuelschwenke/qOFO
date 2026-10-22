@@ -256,9 +256,9 @@ def make_cigre_config() -> MultiTSOConfig:
         tso_shunt_msc_q_step_mvar=25.0,  # Mvar per MSC step
         tso_shunt_msr_q_step_mvar=25.0,  # Mvar per MSR step
         # integrator tuning
-        shunt_int_t_dwell_s=30 * 60.0,  # min seconds between commits per bank (anti-chatter)
-        shunt_int_v_min_pu=0.90,  # HV feasibility band (overshoot guard)
-        shunt_int_v_max_pu=1.10,
+        shunt_t_dwell_s=30 * 60.0,  # min seconds between commits per bank (anti-chatter)
+        shunt_v_min_pu=0.90,  # HV feasibility band (overshoot guard)
+        shunt_v_max_pu=1.10,
         # ── DSO weights ──
         g_w_dso_der=1000,
         g_w_dso_oltc=200,

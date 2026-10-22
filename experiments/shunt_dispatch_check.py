@@ -43,7 +43,7 @@ from experiments.runners.multi_tso_dso import run_multi_tso_dso
 SOURCE_FILES = (
     "controller/tso_controller.py",
     "controller/base_controller.py",
-    "controller/shunt_integrator.py",
+    "controller/shunt_banks.py",
     "optimisation/miqp_solver.py",
     "sensitivity/jacobian.py",
     "experiments/runners/multi_tso_dso.py",
@@ -109,6 +109,10 @@ def summarise(records):
     return {
         "n_records": len(records), "n_switches": len(commits),
         "switch_kinds": dict(Counter(c["kind"] for c in commits)),
+        # One entry per commit: how many couplers of the hosting system the
+        # feedforward shifted (3 on this benchmark, 1 before d607892).
+        "feedforward_couplers_per_commit": [len(c["interface_indices"])
+                                            for c in commits],
         "interface_error_rmse_mvar":
             float(np.sqrt(np.mean(e ** 2))) if e.size else None,
         "interface_error_abs_p95_mvar":
@@ -154,7 +158,7 @@ def main():
         if args.movement_weight is not None:
             cfg = replace(cfg, g_w_tso_shunt=args.movement_weight)
         if args.dwell_s is not None:
-            cfg = replace(cfg, shunt_int_t_dwell_s=args.dwell_s)
+            cfg = replace(cfg, shunt_t_dwell_s=args.dwell_s)
         if args.start_time is not None:
             import pandas as pd
             cfg = replace(cfg, start_time=pd.Timestamp(args.start_time))

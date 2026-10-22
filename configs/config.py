@@ -1798,7 +1798,7 @@ class MultiTSOConfig:
     tso_shunt_msr_q_step_mvar: float = 25.0  # runner default (2026-08-21)
     """MSR nameplate reactive power per step at V = 1 pu [Mvar] (magnitude)."""
 
-    shunt_int_t_dwell_s: float = 30 * 60.0  # runner default (2026-08-21)
+    shunt_t_dwell_s: float = 30 * 60.0  # runner default (2026-08-21)
     """Minimum holding time between commits of the same bank [s].
 
     The MIQP sees it as a bound: a bank inside its holding time is bounded to
@@ -1807,17 +1807,17 @@ class MultiTSOConfig:
     engagement is kept and interface-Q RMSE improves 1.5%, at 900 s an
     engage-release cycle costs 5.6%."""
 
-    shunt_int_v_min_pu: float = 0.90  # runner default (2026-08-21)
+    shunt_v_min_pu: float = 0.90  # runner default (2026-08-21)
     """Lower observed-voltage limit [p.u.] of the bank corridor.  While banks
     are dispatched, the predicted voltage rows are constrained *hard* (no
     slack) and tightened to this band, so a step that would push a monitored
     bus out of band cannot be selected."""
 
-    shunt_int_v_max_pu: float = 1.10
+    shunt_v_max_pu: float = 1.10
     """Upper observed-voltage limit [p.u.] of the bank corridor; see
-    :attr:`shunt_int_v_min_pu`."""
+    :attr:`shunt_v_min_pu`."""
 
-    shunt_int_v_rescale: bool = True  # added 2026-10-14
+    shunt_v_rescale: bool = True  # added 2026-10-14
     """Rescale the bank's interface feedforward by ``(V_meas / V_0)²`` at the
     bank bus, i.e. evaluate the per-step injection ``q_step · V²`` at the
     measured instead of the cached linearisation voltage (thesis
@@ -1830,7 +1830,7 @@ class MultiTSOConfig:
 
         Raises ``ValueError`` on any inconsistent or out-of-range setting; the
         per-bank numeric guards are additionally enforced by
-        :class:`controller.shunt_integrator.ShuntBankConfig`."""
+        :class:`controller.shunt_banks.ShuntBankConfig`."""
         if self.shunt_dispatch not in ("off", "miqp"):
             raise ValueError(
                 f"shunt_dispatch must be 'off' or 'miqp', "
@@ -1848,14 +1848,14 @@ class MultiTSOConfig:
                 f"shunt_dispatch={self.shunt_dispatch!r} requires tso_shunt_kind='msc_msr', "
                 f"got {self.tso_shunt_kind!r}"
             )
-        if self.shunt_int_t_dwell_s < 0.0:
+        if self.shunt_t_dwell_s < 0.0:
             raise ValueError(
-                f"shunt_int_t_dwell_s must be >= 0, got {self.shunt_int_t_dwell_s}"
+                f"shunt_t_dwell_s must be >= 0, got {self.shunt_t_dwell_s}"
             )
-        if self.shunt_int_v_min_pu >= self.shunt_int_v_max_pu:
+        if self.shunt_v_min_pu >= self.shunt_v_max_pu:
             raise ValueError(
-                f"shunt_int_v_min_pu ({self.shunt_int_v_min_pu}) must be < "
-                f"shunt_int_v_max_pu ({self.shunt_int_v_max_pu})"
+                f"shunt_v_min_pu ({self.shunt_v_min_pu}) must be < "
+                f"shunt_v_max_pu ({self.shunt_v_max_pu})"
             )
         if min(self.tso_shunt_msc_n_levels, self.tso_shunt_msr_n_levels) < 1:
             raise ValueError("MSC/MSR n_levels must be >= 1")

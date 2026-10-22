@@ -3,26 +3,28 @@ tuning/parameters.py
 ====================
 The canonical controller-weight vector, and its overlay onto ``MultiTSOConfig``.
 
-One vector, nine weights
-------------------------
+One vector, ten weights
+-----------------------
 After the 2026-09-10 reset there is exactly one definition of "the controller
 weights".  :data:`WEIGHT_FIELDS` names them; a *parameter set* is a mapping over
 exactly these keys plus the timing fields, and nothing else in the codebase may
-carry a competing default (``configs.config`` raises on an unset weight).
+carry a competing default (``configs.config`` raises on an unset weight).  The
+tenth, the bank step price ``g_w_tso_shunt``, joined on 2026-10-22 when the
+switched-shunt banks became integer inputs of the TS-MIQP.
 
 The gauge
 ---------
 The MIQP objective ``w^T G_w w + grad_f^T w + z^T G_z z`` is positively
-homogeneous of degree one in the whole weight vector: scaling ``Q``, ``G_w``,
-``G_z`` and the shunt integrator's gain by a common ``c`` multiplies the
-objective by ``c`` and leaves the argmin — hence the trajectory, *including the
-integer tap sequence* — unchanged.  Measured 2026-07-31: reproduced to ~4e-10.
+homogeneous of degree one in the whole weight vector: scaling ``Q``, ``G_w``
+and ``G_z`` by a common ``c`` multiplies the objective by ``c`` and leaves the
+argmin — hence the trajectory, *including the integer tap and bank sequence* —
+unchanged.  Measured 2026-07-31: reproduced to ~4e-10.
 
 So weights map many-to-one onto controllers: an entire ray through the origin
-is one controller.  A search over all nine spends budget on a direction that
+is one controller.  A search over all ten spends budget on a direction that
 provably changes nothing, and a reported ``g_v = 1e7`` means nothing on its own.
 
-:data:`GAUGE_FIELD` is therefore **pinned**, and the remaining eight coordinates
+:data:`GAUGE_FIELD` is therefore **pinned**, and the remaining nine coordinates
 are searched.  Objective weights are searched as dimensionless priorities
 ``pi = g * sigma^2`` (:class:`tuning.stage1_screen.PriorityScales`) so that
 "voltage matters more than interface-Q" is a unit-free statement the reader can
@@ -54,7 +56,6 @@ from configs.config import MultiTSOConfig
 
 __all__ = [
     "WEIGHT_FIELDS",
-    "GAUGE_COUPLED_FIELDS",
     "SHUNT_FIELDS",
     "SEARCHED_FIELDS",
     "GAUGE_FIELD",
@@ -69,10 +70,17 @@ __all__ = [
 #: only as a ratio to this one.  Pinned, never searched.
 GAUGE_FIELD: str = "g_v"
 
-#: The nine controller weights.  ``g_w_tso_shunt`` is deliberately absent from
-#: the *search*: the bank price is set by the admission rule against the
-#: recorded gradient distribution rather than by the optimiser.  It is still
-#: gauge-coupled, so it travels in :data:`GAUGE_COUPLED_FIELDS`.
+#: The ten controller weights.
+#:
+#: ``g_w_tso_shunt`` was added on 2026-10-22.  Since the switched-shunt banks
+#: became ordinary integer inputs of the TS-MIQP, their step price plays the
+#: role the tap prices play: Stage I places it from a stated engagement
+#: deviation (``tuning.stage1_screen.design_stage1``), and Stage II searches it
+#: in a narrow box around that point.  Before that date it was not searched but
+#: carried as a separate "gauge-coupled" field, because it had to scale with
+#: the gauge (measured 2026-09-11: pinning ``g_v = 40000`` while the bank price
+#: kept its old-gauge value made the banks never commit in the whole
+#: campaign).  As a weight it scales with the gauge by construction.
 WEIGHT_FIELDS: tuple[str, ...] = (
     "g_v",              # TS voltage tracking            [1/pu^2]   (gauge)
     "g_q",              # STS interface-Q tracking       [1/Mvar^2]
@@ -81,40 +89,21 @@ WEIGHT_FIELDS: tuple[str, ...] = (
     "g_w_pcc",          # PCC setpoint step price        [1/Mvar^2]
     "g_w_gen",          # AVR setpoint step price        [1/pu^2]
     "g_w_tso_oltc",     # machine-transformer tap price  [1/tap^2]
+    "g_w_tso_shunt",    # MSC/MSR bank step price        [1/level^2]
     "g_w_dso_der",      # STS DER step price             [1/Mvar^2]
     "g_w_dso_oltc",     # STS coupling-transformer tap   [1/tap^2]
 )
 
-#: The eight coordinates a search may move.
+#: The nine coordinates a search may move.
 SEARCHED_FIELDS: tuple[str, ...] = tuple(
     f for f in WEIGHT_FIELDS if f != GAUGE_FIELD
-)
-
-#: Weights that are **not searched** but that must scale with the gauge.
-#:
-#: These sit in the invariance group with everything in :data:`WEIGHT_FIELDS`
-#: -- scaling the whole group by a common factor reproduces the trajectory --
-#: but they are set by their own rule rather than by the search, so they were
-#: originally left out of the parameter set entirely.  That was a defect.
-#:
-#: Measured 2026-09-11: pinning the gauge at ``g_v = 40000`` (from ``1e7``)
-#: while the shunt weight stayed at its old-gauge value made the banks
-#: **never commit once** -- an entire actuator class was silently absent from
-#: the whole campaign.  The same coupling holds for the in-MIQP price: the
-#: admission rule compares ``|g_H · q_step|``, which scales with the gauge,
-#: against ``g_w_tso_shunt``, which does not unless it is carried here.
-#:
-#: Carrying them in the parameter set is what stops that recurring: the gauge
-#: and everything coupled to it now move together or not at all.
-GAUGE_COUPLED_FIELDS: tuple[str, ...] = (
-    "g_w_tso_shunt",
 )
 
 #: Switched-shunt design, carried in the parameter set for the same reason as
 #: the cadence: the commit behaviour of the bulk banks is part of the design,
 #: and leaving it in ``configs.config`` defaults is how it came to be silently
-#: wrong.  The step price is NOT here -- it is gauge-coupled and lives in
-#: :data:`GAUGE_COUPLED_FIELDS`.  What remains is the wear limit: the minimum
+#: wrong.  The step price is NOT here -- it is a weight
+#: (:data:`WEIGHT_FIELDS`).  What remains is the wear limit: the minimum
 #: holding time, which the 2026-10-21 study found to be the one parameter the
 #: law's benefit actually turns on (1800 s keeps the engagement, 900 s pays
 #: +5.6% interface RMSE for an engage-release cycle).
@@ -162,8 +151,7 @@ def apply_to_config(cfg: MultiTSOConfig, params: dict[str, float]) -> MultiTSOCo
     ``dataclasses.replace`` is used so ``__post_init__`` re-derives everything
     downstream of the weights (per-area voltage relief in particular).
     """
-    allowed = (set(WEIGHT_FIELDS) | set(TIMING_FIELDS)
-               | set(GAUGE_COUPLED_FIELDS) | set(SHUNT_FIELDS))
+    allowed = set(WEIGHT_FIELDS) | set(TIMING_FIELDS) | set(SHUNT_FIELDS)
     given = set(params)
     extra = sorted(given - allowed)
     if extra:
@@ -195,7 +183,7 @@ def apply_to_config(cfg: MultiTSOConfig, params: dict[str, float]) -> MultiTSOCo
 
 
 def params_from_config(cfg: MultiTSOConfig) -> dict[str, float]:
-    """Extract the nine weights from a config.  Pure extractor, no validation."""
+    """Extract the ten weights from a config.  Pure extractor, no validation."""
     return {f: float(getattr(cfg, f)) for f in WEIGHT_FIELDS}
 
 

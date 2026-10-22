@@ -5,11 +5,12 @@ Stage II: the parameter search, and the rule that picks a point out of it.
 
 Shape of the search
 -------------------
-Eight coordinates (``tuning.parameters.SEARCHED_FIELDS``), log-scaled, in a box
-centred on the Stage-I design point.  ``g_v`` is pinned: the objective is
-positively homogeneous of degree one in the whole weight vector, so a common
-rescaling reproduces the trajectory exactly -- including the integer tap
-sequence -- and searching all nine would spend budget on a direction that
+Nine coordinates (``tuning.parameters.SEARCHED_FIELDS``; the bank step price
+``g_w_tso_shunt`` is the ninth since 2026-10-22), log-scaled, in a box centred
+on the Stage-I design point.  ``g_v`` is pinned: the objective is positively
+homogeneous of degree one in the whole weight vector, so a common rescaling
+reproduces the trajectory exactly -- including the integer tap and bank
+sequence -- and searching all ten would spend budget on a direction that
 provably changes nothing.  ``tuning.stage1_screen`` asserts that invariance to
 ~1e-16 rather than assuming it.
 
@@ -148,31 +149,28 @@ class Limits:
     #: thing on the 3 h and 12 h banks.  Comparable within a bank only.
     e_q_max_ratio: float = 3.0
 
-    # -- Switched shunts are DELIBERATELY not bounded here -------------------
+    # -- Switched shunts (bounded since 2026-10-22) ---------------------------
     #
-    # Decided 2026-09-15, by the author, and recorded in the class that
-    # encodes the rule so that a reader finds it where the omission is.
+    # From 2026-09-15 to 2026-10-22 bank switching was reported and NOT
+    # bounded, by author decision: the banks were dispatched by an integrator
+    # outside the MIQP, so their switching was not what the MIQP weights were
+    # selected to govern.  Measured then on ``results/THESIS_ch9_3_shunt_live``
+    # (12 h per window, ``shunt_int_g_w = 0.03``): 8 / 12 / 17 / 49 / 112 / 15
+    # commits in W1-W6.
     #
-    # ``shunt_summary`` measures MSC/MSR commits and short reversals, and
-    # ``aggregate`` does not carry them, so no shunt quantity can reject a
-    # candidate.  That is a SCOPE statement, not an oversight: the bulk banks
-    # are dispatched by an integrator OUTSIDE the MIQP, on sustained need,
-    # with their own dwell guard and daily budget, so their switching is not
-    # what the nine MIQP weights are being selected to govern.
-    #
-    # It is a scope statement with teeth, because the numbers are not small.
-    # Measured on ``results/THESIS_ch9_3_shunt_live`` at the selected weights
-    # (12 h per window; the shunt price was then the retired
-    # ``shunt_int_g_w = 0.03``)::
-    #
-    #     window     W1   W2   W3   W4    W5   W6
-    #     commits     8   12   17   49   112   15
-    #     reversals   2    6   10   32    80    9
-    #
-    # W4 is a RANKED window at 98 commits/day and 64 reversals/day, against a
-    # tap budget of 30 operations/day.  Anyone quoting this selection must say
-    # that bulk shunt switching was reported and not constrained; the numbers
-    # are in the per-window records.
+    # Since the banks became integer inputs of the TS-MIQP, their step price
+    # ``g_w_tso_shunt`` is a searched weight.  Left unbounded, the ranking on
+    # e_v(TS) could buy voltage with bank switching that nothing charges for,
+    # so bank wear is a filter like tap wear.
+
+    #: Commits per bank per day.  No default: the budget is an asset statement
+    #: the campaign protocol must make, and ``ch_9_3_select`` refuses to judge
+    #: a bank that carries shunt wear records without one.
+    shunt_ops_per_day: Optional[float] = None
+
+    #: Bank hunting reversals tolerated over the whole bank, with the tap
+    #: definition (:func:`hunting_reversals`, :attr:`hunt_dwell_h`).
+    max_shunt_hunting: int = 0
 
 
 @dataclass(frozen=True)
@@ -202,9 +200,9 @@ class Box:
 
 
 #: Default spans.  Wider on the objective priorities, which are trade-offs with
-#: no plant-derived value, and narrower on the tap prices, which Stage I has
-#: already placed from a stated engagement threshold and Stage II-c refines by
-#: bisection rather than by sampling.
+#: no plant-derived value, and narrower on the integer step prices (taps and,
+#: since 2026-10-22, the MSC/MSR banks), which Stage I has already placed from
+#: a stated engagement threshold.
 DEFAULT_SPANS: Dict[str, float] = {
     "g_q": 1.5,
     "dso_g_v": 1.5,
@@ -213,6 +211,7 @@ DEFAULT_SPANS: Dict[str, float] = {
     "g_w_dso_der": 1.0,
     "g_w_gen": 1.0,
     "g_w_tso_oltc": 0.5,
+    "g_w_tso_shunt": 0.5,
     "g_w_dso_oltc": 0.5,
 }
 
@@ -386,6 +385,14 @@ def aggregate(per_window: Dict[str, Dict[str, Any]],
         "worst_v_worst_ds": worst("v_worst_ds"),
         "pf_failures": worst("pf_failures"),
         "n_failed_windows": sum(1 for r in rows if r.get("failed")),
+        # Switched-shunt wear (2026-10-22).  Absent from records written before
+        # that date, which is what ``has_shunt_wear`` tells a selection.
+        "has_shunt_wear": float(any("shunt_ops_per_h_bank" in r for r in rows)),
+        "worst_shunt_ops_per_day_bank": _per_day(worst("shunt_ops_per_h_bank")),
+        "n_shunt_hunting": float(sum(r.get("n_shunt_hunting", 0.0) for r in rows)),
+        "n_shunt_event_explained": float(
+            sum(r.get("n_shunt_event_explained", 0.0) for r in rows)),
+        "shunt_commits": float(sum(r.get("shunt_commits", 0.0) for r in rows)),
     }
 
 
@@ -448,6 +455,20 @@ def check_limits(agg: Dict[str, float], limits: Limits,
             bad.append(f"{n_hunt:.0f} hunting reversal(s) "
                        f"(< {limits.hunt_dwell_h:g} h dwell, unexplained by an "
                        f"event) > {limits.max_hunting} allowed")
+        # Switched-shunt wear, by the same two rules as the taps: a per-bank
+        # count against a daily budget, and hunting with event attribution.
+        if limits.shunt_ops_per_day is not None:
+            sh_n = round(agg.get("worst_shunt_ops_per_day_bank", 0.0)
+                         / 24.0 * hours)
+            sh_max = math.floor(limits.shunt_ops_per_day / 24.0 * hours + 1e-9)
+            if sh_n > sh_max:
+                bad.append(f"bank {sh_n} commits per {hours:g} h > {sh_max} "
+                           f"allowed ({limits.shunt_ops_per_day:g}/day)")
+        n_sh_hunt = agg.get("n_shunt_hunting", 0.0)
+        if n_sh_hunt > limits.max_shunt_hunting:
+            bad.append(f"{n_sh_hunt:.0f} bank hunting reversal(s) "
+                       f"(< {limits.hunt_dwell_h:g} h dwell, unexplained by an "
+                       f"event) > {limits.max_shunt_hunting} allowed")
     return (not bad), bad
 
 
@@ -595,20 +616,24 @@ def hunting_summary(records: Sequence[Any], events_s: Sequence[float] = (),
     }
 
 
-def shunt_summary(records: Sequence[Any]) -> Dict[str, Any]:
-    """Switched-shunt commits: count, direction split, and short reversals.
+def shunt_summary(records: Sequence[Any],
+                  events_s: Sequence[float] = ()) -> Dict[str, Any]:
+    """Switched-shunt commits: counts, short reversals, and bank hunting.
 
-    Tracked separately from the tap changers because the device is different in
-    kind: a bulk MSC/MSR bank is dispatched by an integrator OUTSIDE the MIQP,
-    on sustained need, and its own dwell guard and daily budget already bound
-    the rate.  What matters here is (a) that it acts at all -- it was inert for
-    the whole campaign through a gauge error -- and (b) that it does not
-    oscillate between levels.
+    Since 2026-10-22 a bulk MSC/MSR bank is an integer input of the TS-MIQP,
+    priced by ``g_w_tso_shunt`` like a tap by its tap price, so its wear is
+    judged like a tap's:
 
-    ``n_reversals`` uses the same 2 h dwell as the tap metric, but is NOT
-    event-attributed: a bulk bank reversing inside two hours is undesirable
-    whatever caused it, since the integrator is supposed to have averaged a
-    transient away before committing.
+    * ``shunt_ops_max_bank`` -- commits of the busiest single bank in the
+      window, the quantity a per-bank daily budget bounds;
+    * ``n_shunt_hunting`` -- opposite-direction commit pairs on one bank within
+      :data:`HUNT_DWELL_S` with no new disturbance in between, by the same
+      event attribution as the taps (:func:`hunting_reversals`).
+
+    ``shunt_reversals`` is the raw count of the earlier definition (2 h dwell,
+    NOT event-attributed), from when the banks were dispatched by an integrator
+    outside the MIQP that should have averaged every transient away.  Kept as a
+    diagnostic; the filter uses ``n_shunt_hunting``.
     """
     per: Dict[Any, List[Tuple[float, np.ndarray]]] = {}
     for r in records:
@@ -639,6 +664,16 @@ def shunt_summary(records: Sequence[Any]) -> Dict[str, Any]:
                         last_dir[i] = (t, s)
             max_level = max(max_level, float(np.max(np.abs(arr))))
             prev = arr
+
+    per_bank: Dict[str, int] = {}
+    for _t, key, _s in moves:
+        per_bank[key] = per_bank.get(key, 0) + 1
+    hunt, legit = hunting_reversals(
+        [(float(t), str(k), int(s)) for t, k, s in moves], events_s)
     return {"shunt_commits": n_up + n_dn, "shunt_up": n_up, "shunt_down": n_dn,
             "shunt_reversals": n_rev, "shunt_max_level": max_level,
+            "shunt_ops_max_bank": max(per_bank.values(), default=0),
+            "n_shunt_hunting": len(hunt),
+            "n_shunt_event_explained": len(legit),
+            "shunt_hunting_detail": hunt,
             "shunt_moves": moves}

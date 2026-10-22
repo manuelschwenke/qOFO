@@ -379,13 +379,17 @@ class MultiTSOConfig:
     g_w_gen:        Optional[float] = None
     g_w_pcc:        Optional[float] = None
     g_w_tso_oltc:   Optional[float] = None
-    g_w_tso_shunt:  float = 10.0  # 2026-10-21 campaign (was 3600)
-    """Regularisation penalty on TSO bipolar shunt step changes.  Set
-    relatively low (~ ``g_w_tso_oltc``) so the discrete actuator can
-    engage when continuous DERs cannot satisfy voltage / Q targets, but
-    high enough to discourage chattering.  Used by
-    :class:`controller.multi_tso_coordinator.ZoneDefinition.gw_diagonal`
-    to fill the ``s_shunt`` block of the regularisation vector."""
+    g_w_tso_shunt:  Optional[float] = None  # required since 2026-10-22 (was 10.0)
+    """Step price of one MSC/MSR bank level in the TS-MIQP [objective units
+    per level].  An isolated one-level step is taken iff the objective
+    gradient along the bank column exceeds it, so it is the bank's commit
+    threshold, priced like a tap (Stage I engagement rule, then searched).
+    Used by :class:`controller.multi_tso_coordinator.ZoneDefinition.gw_diagonal`
+    to fill the ``s_shunt`` block of the regularisation vector.
+
+    No default since 2026-10-22, like every other weight: the banks became
+    ordinary MIQP inputs that day, and the former default of 10 silently priced
+    them in every parameter set that predates the change."""
 
     # -- DSO objective tuning --------------------------------------------------
     dso_gamma_oltc_q: float = 0.0
@@ -1768,8 +1772,11 @@ class MultiTSOConfig:
                       the zone MIQP, so it is chosen jointly with the
                       continuous actuators and the OLTCs. The device's own
                       restrictions enter as bounds (minimum holding time, level
-                      limits), at most one bank steps per zone and iteration,
-                      and the predicted voltage corridor is hard.
+                      limits, and the MSC/MSR exclusion per STS of
+                      :attr:`shunt_sts_mutual_exclusion`); the output
+                      constraints stay soft, as for every other actuator.
+                      (Until 2026-10-22 at most one bank stepped per zone and
+                      iteration and the voltage rows were hard.)
 
     The supervisory variants of October 2026 — an integrating dispatcher
     outside the MIQP, separate memories for subordinate tracking and
@@ -2118,9 +2125,13 @@ class MultiTSOConfig:
     #: the JSON overlays in ``configs/paramsets/`` and with the weight sets
     #: restated in individual experiment scripts.  They are now ``None`` and
     #: must be supplied explicitly by a parameter set.
+    #:
+    #: ``g_w_tso_shunt`` joined on 2026-10-22, when the switched-shunt banks
+    #: became integer inputs of the TS-MIQP and their step price a weight
+    #: like the tap prices.
     REQUIRED_WEIGHTS: ClassVar[Tuple[str, ...]] = (
         "g_v", "g_q", "dso_g_v",
-        "g_w_der", "g_w_pcc", "g_w_gen", "g_w_tso_oltc",
+        "g_w_der", "g_w_pcc", "g_w_gen", "g_w_tso_oltc", "g_w_tso_shunt",
         "g_w_dso_der", "g_w_dso_oltc",
     )
 
@@ -2139,12 +2150,17 @@ class MultiTSOConfig:
         """
         missing = self.missing_weights()
         if missing:
+            hint = ""
+            if "g_w_tso_shunt" in missing:
+                hint = (" Parameter sets written before 2026-10-22 carry no "
+                        "g_w_tso_shunt: the bank step price became a required "
+                        "weight when the banks moved into the TS-MIQP.")
             raise ValueError(
                 "MultiTSOConfig is missing controller weights: "
                 + ", ".join(missing)
                 + ". These have no defaults by design. Apply a parameter set "
                 "(configs.paramsets.apply_paramset) or set them explicitly. "
-                "See docs/daily_log for the 2026-09-10 weight reset."
+                "See docs/daily_log for the 2026-09-10 weight reset." + hint
             )
 
     # ── derived settings ────────────────────────────────────────────────

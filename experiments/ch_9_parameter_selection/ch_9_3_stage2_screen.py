@@ -165,7 +165,11 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
         # re-simulating; the first Stage II-b dropped its records and could
         # not be re-scored when the definition changed.
         row.update(hunting_summary(records, sc.event_times_s))
-        row.update(shunt_summary(records))
+        row.update(shunt_summary(records, sc.event_times_s))
+        # Per hour, like the tap rates, so aggregate() and check_limits()
+        # treat bank wear exactly as they treat tap wear (2026-10-22).
+        row["shunt_ops_per_h_bank"] = (float(row["shunt_ops_max_bank"])
+                                       / float(job["hours"]))
         del records                       # the log is the large object; drop it
     except Exception as exc:              # noqa: BLE001 - recorded, not raised
         import traceback

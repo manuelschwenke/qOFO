@@ -32,7 +32,8 @@ def weights() -> dict[str, float]:
     return {
         "g_v": 1.0e4, "g_q": 100.0, "dso_g_v": 2.0e3,
         "g_w_der": 10.0, "g_w_pcc": 20.0, "g_w_gen": 1.0e8,
-        "g_w_tso_oltc": 500.0, "g_w_dso_der": 100.0, "g_w_dso_oltc": 50.0,
+        "g_w_tso_oltc": 500.0, "g_w_tso_shunt": 30.0,
+        "g_w_dso_der": 100.0, "g_w_dso_oltc": 50.0,
     }
 
 
@@ -63,7 +64,32 @@ def test_gauge_is_pinned_and_the_rest_are_searched() -> None:
     assert GAUGE_FIELD in WEIGHT_FIELDS
     assert GAUGE_FIELD not in SEARCHED_FIELDS
     assert set(SEARCHED_FIELDS) == set(WEIGHT_FIELDS) - {GAUGE_FIELD}
-    assert len(SEARCHED_FIELDS) == len(WEIGHT_FIELDS) - 1 == 8
+    assert len(SEARCHED_FIELDS) == len(WEIGHT_FIELDS) - 1 == 9
+
+
+def test_bank_step_price_is_a_searched_weight() -> None:
+    """Since 2026-10-22 the banks are MIQP inputs priced like the taps."""
+    assert "g_w_tso_shunt" in WEIGHT_FIELDS
+    assert "g_w_tso_shunt" in SEARCHED_FIELDS
+    assert "g_w_tso_shunt" in MultiTSOConfig.REQUIRED_WEIGHTS
+
+
+def test_every_searched_field_has_a_default_span() -> None:
+    """A searched field without a stated span would silently get the default
+    width of :class:`tuning.stage2_search.Box`, i.e. a box nobody chose."""
+    from tuning.stage2_search import DEFAULT_SPANS
+
+    assert set(DEFAULT_SPANS) == set(SEARCHED_FIELDS)
+    assert DEFAULT_SPANS["g_w_tso_shunt"] == DEFAULT_SPANS["g_w_tso_oltc"]
+
+
+def test_missing_bank_price_names_the_reason(weights) -> None:
+    """A parameter set from before 2026-10-22 lacks the bank price; the error
+    has to say why rather than only that it is missing."""
+    partial = {k: v for k, v in weights.items() if k != "g_w_tso_shunt"}
+    cfg = dataclasses.replace(MultiTSOConfig(), **partial)
+    with pytest.raises(ValueError, match="before 2026-10-22"):
+        cfg.require_weights()
 
 
 def test_fixed_overrides_pins_no_weight() -> None:

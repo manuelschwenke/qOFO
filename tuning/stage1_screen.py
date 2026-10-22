@@ -57,6 +57,11 @@ increments".  What sets them apart is that their ``G_w`` entries are not scaled
 by a layer-gain scalar but by the **commit-threshold rule**, so they contribute
 an irreducible floor that no continuous weight can scale away.
 
+Since 2026-10-22 the MSC/MSR banks are ordinary integer inputs of the TS-MIQP
+(``shunt_dispatch='miqp'``), so the TS layers carry one bank column per bank,
+per level of nameplate step, and ``g_w_tso_shunt`` is priced by the same rule
+as the taps from its own stated engagement deviation (``d_engage_shunt``).
+
 The relaxed eigenvalue cannot see quantisation, so the integer columns get a
 second, exact statement.  The MIQP step objective is
 ``w^T G_w w + c^T w + z^T G_z z`` with diagonal ``G_w`` and no ``H^T Q H``
@@ -483,7 +488,6 @@ def build_operating_point(cfg, condition: str) -> OperatingPoint:
     and simulates nothing.  ``cfg`` supplies the operating point; its weights
     are irrelevant to what is captured, which is the whole point.
     """
-    _check_shunt_screen_support(cfg)
     from tuning._sim_loader import get_run_multi_tso_dso
 
     captured: Dict[str, Any] = {}
@@ -508,6 +512,18 @@ def build_operating_point(cfg, condition: str) -> OperatingPoint:
         op.layers.append(_tso_curvature(zid, tso[zid]))
     for area in sorted(dso):
         op.layers.append(_dso_curvature(area, dso[area]))
+
+    # With in-MIQP bank dispatch the TS layers must carry the bank columns.
+    # Until 2026-10-22 the screen refused this configuration outright; a
+    # capture that silently came back without them would screen a controller
+    # that has no banks and price nothing for the ones it does have.
+    if getattr(cfg, "shunt_dispatch", "off") == "miqp":
+        n_bank_cols = sum(lc.classes.count("shunt") for lc in op.layers
+                          if lc.layer == "TS")
+        if n_bank_cols == 0:
+            raise RuntimeError(
+                f"{condition}: shunt_dispatch='miqp' but no TS layer carries a "
+                f"bank column; the curvature capture does not see the banks.")
     return op
 
 
@@ -620,19 +636,31 @@ def _network_key(cfg) -> str:
     load the SYMMETRIC operating points built earlier and report
     ``lambda_max(B)`` for a network it is not screening (found 2026-09-15).
 
-    The symmetric case keeps the bare key, so the operating points already in
-    ``results/stage1/operating_points`` -- which are symmetric, because
-    ``make_config()`` sets no multipliers and nothing in Stage I or Stage II
-    ever did -- stay valid and are not needlessly rebuilt.
+    The bank layout is part of the key for the same reason (added 2026-10-22).
+    With ``shunt_dispatch='miqp'`` the TS layers carry one column per bank, so
+    an operating point captured without in-MIQP banks -- every cache written
+    before that date -- has a different column set and must not be loaded.
+    Placement and step size enter because they set the columns' values.
+
+    The symmetric case without in-MIQP banks keeps the bare key, so operating
+    points captured for it stay valid and are not needlessly rebuilt.
     """
     import hashlib
     import json as _json
 
-    parts = {
+    parts: Dict[str, Any] = {
         "der": dict(getattr(cfg, "dso_der_scale", None) or {}),
         "load_p": dict(getattr(cfg, "dso_load_p_scale", None) or {}),
         "load_q": dict(getattr(cfg, "dso_load_q_profile_base_mvar", None) or {}),
     }
+    if getattr(cfg, "shunt_dispatch", "off") == "miqp":
+        parts["banks"] = {
+            "dispatch": "miqp",
+            "msc_pos": int(cfg.tso_shunt_msc_coupling_pos),
+            "msr_pos": int(cfg.tso_shunt_msr_coupling_pos),
+            "msc_q": float(cfg.tso_shunt_msc_q_step_mvar),
+            "msr_q": float(cfg.tso_shunt_msr_q_step_mvar),
+        }
     if not any(parts.values()):
         return ""
     blob = _json.dumps(parts, sort_keys=True)
@@ -643,16 +671,6 @@ def _cache_path(root: Path, condition: str, scenario: str,
                 network_key: str = "") -> Path:
     tag = f"{scenario}_{network_key}" if network_key else scenario
     return root / f"op_{tag}_{condition}.npz"
-
-
-def _check_shunt_screen_support(cfg) -> None:
-    if getattr(cfg, "shunt_dispatch", "off") == "miqp":
-        raise ValueError(
-            "Stage-I screening does not include the switched-shunt bank "
-            "columns or g_w_tso_shunt. Extend the curvature capture and the "
-            "cache identity before screening this controller. (The guard named "
-            "the retired 'hybrid' mode until 2026-10-22; the bank columns are "
-            "now in the ordinary MIQP, so it applies to 'miqp'.)")
 
 
 def load_or_build_operating_points(
@@ -667,10 +685,10 @@ def load_or_build_operating_points(
 
     The cache is keyed on condition and network only, because that is all the
     captured data depends on -- the whole reason the screen is cheap.  "Network"
-    means the benchmark name *and* the per-DSO scenario multipliers; see
-    :func:`_network_key` for why the second half is not optional.
+    means the benchmark name *and* the per-DSO scenario multipliers and, with
+    in-MIQP bank dispatch, the bank layout; see :func:`_network_key` for why
+    neither is optional.
     """
-    _check_shunt_screen_support(base_cfg)
     import dataclasses as _dc
     import pickle
 
@@ -881,12 +899,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="With --design: write the result to "
                         "configs/paramsets/NAME.json with full provenance. "
                         "Refuses to overwrite an existing file.")
-    p.add_argument("--g-w-tso-shunt", type=float, default=10.0,
-                   help="With --design: the switched-shunt step price carried "
-                        "into the written parameter set. It sits in the "
-                        "gauge-invariance group with the nine weights, so it "
-                        "must travel with them. Default 10 (2026-10-21 "
-                        "campaign; 10 and 20 gave identical trajectories).")
+    p.add_argument("--d-engage-shunt", type=float, default=None,
+                   help="With --design: systematic voltage deviation [pu] at "
+                        "which the strongest MSC/MSR bank column commits one "
+                        "level. Required when the banks are dispatched in the "
+                        "MIQP; no default (added 2026-10-22, replacing a "
+                        "hand-set --g-w-tso-shunt).")
     p.add_argument("--d-engage-ts", type=float, default=0.010,
                    help="With --design: systematic voltage deviation [pu] at "
                         "which the strongest TS tap column commits (commit "
@@ -921,8 +939,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # to build them.  design_stage1 then produces the real ones.
         weights = {"g_v": 1.0, "g_q": 1.0, "dso_g_v": 1.0,
                    "g_w_der": 1.0, "g_w_pcc": 1.0, "g_w_gen": 1.0,
-                   "g_w_tso_oltc": 1.0, "g_w_dso_der": 1.0,
-                   "g_w_dso_oltc": 1.0}
+                   "g_w_tso_oltc": 1.0, "g_w_tso_shunt": 1.0,
+                   "g_w_dso_der": 1.0, "g_w_dso_oltc": 1.0}
     else:
         p.error("one of --paramset, --weights-json or --design is required")
 
@@ -956,7 +974,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.design:
         weights, design_report = design_stage1(
             ops, d_engage_ts=float(args.d_engage_ts),
-            d_engage_sts=float(args.d_engage_sts))
+            d_engage_sts=float(args.d_engage_sts),
+            d_engage_shunt=args.d_engage_shunt)
         print()
         print("[stage1] analytic design point:")
         for k in sorted(weights):
@@ -987,15 +1006,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if design_report is None:
             p.error("--write-paramset requires --design")
         _write_design_paramset(args.write_paramset, weights, design_report,
-                               base, rows, float(args.g_w_tso_shunt),
-                               [r[0] for r in rows_wanted])
+                               base, rows, [r[0] for r in rows_wanted])
 
     return 0 if worst(rows).lambda_max <= screen_ceiling() else 2
 
 
 def _write_design_paramset(name: str, weights: Dict[str, float],
                            report: Dict[str, Any], base_cfg,
-                           rows: Sequence[Any], g_w_tso_shunt: float,
+                           rows: Sequence[Any],
                            conditions: Sequence[str]) -> None:
     """Persist an analytic design point as a parameter set, with provenance.
 
@@ -1013,10 +1031,17 @@ def _write_design_paramset(name: str, weights: Dict[str, float],
             f"{path} already exists. A parameter set is the record of what a "
             f"controller was; pick a new name rather than overwriting it.")
 
+    from tuning.parameters import WEIGHT_FIELDS
+
+    missing = sorted(set(WEIGHT_FIELDS) - set(weights))
+    if missing:
+        raise SystemExit(
+            f"the design does not price {missing}; a parameter set must carry "
+            f"every weight. (g_w_tso_shunt is only designed when the operating "
+            f"points carry bank columns, i.e. shunt_dispatch='miqp'.)")
     der = dict(getattr(base_cfg, "dso_der_scale", None) or {})
     load_p = dict(getattr(base_cfg, "dso_load_p_scale", None) or {})
-    fields = dict(weights)
-    fields["g_w_tso_shunt"] = float(g_w_tso_shunt)
+    fields = {k: float(weights[k]) for k in WEIGHT_FIELDS}
 
     doc = {
         "name": name,
@@ -1030,7 +1055,7 @@ def _write_design_paramset(name: str, weights: Dict[str, float],
             "Gauge g_v is pinned so the supervisory voltage priority "
             "pi = g*sigma^2 equals 1.",
             "Continuous scale placed by bisection against the layer "
-            "contraction targets; tap weights priced from the stated "
+            "contraction targets; tap and bank step prices from the stated "
             "engagement deviations.",
             "The per-DSO scenario multipliers are NOT part of this parameter "
             "set -- they are network, not weights -- but the curvature this "
@@ -1199,11 +1224,12 @@ def design_stage1(
     g_w_gen: float = 1.0e8,
     d_engage_ts: float = 0.010,
     d_engage_sts: float = 0.020,
+    d_engage_shunt: Optional[float] = None,
     lambda_target_ts: float = 1.0,
     lambda_target_sts: float = 1.0,
     scales: Optional[PriorityScales] = None,
 ) -> Tuple[Dict[str, float], Dict[str, Any]]:
-    """The Stage-I starting point: nine weights from six engineering statements.
+    """The Stage-I starting point: the weights from a few engineering statements.
 
     The six are dimensionless or in physical units, and each is an argument a
     reader can check:
@@ -1214,7 +1240,9 @@ def design_stage1(
                            (1.0 = no preference)
     ``g_w_gen``            AVR step price, set by the smoothness requirement
     ``d_engage_*``         the voltage deviation at which each tap class should
-                           commit, in pu
+                           commit, in pu; ``d_engage_shunt`` the same for the
+                           MSC/MSR banks (2026-10-22), required whenever the
+                           operating points carry bank columns
     ``lambda_target_*``    where to place each layer contraction
 
     The gauge is pinned so that ``pi_v_ts = 1``.  Integer weights follow from
@@ -1234,13 +1262,25 @@ def design_stage1(
         "g_q": S.g_q_from_priority(pi_q),
         "dso_g_v": S.dso_g_v_from_priority(pi_v_ds),
     }
-    g_w_int = design_integer_weights(
-        lcs, objective, {"oltc": d_engage_ts, "dso_oltc": d_engage_sts})
+    d_engage: Dict[str, float] = {"oltc": d_engage_ts, "dso_oltc": d_engage_sts}
+    has_banks = any("shunt" in lc.classes for lc in lcs)
+    if has_banks:
+        # No default: a bank engagement deviation is a design statement in its
+        # own right, and borrowing the tap value would hide that it was made.
+        if d_engage_shunt is None:
+            raise ValueError(
+                "the operating points carry MSC/MSR bank columns, so the bank "
+                "step price must be placed from a stated engagement deviation: "
+                "pass d_engage_shunt.")
+        d_engage["shunt"] = float(d_engage_shunt)
+    g_w_int = design_integer_weights(lcs, objective, d_engage)
 
     weights: Dict[str, float] = dict(objective)
     weights["g_w_gen"] = float(g_w_gen)
     weights["g_w_tso_oltc"] = g_w_int["oltc"]
     weights["g_w_dso_oltc"] = g_w_int["dso_oltc"]
+    if has_banks:
+        weights["g_w_tso_shunt"] = g_w_int["shunt"]
     # Provisional continuous block; only its RATIOS matter, the scale is solved.
     weights["g_w_der"] = 1.0
     weights["g_w_pcc"] = float(tau)
@@ -1267,7 +1307,7 @@ def design_stage1(
             name = CLASS_TO_WEIGHT[cls]
             weights[name] = float(weights[name]) * kappa
 
-    report["d_engage"] = {"oltc": d_engage_ts, "dso_oltc": d_engage_sts}
+    report["d_engage"] = dict(d_engage)
     report["priorities"] = {"pi_v_ts": 1.0, "pi_q": pi_q, "pi_v_ds": pi_v_ds}
     report["tau"] = tau
     return weights, report

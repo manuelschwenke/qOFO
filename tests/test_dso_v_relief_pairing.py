@@ -38,7 +38,7 @@ RELIEVED = ("DSO_2", "DSO_4")
 WEIGHTS = dict(
     g_v=1.0e4, g_q=100.0, dso_g_v=2.0e3,
     g_w_der=10.0, g_w_pcc=20.0, g_w_gen=1.0e8, g_w_tso_oltc=500.0,
-    g_w_dso_der=100.0, g_w_dso_oltc=50.0,
+    g_w_tso_shunt=30.0, g_w_dso_der=100.0, g_w_dso_oltc=50.0,
 )
 
 

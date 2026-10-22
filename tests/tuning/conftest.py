@@ -34,6 +34,7 @@ def baseline_cfg() -> MultiTSOConfig:
         g_w_gen=5e7,
         g_w_pcc=100.0,
         g_w_tso_oltc=100.0,
+        g_w_tso_shunt=10.0,
         g_w_dso_der=1000.0,
         g_w_dso_oltc=50.0,
         scenario="wind_replace",

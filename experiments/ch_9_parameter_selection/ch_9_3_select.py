@@ -76,6 +76,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "between; a tap that moves on a trip and back on the "
                         "restore is not one.")
     p.add_argument("--hunt-dwell-h", type=float, default=2.0)
+    p.add_argument("--shunt-ops-per-day", type=float, default=None,
+                   help="Commits per MSC/MSR bank per day. No default: a bank "
+                        "whose records carry shunt wear (written since "
+                        "2026-10-22) is not judged without a stated budget.")
+    p.add_argument("--max-shunt-hunting", type=int, default=0,
+                   help="Bank hunting reversals tolerated over the whole bank, "
+                        "with the tap definition (event-attributed).")
     p.add_argument("--write-paramset", default=None,
                    help="Write the winner to configs/paramsets/<name>.json.")
     p.add_argument("--out", type=Path, default=None,
@@ -100,9 +107,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     b = base["aggregate"]
 
     wear = args.hours >= 6.0
+    has_shunt_wear = any(r["aggregate"].get("has_shunt_wear") for r in recs)
+    if wear and has_shunt_wear and args.shunt_ops_per_day is None:
+        raise SystemExit(
+            "the records carry switched-shunt wear (banks in the TS-MIQP), so "
+            "the bank budget must be stated: pass --shunt-ops-per-day. It is "
+            "an asset statement of the campaign protocol, not a default.")
     limits = Limits(tap_ops_per_day=args.taps_per_day,
                     max_hunting=args.max_hunting,
-                    hunt_dwell_h=args.hunt_dwell_h)
+                    hunt_dwell_h=args.hunt_dwell_h,
+                    shunt_ops_per_day=args.shunt_ops_per_day,
+                    max_shunt_hunting=args.max_shunt_hunting)
 
     feasible: List[Dict[str, Any]] = []
     rejected: List[Dict[str, Any]] = []
@@ -138,7 +153,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ranked = rank_lexicographic(feasible, indifference=args.indifference)
     print(f"\nRANKED (e_v_ts, tie-break e_v_ds within {100*args.indifference:.0f} %)")
     hdr = (f"{'#':>3} {'key':>13} {'lam':>6} {'e_v_ts':>9} {'e_v_ds':>9} "
-           f"{'e_q':>9} {'taps/d TS':>10} {'taps/d DS':>10} {'hunt':>6}")
+           f"{'e_q':>9} {'taps/d TS':>10} {'taps/d DS':>10} {'hunt':>6}"
+           f" {'bank/d':>7} {'b.hunt':>6}")
     print(hdr)
     for i, r in enumerate(ranked, 1):
         a = r["aggregate"]
@@ -148,6 +164,8 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"{a['worst_tap_ops_per_day_tso']:>10.1f} "
               f"{a['worst_tap_ops_per_day_dso']:>10.1f} "
               f"{a.get('n_hunting', 0.0):>7.0f}"
+              f" {a.get('worst_shunt_ops_per_day_bank', 0.0):>7.1f}"
+              f" {a.get('n_shunt_hunting', 0.0):>6.0f}"
               f"{tag}")
 
     front = _pareto(feasible, "e_v_ts", "e_v_ds")
@@ -180,6 +198,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "indifference": args.indifference,
         "limits": {k: getattr(limits, k) for k in
                    ("tap_ops_per_day", "max_hunting", "hunt_dwell_h",
+                    "shunt_ops_per_day", "max_shunt_hunting",
                     "avr_max_step_pu", "lambda_max_b", "max_v_violations",
                     "e_q_max_ratio")},
         "baseline": {"key": base["key"], "aggregate": b},

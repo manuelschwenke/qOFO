@@ -23,9 +23,10 @@ Assumptions and limits
 ----------------------
 * The admission identity above neglects the joint solve: the MIQP chooses bank
   steps together with the continuous actuators and under the output
-  constraints, and at most one bank per zone and instant may move.  Admitted
-  bank-instants are therefore an upper bound on commits, and the bank with the
-  largest gradient is not necessarily the one selected.
+  constraints (several banks of a zone may move in one instant since
+  2026-10-22).  The bank with the largest gradient is therefore not
+  necessarily the one selected, and an admitted bank-instant is not
+  necessarily a commit.
 * A step being admitted says nothing about it being beneficial.  The gradient
   is dominated by whichever output term carries the largest weight.
 * ``--engage-only`` keeps samples whose demanded direction is engagement.  It

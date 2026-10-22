@@ -70,6 +70,21 @@ phases, and the PowerFactory tests that skip without a live session). Nothing
 in the drop is unexplained, which is the statement the count alone could not
 have supported.
 
+One residue, deliberately left open. Collection reports 876 at the baseline
+while the run reports 877 outcomes, and the same +1 reproduces in the parallel
+session's independent clone at `100de96` — so it is a property of the suite,
+not of either checkout, and it is not introduced by this branch. The usual
+causes were ruled out cheaply (no `subTest`, no `pytest_generate_tests` or
+`metafunc`, no `doctest`/`addopts`/`testpaths` in any config file); pinning it
+down would need a verbose full run, 37 minutes to explain a +1, which neither
+of us spent.
+
+Worth stating *why* leaving it open is safe, because the asymmetry is the whole
+argument: **one more outcome than collected is the benign direction.** It means
+something reported twice or generated a case at runtime. The dangerous
+direction is collected-but-not-run — a test silently not executing — and that
+is not what either checkout shows.
+
 ## The headline consequence
 
 **This removes the project's only non-quasi-static validation path.** After it,

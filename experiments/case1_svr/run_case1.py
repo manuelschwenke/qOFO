@@ -75,7 +75,8 @@ PARAMSET = "ch9_selected"
 HORIZON_MIN = 360
 
 #: Pilot buses of the classical scheme, selected once on the base case
-#: (``experiments/CIGRE_2026/008_PILOT_BUS_SELECT.py``) and held fixed; the
+#: (``008_PILOT_BUS_SELECT.py``, archived to ``_local_archive/`` on
+#: 2026-10-22) and held fixed; the
 #: same as in ``experiments/ch_10_case_study/ch_10_1_variant_ladder.py`` and
 #: thesis ``tab:svr:pilots``.
 PILOT_BUSES: Dict[int, int] = {1: 25, 2: 7, 3: 20}

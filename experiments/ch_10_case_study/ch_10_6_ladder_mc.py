@@ -17,7 +17,8 @@ Relationship to 006_CIGRE_MONTECARLO
 ------------------------------------
 The scenario machinery (paired runs, slot-based random schedule, drop-and-
 replace, base-case prescreen, seeded reproducibility) is modelled directly on
-``experiments/CIGRE_2026/006_CIGRE_MONTECARLO.py``.  That file is FROZEN for a
+``006_CIGRE_MONTECARLO.py``, archived to ``_local_archive/`` on
+2026-10-22.  That file is FROZEN for a
 paper and is neither imported nor modified: it derives from
 ``make_cigre_config``, which differs from the authoritative
 ``run_multi_system_ofo.make_config`` in 15 fields, three of them structural.

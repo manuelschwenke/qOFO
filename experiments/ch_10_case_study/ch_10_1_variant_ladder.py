@@ -154,7 +154,8 @@ def fired_contingencies(cfg: MultiTSOConfig) -> tuple:
 
 
 #: Pilot buses for S1, selected on the base case by
-#: ``experiments/CIGRE_2026/008_PILOT_BUS_SELECT.py`` with CONFIG_SOURCE =
+#: ``008_PILOT_BUS_SELECT.py`` (archived to ``_local_archive/``) with
+#: CONFIG_SOURCE =
 #: "thesis", and held fixed thereafter as classical SVR does.
 #:
 #: Regenerated against the validated config on 2026-09-02 and found IDENTICAL

@@ -2902,7 +2902,9 @@ def run_multi_tso_dso(
         if not config.svr_pilot_buses:
             raise ValueError(
                 "tso_mode='svr' requires config.svr_pilot_buses (zone -> bus). "
-                "Generate them with experiments/CIGRE_2026/008_PILOT_BUS_SELECT.py."
+                "Generate them with 008_PILOT_BUS_SELECT.py, which moved to "
+                "_local_archive/experiments/CIGRE_2026/ on 2026-10-22 "
+                "(untracked; also in git history)."
             )
         _svr_ctrls: Dict[int, Any] = {}
         for z, zd in zone_defs.items():

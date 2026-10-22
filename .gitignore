@@ -74,3 +74,13 @@ docs/*.pdf
 # `_local_archive/README.md` records how it was generated and from which
 # commits.
 _local_archive/
+
+# ---------------------------------------------------------------------------
+# Local PowerShell launchers (2026-10-22)
+# ---------------------------------------------------------------------------
+# Campaign drivers parked out of the tree: machine-specific, path-specific and
+# account-specific, so they are local tooling rather than source. The four here
+# are the §9.2 dead-band producers, which is why they are parked rather than
+# deleted -- see `local_ps_scripts/README.md` and the §9.2 row of
+# `experiments/ch_9_parameter_selection/README.md`.
+local_ps_scripts/

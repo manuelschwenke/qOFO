@@ -4,7 +4,7 @@ import importlib
 
 
 def test_single_demo_initializes_sbx_at_time_zero() -> None:
-    demo = importlib.import_module("experiments.archived.014_SBX_SINGLE_DEMO")
+    demo = importlib.import_module("experiments.014_SBX_SINGLE_DEMO")
     config = demo.make_config(
         minutes=2.0,
         stress_on_min=1.0,

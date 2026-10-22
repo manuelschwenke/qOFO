@@ -133,7 +133,8 @@ def make_thesis_config() -> MultiTSOConfig:
         # leaves both multipliers empty, but the chapter-9 dead-band studies
         # (analysis/deadband_selection.py, deadband_2d.py, deadband_n1.py) all
         # ADMIT only runs carrying {"DSO_3": 2.0} on BOTH, and
-        # helpers/rms_cosim_config.py declares them as its defaults.  The runner
+        # the removed helpers/rms_cosim_config.py declared them as its
+        # defaults.  The runner
         # warns that a scaled run is "NOT comparable with an unscaled run", so
         # chapter 10 has to match chapter 9 or the two chapters describe
         # different networks.  Adopted 2026-09-08.

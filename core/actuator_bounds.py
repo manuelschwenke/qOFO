@@ -84,8 +84,8 @@ def set_der_qv_deadband_override(value: Optional[float]) -> None:
 
 #: Per-park DER Q(V) deadband [pu], keyed by pandapower sgen index.
 #:
-#: The RMS plant anchors its Q(V) pre-controllers from the *exported snapshot*,
-#: which ``export.make_snapshots`` writes using ``MultiTSOConfig()`` DEFAULTS --
+#: The RMS plant anchored its Q(V) pre-controllers from the *exported snapshot*,
+#: which the snapshot builder writes using ``MultiTSOConfig()`` DEFAULTS --
 #: not the deadband of the run being executed.  The blanket scalar above was
 #: therefore the only channel by which a per-run deadband reached PowerFactory,
 #: and being a single number it cannot express ``delta_TS != delta_DS``.
@@ -109,8 +109,8 @@ def set_der_qv_deadband_by_sgen(mapping: Optional[Dict[int, float]]) -> None:
 #: Per-park DER Q(V) DROOP [pu], keyed by pandapower sgen index.
 #:
 #: Same defect, same remedy as the deadband map above: the RMS plant anchors
-#: its Q(V) pre-controllers from the exported snapshot, which
-#: ``export.make_snapshots`` writes using ``MultiTSOConfig()`` DEFAULTS.  So
+#: its Q(V) pre-controllers from the exported snapshot, which the snapshot
+#: builder writes using ``MultiTSOConfig()`` DEFAULTS.  So
 #: ``--der-slope`` changed the static plant (via ``tag_der_q_modes`` ->
 #: ``net.sgen.qv_slope_pu``) while the RMS plant silently kept the snapshot's
 #: 0.06, and a droop sweep would have compared two different plants.  Harmless

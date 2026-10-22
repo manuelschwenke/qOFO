@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from export.make_snapshots import DEFAULT_T0, build_snapshot_state
+from experiments.helpers.snapshot_state import DEFAULT_T0, build_snapshot_state
 from network.ieee39.aux_load_buses import (
     AUX_LOAD_LINK_LENGTH_KM,
     AUX_LOAD_LINK_R_OHM,

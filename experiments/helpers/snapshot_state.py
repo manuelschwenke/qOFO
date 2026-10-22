@@ -1,9 +1,16 @@
 """
-export/make_snapshots.py
-========================
-Build the IEEE 39-bus network at a chosen build phase and profile timestamp,
-bring it to the experiment's initial operating point, and dump a dynamic
-snapshot JSON (see :mod:`export.dynamic_snapshot`).
+experiments/helpers/snapshot_state.py
+====================================
+Build the IEEE 39-bus network at a chosen build phase and profile timestamp
+and bring it to the experiment's initial operating point.
+
+Was ``export/make_snapshots.py``, whose other half dumped the state as a
+dynamic-snapshot JSON for the PowerFactory RMS pipeline.  That pipeline and its
+schema module were removed on 2026-10-22; the state builder stays, because it
+is the only thing that produces "the network every quasi-static experiment
+starts from" without running a controller, which is what the plant tests
+(``test_zip_load_model``, ``test_plant_static``,
+``test_full_dso_aux_load_buses``) measure against.
 
 The construction sequence mirrors the plant-relevant steps of
 ``experiments/runners/multi_tso_dso.py`` (steps [1]-[4], [9], [10.1]-[10.2])
@@ -40,7 +47,6 @@ Author: Manuel Schwenke / Claude Code (2026-07-17)
 
 from __future__ import annotations
 
-import argparse
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -61,7 +67,6 @@ from core.profiles import (
     load_profiles,
     snapshot_base_values,
 )
-from export.dynamic_snapshot import dump_dynamic_snapshot, verify_roundtrip
 from network.ieee39 import add_hv_networks, build_ieee39_net, tag_der_q_modes
 from network.ieee39.dso_overrides import apply_dso_overrides
 from network.ieee39.load_model import apply_zip_load_model
@@ -512,162 +517,3 @@ def build_snapshot_state(
         snapshot_time=at, phase=phase,
         dso_overrides=dso_overrides,
     )
-
-
-# =====================================================================
-#  CLI
-# =====================================================================
-
-def _parse_at(text: str) -> datetime:
-    for fmt in ("%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M"):
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    raise argparse.ArgumentTypeError(
-        f"Cannot parse timestamp {text!r}; use 'YYYY-MM-DD HH:MM'"
-    )
-
-
-def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Dump dynamic IEEE 39 snapshots for the PowerFactory "
-                    "RMS pipeline (build plan Phase 0).",
-    )
-    parser.add_argument("--phase", choices=PHASES, default="full")
-    parser.add_argument(
-        "--at", action="append", type=_parse_at, default=None, metavar="TIME",
-        help="Explicit profile timestamp (repeatable), e.g. '2016-04-15 12:00'.",
-    )
-    parser.add_argument(
-        "--auto", default="t0,peakres",
-        help="Comma-separated automatic reference timestamps out of "
-             "{t0, peakres}; ignored when empty. Default: t0,peakres.",
-    )
-    parser.add_argument("--out-dir", default="export/snapshots")
-    parser.add_argument("--no-oltc-init", action="store_true",
-                        help="Skip the phase-1/2 OLTC + STATCOM Q init "
-                             "(taps stay at 0).")
-    parser.add_argument("--shunt-kind", choices=("msc_msr", "bipolar", "none"),
-                        default="msc_msr")
-    parser.add_argument("--load-model", choices=("zip", "const_pq"),
-                        default=None,
-                        help="Plant load model; default = MultiTSOConfig "
-                             "default (anchored ZIP since 2026-07-17).")
-    parser.add_argument("--scenario", default=None,
-                        help="Installed-DER scenario ('base_410' or "
-                             "'rural_700'); default = MultiTSOConfig.scenario "
-                             f"({DEFAULT_DSO_DER_SCENARIO!r}). The 'base' "
-                             "phase always builds the bare IEEE 39 case.")
-    parser.add_argument(
-        "--dso-der-scale", default=None, metavar="DSO_3=2.0[,...]",
-        help="Per-DSO DER nameplate/dispatch multiplier (scenario multiplier, "
-             "not builder state). Requires --phase full. Recorded in the "
-             "snapshot label and provenance notes.",
-    )
-    parser.add_argument(
-        "--dso-load-p-scale", default=None, metavar="DSO_3=2.0[,...]",
-        help="Per-DSO active-load multiplier. Same contract as "
-             "--dso-der-scale; normally set to the same value.",
-    )
-    parser.add_argument("--verify", action="store_true",
-                        help="Round-trip verify each dumped snapshot.")
-    parser.add_argument("--verbose", type=int, default=1)
-    args = parser.parse_args(argv)
-
-    def _parse_dso_map(raw: Optional[str], flag: str) -> Optional[Dict[str, float]]:
-        if not raw:
-            return None
-        out: Dict[str, float] = {}
-        for token in str(raw).split(","):
-            token = token.strip()
-            if not token:
-                continue
-            if "=" not in token:
-                raise SystemExit(f"{flag}: expected NAME=VALUE, got {token!r}")
-            name, _, value = token.partition("=")
-            try:
-                out[name.strip()] = float(value)
-            except ValueError:
-                raise SystemExit(f"{flag}: {value!r} is not a number") from None
-        return out or None
-
-    der_scale = _parse_dso_map(args.dso_der_scale, "--dso-der-scale")
-    load_p_scale = _parse_dso_map(args.dso_load_p_scale, "--dso-load-p-scale")
-
-    # ── Resolve requested timestamps ─────────────────────────────────────
-    requested: List[Tuple[str, datetime]] = []
-    auto_tags = [t.strip() for t in args.auto.split(",") if t.strip()] \
-        if args.auto else []
-    for tag in auto_tags:
-        if tag == "t0":
-            requested.append(("t0", DEFAULT_T0))
-        elif tag == "peakres":
-            requested.append(("peakres", None))  # resolved after a probe build
-        else:
-            raise SystemExit(f"Unknown --auto tag {tag!r}; use t0, peakres")
-    for at in (args.at or []):
-        requested.append((f"at{at:%Y%m%d-%H%M}", at))
-    if not requested:
-        raise SystemExit("No timestamps requested (empty --auto and no --at).")
-
-    # Resolve 'peakres' with one probe build (base values only, no dump).
-    if any(t is None for _, t in requested):
-        probe = build_snapshot_state(
-            args.phase, DEFAULT_T0, oltc_init=False,
-            shunt_kind=args.shunt_kind, load_model=args.load_model,
-            scenario=args.scenario,
-            dso_der_scale=der_scale, dso_load_p_scale=load_p_scale,
-            verbose=0,
-        )
-        profiles = load_profiles(DEFAULT_PROFILES_CSV, timestep_min=15)
-        t_peak = find_peak_residual_time(probe.net, profiles)
-        requested = [(tag, t_peak if t is None else t) for tag, t in requested]
-        if args.verbose:
-            print(f"[snapshot] peak residual load at {t_peak:%d.%m.%Y %H:%M}")
-
-    # ── Build + dump each snapshot ───────────────────────────────────────
-    failures = 0
-    for tag, at in requested:
-        state = build_snapshot_state(
-            args.phase, at,
-            oltc_init=not args.no_oltc_init,
-            shunt_kind=args.shunt_kind,
-            load_model=args.load_model,
-            scenario=args.scenario,
-            dso_der_scale=der_scale, dso_load_p_scale=load_p_scale,
-            verbose=args.verbose,
-        )
-        label = f"{state.phase}_{tag}_{at:%Y%m%d-%H%M}"
-        notes = None
-        if state.dso_overrides:
-            # The label must differ, or a scaled snapshot silently overwrites
-            # the symmetric one of the same timestamp and the two become
-            # indistinguishable on disk -- which is how the doubled model and
-            # the symmetric one drifted apart in the first place.
-            suffix = "".join(
-                f"_{k.replace('_', '').lower()}x{v:g}"
-                for k, v in sorted(
-                    (state.dso_overrides.get("der_scale") or {}).items())
-            )
-            label += suffix or "_dsoscaled"
-            notes = f"dso_overrides={state.dso_overrides}"
-        path = dump_dynamic_snapshot(
-            state.net, state.meta, state.zone_map, label, args.out_dir,
-            solver_options=state.solver_options,
-            snapshot_time=state.snapshot_time,
-            phase=state.phase,
-            notes=notes,
-        )
-        print(f"[snapshot] wrote {path}")
-        if args.verify:
-            report = verify_roundtrip(path)
-            print("  " + report.summary().replace("\n", "\n  "))
-            if not report.ok:
-                failures += 1
-
-    return 1 if failures else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

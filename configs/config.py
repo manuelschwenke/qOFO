@@ -2131,7 +2131,7 @@ class MultiTSOConfig:
 
         Called by the runner before any controller is constructed, rather than
         from ``__post_init__``: a bare ``MultiTSOConfig()`` is still legitimate
-        for reading *structural* defaults (``export.make_snapshots`` does
+        for reading *structural* defaults (the snapshot builder does
         exactly that for ``scenario``), and only a config that is about to
         drive controllers needs its weights.
         """

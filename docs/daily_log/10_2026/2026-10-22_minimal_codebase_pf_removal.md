@@ -18,10 +18,43 @@ the same repository, so `git log minimal/thesis-core` works from either place.
 Changes: commits `94319df` (PowerFactory), `38f3557` (Nordic 32, tools,
 launchers), `36235aa` (dead Q(V) channels, the audit, colloquium).
 
-Baseline: the full suite passes at `100de96`, the last commit before this
-branch diverges — **862 passed, 15 skipped, nothing failed**, run in an
-isolated clone at that pinned SHA (measured by the parallel session). That
-includes the experiment restore and the index regeneration from the morning.
+Baseline: the full suite passes at `fa94411`, the commit this branch diverges
+from — **862 passed, 15 skipped, nothing failed**. Measured twice
+independently: here in a worktree at `fa94411`, and by the parallel session in
+its own clone at `100de96`, with identical counts. Two checkouts, same
+outcome, so it is corroborated rather than reported once. It also covers the
+`tuning_mc` merge against the whole suite rather than only the 56
+`tests/tuning` cases.
+
+### The removal is verified by identity, not by a count
+
+Comparing totals would only say "142 fewer tests". Diffing the collected node
+IDs (`pytest --collect-only -q` on both branches) says which ones, and the
+answer is exactly the deletion list and nothing else:
+
+| removed tests | file |
+|---:|---|
+| 51 | `tests/pf/` (seven modules) |
+| 18 | `tests/export/test_dynamic_snapshot_roundtrip.py` |
+| 17 | `tests/experiments/test_ch9_timescale_seperation.py` |
+| 16 | `tests/test_pf_adapter.py` |
+| 15 | `tests/experiments/test_ch9_actuator_location_sweep.py` |
+| 9 | `tests/test_colloquium_gifs.py` |
+| 8 | `tests/test_rms_cosim.py` |
+| 4 | `tests/test_modal_participation.py` |
+| 4 | `tests/test_modal_observability.py` |
+
+876 node IDs before, 734 after; 142 removed, every one of them from a file on
+the deletion list. **No test from a surviving file disappeared**, and the
+reverse direction is empty too — nothing was added or silently renamed. So the
+drop is an accounted identity rather than a number to accept.
+
+What this does *not* cover is the one thing neither collection nor an import
+check can see: a surviving test that imports cleanly but exercises a removed
+code path at runtime. Both indirections that caught this cleanup earlier were
+of that shape — `importlib.import_module` with a string literal, and a printed
+instruction naming a PowerShell launcher. The post-deletion suite run is the
+only thing that answers it.
 
 ## The headline consequence
 

@@ -46,8 +46,10 @@ Two traps worth stating explicitly:
   study collects from `results/rms_phase6_replay/`, it needs the *comparison*
   script.
 * **The former `run_rms_phase6_replay.py` was a misnomer** — it never replayed
-  anything. It is now a deprecation shim in `experiments/archived/` delegating to
-  `run_comparison_rms_cosim_qss.py`. The genuine replay is
+  anything. It ran `run_multi_tso_dso` twice as two independent closed loops and
+  compared them, i.e. a co-simulation comparison. Renamed 2026-07-31 to
+  `run_comparison_rms_cosim_qss.py`; the deprecation shim that kept the old name
+  working was deleted on 2026-10-22. The genuine replay is
   `run_openloop_qss_to_rms.py`.
 
 ---

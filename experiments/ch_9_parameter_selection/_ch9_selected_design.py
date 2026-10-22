@@ -26,7 +26,7 @@ two bases differ in fourteen fields, and six of them change the physics:
 field                                   ``make_config()``     bare dataclass
 ======================================  ====================  ==================
 ``install_tso_tertiary_shunts``         True                  False
-``shunt_dispatch``                      ``integrator``        ``off``
+``shunt_dispatch``                      ``miqp``              ``off``
 ``tie_boundary_equivalent``             ``thevenin``          ``pq``
 ``local_sensitivities_tso/dso``         True                  False
 ``zone_v_setpoints_pu``                 1.03 in all 3 zones   None

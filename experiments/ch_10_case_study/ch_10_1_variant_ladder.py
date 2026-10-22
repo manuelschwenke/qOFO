@@ -16,8 +16,15 @@ structural rather than tuning:
     g_w_der   14.4 vs 100      g_w_gen  1e9 vs 5e9    g_w_pcc  54.8 vs 200
     g_w_tso_oltc 3783 vs 1e4   g_q      250 vs 200    g_w_dso_oltc 183 vs 200
     install_tso_tertiary_shunts  True vs False        <- structural
-    shunt_dispatch  'integrator' vs 'off'             <- structural
+    shunt_dispatch  'miqp' vs 'off'                   <- structural
     tie_boundary_equivalent  'thevenin' vs 'pq'       <- structural
+
+The ``shunt_dispatch`` axis survives the 2026-10-22 cleanup -- banks dispatched
+against banks installed and held is still exactly the O1->O2 question -- but the
+mechanism behind the dispatching arm changed: the bank level is now an integer
+variable of the zone MIQP, where it used to be driven by a separate integrating
+dispatcher.  Ladder results computed before that date therefore describe the old
+mechanism on that rung and would have to be re-run to describe the current one.
 
 The paper's set is left untouched.  This driver derives from the authoritative
 factory with ``dataclasses.replace`` and overrides ONLY the horizon, so the

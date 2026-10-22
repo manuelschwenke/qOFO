@@ -57,3 +57,20 @@ docs/*.pdf
 # database). Kept out of history; it is provenance for the RMS runs, not
 # source, and a binary blob in git is a one-way cost.
 *.pfd
+
+# ---------------------------------------------------------------------------
+# Local archive of removed files (2026-10-22)
+# ---------------------------------------------------------------------------
+# A local-only mirror of the project tree holding files the cleanup removed, at
+# their original relative paths (`_local_archive/network/nordic32/...` and so
+# on). Deliberately untracked: git history already holds every one of them, so
+# a committed second copy would only add weight and a second place to look.
+#
+# It exists so a removed file can be read without a `git show`, and it is
+# ignored here as well as excluded in the PyCharm project view, so it stays out
+# of search, indexing and refactoring. Nothing imports from it and nothing
+# should: it is a reading copy, not a code path.
+#
+# `_local_archive/README.md` records how it was generated and from which
+# commits.
+_local_archive/

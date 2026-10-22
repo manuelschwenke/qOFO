@@ -49,12 +49,26 @@ the deletion list. **No test from a surviving file disappeared**, and the
 reverse direction is empty too — nothing was added or silently renamed. So the
 drop is an accounted identity rather than a number to accept.
 
-What this does *not* cover is the one thing neither collection nor an import
-check can see: a surviving test that imports cleanly but exercises a removed
-code path at runtime. Both indirections that caught this cleanup earlier were
-of that shape — `importlib.import_module` with a string literal, and a printed
-instruction naming a PowerShell launcher. The post-deletion suite run is the
-only thing that answers it.
+### And confirmed at runtime: the accounting closes exactly
+
+The identity check above cannot see a surviving test that imports cleanly but
+exercises a removed code path at runtime — the shape of both indirections that
+caught this cleanup earlier (`importlib.import_module` with a string literal,
+and a printed instruction naming a PowerShell launcher). Only running the suite
+answers that.
+
+**726 passed, 9 skipped, nothing failed** (34m53s), against 862 passed and 15
+skipped at the baseline. The two measurements reconcile without a remainder:
+
+- outcome drop 877 → 735 = **142**, equal to the node-ID drop 876 → 734;
+- of those 142, **136 were passing and 6 were skipped** — 136 + 6 = 142.
+
+So every test that disappeared is one of the 142 from deleted files, no
+surviving test broke, and the six lost skips are the conditional skips those
+deleted files carried (the snapshot tamper check needing only one of three
+phases, and the PowerFactory tests that skip without a live session). Nothing
+in the drop is unexplained, which is the statement the count alone could not
+have supported.
 
 ## The headline consequence
 
@@ -176,35 +190,54 @@ runner now **raises** if the field is set, and the field is kept (not deleted)
 so a stored config carrying it fails loudly rather than being silently
 reinterpreted.
 
-### Which recorded runs believed it
+### Which recorded runs believed it: none on record, which is not the same thing
 
 "The runner printed that it had overridden the deadband on both plants" is the
-kind of statement that gets quoted, so the scope needs stating rather than
-worrying about. It is a **bounded, checkable question**: every archived run
-carries its resolved `config.json`, so the runs that believed an override that
-was never applied are exactly those whose config has a non-`None`
-`der_qv_deadband_override_pu`.
+kind of statement that gets quoted, so the scope needs stating. The parallel
+session scanned the vault's `results/` for it (manifest appended in `17a9227`):
+**75 `config.json` files, 64 of them carrying the Q(V) fields, and not one
+sets `der_qv_deadband_override_pu` or any of the three per-park override
+maps.** The four switched-shunt acceptance configs are among the clean ones, so
+the accepted figures never depended on it.
 
-Two things are known so far, both measured by the parallel session rather than
-here:
+The correct statement is therefore **"no affected run is on record", not "no
+run was affected"** — and the gap between those two is exactly where the defect
+would have mattered:
 
-- the four switched-shunt acceptance configs (pre- and post-repair, both arms)
-  all carry `der_qv_deadband_override_pu = None`, with
-  `der_qv_deadband_pu_overrides`, `der_qv_slope_pu_overrides` and
-  `der_qv_vref_pu_overrides` empty. **The accepted figures never depended on
-  it**, and the false claim in the log output did not reach them.
-- the earlier campaigns are the open part. Once the archive copy finishes, the
-  whole set sits at
-  `Z:\Python_Projekte\qOFO_results_archive\vault_results_2026-10-22\`, and
-  `docs/data/results_manifest_2026-10-22.md` maps each campaign to the
-  documents that cite it — so the grep answers not just which runs were
-  affected but which written claims rest on them.
+- **20 of the 39 campaigns store no resolved configuration at all**, including
+  all fourteen `THESIS_*` folders — the ones the vault cites as thesis
+  evidence. They cannot be checked for this or for any other configuration
+  question.
+- **the eight `rms_cosim` runs of 16–17 September carry no Q(V) fields**,
+  predating them. That is the RMS co-simulation campaign: the one plant that
+  could have contradicted the false log line, and its records cannot say
+  whether the override was set.
+- three `research_colloquium_gifs` configs are not JSON objects.
 
-Worth noting what class of defect this was, because it is the same class the
-section above warns about: a claim the system made about itself with nothing in
-the codebase able to contradict it. The static plant could not disagree,
-because the override never reached it; the RMS plant could have, and is now
-gone.
+This is the same class of defect as the validation consequence above — a claim
+the system made about itself with nothing able to contradict it. The static
+plant *could not* disagree, because the override never reached it; the RMS
+plant could have, and is now both gone from the codebase and silent in the
+record.
+
+### The durable finding is the provenance gap
+
+Worth more than the override question, and it outlives it: **a run's own
+resolved configuration is what makes a figure checkable later, and the
+campaigns the thesis cites do not have one.** Nineteen of 39 campaigns can be
+interrogated; twenty cannot, the `THESIS_*` folders among them.
+
+The 20–22 October runs do carry `config.json`, `source_hashes.json` and a
+per-case log — but only because the driver written that day happened to record
+them, not by policy.
+
+**Recommendation to the author, not implemented here:** make that a convention
+— every driver writes its resolved config and the hashes of the files that
+decide what the run means, beside the results. It costs four small files per
+case. It is also the difference between a figure that can be defended and one
+that can only be repeated, which is precisely what the twenty unrecorded
+campaigns now are. This is a change to how every driver behaves, so it is the
+author's call rather than something to fold into a deletion branch.
 
 ## Risks and open points
 

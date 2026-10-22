@@ -3,7 +3,8 @@
 What this replaces
 ------------------
 Until 2026-09-10 this module rebuilt the design at run time: seven search
-coordinates were pushed through ``tuning_mc.stage_0_preconditioning`` to
+coordinates were pushed through the retired
+``tuning_mc.stage_0_preconditioning`` to
 *generate* weights, a per-area voltage relief was applied on top, a
 post-selection correction then stripped and re-derived that relief at a
 different factor and overrode one area's DER weight by hand, a frozen network

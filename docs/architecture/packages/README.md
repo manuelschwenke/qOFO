@@ -12,11 +12,11 @@ Coverage figures for the whole codebase: [doc_coverage.md](../doc_coverage.md).
 | [`pf`](pf.md) | 29 | 11,733 | yes |
 | [`controller`](controller.md) | 12 | 10,838 | yes |
 | [`visualisation`](visualisation.md) | 14 | 7,840 | yes |
-| [`experiments/ch_9_parameter_selection`](experiments_ch_9_parameter_selection.md) | 11 | 7,472 | **no** |
+| [`experiments/ch_9_parameter_selection`](experiments_ch_9_parameter_selection.md) | 11 | 7,473 | **no** |
 | [`experiments/runners`](experiments_runners.md) | 4 | 7,262 | yes |
 | [`sensitivity`](sensitivity.md) | 6 | 6,271 | yes |
 | [`experiments/CIGRE_2026`](experiments_CIGRE_2026.md) | 15 | 6,082 | yes |
-| [`tuning`](tuning.md) | 13 | 5,186 | yes |
+| [`tuning`](tuning.md) | 15 | 5,970 | yes |
 | [`experiments`](experiments.md) | 16 | 4,643 | yes |
 | [`core`](core.md) | 12 | 4,449 | yes |
 | [`sbx_v`](sbx_v.md) | 16 | 3,899 | yes |
@@ -24,7 +24,7 @@ Coverage figures for the whole codebase: [doc_coverage.md](../doc_coverage.md).
 | [`network/ieee39`](network_ieee39.md) | 10 | 3,582 | yes |
 | [`sbx_h`](sbx_h.md) | 11 | 3,108 | yes |
 | [`pf/probes`](pf_probes.md) | 14 | 3,077 | yes |
-| [`configs`](configs.md) | 4 | 2,858 | yes |
+| [`configs`](configs.md) | 4 | 2,863 | yes |
 | [`experiments/ch_10_case_study`](experiments_ch_10_case_study.md) | 8 | 2,594 | **no** |
 | [`optimisation`](optimisation.md) | 3 | 1,956 | yes |
 | [`network`](network.md) | 4 | 1,758 | yes |
@@ -36,7 +36,6 @@ Coverage figures for the whole codebase: [doc_coverage.md](../doc_coverage.md).
 | [`experiments/part3_mc`](experiments_part3_mc.md) | 3 | 1,030 | **no** |
 | [`tests/pf`](tests_pf.md) | 8 | 975 | n/a |
 | [`tools`](tools.md) | 4 | 811 | yes |
-| [`tuning_mc`](tuning_mc.md) | 3 | 790 | **no** |
 | [`experiments/case1_svr`](experiments_case1_svr.md) | 4 | 750 | **no** |
 | [`network/ieee39/analysis`](network_ieee39_analysis.md) | 2 | 548 | yes |
 | [`tests/experiments`](tests_experiments.md) | 3 | 502 | n/a |
@@ -56,4 +55,3 @@ Coverage figures for the whole codebase: [doc_coverage.md](../doc_coverage.md).
 - `experiments/ch_9_parameter_selection`
 - `experiments/part3_mc`
 - `experiments/reference_period`
-- `tuning_mc`

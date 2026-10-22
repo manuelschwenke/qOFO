@@ -1,8 +1,10 @@
 """
-tuning_mc/scenarios_mc_v2.py
+tuning/scenarios_mc_v2.py
 ============================
-Scenario banks for the 0815 campaign.  Replaces :mod:`tuning_mc.scenarios_mc`,
-which is kept unchanged so the 0814 results stay reproducible.
+Scenario banks for the 0815 campaign.  Replaced the 0814 bank
+``tuning_mc.scenarios_mc``, which was retired with the rest of that package;
+the 0814 results stay reproducible from git history.  Moved here 2026-10-22
+when ``tuning_mc`` was folded into ``tuning``.
 
 What changed, and why
 ---------------------
@@ -29,8 +31,8 @@ Three banks, two tiers
 is kept (quiet control; impulsive generator outage; load ramp up; load ramp
 down; sign-reversing) but each role is replicated across seasons, and the
 operating point filling each role x season cell is chosen **from the Screen-1
-capability measurement** by :mod:`tuning_mc.select_windows_v2` rather than by
-hand.  The resulting capability mix tracks the profile year:
+capability measurement** by ``tuning_mc.select_windows_v2`` (retired) rather
+than by hand.  The resulting capability mix tracks the profile year:
 
     stratum   bank            2016 profile year
     none      2/12 (17 %)     18.6 %
@@ -95,11 +97,10 @@ _S = STABILISE_MIN
 AUDIT_H = 12                                   # Tier-2 window length
 
 # ---------------------------------------------------------------------------
-# Windows, as selected by tuning_mc/select_windows_v2.py from
-# results/tuning_mc/stage1a/screen1.json.  Regenerate with
-#     python -m tuning_mc.select_windows_v2
-# The provenance of every timestamp is in
-# results/tuning_mc/campaign_0815/window_selection.json.
+# Windows, as selected by the retired ``tuning_mc.select_windows_v2`` from
+# results/tuning_mc/stage1a/screen1.json.  The selector is gone, so this table
+# is now the authority rather than a regenerable cache; the provenance of every
+# timestamp is in results/tuning_mc/campaign_0815/window_selection.json.
 # ---------------------------------------------------------------------------
 
 #: ``(role, season, start, stratum)``.  Odd ISO weeks.

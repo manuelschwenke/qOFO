@@ -339,7 +339,7 @@ Twelve mandatory RMS traces, eighteen with the narrower-width comparison.
 * Recommended: 6 more at the adjacent narrower width, to show the onset of interaction.
 
 Start the six traces at the **W1–W6** timestamps and run uninterrupted for 2 h, rather
-than cold-starting at the later hours. `CONDITIONS` in `tuning_mc/scenarios_mc_v2.py` is
+than cold-starting at the later hours. `CONDITIONS` in `tuning/scenarios_mc_v2.py` is
 the tracked source of those timestamps:
 
 | | W1 | W2 | W3 | W4 | W5 | W6 |

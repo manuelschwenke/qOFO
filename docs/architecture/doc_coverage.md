@@ -5,8 +5,8 @@ imported). Regenerate with `python tools/doc_audit.py`.
 
 ## Totals
 
-- **363 modules**, 140,018 lines
-- module docstrings: **340/363** (94 %)
+- **362 modules**, 140,018 lines
+- module docstrings: **339/362** (94 %)
 - public functions: **710/1316** (54 %)
 - private functions: 379/690 (55 %)
 - classes: **264/361** (73 %)
@@ -36,22 +36,21 @@ Sorted by public-API coverage, weakest first.
 | `tests/tuning` | 7 | 5/7 | 27/56 | 0/0 | 0/0 | 1,097 |
 | `docs/daily_log` | 1 | 1/1 | 1/2 | 0/0 | 0/0 | 112 |
 | `tests` | 51 | 48/51 | 64/179 | 63/104 | 223/389 | 13,637 |
-| `experiments/ch_9_parameter_selection` | 11 | 11/11 | 36/58 | 2/7 | 0/7 | 7,472 |
+| `experiments/ch_9_parameter_selection` | 11 | 11/11 | 36/58 | 2/7 | 0/7 | 7,473 |
 | `analysis` | 28 | 28/28 | 102/201 | 16/17 | 7/14 | 13,115 |
 | `experiments/CIGRE_2026` | 15 | 15/15 | 34/55 | 0/0 | 0/0 | 6,082 |
 | `pf` | 29 | 29/29 | 83/127 | 10/14 | 45/67 | 11,733 |
 | `core` | 12 | 12/12 | 30/30 | 15/15 | 39/70 | 4,449 |
 | `sbx_v` | 16 | 16/16 | 15/15 | 35/39 | 37/57 | 3,899 |
-| `tuning` | 13 | 13/13 | 51/55 | 17/17 | 7/19 | 5,186 |
+| `tuning` | 15 | 15/15 | 61/66 | 17/17 | 7/19 | 5,970 |
 | `tests/export` | 2 | 1/2 | 6/7 | 0/0 | 0/0 | 116 |
 | `experiments/helpers` | 9 | 9/9 | 45/51 | 5/6 | 1/2 | 3,589 |
 | `analysis/observer` | 5 | 5/5 | 11/12 | 9/9 | 12/16 | 1,740 |
 | `export` | 3 | 3/3 | 7/8 | 6/6 | 0/1 | 1,737 |
 | `sbx_h` | 11 | 11/11 | 14/14 | 18/18 | 21/27 | 3,108 |
-| `tuning_mc` | 3 | 3/3 | 10/11 | 0/0 | 0/0 | 790 |
 | `controller` | 12 | 12/12 | 12/12 | 29/30 | 139/154 | 10,838 |
 | `sensitivity` | 6 | 6/6 | 16/16 | 4/4 | 50/52 | 6,271 |
-| `configs` | 4 | 4/4 | 2/2 | 3/3 | 28/28 | 2,858 |
+| `configs` | 4 | 4/4 | 2/2 | 3/3 | 28/28 | 2,863 |
 | `configs/paramsets` | 1 | 1/1 | 3/3 | 0/0 | 0/0 | 164 |
 | `experiments/runners` | 4 | 4/4 | 2/2 | 1/1 | 4/4 | 7,262 |
 | `network` | 4 | 4/4 | 9/9 | 3/3 | 0/0 | 1,758 |

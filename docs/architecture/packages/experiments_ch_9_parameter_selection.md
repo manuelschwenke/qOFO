@@ -7,7 +7,7 @@
 
 ## At a glance
 
-- modules: **11**, 7,472 lines
+- modules: **11**, 7,473 lines
 - module docstrings: 11/11 (100%)
 - public functions documented: 36/58 (62%)
 - classes documented: 2/7 (29%)
@@ -23,7 +23,7 @@
 | `ch_9_3_stage2_screen.py` | 475 | 1 | 0 | experiments/ch_9_parameter_selection/ch_9_3_stage2_screen.py |
 | `ch_9_3_compare_runs.py` | 431 | 2 | 0 | experiments/ch_9_parameter_selection/ch_9_3_compare_runs.py |
 | `ch_8_D1_settling_screen.py` | 307 | 4 | 0 | D1 -- subordinate-settling screen of DSO weight sets (thesis Ch 8, Exp. D). |
-| `_ch9_selected_design.py` | 262 | 2 | 0 | The Chapter-9 selected weight design, loaded rather than reconstructed. |
+| `_ch9_selected_design.py` | 263 | 2 | 0 | The Chapter-9 selected weight design, loaded rather than reconstructed. |
 | `ch_9_3_select.py` | 241 | 1 | 0 | experiments/ch_9_parameter_selection/ch_9_3_select.py |
 | `ch_9_3_shortlist.py` | 113 | 1 | 0 | experiments/ch_9_parameter_selection/ch_9_3_shortlist.py |
 | `__init__.py` | 13 | 0 | 0 | Entry points producing the parameter-selection results of thesis Ch. 9. |

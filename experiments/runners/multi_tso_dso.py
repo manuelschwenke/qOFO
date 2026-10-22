@@ -3019,7 +3019,7 @@ def run_multi_tso_dso(
     # Absolute weights, one level finer than ``zone_g_w_scale``: that knob has a
     # single number per area and cannot express an area whose classes want to
     # move in opposite directions, which is what the analytic per-column design
-    # actually asks for (``tuning_mc.stage_0_preconditioning --per-area``).
+    # actually asks for (the retired ``tuning_mc.stage_0_preconditioning``).
     #
     # Applied BEFORE ``zone_g_w_scale`` so the scale, if also set, multiplies
     # these rather than being overwritten by them.

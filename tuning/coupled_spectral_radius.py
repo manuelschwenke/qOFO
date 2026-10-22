@@ -1,5 +1,5 @@
 r"""
-tuning_mc/coupled_spectral_radius.py
+tuning/coupled_spectral_radius.py
 ====================================
 Stage I-d: the contraction of the **assembled coupled** operator, rather than
 the per-zone block bound.
@@ -45,7 +45,7 @@ now lives here, so this module is self-contained.
 
 Usage::
 
-    python -m tuning_mc.coupled_spectral_radius --paramset ch9_selected \
+    python -m tuning.coupled_spectral_radius --paramset ch9_selected \
         --start-time 2016-01-05T08:00
 """
 
@@ -140,7 +140,7 @@ def assemble(blocks: Dict[tuple, np.ndarray], zone_ids: list) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="tuning_mc.coupled_spectral_radius")
+    p = argparse.ArgumentParser(prog="tuning.coupled_spectral_radius")
     p.add_argument("--paramset", default="ch9_selected",
                    help="Parameter set to evaluate. The weights are applied "
                         "before the criterion is formed; there is no fallback, "
@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
                         "coupling factor must be checked across conditions "
                         "rather than assumed constant.")
     p.add_argument("--condition", default=None,
-                   help="Name from tuning_mc.scenarios_mc_v2.CONDITIONS "
+                   help="Name from tuning.scenarios_mc_v2.CONDITIONS "
                         "(W1..W6); an alternative to --start-time.")
     p.add_argument("--network", default=None)
     p.add_argument("--out", type=Path, default=None)
@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         precondition_g_w=False,
     )
     if args.condition:
-        from tuning_mc.scenarios_mc_v2 import CONDITIONS
+        from tuning.scenarios_mc_v2 import CONDITIONS
         row = next((r for r in CONDITIONS if r[0] == args.condition), None)
         if row is None:
             raise SystemExit(f"unknown condition {args.condition!r}")

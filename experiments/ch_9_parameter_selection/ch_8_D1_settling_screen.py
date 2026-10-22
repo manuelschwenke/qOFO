@@ -117,7 +117,7 @@ def analytic(sets: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     from tuning.settling_predictor import load_or_capture, predict, summarise
     from tuning.stage1_screen import (load_or_build_operating_points,
                                       screen_weights)
-    from tuning_mc.scenarios_mc_v2 import CONDITIONS
+    from tuning.scenarios_mc_v2 import CONDITIONS
 
     cfg, _ = build_selected_config(paramset=BASE_PARAMSET)
     conds = [(r[0], r[1]) for r in CONDITIONS]

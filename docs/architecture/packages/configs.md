@@ -7,7 +7,7 @@ Configuration dataclasses for the whole study. `MultiTSOConfig` is the single ob
 
 ## At a glance
 
-- modules: **4**, 2,858 lines
+- modules: **4**, 2,863 lines
 - module docstrings: 4/4 (100%)
 - public functions documented: 2/2 (100%)
 - classes documented: 3/3 (100%)
@@ -16,7 +16,7 @@ Configuration dataclasses for the whole study. `MultiTSOConfig` is the single ob
 
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
-| `config.py` | 2,262 | 2 | 2 | configs/multi_tso_config.py |
+| `config.py` | 2,267 | 2 | 2 | configs/multi_tso_config.py |
 | `cascade_config.py` | 547 | 0 | 1 | Centralized Cascade Simulation Configuration |
 | `color_config.py` | 29 | 0 | 0 | Shared TU Darmstadt corporate colour palette. |
 | `__init__.py` | 20 | 0 | 0 | configs package |

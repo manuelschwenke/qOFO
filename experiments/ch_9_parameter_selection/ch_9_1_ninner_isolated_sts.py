@@ -191,7 +191,7 @@ V_MIN_PU, V_MAX_PU = 0.9, 1.1
 #: as the T_TS sweep's own measured band widths confirm: ``full`` ~190 Mvar
 #: (6 windows), ``partial`` ~55-85 Mvar (4), and ``none`` ~0.1-0.7 Mvar
 #: (``d_quiet_summer``, ``d_ramp_up_winter``). The last is the VDE dead zone
-#: that ``tuning_mc/stage_1_search.py`` already names as the reason ``tau``,
+#: that the retired ``tuning_mc.stage_1_search`` already named as the reason ``tau``,
 #: ``lambda_dso`` and ``dso_g_v_ratio`` are structurally inert there.
 #:
 #: These windows are excluded by default, and the exclusion is REPORTED: a
@@ -202,7 +202,7 @@ DEAD_ZONE_STRATA = ("none",)
 #: Window banks this experiment can be measured on.
 #:
 #: ``conditions`` -- the six operating conditions W1-W6 of thesis table
-#: ``tab:timescales:conditions``, declared in ``tuning_mc/scenarios_mc_v2.py``.
+#: ``tab:timescales:conditions``, declared in ``tuning/scenarios_mc_v2.py``.
 #: This is the default from 2026-09-15: F1 and F2 are specified on W1-W6, and a
 #: subordinate-response measurement taken on a different bank cannot be read
 #: alongside them.  W5 has structurally zero DER reactive capability at both
@@ -220,10 +220,10 @@ DEFAULT_BANK = "conditions"
 def bank_specs(bank: str):
     """Scenario specs of the named window bank.
 
-    Importing inside the function keeps ``tuning_mc`` off this module's import
+    Importing inside the function keeps ``tuning`` off this module's import
     path, which matters because the worker processes import it too.
     """
-    from tuning_mc.scenarios_mc_v2 import condition_set, tier1_design_set
+    from tuning.scenarios_mc_v2 import condition_set, tier1_design_set
     if bank == "conditions":
         # ``hours`` is irrelevant here -- _run_case replaces duration_s with
         # SETTLE_S + OBSERVE_S -- but calling it is what registers W1-W6 in
@@ -1544,7 +1544,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return self_test()
 
     from _ch9_selected_design import build_selected_config, resolved_manifest
-    from tuning_mc.scenarios_mc_v2 import WINDOW_META
+    from tuning.scenarios_mc_v2 import WINDOW_META
 
     cfg, design = build_selected_config(
         paramset=a.paramset,

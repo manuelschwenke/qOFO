@@ -7,9 +7,9 @@ Offline Bayesian optimisation of the controller weights, plus the stability cert
 
 ## At a glance
 
-- modules: **13**, 5,186 lines
-- module docstrings: 13/13 (100%)
-- public functions documented: 51/55 (93%)
+- modules: **15**, 5,970 lines
+- module docstrings: 15/15 (100%)
+- public functions documented: 61/66 (92%)
 - classes documented: 17/17 (100%)
 
 ## Modules
@@ -20,13 +20,15 @@ Offline Bayesian optimisation of the controller weights, plus the stability cert
 | `metrics.py` | 1,170 | 2 | 4 | tuning/metrics.py |
 | `stage2_search.py` | 645 | 11 | 2 | tuning/stage2_search.py |
 | `scenarios.py` | 495 | 4 | 1 | tuning/scenarios.py |
+| `scenarios_mc_v2.py` | 486 | 7 | 0 | tuning/scenarios_mc_v2.py |
 | `bisect_switching.py` | 307 | 1 | 2 | tuning/bisect_switching.py |
+| `coupled_spectral_radius.py` | 286 | 4 | 0 | tuning/coupled_spectral_radius.py |
 | `_io.py` | 253 | 5 | 0 | tuning/_io.py |
 | `parameters.py` | 207 | 3 | 0 | tuning/parameters.py |
 | `settling_predictor.py` | 207 | 5 | 1 | tuning/settling_predictor.py |
 | `runner.py` | 188 | 2 | 1 | tuning/runner.py |
 | `shunt_weight_calibration.py` | 184 | 4 | 0 | Calibrate the hybrid bank movement weight from recorded bank gradients. |
 | `_types.py` | 104 | 0 | 2 | tuning/_types.py |
+| `__init__.py` | 68 | 0 | 0 | tuning |
 | `_sim_loader.py` | 66 | 2 | 0 | tuning/_sim_loader.py |
-| `__init__.py` | 56 | 0 | 0 | tuning |
 

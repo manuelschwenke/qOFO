@@ -31,7 +31,7 @@
   "configs": {
    "modules": 4,
    "modules_doc": 4,
-   "loc": 2858,
+   "loc": 2863,
    "pub_fn": 2,
    "pub_fn_doc": 2,
    "priv_fn": 3,
@@ -143,7 +143,7 @@
   "experiments/ch_9_parameter_selection": {
    "modules": 11,
    "modules_doc": 11,
-   "loc": 7472,
+   "loc": 7473,
    "pub_fn": 58,
    "pub_fn_doc": 36,
    "priv_fn": 62,
@@ -519,31 +519,17 @@
    "syntax_errors": []
   },
   "tuning": {
-   "modules": 13,
-   "modules_doc": 13,
-   "loc": 5186,
-   "pub_fn": 55,
-   "pub_fn_doc": 51,
-   "priv_fn": 35,
-   "priv_fn_doc": 25,
+   "modules": 15,
+   "modules_doc": 15,
+   "loc": 5970,
+   "pub_fn": 66,
+   "pub_fn_doc": 61,
+   "priv_fn": 46,
+   "priv_fn_doc": 31,
    "cls": 17,
    "cls_doc": 17,
    "meth": 19,
    "meth_doc": 7,
-   "syntax_errors": []
-  },
-  "tuning_mc": {
-   "modules": 3,
-   "modules_doc": 3,
-   "loc": 790,
-   "pub_fn": 11,
-   "pub_fn_doc": 10,
-   "priv_fn": 11,
-   "priv_fn_doc": 6,
-   "cls": 0,
-   "cls_doc": 0,
-   "meth": 0,
-   "meth_doc": 0,
    "syntax_errors": []
   },
   "visualisation": {
@@ -925,7 +911,7 @@
   {
    "rel": "configs/config.py",
    "pkg": "configs",
-   "loc": 2262,
+   "loc": 2267,
    "module_doc": true,
    "summary": "configs/multi_tso_config.py",
    "n_pub_fn": 2,
@@ -1375,7 +1361,7 @@
   {
    "rel": "experiments/ch_9_parameter_selection/_ch9_selected_design.py",
    "pkg": "experiments/ch_9_parameter_selection",
-   "loc": 262,
+   "loc": 263,
    "module_doc": true,
    "summary": "The Chapter-9 selected weight design, loaded rather than reconstructed.",
    "n_pub_fn": 2,
@@ -3895,7 +3881,7 @@
   {
    "rel": "tuning/__init__.py",
    "pkg": "tuning",
-   "loc": 56,
+   "loc": 68,
    "module_doc": true,
    "summary": "tuning",
    "n_pub_fn": 0,
@@ -3943,6 +3929,16 @@
    "syntax_error": null
   },
   {
+   "rel": "tuning/coupled_spectral_radius.py",
+   "pkg": "tuning",
+   "loc": 286,
+   "module_doc": true,
+   "summary": "tuning/coupled_spectral_radius.py",
+   "n_pub_fn": 4,
+   "n_cls": 0,
+   "syntax_error": null
+  },
+  {
    "rel": "tuning/metrics.py",
    "pkg": "tuning",
    "loc": 1170,
@@ -3983,6 +3979,16 @@
    "syntax_error": null
   },
   {
+   "rel": "tuning/scenarios_mc_v2.py",
+   "pkg": "tuning",
+   "loc": 486,
+   "module_doc": true,
+   "summary": "tuning/scenarios_mc_v2.py",
+   "n_pub_fn": 7,
+   "n_cls": 0,
+   "syntax_error": null
+  },
+  {
    "rel": "tuning/settling_predictor.py",
    "pkg": "tuning",
    "loc": 207,
@@ -4020,36 +4026,6 @@
    "summary": "tuning/stage2_search.py",
    "n_pub_fn": 11,
    "n_cls": 2,
-   "syntax_error": null
-  },
-  {
-   "rel": "tuning_mc/__init__.py",
-   "pkg": "tuning_mc",
-   "loc": 19,
-   "module_doc": true,
-   "summary": "tuning_mc",
-   "n_pub_fn": 0,
-   "n_cls": 0,
-   "syntax_error": null
-  },
-  {
-   "rel": "tuning_mc/coupled_spectral_radius.py",
-   "pkg": "tuning_mc",
-   "loc": 286,
-   "module_doc": true,
-   "summary": "tuning_mc/coupled_spectral_radius.py",
-   "n_pub_fn": 4,
-   "n_cls": 0,
-   "syntax_error": null
-  },
-  {
-   "rel": "tuning_mc/scenarios_mc_v2.py",
-   "pkg": "tuning_mc",
-   "loc": 485,
-   "module_doc": true,
-   "summary": "tuning_mc/scenarios_mc_v2.py",
-   "n_pub_fn": 7,
-   "n_cls": 0,
    "syntax_error": null
   },
   {

@@ -71,7 +71,7 @@ DEFAULT_BANK = "conditions"
 
 def bank_specs(bank: str):
     """Scenario specs of the named window bank; see the ninner module."""
-    from tuning_mc.scenarios_mc_v2 import condition_set, tier1_design_set
+    from tuning.scenarios_mc_v2 import condition_set, tier1_design_set
     if bank == "conditions":
         return condition_set()
     if bank == "design12":
@@ -991,7 +991,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             v_max_pu=float(getattr(cfg, "v_max_pu", V_MAX_PU)))
 
     from _ch9_selected_design import build_selected_config, resolved_manifest
-    from tuning_mc.scenarios_mc_v2 import WINDOW_META
+    from tuning.scenarios_mc_v2 import WINDOW_META
 
     cfg, design = build_selected_config(
         paramset=a.paramset,

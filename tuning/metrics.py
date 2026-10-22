@@ -275,7 +275,7 @@ class TrajectoryMetrics:
 
     The ramp shape matters for the *current* search too, though not for the
     reason ``_voltage_band_excess`` gives -- that docstring predates
-    ``tuning_mc`` and argues from TPE's Parzen kernels.  ``tuning_mc`` uses a
+    ``tuning_mc`` and argues from TPE's Parzen kernels.  ``tuning_mc`` used a
     compass search under an Audet-Dennis filter, where a step function is bad
     for a different reason: a poll would flip between "no signal at all" and a
     discontinuous jump, so a direction reads as dead until it suddenly is not,

@@ -908,7 +908,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # profiles off) and screening it would answer for a system nobody runs.
     from experiments.run_multi_system_ofo import make_config
     from tuning.parameters import apply_to_config
-    from tuning_mc.scenarios_mc_v2 import CONDITIONS
+    from tuning.scenarios_mc_v2 import CONDITIONS
 
     if args.weights_json:
         weights = json.loads(args.weights_json.read_text(encoding="utf-8"))

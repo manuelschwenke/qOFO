@@ -357,8 +357,8 @@ def main() -> None:
 def make_config_ch9_frozen() -> MultiTSOConfig:
     """The Chapter-9 frozen configuration, for analyses that take a factory.
 
-    ``tuning_mc.stage_0_preconditioning --from-runner make_config_ch9_frozen``
-    then analyses exactly what the Chapter-9 batch runs.  That distinction
+    The retired ``tuning_mc.stage_0_preconditioning --from-runner
+    make_config_ch9_frozen`` analysed exactly what the Chapter-9 batch runs.  That distinction
     mattered while the two lineages differed: the design depends on H, and H
     depends on the network, the boundary equivalent, the zone partition and the
     start time the config declares.
@@ -373,8 +373,8 @@ def make_config_ch9_frozen() -> MultiTSOConfig:
 
     Note that the network is the one respect in which the Chapter-9 batch
     differs from the Stage-I/II weight campaign, which ran symmetric.  The
-    import is local because that module reaches into ``tuning_mc``, which
-    imports this one.
+    import is local because that module reaches into ``tuning``, which imports
+    this one.
     """
     import sys
     from pathlib import Path as _Path

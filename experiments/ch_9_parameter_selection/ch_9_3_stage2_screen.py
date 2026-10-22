@@ -90,7 +90,7 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
     from tuning.runner import run_scenario_with_records
     from tuning.stage2_search import (avr_step_metrics, hunting_summary,
                                   shunt_summary)
-    from tuning_mc.scenarios_mc_v2 import condition_set, condition_set_evented
+    from tuning.scenarios_mc_v2 import condition_set, condition_set_evented
 
     out_path = Path(job["out"])
     if out_path.exists() and not job.get("force"):
@@ -276,7 +276,7 @@ def main(argv: List[str] | None = None) -> int:
     from experiments.run_multi_system_ofo import make_config
     from tuning.parameters import apply_to_config as _apply_w
     from tuning.stage1_screen import load_or_build_operating_points
-    from tuning_mc.scenarios_mc_v2 import CONDITIONS
+    from tuning.scenarios_mc_v2 import CONDITIONS
 
     _base = _apply_w(make_config(), centre)
     if args.frozen_network:
@@ -437,7 +437,7 @@ def main(argv: List[str] | None = None) -> int:
 
     # ---- assemble per-window results into candidate records --------------
     from tuning.stage2_search import aggregate
-    from tuning_mc.scenarios_mc_v2 import ZERO_CAPABILITY
+    from tuning.scenarios_mc_v2 import ZERO_CAPABILITY
 
     n_written = 0
     for key, c in cand_meta.items():

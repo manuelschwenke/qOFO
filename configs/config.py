@@ -754,7 +754,11 @@ class MultiTSOConfig:
     zone's ``params.g_w`` vector; :attr:`zone_g_w_scale`, if also set, is applied
     *after* this and multiplies the result.
 
-    Derive with ``python -m tuning_mc.stage_0_preconditioning --per-area``."""
+    The generative rule that produced these vectors,
+    ``tuning_mc.stage_0_preconditioning``, was retired on 2026-09-10 with the
+    weight reset; its successor ``tuning.stage1_screen`` screens one global
+    weight set and does not emit per-area blocks (a per-area parameter set is
+    Stage III there).  Set this by hand, or recover a vector from git history."""
 
     dso_g_w_class: Optional[Dict[str, Dict[str, float]]] = None
     """Per-DSO-area, per-actuator-class absolute ``g_w`` override
@@ -2191,8 +2195,8 @@ def apply_dso_v_relief(
 ) -> "MultiTSOConfig":
     """Set :attr:`MultiTSOConfig.dso_v_relief_factors` and re-derive.
 
-    The imperative face of the relief, kept because
-    ``tuning_mc.stage_1_search.build_config`` applies a *searched* factor after
+    The imperative face of the relief, kept because the retired
+    ``tuning_mc.stage_1_search.build_config`` applied a *searched* factor after
     the overlay has set ``dso_g_v``: ``dso_g_v_ratio`` is a search coordinate,
     so an absolute relief would let the OLTC loop gain
     ``dso_g_v / g_w_dso_oltc`` drift as the search walked, and that ratio is
@@ -2244,8 +2248,9 @@ def strip_dso_v_relief(
     starting point carries.  ``MultiTSOConfig.__post_init__`` cannot do this on
     its own: by the time it runs, the object already holds the NEW factor set
     and has no way to know which per-area entries the OLD one installed.  That
-    is how a relieved baseline leaked into ``tuning_mc.stage_1_search``, whose
-    campaigns declare their own (often empty) relief policy.
+    is how a relieved baseline leaked into the retired
+    ``tuning_mc.stage_1_search``, whose campaigns declared their own (often
+    empty) relief policy.
     """
     keep = keep or {}
     gv = dict(cfg.dso_g_v_per_area or {})

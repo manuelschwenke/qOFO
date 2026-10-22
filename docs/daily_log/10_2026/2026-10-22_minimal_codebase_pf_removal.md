@@ -16,7 +16,32 @@ branches there would have moved HEAD under that session. The branch lives in
 the same repository, so `git log minimal/thesis-core` works from either place.
 
 Changes: commits `94319df` (PowerFactory), `38f3557` (Nordic 32, tools,
-launchers), and the dead-channel and colloquium removals that follow.
+launchers), `36235aa` (dead Q(V) channels, the audit, colloquium).
+
+Baseline: the full suite passes at `100de96`, the last commit before this
+branch diverges — **862 passed, 15 skipped, nothing failed**, run in an
+isolated clone at that pinned SHA (measured by the parallel session). That
+includes the experiment restore and the index regeneration from the morning.
+
+## The headline consequence
+
+**This removes the project's only non-quasi-static validation path.** After it,
+every controller claim in the codebase — the switched-shunt law included — is
+verifiable only against the static pandapower plant, and the RMS
+co-simulation comparison cannot be re-run at all. The reasoning and the
+measured findings survive in the daily logs; as *runnable evidence* they do
+not.
+
+That is a defensible choice for a thesis-only codebase, and it is the author's
+decision. It should be a knowing one. Two things follow from it that are easy
+to miss:
+
+- the quasi-static plant is now both the thing under test and the only
+  reference it can be tested against, so a defect shared by controller and
+  plant model has nothing left to expose it; and
+- it also discards the `base`-phase repair made this morning as a
+  *PowerFactory* fix, although that repair survives in another role — see the
+  state builder below.
 
 ## What was removed, and what it cost
 
@@ -120,10 +145,9 @@ reinterpreted.
 
 ## Risks and open points
 
-- Removing `pf/` removes the ability to reproduce the RMS-versus-QSS
-  validation at all. The reasoning and the measured findings survive in the
-  daily logs — the EvtTap and event-admission measurements of 2026-07-30 among
-  them — but not as runnable code.
+- The non-quasi-static validation path is gone (see above). The EvtTap and
+  event-admission measurements of 2026-07-30 survive as reasoning in the daily
+  logs but not as runnable code.
 - Table 9.1 and the actuator-location sweep are no longer reproducible, and
   neither is the dead-band sweep data.
 - Sixteen `analysis/` scripts are kept pending the author's judgement.
@@ -132,6 +156,36 @@ reinterpreted.
 - `docs/` was left alone apart from the generated inventories. It holds the
   record of the removed work, including the PowerFactory notes, and deleting it
   would destroy the provenance of results the thesis still reports.
+
+## `results/` was never in reach, and that is worth understanding
+
+Author instruction during this work: leave `results/` **entirely** alone until
+it has been reviewed. It was never at risk here, and for a reason worth
+recording rather than relying on: `.gitignore` excludes `results/`, so a fresh
+worktree never receives it at all. The directory does not exist in
+`C:\Users\Manuel Schwenke\qOFO-minimal`, and no commit on this branch touches
+that path.
+
+The same property is the hazard. **"Nothing was deleted, it is all in git" does
+not hold for `results/`** — nothing in it is tracked, so a deletion there
+leaves no git trace and cannot be reverted. The reassurance that covers every
+other removal on this branch covers none of it.
+
+Two inventories, taken by the parallel session:
+
+- the code clone's `results/` holds only the two 6-hour shunt acceptance runs
+  (26.6 MB, 20 files). Both are already preserved — provenance tracked in the
+  vault under `docs/data/2026-10-22_shunt_fold_acceptance/`, records archived
+  outside both repositories — so there is nothing left to rescue there, and
+  equally nothing to gain by deleting it: being untracked, it is not part of
+  the thesis codebase in git terms at all.
+- the **vault** at `Z:\Python_Projekte\qOFO_2027` has its own ignored
+  `results/` holding **3.06 GB in 7,488 files across 39 campaign folders**,
+  including the runs behind the 21 October decisions (`three_way_20261021`,
+  `confirm6h_20261022`, `ts_fleet_margins_20261021`, `stripped6h_20261022`).
+  Vault documents cite those runs as their evidence and not one of those files
+  is tracked anywhere. That directory is outside this sweep's path; it is
+  recorded here so that nobody later reasons about it as if git protected it.
 
 ## The lesson, third time today
 

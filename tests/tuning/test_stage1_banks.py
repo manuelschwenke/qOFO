@@ -10,6 +10,7 @@ operating-point cache cannot hand back a capture made without the banks.
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 
 import numpy as np
@@ -23,6 +24,7 @@ from tuning.stage1_screen import (
     design_integer_weights,
     design_stage1,
     engage_deviation,
+    lambda_max_B,
 )
 
 G_V = 4.0e4          # = 1 / 0.005^2, the Stage-I gauge at pi_v_ts = 1
@@ -113,9 +115,27 @@ def test_design_without_banks_prices_no_bank() -> None:
     assert "g_w_tso_shunt" not in weights
 
 
-def _cfg(dispatch: str, msc_pos: int = 1, **extra) -> SimpleNamespace:
+def test_exclusive_group_counts_only_the_stronger_bank() -> None:
+    """MSC and MSR of one STS cannot move in the same direction together, so
+    the screen sees the stronger of the two, not their sum."""
+    strong, weak = [0.003, 0.003, 0.002, 0.001], [0.001, 0.001, 0.001, 0.001]
+    both = _ts_layer("2", [strong, weak])
+    alone = _ts_layer("2", [strong])
+    grouped = dataclasses.replace(both, exclusive_groups=((4, 5),))
+    w = {"g_v": G_V, "g_w_der": 1.0, "g_w_pcc": 1.0, "g_w_gen": 1e8,
+         "g_w_tso_oltc": 1e12, "g_w_tso_shunt": 20.0}
+
+    def lam(lc):
+        return lambda_max_B(lc, G_V, 0.0, lc.g_w_vector(w))
+
+    assert lam(grouped) == pytest.approx(lam(alone), rel=1e-12)
+    assert lam(both) > lam(grouped)
+
+
+def _cfg(dispatch: str, msc_pos: int = 1, exclusion: bool = True,
+         **extra) -> SimpleNamespace:
     return SimpleNamespace(
-        shunt_dispatch=dispatch,
+        shunt_dispatch=dispatch, shunt_sts_mutual_exclusion=exclusion,
         tso_shunt_msc_coupling_pos=msc_pos, tso_shunt_msr_coupling_pos=0,
         tso_shunt_msc_q_step_mvar=25.0, tso_shunt_msr_q_step_mvar=25.0,
         dso_der_scale=extra.get("der"), dso_load_p_scale=extra.get("load_p"),
@@ -129,6 +149,7 @@ def test_cache_key_separates_captures_with_and_without_banks() -> None:
     with_banks = _network_key(_cfg("miqp"))
     assert with_banks != ""
     assert with_banks != _network_key(_cfg("miqp", msc_pos=0))
+    assert with_banks != _network_key(_cfg("miqp", exclusion=False))
     doubled = {"DSO_3": 2.0}
     assert (_network_key(_cfg("off", der=doubled, load_p=doubled))
             != _network_key(_cfg("miqp", der=doubled, load_p=doubled)))

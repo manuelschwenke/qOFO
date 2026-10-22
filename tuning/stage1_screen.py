@@ -61,6 +61,9 @@ Since 2026-10-22 the MSC/MSR banks are ordinary integer inputs of the TS-MIQP
 (``shunt_dispatch='miqp'``), so the TS layers carry one bank column per bank,
 per level of nameplate step, and ``g_w_tso_shunt`` is priced by the same rule
 as the taps from its own stated engagement deviation (``d_engage_shunt``).
+With the MSC/MSR exclusion only one bank of an STS can move in a given
+direction, so ``lambda_max(B)`` keeps one bank column per STS, the stronger
+(:attr:`LayerCurvature.exclusive_groups`; author decision 2026-10-22).
 
 The relaxed eigenvalue cannot see quantisation, so the integer columns get a
 second, exact statement.  The MIQP step objective is
@@ -254,6 +257,11 @@ class LayerCurvature:
     classes: Tuple[str, ...]      # (n_u,)  per-column class label
     n_v: int
     n_q: int
+    #: Column groups of which at most one column can move in a given
+    #: direction at any instant: the MSC and MSR of one STS under
+    #: ``shunt_sts_mutual_exclusion`` (added 2026-10-22).  The screen keeps
+    #: only the strongest column of each group; see :func:`lambda_max_B`.
+    exclusive_groups: Tuple[Tuple[int, ...], ...] = ()
 
     @property
     def n_u(self) -> int:
@@ -301,17 +309,47 @@ def lambda_max_B(
     change (co-located DER are the usual cause) leave a null space that is not
     a stability finding, and the coordinator applies the same filter
     (``multi_tso_coordinator.check_contraction``).
+
+    Mutually exclusive columns (:attr:`LayerCurvature.exclusive_groups`) are
+    reduced to the strongest one per group, by its own contribution
+    ``C_ii = ||a_i||^2 / g_w,i``.  Under the MSC/MSR exclusion only one bank of
+    an STS can move in a given direction -- raising the voltage is either an
+    MSC engagement or an MSR release, never both -- so a ``B`` that lets both
+    act together describes a step the controller cannot take (author
+    decision 2026-10-22).  Steps of banks in *different* STSs remain joint.
     """
     d_inv_sqrt = 1.0 / np.sqrt(np.asarray(g_w, dtype=float))
     C = lc.q_gram(g_v, g_q)
     C = (d_inv_sqrt[:, None] * C) * d_inv_sqrt[None, :]
     C = 0.5 * (C + C.T)                       # symmetrise against round-off
+    keep = _exclusive_keep(lc, np.diag(C))
+    if keep is not None:
+        C = C[np.ix_(keep, keep)]
     eig = np.linalg.eigvalsh(C)
     top = float(max(eig[-1], 0.0))
     if top <= 0.0:
         return 0.0
     kept = eig[eig > rel_tol * top]
     return float(kept[-1]) if kept.size else 0.0
+
+
+def _exclusive_keep(lc: LayerCurvature, strength: np.ndarray
+                    ) -> Optional[List[int]]:
+    """Column indices left after keeping the strongest member of each
+    exclusive group, or ``None`` when the layer has no such group.
+
+    ``getattr`` because operating points pickled before 2026-10-22 lack the
+    field; their cache key differs anyway, so they are never loaded for a
+    controller with in-MIQP banks.
+    """
+    groups = getattr(lc, "exclusive_groups", ())
+    if not groups:
+        return None
+    drop = set()
+    for grp in groups:
+        strongest = max(grp, key=lambda i: float(strength[i]))
+        drop.update(i for i in grp if i != strongest)
+    return [i for i in range(lc.n_u) if i not in drop]
 
 
 def engage_deviation(
@@ -399,7 +437,10 @@ def _grams(H_V: np.ndarray, H_Q: np.ndarray) -> Tuple[np.ndarray, np.ndarray,
     return S_V, S_Q, colsum, maxabs
 
 
-def _tso_curvature(zone_id: Any, ctrl: Any) -> LayerCurvature:
+def _tso_curvature(zone_id: Any, ctrl: Any,
+                   bank_sts: Optional[Dict[int, str]] = None) -> LayerCurvature:
+    """``bank_sts`` maps a bank bus to its STS; when given, the banks of one
+    STS form an exclusive group (MSC/MSR mutual exclusion)."""
     cfg = ctrl.config
     n_v = len(cfg.voltage_bus_indices)
     n_pcc = len(cfg.pcc_trafo_indices)
@@ -427,11 +468,24 @@ def _tso_curvature(zone_id: Any, ctrl: Any) -> LayerCurvature:
     H_V = np.ascontiguousarray(H[:n_v, :])
     H_Q = np.ascontiguousarray(H[n_v:n_v + n_pcc, :])
     S_V, S_Q, colsum, maxabs = _grams(H_V, H_Q)
+    classes = _labels((n_der, n_pcc, n_gen, n_oltc, n_shunt), TS_CLASSES)
+
+    groups: Tuple[Tuple[int, ...], ...] = ()
+    if bank_sts is not None and n_shunt:
+        bank_cols = [i for i, c in enumerate(classes) if c == "shunt"]
+        by_sts: Dict[str, List[int]] = {}
+        for col, bus in zip(bank_cols, cfg.shunt_bus_indices):
+            if int(bus) not in bank_sts:
+                raise RuntimeError(
+                    f"TS zone {zone_id}: bank at bus {bus} has no STS; the "
+                    f"exclusive groups cannot be formed.")
+            by_sts.setdefault(bank_sts[int(bus)], []).append(col)
+        groups = tuple(tuple(c) for c in by_sts.values() if len(c) > 1)
+
     return LayerCurvature(
         key=f"TS_{zone_id}", layer="TS", area=str(zone_id),
         S_V=S_V, S_Q=S_Q, colsum_V=colsum, maxabs_V=maxabs,
-        classes=_labels((n_der, n_pcc, n_gen, n_oltc, n_shunt), TS_CLASSES),
-        n_v=n_v, n_q=n_pcc,
+        classes=classes, n_v=n_v, n_q=n_pcc, exclusive_groups=groups,
     )
 
 
@@ -507,9 +561,18 @@ def build_operating_point(cfg, condition: str) -> OperatingPoint:
             f"{condition}: the runner exposed no TSO controllers; Stage I "
             f"needs the multi-TSO path.")
 
+    # MSC/MSR of one STS are mutually exclusive (one device per direction), so
+    # the screen counts one bank column per STS; it needs each bank's STS.
+    bank_sts: Optional[Dict[int, str]] = None
+    if (getattr(cfg, "shunt_dispatch", "off") == "miqp"
+            and getattr(cfg, "shunt_sts_mutual_exclusion", False)):
+        meta = captured["meta"]
+        bank_sts = {int(lv): str(hv.net_id) for hv in meta.hv_networks
+                    for lv in hv.coupling_lv_bus_indices}
+
     op = OperatingPoint(condition=condition)
     for zid in sorted(tso):
-        op.layers.append(_tso_curvature(zid, tso[zid]))
+        op.layers.append(_tso_curvature(zid, tso[zid], bank_sts))
     for area in sorted(dso):
         op.layers.append(_dso_curvature(area, dso[area]))
 
@@ -660,6 +723,9 @@ def _network_key(cfg) -> str:
             "msr_pos": int(cfg.tso_shunt_msr_coupling_pos),
             "msc_q": float(cfg.tso_shunt_msc_q_step_mvar),
             "msr_q": float(cfg.tso_shunt_msr_q_step_mvar),
+            # The exclusive groups are captured only with the exclusion on.
+            "sts_exclusion": bool(getattr(cfg, "shunt_sts_mutual_exclusion",
+                                          False)),
         }
     if not any(parts.values()):
         return ""

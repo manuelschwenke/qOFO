@@ -209,6 +209,16 @@ def test_purge_deletes_objects_and_clears_pool_references():
     }
 
 def test_persistent_pool_grows_admits_and_retires_events():
+    """Pool growth, barrier admission and retirement -- EvtTap excluded.
+
+    The tap path deliberately bypasses the persistent pool and the retirement
+    bookkeeping (both measured 2026-07-30, see ``add_tap_event``): a re-armed
+    pooled slot does not move the tap mid-run, and writing ``time`` back onto
+    an already-fired EvtTap kills every subsequent tap in the calculation.  So
+    a tap event is counted in ``pending_admission`` (a fresh mid-run object
+    still needs a barrier) but never in ``created`` or ``retired``, and it
+    keeps its armed timestamp instead of returning to the inert one.
+    """
     ctx = _context(strict=False, persistent=True)
     ctx._calculation_active = True
     param_target = _Target("qvpre")
@@ -219,27 +229,40 @@ def test_persistent_pool_grows_admits_and_retires_events():
     ctx.add_load_event(load_target, 2.0, -1.0, 1.0)
     ctx.add_tap_event(tap_target, 1, 1.0)
 
-    assert len(ctx.evt_folder.events) == 3
-    assert ctx.event_pool_stats()["pending_admission"] == 3
-    assert ctx.event_pool_stats()["created"] == 3
-    assert all(
-        event.loc_name.startswith("qofo_pool_")
-        for event in ctx.evt_folder.events
-    )
+    pooled = [e for e in ctx.evt_folder.events
+              if e.loc_name.startswith("qofo_pool_")]
+    unpooled = [e for e in ctx.evt_folder.events
+                if not e.loc_name.startswith("qofo_pool_")]
 
-    calls = ctx.admit_new_events(0.0, batch_size=1)
+    assert len(ctx.evt_folder.events) == 3
+    # All three need admission; only the two pooled ones were pool-created.
+    assert ctx.event_pool_stats()["pending_admission"] == 3
+    assert ctx.event_pool_stats()["created"] == 2
+    assert [e.class_name for e in pooled] == ["EvtParam", "EvtLod"]
+    assert [e.class_name for e in unpooled] == ["EvtTap"]
+
+    # Barriers land in the open interval (current_time, current_time +
+    # horizon_s), strictly before the events at t = 1.0 s, so they admit
+    # without crossing.  batch_size=1 over 3 pending gives 3 barriers at
+    # horizon * i/(calls + 1).
+    horizon_s = 0.5
+    calls = ctx.admit_new_events(0.0, horizon_s, batch_size=1)
     assert calls == 3
     assert ctx.sim.execute_count == 3
-    assert ctx.sim.attributes["tstop"] == 0.0
+    assert ctx.sim.attributes["tstop"] == pytest.approx(
+        horizon_s * calls / (calls + 1)
+    )
+    assert ctx.sim.attributes["tstop"] < 1.0
     assert ctx.event_pool_stats()["pending_admission"] == 0
 
     ctx.simulate(2.0)
     assert ctx.sim.execute_count == 4
     assert all(
-        event.attributes["time"] == EVENT_INERT_TIME_S
-        for event in ctx.evt_folder.events
+        event.attributes["time"] == EVENT_INERT_TIME_S for event in pooled
     )
-    assert ctx.event_pool_stats()["retired"] == 3
+    assert ctx.event_pool_stats()["retired"] == 2
+    # The one-shot EvtTap keeps its armed time: never retired, never reused.
+    assert unpooled[0].attributes["time"] == 1.0
 
 
 def test_prepare_discovers_existing_pool_and_removes_unmanaged_events():

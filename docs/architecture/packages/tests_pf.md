@@ -7,16 +7,16 @@ Test or archived code; retained for reference.
 
 ## At a glance
 
-- modules: **8**, 922 lines
+- modules: **8**, 975 lines
 - module docstrings: 3/8 (38%)
-- public functions documented: 1/28 (4%)
+- public functions documented: 3/29 (10%)
 - classes documented: 2/21 (10%)
 
 ## Modules
 
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
-| `test_screening_event_pool.py` | 272 | 7 | 5 | _no module docstring_ |
+| `test_screening_event_pool.py` | 325 | 8 | 5 | _no module docstring_ |
 | `test_pf_sync_reconnect.py` | 183 | 9 | 8 | Regressions for connection re-pointing and orphan detection in pf_sync. |
 | `test_result_export.py` | 145 | 3 | 3 | _no module docstring_ |
 | `test_profile_playback.py` | 105 | 4 | 0 | _no module docstring_ |

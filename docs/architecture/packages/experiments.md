@@ -7,9 +7,9 @@ Entry points. `run_comparison_rms_cosim_qss.py` runs the quasi-static and PowerF
 
 ## At a glance
 
-- modules: **10**, 2,584 lines
-- module docstrings: 9/10 (90%)
-- public functions documented: 12/29 (41%)
+- modules: **12**, 3,079 lines
+- module docstrings: 11/12 (92%)
+- public functions documented: 14/38 (37%)
 - classes documented: 3/3 (100%)
 
 ## Modules
@@ -17,12 +17,14 @@ Entry points. `run_comparison_rms_cosim_qss.py` runs the quasi-static and PowerF
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
 | `comparison_none_vs_sbxh.py` | 706 | 17 | 0 | experiments/015_SBX_COMPARE.py |
-| `run_comparison_rms_cosim_qss.py` | 475 | 1 | 0 | Phase 6 Gate E closed-loop static-versus-RMS replay. |
-| `run_multi_system_ofo.py` | 380 | 3 | 0 | experiments/000_M_TSO_M_DSO.py |
+| `run_comparison_rms_cosim_qss.py` | 571 | 1 | 0 | Phase 6 Gate E closed-loop static-versus-RMS replay. |
+| `run_multi_system_ofo.py` | 392 | 4 | 0 | experiments/000_M_TSO_M_DSO.py |
 | `run_openloop_qss_to_rms.py` | 285 | 1 | 2 | Open-loop u -> y plant-equivalence test (Gate E, 2026-07-22). |
 | `postprocess_rms_cosim.py` | 230 | 1 | 0 | Complete an interrupted RMS replay from its retained ComRes CSV. |
+| `shunt_dispatch_check.py` | 192 | 4 | 0 | AC comparison of the switched-shunt arms: banks held against banks dispatched. |
+| `run_rms_cosim.py` | 187 | 1 | 0 | Run the PowerFactory RMS co-simulation alone (no QSS reference). |
+| `run_colloquium_gifs.py` | 167 | 4 | 0 | Reproducible four-hour QSS runs for the research-colloquium animations. |
 | `results_io.py` | 159 | 2 | 1 | Standard, config-tracked result directories for experiment entry points. |
-| `run_rms_cosim.py` | 159 | 1 | 0 | Run the PowerFactory RMS co-simulation alone (no QSS reference). |
 | `demonstrate_sbxv.py` | 110 | 2 | 0 | Standalone SBX-V mechanism demonstration on the three-zone CIGRE case. |
 | `__init__.py` | 67 | 0 | 0 | experiments/__init__.py |
 | `paths.py` | 13 | 1 | 0 | _no module docstring_ |

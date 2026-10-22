@@ -7,21 +7,22 @@ Shared machinery for the co-simulation entry points: the common CLI and config b
 
 ## At a glance
 
-- modules: **8**, 3,122 lines
-- module docstrings: 8/8 (100%)
-- public functions documented: 39/45 (87%)
+- modules: **9**, 3,589 lines
+- module docstrings: 9/9 (100%)
+- public functions documented: 45/51 (88%)
 - classes documented: 5/6 (83%)
 
 ## Modules
 
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
-| `comparison_metrics.py` | 770 | 20 | 0 | experiments/helpers/comparison_metrics.py |
+| `comparison_metrics.py` | 828 | 23 | 0 | experiments/helpers/comparison_metrics.py |
 | `plant_io.py` | 644 | 8 | 1 | experiments/plant_io.py |
 | `rms_replay.py` | 516 | 9 | 0 | Pure extraction, comparison and plotting for Phase 6 RMS replay. |
-| `records.py` | 387 | 0 | 4 | experiments/records.py |
-| `contingency.py` | 286 | 1 | 0 | run/contingency.py |
-| `rms_cosim_config.py` | 258 | 5 | 1 | Shared configuration and CLI for the PowerFactory RMS co-simulation. |
+| `rms_cosim_config.py` | 437 | 5 | 1 | Shared configuration and CLI for the PowerFactory RMS co-simulation. |
+| `records.py` | 426 | 0 | 4 | experiments/records.py |
+| `contingency.py` | 325 | 1 | 0 | run/contingency.py |
 | `utils.py` | 180 | 2 | 0 | run/helpers.py |
+| `run_params.py` | 152 | 3 | 0 | experiments/helpers/run_params.py |
 | `__init__.py` | 81 | 0 | 0 | experiments/helpers/ |
 

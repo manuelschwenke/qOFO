@@ -7,10 +7,10 @@ Post-processing of stored runs. Each study has its own admission filter deciding
 
 ## At a glance
 
-- modules: **11**, 6,658 lines
-- module docstrings: 11/11 (100%)
-- public functions documented: 46/62 (74%)
-- classes documented: 12/12 (100%)
+- modules: **28**, 13,115 lines
+- module docstrings: 28/28 (100%)
+- public functions documented: 102/201 (51%)
+- classes documented: 16/17 (94%)
 
 ## Modules
 
@@ -19,12 +19,29 @@ Post-processing of stored runs. Each study has its own admission filter deciding
 | `annual_dso_pq_characterization.py` | 1,285 | 2 | 1 | Annual P-Q characterization of the IEEE39-underlaid synthetic DS models. |
 | `stability_analysis.py` | 1,162 | 4 | 5 | Three-Condition Stability Analysis for OFO-MIQP Controllers |
 | `simbench_hv_benchmark.py` | 964 | 12 | 1 | analysis/simbench_hv_benchmark.py |
+| `deadband_anchor.py` | 769 | 12 | 2 | Experiment F1: the anchor-referenced measurement, from the plant's own signals. |
+| `modal_observability.py` | 713 | 17 | 2 | Exact residues of the linearised RMS plant in the controlled outputs. |
 | `result_comparison.py` | 681 | 11 | 2 | Interactive comparison helpers for saved multi-system OFO runs. |
+| `deadband_selection.py` | 644 | 8 | 0 | Dead-band selection study: collect metrics, write CSVs, draw both figures. |
+| `deadband_n1.py` | 604 | 11 | 0 | Dead-band selection under an N-1 outage: delta as a DETECTOR THRESHOLD. |
 | `simbench_hv_generation_benchmark.py` | 599 | 7 | 0 | Generation benchmark for the synthetic IEEE39-underlaid 110 kV DS models. |
-| `deadband_selection.py` | 587 | 6 | 0 | Dead-band selection study: collect metrics, write CSVs, draw both figures. |
-| `reachability.py` | 487 | 1 | 3 | Voltage-Stability / Nose-Curve Reachability Guard |
+| `reachability.py` | 522 | 2 | 3 | Voltage-Stability / Nose-Curve Reachability Guard |
+| `modal_reduce.py` | 497 | 13 | 0 | Reduction of the PowerFactory modal screen for the plant-time-constant section. |
+| `e1_interface_column_norms.py` | 480 | 9 | 0 | analysis/e1_interface_column_norms.py |
+| `modal_residue.py` | 450 | 9 | 1 | analysis/modal_residue.py |
+| `build_modal_bundle.py` | 437 | 9 | 0 | Assemble the dissertation bundle of the plant-time-constant modal analysis. |
 | `dso_ts_coupling_geometry.py` | 414 | 7 | 0 | analysis/dso_ts_coupling_geometry.py |
+| `deadband_2d.py` | 407 | 6 | 0 | 2D dead-band study: delta_TS x delta_DS under a localised TS load step. |
+| `deadband_threshold.py` | 387 | 5 | 0 | Design E readout: locate the dead-zone threshold from an amplitude sweep. |
+| `deadband_disturbance.py` | 354 | 6 | 0 | Disturbance rejection: how well each dead band rejects an exogenous load step. |
 | `gate_e_diagnostics.py` | 263 | 6 | 0 | Gate-E diagnostics: discrete actuator and per-bus voltage comparison. |
+| `deadband_activity.py` | 229 | 4 | 0 | Designs A and B: measure the mechanism, and normalise delta by what it filters. |
+| `deadband_n1_figures.py` | 194 | 7 | 0 | Figures for the N-1 dead-band study (minimal style, no titles). |
+| `deadband_tables.py` | 188 | 7 | 0 | Cross-tabulate the dead-band study: delta x window, one table per metric. |
 | `deadband_pareto.py` | 185 | 6 | 0 | Pareto analysis of the dead-band grid: voltage quality vs interface-Q tracking. |
+| `deadband_n1_figures_multiwindow.py` | 181 | 5 | 0 | Cross-window figures for the N-1 dead-band study (minimal, no titles). |
+| `deadband_figures.py` | 180 | 7 | 0 | Publication figures for the dead-band study (minimal style, no titles). |
+| `deadband_2d_figures.py` | 170 | 5 | 0 | Figures for the 2D dead-band study (minimal style, no titles). |
+| `colloquium_run_report.py` | 125 | 4 | 0 | Audit completed four-hour colloquium runs without modifying their records. |
 | `__init__.py` | 31 | 0 | 0 | Analysis package for the cascaded OFO controller. |
 

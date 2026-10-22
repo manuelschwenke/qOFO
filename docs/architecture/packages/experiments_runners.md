@@ -7,7 +7,7 @@
 
 ## At a glance
 
-- modules: **4**, 6,594 lines
+- modules: **4**, 7,262 lines
 - module docstrings: 4/4 (100%)
 - public functions documented: 2/2 (100%)
 - classes documented: 1/1 (100%)
@@ -16,8 +16,8 @@
 
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
-| `multi_tso_dso.py` | 4,550 | 1 | 0 | experiments/runners/multi_tso_dso.py |
+| `multi_tso_dso.py` | 5,197 | 1 | 0 | experiments/runners/multi_tso_dso.py |
+| `_multi_tso_helpers.py` | 1,021 | 0 | 1 | experiments/runners/_multi_tso_helpers.py |
 | `cascade.py` | 1,018 | 1 | 0 | experiments/runners/cascade.py |
-| `_multi_tso_helpers.py` | 1,000 | 0 | 1 | experiments/runners/_multi_tso_helpers.py |
 | `__init__.py` | 26 | 0 | 0 | experiments/runners/ |
 

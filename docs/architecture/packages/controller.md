@@ -7,24 +7,25 @@ The OFO controllers themselves. The TSO controller dispatches AVR setpoints, OLT
 
 ## At a glance
 
-- modules: **11**, 9,991 lines
-- module docstrings: 11/11 (100%)
+- modules: **12**, 10,838 lines
+- module docstrings: 12/12 (100%)
 - public functions documented: 12/12 (100%)
-- classes documented: 26/26 (100%)
+- classes documented: 29/30 (97%)
 
 ## Modules
 
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
-| `tso_controller.py` | 2,657 | 0 | 2 | TSO Controller Module |
-| `dso_controller.py` | 1,884 | 0 | 2 | DSO Controller Module |
-| `base_controller.py` | 1,281 | 0 | 3 | Base Controller Module |
+| `tso_controller.py` | 2,732 | 0 | 2 | TSO Controller Module |
+| `dso_controller.py` | 1,927 | 0 | 2 | DSO Controller Module |
+| `base_controller.py` | 1,320 | 0 | 3 | Base Controller Module |
 | `multi_tso_coordinator.py` | 1,133 | 0 | 2 | controller/multi_tso_coordinator.py |
 | `der_qv_local_loop.py` | 1,016 | 8 | 2 | DER plant-side reactive-power controllers. |
+| `svr_controller.py` | 870 | 0 | 5 | controller/svr_controller.py |
 | `gw_precondition.py` | 594 | 2 | 2 | Curvature-based g_w preconditioning (Tier-2 OFO gain selection) |
-| `shunt_integrator.py` | 436 | 1 | 6 | Switched-shunt integrator (MSC / MSR) for the TSO OFO controller |
 | `central_controller.py` | 347 | 0 | 2 | Central (single-controller) OFO Module |
 | `g_w_adapter.py` | 346 | 1 | 2 | Adaptive g_w Module |
+| `shunt_banks.py` | 256 | 1 | 5 | Switched-shunt bank model (MSC / MSR) for the TSO OFO controller |
 | `reserve_observer.py` | 254 | 0 | 3 | Reserve Observer Module |
 | `__init__.py` | 43 | 0 | 0 | Controller Module |
 

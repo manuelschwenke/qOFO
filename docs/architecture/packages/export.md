@@ -7,7 +7,7 @@ Snapshot export of built networks for external tools.
 
 ## At a glance
 
-- modules: **3**, 1,639 lines
+- modules: **3**, 1,737 lines
 - module docstrings: 3/3 (100%)
 - public functions documented: 7/8 (88%)
 - classes documented: 6/6 (100%)
@@ -17,6 +17,6 @@ Snapshot export of built networks for external tools.
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
 | `dynamic_snapshot.py` | 1,052 | 5 | 5 | export/dynamic_snapshot.py |
-| `make_snapshots.py` | 576 | 3 | 1 | export/make_snapshots.py |
+| `make_snapshots.py` | 674 | 3 | 1 | export/make_snapshots.py |
 | `__init__.py` | 11 | 0 | 0 | export |
 

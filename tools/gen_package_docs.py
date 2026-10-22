@@ -109,7 +109,7 @@ PURPOSE: Dict[str, str] = {
     "tuning": (
         "Offline Bayesian optimisation of the controller weights, plus the "
         "stability certificate machinery. See "
-        "`docs/daily_log/07_2026/2026-07-31_bo_tuning_audit.md` for the audit of "
+        "`00_daily_log/07_2026/2026-07-31_bo_tuning_audit.md` for the audit of "
         "why the search as parameterised was not identifiable."
     ),
     "sbx_h": (
@@ -145,11 +145,6 @@ PURPOSE: Dict[str, str] = {
         "The CIGRE Calgary 2026 paper experiments, including the Monte-Carlo "
         "campaign over contingency schedules."
     ),
-    "experiments/archived": (
-        "Superseded entry points, retained because daily logs and shell history "
-        "still reference them. Includes the deprecation shim for the former "
-        "`run_rms_phase6_replay.py`."
-    ),
     "pf/probes": (
         "One-off, read-only probes answering a single question about the "
         "PowerFactory API or RMS solver semantics -- event firing, ElmFile "
@@ -157,18 +152,10 @@ PURPOSE: Dict[str, str] = {
         "probe bodies stay behind a `__main__` guard and are not part of the "
         "co-simulation import graph."
     ),
-    "tuning/scripts": (
-        "Drivers for the BO campaigns and for regenerating the baseline YAML "
-        "from the authoritative hand-tuned configuration."
-    ),
-    "tuning/stability_certificate": (
-        "LMI/IQC machinery producing stability certificates used as ceilings "
-        "and floors on the controller weights."
-    ),
-    "tuning/reports": ("Report rendering for completed tuning studies."),
-    "docs/daily_log": (
+    "00_daily_log": (
         "Not a code package: holds `_build_index.py`, which regenerates "
-        "`docs/daily_log/INDEX.md` from the log headings."
+        "`00_daily_log/INDEX.md` from the log headings. The log moved here "
+        "from `docs/daily_log/` on 2026-10-22."
     ),
 }
 

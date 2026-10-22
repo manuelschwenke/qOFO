@@ -7,7 +7,7 @@ The IEEE 39-bus build itself: buses, lines, the HV sub-networks, DER capability 
 
 ## At a glance
 
-- modules: **10**, 3,528 lines
+- modules: **10**, 3,582 lines
 - module docstrings: 10/10 (100%)
 - public functions documented: 14/14 (100%)
 - classes documented: 2/2 (100%)
@@ -16,12 +16,12 @@ The IEEE 39-bus build itself: buses, lines, the HV sub-networks, DER capability 
 
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
-| `hv_networks.py` | 1,052 | 1 | 0 | network/ieee39/hv_networks.py |
-| `build.py` | 701 | 2 | 0 | network/ieee39/build.py |
+| `hv_networks.py` | 1,083 | 1 | 0 | network/ieee39/hv_networks.py |
+| `build.py` | 722 | 2 | 0 | network/ieee39/build.py |
 | `zonal_balancing.py` | 407 | 2 | 0 | network/ieee39/zonal_balancing.py |
 | `helpers.py` | 387 | 6 | 0 | network.ieee39.helpers |
 | `constants.py` | 317 | 0 | 0 | network/ieee39/constants.py |
-| `meta.py` | 222 | 0 | 2 | network/ieee39/meta.py |
+| `meta.py` | 224 | 0 | 2 | network/ieee39/meta.py |
 | `dso_overrides.py` | 168 | 1 | 0 | Experiment-only nameplate / load / conductor overrides per DSO underlay. |
 | `load_model.py` | 127 | 1 | 0 | network/ieee39/load_model.py |
 | `aux_load_buses.py` | 109 | 1 | 0 | Internal load-separation nodes for pandapower ZIP consistency. |

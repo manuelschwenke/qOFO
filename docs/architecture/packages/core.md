@@ -7,9 +7,9 @@ Plant abstraction, measurements and the message types crossing the TSO/DSO seam.
 
 ## At a glance
 
-- modules: **12**, 4,378 lines
+- modules: **12**, 4,449 lines
 - module docstrings: 12/12 (100%)
-- public functions documented: 28/28 (100%)
+- public functions documented: 30/30 (100%)
 - classes documented: 15/15 (100%)
 
 ## Modules
@@ -18,11 +18,11 @@ Plant abstraction, measurements and the message types crossing the TSO/DSO seam.
 |---|---|---|---|---|
 | `pf_adapter.py` | 811 | 5 | 3 | core/pf_adapter.py |
 | `measurement.py` | 694 | 5 | 1 | Measurement Module |
-| `actuator_bounds.py` | 638 | 4 | 2 | Actuator Bounds Module |
+| `actuator_bounds.py` | 688 | 6 | 2 | Actuator Bounds Module |
 | `reporting.py` | 468 | 3 | 0 | core/reporting.py |
 | `measurement_noise.py` | 380 | 0 | 1 | Component-wise metering errors for controller-facing measurements. |
 | `results_storage.py` | 312 | 2 | 0 | Results Storage |
-| `plant.py` | 286 | 6 | 3 | core/plant.py |
+| `plant.py` | 307 | 6 | 3 | core/plant.py |
 | `der_mapping.py` | 254 | 0 | 1 | DER Mapping Module |
 | `message.py` | 248 | 0 | 3 | Message Module |
 | `network_state.py` | 126 | 0 | 1 | Network State Module |

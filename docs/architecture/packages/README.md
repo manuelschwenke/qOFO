@@ -7,45 +7,53 @@ Coverage figures for the whole codebase: [doc_coverage.md](../doc_coverage.md).
 
 | package | modules | LOC | curated |
 |---|---|---|---|
-| [`tests`](tests.md) | 42 | 12,234 | n/a |
-| [`controller`](controller.md) | 11 | 9,991 | yes |
-| [`pf`](pf.md) | 22 | 8,668 | yes |
-| [`visualisation`](visualisation.md) | 13 | 7,362 | yes |
-| [`analysis`](analysis.md) | 11 | 6,658 | yes |
-| [`experiments/runners`](experiments_runners.md) | 4 | 6,594 | yes |
-| [`sensitivity`](sensitivity.md) | 6 | 5,614 | yes |
-| [`_archive/sbx_h_v5/sbx_h`](_archive_sbx_h_v5_sbx_h.md) | 13 | 4,464 | n/a |
-| [`core`](core.md) | 12 | 4,378 | yes |
+| [`tests`](tests.md) | 51 | 13,637 | n/a |
+| [`analysis`](analysis.md) | 28 | 13,115 | yes |
+| [`pf`](pf.md) | 29 | 11,733 | yes |
+| [`controller`](controller.md) | 12 | 10,838 | yes |
+| [`visualisation`](visualisation.md) | 14 | 7,840 | yes |
+| [`experiments/ch_9_parameter_selection`](experiments_ch_9_parameter_selection.md) | 11 | 7,472 | **no** |
+| [`experiments/runners`](experiments_runners.md) | 4 | 7,262 | yes |
+| [`sensitivity`](sensitivity.md) | 6 | 6,271 | yes |
+| [`experiments/CIGRE_2026`](experiments_CIGRE_2026.md) | 15 | 6,082 | yes |
+| [`tuning`](tuning.md) | 13 | 5,186 | yes |
+| [`core`](core.md) | 12 | 4,449 | yes |
 | [`sbx_v`](sbx_v.md) | 16 | 3,899 | yes |
-| [`tuning`](tuning.md) | 15 | 3,740 | yes |
-| [`experiments/archived`](experiments_archived.md) | 11 | 3,611 | yes |
-| [`network/ieee39`](network_ieee39.md) | 10 | 3,528 | yes |
-| [`experiments/helpers`](experiments_helpers.md) | 8 | 3,122 | yes |
+| [`experiments/helpers`](experiments_helpers.md) | 9 | 3,589 | yes |
+| [`network/ieee39`](network_ieee39.md) | 10 | 3,582 | yes |
 | [`sbx_h`](sbx_h.md) | 11 | 3,108 | yes |
-| [`pf/probes`](pf_probes.md) | 13 | 2,795 | yes |
-| [`experiments/CIGRE_2026`](experiments_CIGRE_2026.md) | 2 | 2,666 | yes |
-| [`experiments`](experiments.md) | 10 | 2,584 | yes |
-| [`_archive/sbx_h_v5/tests`](_archive_sbx_h_v5_tests.md) | 11 | 2,345 | n/a |
-| [`configs`](configs.md) | 4 | 2,169 | yes |
-| [`tuning/stability_certificate`](tuning_stability_certificate.md) | 10 | 1,942 | yes |
-| [`optimisation`](optimisation.md) | 3 | 1,932 | yes |
+| [`experiments`](experiments.md) | 12 | 3,079 | yes |
+| [`pf/probes`](pf_probes.md) | 14 | 3,077 | yes |
+| [`configs`](configs.md) | 4 | 2,858 | yes |
+| [`experiments/ch_10_case_study`](experiments_ch_10_case_study.md) | 8 | 2,594 | **no** |
+| [`optimisation`](optimisation.md) | 3 | 1,956 | yes |
 | [`network`](network.md) | 4 | 1,758 | yes |
 | [`analysis/observer`](analysis_observer.md) | 5 | 1,740 | yes |
+| [`export`](export.md) | 3 | 1,737 | yes |
 | [`tests/sbx_v`](tests_sbx_v.md) | 7 | 1,709 | n/a |
-| [`export`](export.md) | 3 | 1,639 | yes |
-| [`tests/tuning`](tests_tuning.md) | 10 | 1,554 | n/a |
-| [`_archive/sbx_h_v5/experiments`](_archive_sbx_h_v5_experiments.md) | 3 | 1,474 | n/a |
 | [`tests/sbx_h`](tests_sbx_h.md) | 11 | 1,359 | n/a |
-| [`tuning/scripts`](tuning_scripts.md) | 8 | 982 | yes |
-| [`tests/pf`](tests_pf.md) | 8 | 922 | n/a |
+| [`tests/tuning`](tests_tuning.md) | 7 | 1,097 | n/a |
+| [`experiments/part3_mc`](experiments_part3_mc.md) | 3 | 1,030 | **no** |
+| [`tests/pf`](tests_pf.md) | 8 | 975 | n/a |
+| [`tools`](tools.md) | 4 | 820 | yes |
+| [`tuning_mc`](tuning_mc.md) | 3 | 790 | **no** |
+| [`experiments/case1_svr`](experiments_case1_svr.md) | 4 | 750 | **no** |
 | [`network/ieee39/analysis`](network_ieee39_analysis.md) | 2 | 548 | yes |
+| [`tests/experiments`](tests_experiments.md) | 3 | 502 | n/a |
 | [`tests/observer`](tests_observer.md) | 3 | 488 | n/a |
+| [`experiments/reference_period`](experiments_reference_period.md) | 2 | 482 | **no** |
 | [`network/nordic32`](network_nordic32.md) | 2 | 389 | yes |
-| [`_archive/sbx_h_v5`](_archive_sbx_h_v5.md) | 1 | 347 | n/a |
-| [`_archive/observer_phase3`](_archive_observer_phase3.md) | 1 | 341 | n/a |
-| [`tuning/reports`](tuning_reports.md) | 3 | 334 | yes |
-| [`tools`](tools.md) | 1 | 268 | yes |
-| [`network/ieee39/scenarios`](network_ieee39_scenarios.md) | 2 | 248 | yes |
-| [`tests/tuning/stability_certificate`](tests_tuning_stability_certificate.md) | 4 | 217 | n/a |
+| [`network/ieee39/scenarios`](network_ieee39_scenarios.md) | 2 | 270 | yes |
+| [`configs/paramsets`](configs_paramsets.md) | 1 | 164 | **no** |
 | [`tests/export`](tests_export.md) | 2 | 116 | n/a |
-| [`docs/daily_log`](docs_daily_log.md) | 1 | 106 | yes |
+| [`00_daily_log`](00_daily_log.md) | 1 | 114 | yes |
+
+## Packages still lacking a curated description
+
+- `configs/paramsets`
+- `experiments/case1_svr`
+- `experiments/ch_10_case_study`
+- `experiments/ch_9_parameter_selection`
+- `experiments/part3_mc`
+- `experiments/reference_period`
+- `tuning_mc`

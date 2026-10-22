@@ -7,7 +7,7 @@ The MIQP solver layer that each OFO step calls. Note that the feasible set carri
 
 ## At a glance
 
-- modules: **3**, 1,932 lines
+- modules: **3**, 1,956 lines
 - module docstrings: 3/3 (100%)
 - public functions documented: 5/5 (100%)
 - classes documented: 9/9 (100%)
@@ -17,6 +17,6 @@ The MIQP solver layer that each OFO step calls. Note that the feasible set carri
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
 | `ac_opf_reference.py` | 975 | 4 | 6 | AC-OPF MINLP Reference Model |
-| `miqp_solver.py` | 922 | 1 | 3 | MIQP Solver Module |
+| `miqp_solver.py` | 946 | 1 | 3 | MIQP Solver Module |
 | `__init__.py` | 35 | 0 | 0 | Optimisation Module |
 

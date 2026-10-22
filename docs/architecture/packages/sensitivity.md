@@ -7,19 +7,19 @@ Cached linear models of the plant: Jacobian-derived voltage and reactive-power s
 
 ## At a glance
 
-- modules: **6**, 5,614 lines
+- modules: **6**, 6,271 lines
 - module docstrings: 6/6 (100%)
-- public functions documented: 12/12 (100%)
+- public functions documented: 16/16 (100%)
 - classes documented: 4/4 (100%)
 
 ## Modules
 
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
-| `jacobian.py` | 3,573 | 1 | 1 | Jacobian Module |
-| `network_reduction.py` | 771 | 2 | 2 | sensitivity/network_reduction.py |
+| `jacobian.py` | 3,614 | 1 | 1 | Jacobian Module |
+| `network_reduction.py` | 1,332 | 4 | 2 | sensitivity/network_reduction.py |
 | `numerical_h.py` | 588 | 3 | 0 | sensitivity/numerical_h.py |
 | `index_helper.py` | 465 | 6 | 0 | Index-Helper Module |
-| `sensitivity_updater.py` | 166 | 0 | 1 | Sensitivity Updater Module |
+| `sensitivity_updater.py` | 221 | 2 | 1 | Sensitivity Updater Module |
 | `__init__.py` | 51 | 0 | 0 | Sensitivity Module |
 

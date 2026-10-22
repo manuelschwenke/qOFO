@@ -7,22 +7,19 @@ Test or archived code; retained for reference.
 
 ## At a glance
 
-- modules: **10**, 1,554 lines
-- module docstrings: 8/10 (80%)
-- public functions documented: 38/69 (55%)
+- modules: **7**, 1,097 lines
+- module docstrings: 5/7 (71%)
+- public functions documented: 27/56 (48%)
 - classes documented: 0/0 (n/a)
 
 ## Modules
 
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
-| `test_metrics.py` | 384 | 18 | 0 | Unit tests for ``tuning/metrics.py``. |
-| `test_parameters.py` | 266 | 11 | 0 | Unit tests for ``tuning/parameters.py``. |
-| `test_scenarios.py` | 197 | 9 | 0 | Unit tests for ``tuning/scenarios.py``. |
-| `test_objectives_v2.py` | 159 | 12 | 0 | Unit tests for ``tuning/objectives_v2.py`` (constrained-scalar objective). |
-| `test_objective.py` | 149 | 7 | 0 | Unit tests for ``tuning/objective.py``. |
-| `test_ceilings.py` | 140 | 4 | 0 | Unit tests for ``tuning/ceilings.py``. |
-| `test_io.py` | 115 | 3 | 0 | Unit tests for ``tuning/_io.py``. |
+| `test_metrics.py` | 390 | 18 | 0 | Unit tests for ``tuning/metrics.py``. |
+| `test_scenarios.py` | 262 | 14 | 0 | Unit tests for ``tuning/scenarios.py``. |
+| `test_parameters.py` | 155 | 15 | 0 | The canonical weight vector, and the holes the 2026-09-10 reset closed. |
+| `test_io.py` | 146 | 4 | 0 | Unit tests for ``tuning/_io.py``. |
 | `test_runner.py` | 93 | 3 | 0 | Unit tests for ``tuning/runner.py``. |
 | `conftest.py` | 50 | 2 | 0 | _no module docstring_ |
 | `__init__.py` | 1 | 0 | 0 | _no module docstring_ |

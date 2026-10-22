@@ -7,14 +7,17 @@ Repository maintenance utilities, including this documentation audit.
 
 ## At a glance
 
-- modules: **1**, 268 lines
-- module docstrings: 1/1 (100%)
-- public functions documented: 0/8 (0%)
+- modules: **4**, 820 lines
+- module docstrings: 4/4 (100%)
+- public functions documented: 1/15 (7%)
 - classes documented: 0/0 (n/a)
 
 ## Modules
 
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
-| `doc_audit.py` | 268 | 8 | 0 | Static documentation audit of the Python codebase. |
+| `doc_audit.py` | 280 | 8 | 0 | Static documentation audit of the Python codebase. |
+| `gen_package_docs.py` | 277 | 3 | 0 | Generate one markdown overview per Python package. |
+| `check_reduction_fidelity.py` | 154 | 2 | 0 | Does each reduced (Ward) network reproduce the combined solution? |
+| `missing_cells.py` | 109 | 2 | 0 | List the (delta, gen) cells of a dead-band sweep that still need running. |
 

@@ -53,14 +53,26 @@ def is_dunder(name: str) -> bool:
 
 def analyse(path: Path) -> Optional[dict]:
     try:
-        src = path.read_text(encoding="utf-8", errors="replace")
+        # utf-8-sig, not utf-8: a file saved with a BOM otherwise keeps a
+        # literal U+FEFF as its first character, which ``ast.parse`` rejects
+        # as an invalid non-printable character even though Python imports the
+        # module fine.  ``experiments/case1_svr/report_case1.py`` was such a
+        # file and took the whole audit down (see the record below).
+        src = path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return None
     try:
         tree = ast.parse(src, filename=str(path))
     except SyntaxError as exc:
+        # Return the *full* key set.  A sparse record here crashed both
+        # ``summarise`` (``int(r["module_doc"])``) and the JSON payload in
+        # ``main`` with ``KeyError: 'module_doc'``, so one unparseable file
+        # anywhere in the tree killed the audit instead of being reported as
+        # the syntax error it is -- which ``write_report`` already handles.
         return {"path": path, "syntax_error": f"line {exc.lineno}: {exc.msg}",
-                "loc": src.count("\n") + 1}
+                "loc": src.count("\n") + 1,
+                "module_doc": False, "module_doc_first": [],
+                "functions": [], "classes": []}
 
     rec = {
         "path": path,

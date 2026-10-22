@@ -7,7 +7,7 @@ Scenario definitions selecting the installed DER capacity per DSO. `base_410` an
 
 ## At a glance
 
-- modules: **2**, 248 lines
+- modules: **2**, 270 lines
 - module docstrings: 2/2 (100%)
 - public functions documented: 1/1 (100%)
 - classes documented: 0/0 (n/a)
@@ -17,5 +17,5 @@ Scenario definitions selecting the installed DER capacity per DSO. `base_410` an
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
 | `wind_replace.py` | 232 | 1 | 0 | Scenario: wind_replace |
-| `__init__.py` | 16 | 0 | 0 | Scenario registry for the IEEE 39-bus network. |
+| `__init__.py` | 38 | 0 | 0 | Scenario registry for the IEEE 39-bus network. |
 

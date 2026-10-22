@@ -7,9 +7,9 @@ One-off, read-only probes answering a single question about the PowerFactory API
 
 ## At a glance
 
-- modules: **13**, 2,795 lines
-- module docstrings: 13/13 (100%)
-- public functions documented: 0/15 (0%)
+- modules: **14**, 3,077 lines
+- module docstrings: 14/14 (100%)
+- public functions documented: 3/20 (15%)
 - classes documented: 0/0 (n/a)
 
 ## Modules
@@ -21,6 +21,7 @@ One-off, read-only probes answering a single question about the PowerFactory API
 | `probe_live_dsl_parameter.py` | 323 | 1 | 0 | Probe direct DSL-parameter writes inside one active RMS calculation. |
 | `probe_event_rearm.py` | 316 | 1 | 0 | Probe PowerFactory's persistent simulation-event re-arm semantics. |
 | `probe_tap_avr.py` | 306 | 1 | 0 | pf/probes/probe_tap_avr.py |
+| `probe_modal_residue.py` | 282 | 5 | 0 | pf/probes/probe_modal_residue.py |
 | `probe_event_preallocation_volume.py` | 217 | 1 | 0 | Stress-probe pre-created one-shot PowerFactory event slots. |
 | `probe_event_double_buffer.py` | 193 | 1 | 0 | Probe cyclic reuse of two pre-created PowerFactory event slots. |
 | `probe_event_admission_barrier.py` | 172 | 1 | 0 | Probe extra ``ComSim.Execute`` calls as an event-admission barrier. |

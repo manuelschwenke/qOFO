@@ -7,23 +7,24 @@ Live plotting during a run and publication figures afterwards.
 
 ## At a glance
 
-- modules: **13**, 7,362 lines
-- module docstrings: 12/13 (92%)
-- public functions documented: 20/20 (100%)
-- classes documented: 7/7 (100%)
+- modules: **14**, 7,840 lines
+- module docstrings: 13/14 (93%)
+- public functions documented: 21/33 (64%)
+- classes documented: 7/9 (78%)
 
 ## Modules
 
 | module | LOC | fn | cls | summary |
 |---|---|---|---|---|
 | `plot_cascade.py` | 1,359 | 3 | 1 | Cascade Simulation Plotting |
-| `plot_cigre.py` | 962 | 6 | 0 | visualisation/plot_cigre.py |
+| `plot_cigre.py` | 970 | 6 | 0 | visualisation/plot_cigre.py |
 | `result_plot_to_gif.py` | 897 | 2 | 0 | Animated GIF Export for Cascade / TSO-Only Results |
 | `plot_sbx.py` | 656 | 0 | 1 | Live visualization of the active SBX-H v6 mechanism. |
 | `plot_compare_scenarios.py` | 576 | 1 | 0 | visualisation/plot_compare_scenarios.py |
 | `plot_multi_tso.py` | 537 | 1 | 0 | Multi-TSO/DSO post-run comparison plotting |
 | `plot_tso_controller.py` | 508 | 0 | 1 | visualisation/plot_tso_controller.py |
 | `plot_cascade_dso.py` | 484 | 0 | 1 | visualisation/plot_cascade_dso.py |
+| `colloquium_gifs.py` | 470 | 13 | 2 | Render seven presentation GIFs from completed colloquium QSS records. |
 | `plot_tracking.py` | 423 | 0 | 1 | visualisation/plot_tracking.py |
 | `plot_system_power_flow.py` | 420 | 0 | 1 | visualisation/plot_system_power_flow.py |
 | `style.py` | 317 | 7 | 0 | Shared visualisation styling (classicthesis look). |

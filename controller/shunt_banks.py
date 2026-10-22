@@ -6,8 +6,11 @@ Holds the state of one mechanically switched shunt bank owned by the TSO at a
 DSO tertiary winding. The *dispatch decision* is not here: the bank level is an
 integer variable of the TSO MIQP, so the bank is chosen jointly with the
 continuous actuators and the OLTCs. This module supplies what that decision
-needs — the committed level, which directions are currently permitted, and the
-predicted-voltage guard — plus the commit record the runner applies.
+needs — the committed level and which directions are currently permitted — plus
+the commit record the runner applies. The bank's effect on the outputs is not
+checked here: it enters the MIQP through its sensitivity column like any other
+input, under the ordinary soft output constraints (the predicted-voltage guard
+and the one-step-per-zone restriction were removed on 2026-10-22).
 
 Two device classes are provided:
 
@@ -44,10 +47,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List
-
-import numpy as np
-from numpy.typing import NDArray
+from typing import Iterable, List
 
 @dataclass(frozen=True)
 class ShuntBankConfig:
@@ -82,10 +82,6 @@ class ShuntBankConfig:
         Minimum holding time between commits of this bank [s], ``≥ 0``.  The
         MIQP sees it through :meth:`ShuntBank.available_directions`, so a bank
         inside its holding time is simply bounded to its current level.
-    y_h_min, y_h_max :
-        HV-boundary voltage band [p.u.] used by the overshoot feasibility
-        guard (uniform across the observed boundary buses).  ``y_h_min <
-        y_h_max``.
     """
 
     shunt_idx: int
@@ -96,8 +92,6 @@ class ShuntBankConfig:
     q_step_mvar: float
     n_levels: int
     t_dwell_s: float
-    y_h_min: float
-    y_h_max: float
 
     def __post_init__(self) -> None:
         if self.kind not in ("MSC", "MSR"):
@@ -114,11 +108,6 @@ class ShuntBankConfig:
             )
         if self.t_dwell_s < 0.0:
             raise ValueError(f"t_dwell_s must be >= 0, got {self.t_dwell_s}")
-        if not (float(self.y_h_min) < float(self.y_h_max)):
-            raise ValueError(
-                f"y_h_min ({self.y_h_min}) must be strictly less than "
-                f"y_h_max ({self.y_h_max})"
-            )
 
 
 @dataclass
@@ -143,7 +132,7 @@ class ShuntCommit:
 
 
 class ShuntBank:
-    """One switched-shunt bank: committed level, holding time and guard.
+    """One switched-shunt bank: committed level and holding time.
 
     Subclassed by :class:`MSC` and :class:`MSR`; the base class holds the state
     and the only difference is :meth:`pp_step_for_level` and
@@ -184,46 +173,44 @@ class ShuntBank:
     def _dwell_elapsed(self, t_now: float) -> bool:
         return (t_now - self._last_switch_t) >= self.config.t_dwell_s
 
-    def _feasible(self, direction: int, v_meas: NDArray[np.float64],
-                  h_v: NDArray[np.float64]) -> bool:
-        """HV overshoot guard for a candidate one-step move.
-
-        Predicts the boundary voltages after the step using the cached
-        sensitivity and checks them against the configured band:
-
-            y_H_min ≤ v_meas + h_v · (direction · q_step) ≤ y_H_max
-
-        ``h_v`` is ``∂V/∂Q_eq`` (per Mvar) at the observed boundary buses.
-        """
-        v_pred = v_meas + h_v * (float(direction) * self.config.q_step_mvar)
-        return bool(
-            np.all(v_pred >= self.config.y_h_min)
-            and np.all(v_pred <= self.config.y_h_max)
-        )
-
     # -- Public update -----------------------------------------------------
 
-    def available_directions(self, t_now: float) -> List[int]:
-        """Directions permitted by the level limits and the holding time.
+    def available_directions(self, t_now: float,
+                             opposite_engaged: bool = False) -> List[int]:
+        """Directions permitted by the level limits, the holding time and the
+        mutual exclusion of opposite devices.
 
         This is what the MIQP is given as bounds on the bank variable, so a
         bank inside its holding time cannot be selected at all.
+        ``opposite_engaged`` (see :func:`opposite_engaged`) removes the
+        engaging direction: an MSC and an MSR of the same STS must not stand
+        engaged against each other. Releasing stays allowed, so a change-over
+        takes a release of the one device and, later, an engagement of the
+        other.
         """
         if not math.isfinite(t_now):
             raise ValueError("Switch time must be finite")
         if not self._dwell_elapsed(t_now):
             return []
-        return [d for d in (-1, 1) if 0 <= self.level+d <= self.config.n_levels]
+        return [d for d in (-1, 1) if 0 <= self.level+d <= self.config.n_levels
+                and not (d == 1 and opposite_engaged)]
 
-    def commit_selected(self, direction: int, t_now: float) -> ShuntCommit:
+    def commit_selected(self, direction: int, t_now: float,
+                        opposite_engaged: bool = False) -> ShuntCommit:
         """Commit the step the MIQP selected for this bank.
 
-        The MIQP has already checked the output limits and the one-step-per-zone
-        restriction; this records the level change and restarts the holding
-        clock.
+        The MIQP chose the step under the bounds of
+        :meth:`available_directions`; this records the level change and
+        restarts the holding clock. ``opposite_engaged`` is evaluated by the
+        caller at commit time, after earlier commits of the same instant, so
+        an MSC and an MSR of one STS that were both at level 0 and were both
+        engaged in the same solve -- the one case the per-bank bounds cannot
+        exclude -- fail here instead of standing engaged together.
         """
-        if direction not in self.available_directions(t_now):
-            raise ValueError("Selected shunt step violates the holding time or a level limit")
+        if direction not in self.available_directions(t_now, opposite_engaged):
+            raise ValueError(
+                "Selected shunt step violates the holding time, a level limit "
+                "or the mutual exclusion of opposite devices in one STS")
         old = self.level
         self.level += direction
         self._last_switch_t = t_now
@@ -253,3 +240,16 @@ def make_bank(config: ShuntBankConfig) -> ShuntBank:
     if config.kind == "MSR":
         return MSR(config)
     raise ValueError(f"Unknown shunt kind {config.kind!r}")
+
+
+def opposite_engaged(bank: ShuntBank, banks: Iterable[ShuntBank]) -> bool:
+    """Whether a device of the opposite class in ``bank``'s STS is engaged.
+
+    The STS is identified by ``dso_id``. Added 2026-10-22: without it, a bank
+    inside its holding time could not be released, so the MIQP compensated by
+    engaging the opposite device of the same STS, and both stayed engaged
+    against each other for hours.
+    """
+    return any(o is not bank and o.config.dso_id == bank.config.dso_id
+               and o.config.kind != bank.config.kind and o.level > 0
+               for o in banks)

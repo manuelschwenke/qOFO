@@ -8,8 +8,10 @@ Two cases on the same parameter set, the same profiles and the same disturbance:
     continuous actuators and the OLTCs.
 ``miqp``
     The bank level is an integer variable of the zone MIQP, bounded by the
-    device's own holding time and level limits, restricted to at most one step
-    per zone and iteration, and subject to a hard predicted-voltage corridor.
+    device's own holding time and level limits and by the mutual exclusion of
+    the opposite device in the same STS, and otherwise treated like any other
+    input (soft output constraints; the one-step-per-zone restriction and the
+    hard predicted-voltage corridor were removed on 2026-10-22).
 
 Horizontal coordination is disabled so the vertical cascade is isolated. The
 ordinary MIQPs and AC power flows run; no synthetic measurements are injected.
@@ -145,6 +147,9 @@ def main():
     ap.add_argument("--dwell-s", type=float, default=None,
                     help="minimum holding time per bank; None keeps the "
                          "parameter set's value")
+    ap.add_argument("--no-mutual-exclusion", action="store_true",
+                    help="allow an MSC and an MSR of one STS to stand engaged "
+                         "together (the law before 2026-10-22)")
     ap.add_argument("--verbose", type=int, default=0,
                     help="1 prints a per-TS-instant progress line to run.log")
     ap.add_argument("--start-time", default=None,
@@ -159,6 +164,8 @@ def main():
             cfg = replace(cfg, g_w_tso_shunt=args.movement_weight)
         if args.dwell_s is not None:
             cfg = replace(cfg, shunt_t_dwell_s=args.dwell_s)
+        if args.no_mutual_exclusion:
+            cfg = replace(cfg, shunt_sts_mutual_exclusion=False)
         if args.start_time is not None:
             import pandas as pd
             cfg = replace(cfg, start_time=pd.Timestamp(args.start_time))

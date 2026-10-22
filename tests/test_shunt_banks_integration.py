@@ -6,8 +6,7 @@ This bridges the pure bank model (``test_shunt_banks.py``) and the plant. It
 checks that the bank columns the MIQP is given carry the device direction (an
 MSC step must raise voltage, an MSR step must lower it) without the caller
 having to sign them, that the interface feedforward is finite and
-device-signed, that the predicted-voltage guard blocks an overshoot computed
-from a real column, and that a bus hosting two banks is refused rather than
+device-signed, and that a bus hosting two banks is refused rather than
 silently resolved to one device.
 
 Author: Manuel Schwenke
@@ -25,8 +24,6 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-
-from controller.shunt_banks import MSC, ShuntBankConfig  # noqa: E402
 
 
 def _build(**bank_kwargs):
@@ -123,38 +120,6 @@ def test_interface_feedforward_finite_and_signed():
     assert abs(dq_msc) > 0.0
     # Opposite susceptance signs ⇒ opposite interface-Q contributions.
     assert np.sign(dq_msc) == -np.sign(dq_msr)
-
-
-def test_guard_blocks_overshoot_computed_from_a_real_column():
-    """With the band tight around the present voltage, the guard refuses the
-    engaging direction while the releasing one stays admissible."""
-    from sensitivity.jacobian import JacobianSensitivities
-
-    net, meta = _build()
-    sens = JacobianSensitivities(net)
-    hv0 = meta.hv_networks[0]
-    msc_idx, msc_bus = _first_bank(meta, "MSC")
-    obs = list(hv0.bus_indices)
-    h_col, obs_map = _voltage_column(sens, msc_bus, obs)
-    v_meas = np.array([float(net.res_bus.at[b, "vm_pu"]) for b in obs_map],
-                      dtype=np.float64)
-
-    # Upper rail just above the present maximum, so a capacitive step would
-    # overshoot it.  ``h_col`` is per Mvar, which is what ``_feasible`` expects.
-    cfg = ShuntBankConfig(
-        shunt_idx=msc_idx, bus_idx=msc_bus,
-        interface_trafo3w_idx=_host_trafo(hv0, msc_bus),
-        dso_id=hv0.net_id, kind="MSC", q_step_mvar=50.0, n_levels=4,
-        t_dwell_s=0.0, y_h_min=0.80, y_h_max=float(v_meas.max()) + 1e-4,
-    )
-    bank = MSC(cfg)
-    bank.level = 1
-    assert not bank._feasible(+1, v_meas, h_col)
-    assert bank._feasible(-1, v_meas, h_col)
-    # A band wide enough for the linear prediction admits the step again.
-    wide = MSC(ShuntBankConfig(**{**cfg.__dict__, "y_h_max": 10.0,
-                                  "y_h_min": 0.0}))
-    assert wide._feasible(+1, v_meas, h_col)
 
 
 def test_two_banks_on_one_tertiary_are_refused():

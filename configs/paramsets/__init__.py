@@ -110,8 +110,6 @@ def _coerce(field_name: str, value: Any) -> Any:
 #: integrating shunt dispatcher the ``_int_`` infix referred to.
 RENAMED_FIELDS: dict[str, str] = {
     "shunt_int_t_dwell_s": "shunt_t_dwell_s",
-    "shunt_int_v_min_pu": "shunt_v_min_pu",
-    "shunt_int_v_max_pu": "shunt_v_max_pu",
     "shunt_int_v_rescale": "shunt_v_rescale",
 }
 
@@ -123,6 +121,13 @@ RETIRED_FIELDS: frozenset[str] = frozenset({
     "shunt_int_daily_budget",
     "shunt_int_t_persistence_s",
     "shunt_int_drive",
+    # Retired 2026-10-22 (later the same day): the bank voltage guard band,
+    # under both spellings. The MIQP no longer makes the voltage rows hard
+    # while banks are dispatched, so the band has nothing left to tighten.
+    "shunt_v_min_pu",
+    "shunt_v_max_pu",
+    "shunt_int_v_min_pu",
+    "shunt_int_v_max_pu",
 })
 
 

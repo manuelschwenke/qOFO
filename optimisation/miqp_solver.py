@@ -31,7 +31,7 @@ Date: 2025-02-05
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, List, Union
+from typing import Optional, List, Union
 import numpy as np
 from numpy.typing import NDArray
 
@@ -141,20 +141,10 @@ class MIQPProblem:
     y_lower: NDArray[np.float64]
     y_upper: NDArray[np.float64]
     integer_indices: List[int]
-    # Optional restrictions used by the shared shunt dispatch. Empty in the
-    # existing OFO formulation. Indices refer to the solver variable ordering.
-    one_step_indices: Tuple[int, ...] = ()
-    hard_output_indices: Tuple[int, ...] = ()
     
     def __post_init__(self) -> None:
         """Validate problem dimensions after initialisation."""
         n_total = self.n_continuous + self.n_integer
-        if (len(set(self.one_step_indices)) != len(self.one_step_indices)
-                or any(i not in self.integer_indices for i in self.one_step_indices)):
-            raise ValueError("one_step_indices must be distinct integer variables")
-        if (len(set(self.hard_output_indices)) != len(self.hard_output_indices)
-                or any(i < 0 or i >= self.n_outputs for i in self.hard_output_indices)):
-            raise ValueError("Invalid hard output indices")
         
         if self.G_w.shape != (n_total, n_total):
             raise ValueError(
@@ -476,13 +466,6 @@ class MIQPSolver:
             constraints.append(Hw >= y_error_lower)
             constraints.append(Hw <= y_error_upper)
 
-        if problem.hard_output_indices:
-            rows = list(problem.hard_output_indices)
-            constraints.extend([Hw[rows] >= y_error_lower[rows],
-                                Hw[rows] <= y_error_upper[rows]])
-        if problem.one_step_indices:
-            constraints.append(cp.norm1(w[list(problem.one_step_indices)]) <= 1)
-
         # Formulate and solve
         cvxpy_problem = cp.Problem(cp.Minimize(objective), constraints)
 
@@ -625,13 +608,6 @@ class MIQPSolver:
             # Hard output constraints (no slack)
             constraints.append(Hw >= y_error_lower)
             constraints.append(Hw <= y_error_upper)
-
-        if problem.hard_output_indices:
-            rows = list(problem.hard_output_indices)
-            constraints.extend([Hw[rows] >= y_error_lower[rows],
-                                Hw[rows] <= y_error_upper[rows]])
-        if problem.one_step_indices:
-            constraints.append(cp.norm1(w[list(problem.one_step_indices)]) <= 1)
 
         # Formulate and solve
         cvxpy_problem = cp.Problem(cp.Minimize(objective), constraints)

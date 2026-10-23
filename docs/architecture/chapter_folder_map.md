@@ -165,6 +165,37 @@ Current code citations check out: `ch:param:experiment:e` in
 (all Experiment C), and `ch:param:experiment:d` in
 `docs/tuning/2026-10-16_protocol_experiment_B_rerun.md` (Experiment B).
 
+### Letter audit, 2026-10-23
+
+Letters A, B and C in `experiments/ch_9_parameter_selection/` match the live
+chapter and each claim holds against what that experiment now contains. Three
+did not, fixed in `6b2e571`: three retired **F1/F2** references (the live
+chapter uses them nowhere — they became D1/D2), and
+`ch_9_1_actuator_location_sweep.py`, which opened with "open-loop settling
+experiment A". That was wrong twice: A is now the modal analysis via a
+different pipeline, and the open-loop settling battery the sweep belongs to was
+retired at the 2026-09-18 colloquium. Whether the sweep still has a reported
+role is the author's call, so the docstring says that rather than declaring it
+dead.
+
+## Hard-coded thesis numbers — the same problem as the folder names
+
+**29 of them in `experiments/ch_9_parameter_selection/` alone:** `Table 9.1`
+fourteen times, `eq. (9.1)` three, `eq. (9.2)` five, plus bare `§9.1` / `§9.2`.
+Most are already stale — the settling table is retired and the `N_inner`
+equation is no longer the second in the chapter — and all of them go stale
+again at every renumbering, of which there have now been three.
+
+Not fixed, because each site needs its own decision: some should cite a live
+label, some describe retired material and should say so, and a few are
+historical notes that are correct as written. The durable answer is the same as
+for the folder names — **cite labels, not numbers**. Labels survived both
+renumberings untouched; numbers have not survived any of them.
+
+A concrete starting list, worst first: `ch_9_1_timescale_seperation.py` holds
+twelve `Table 9.1` references and three `eq. (9.1)`, and it is the script whose
+table is retired, so it is both the largest and the clearest case.
+
 **Cross-repo point worth a decision.** `graphics/Ch9/data/2026-09-23_modal/README.md`
 records that the modal bundle was produced **in `qOFO_2027` on the PowerFactory
 machine**. If `qOFO` is meant to own that chain now, the four-stage pipeline

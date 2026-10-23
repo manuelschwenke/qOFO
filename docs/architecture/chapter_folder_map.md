@@ -214,11 +214,40 @@ A concrete starting list, worst first: `ch_9_1_timescale_seperation.py` holds
 twelve `Table 9.1` references and three `eq. (9.1)`, and it is the script whose
 table is retired, so it is both the largest and the clearest case.
 
-**Cross-repo point worth a decision.** `graphics/Ch9/data/2026-09-23_modal/README.md`
-records that the modal bundle was produced **in `qOFO_2027` on the PowerFactory
-machine**. If `qOFO` is meant to own that chain now, the four-stage pipeline
-above and its outputs need a home decision; at present the chapter's actuator
-settling table is produced from the other clone.
+**Cross-repo point — answered.** `graphics/Ch9/data/2026-09-23_modal/README.md`
+records that the modal bundle was produced in `qOFO_2027` on the PowerFactory
+machine, which left open which clone owns that chain.
+
+Author decision 2026-10-23, relayed from the Chapter rework session and
+**pending confirmation in the cleanup session**: "everything we do should be in
+qOFO". So `qOFO` is the only working copy and `qOFO_2027` is legacy. The modal
+chain is maintained and run from `qOFO` from now on, which also settles that
+the 2026-10-22 restore of `pf/` and `export/` is the whole of that capability
+rather than half of a split.
+
+The existing evidence produced in `qOFO_2027` stays where it is as historical
+provenance — the 2026-09-23 modal bundle behind
+`tab:param:timescales:actuators`, and `THESIS_ch8_D_settling_20260929` behind
+`tab:param:timescales:ninner`. The decision was "do the work in `qOFO`", not
+"move the old data", so **nothing has been copied**. The thesis comments naming
+`qOFO_2027` paths also stay, because they record where those runs were
+produced. Reaching that evidence from `qOFO` wants a pointer, but the agreed
+form of one is part of the results-provenance scheme below, which is not
+confirmed here yet.
+
+### `n_s` — settled, and no change needed
+
+Author decision 2026-10-23: "just use `n_s` for the settled within 1 mvar". So
+`n_s` denotes only the final-value band count
+(`eq:param:timescales:settling`), and the flatness counts must not be called
+`n_s` anywhere — docstrings, `--help`, output headings or self-tests.
+
+Audited at `a658bbf`: every `n_s` in `ch_9_1_ninner_isolated_sts.py` is bound
+to the band quantity, including the self-test variables, which take their value
+from `n_settle_final`. The flatness counts never appear in the summary text or
+in `--help` at all; they exist only as the `n_inner_flat_*` CSV keys, and the
+summary states "Not a flatness count" where it defines what it reports. No
+further change was needed.
 
 ## The naming question
 

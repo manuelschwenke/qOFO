@@ -84,14 +84,37 @@ The three live tables and what produces each:
 | `tab:timescales:separations` | the chapter's overview of experiments A–D2 and what each fixes | not a data table |
 
 **What this corrects in the code:** the package docstring claimed the battery
-"fixes `T_DS` and `T_TS`". It does not. The subordinate period follows from the
-modal bound of Experiment A — `Chapter09.tex` line 168 gives
-`T_STS >= 17.7 s`, with the period set to 20 s — which is
-`tab:param:timescales:actuators`, a different pipeline. The thesis side also
-reports that `T_TS = 3 min` is set by definition rather than measured; the
-phrase did not match my greps of `Chapter09.tex`, so that one is recorded as
-their reading, not as verified here. The code now avoids the mechanism
-question entirely rather than encoding an unconfirmed claim.
+"fixes `T_DS` and `T_TS`". It does not. How they are actually fixed, all of it
+verified against `Chapters/Chapter09.tex` on 2026-10-23:
+
+- `T_TS` = **180 s by definition**, not measured — "the supervisory period is
+  set by definition rather than derived from an experiment" (l. 218), chosen
+  because three minutes lies inside the classical secondary-voltage-control
+  range of tens of seconds to minutes (l. 225, `paul.1987`, `corsi.2004a`).
+  The overview row at l. 33 reads "Supervisory period (by definition)".
+- `T_STS` = **20 s from the modal bound** of Experiment A, `T_STS >= 17.7 s`
+  (l. 168) — i.e. `tab:param:timescales:actuators`, the modal pipeline.
+- `N_inner` = **9**, as `T_TS / T_STS` (`eq:param:timescales:ninner`, ll. 219–224).
+  Experiment C only checks that the selected weights settle inside that budget
+  (`n_s,95` = 23.05 ≤ 27, l. 433); it does not move the period.
+
+(My first attempt to confirm this found nothing because the `\mathrm` patterns
+broke in shell quoting — the lines were there all along. Worth remembering:
+a grep that returns nothing against a file you have not opened is not evidence.)
+
+The thesis names the code side at ll. 216–217: `tuning/parameters.py`
+`TIMING_FIELDS`, with `refine_evented` candidates `tso_period_s` 180 and
+`dso_period_s` 20. `TIMING_FIELDS` is confirmed at `tuning/parameters.py:117`,
+so that link holds in both directions.
+
+**One open point this turned up.** `tuning/parameters.py:115` says
+"`N_inner = tso_period_s / dso_period_s` is a *measured* quantity
+(Experiment B) and is not a field", while the chapter has `N_inner` following
+arithmetically from a period set by definition. Both agree it is not a field
+and is the quotient of the two periods; they disagree on whether its value is
+measured or derived. Likely Experiment B measures the *achievable* `N_inner`
+while 9 is the configured consequence — but that is a thesis-and-code
+semantics question, not a repair, so it is recorded rather than resolved.
 
 **Cross-repo point worth a decision.** `graphics/Ch9/data/2026-09-23_modal/README.md`
 records that the modal bundle was produced **in `qOFO_2027` on the PowerFactory

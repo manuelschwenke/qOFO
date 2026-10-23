@@ -15,18 +15,40 @@ count, which is checked against a budget *expressed* in ``N_inner``.  The
 equation is also no longer numbered 9.2, so cite the label rather than the
 number.
 
-The measurement definition below is unchanged and is the part that matters:
-``n_s`` is the number of subordinate (STS-OFO) iterations a
-capability-band-traversing interface-Q setpoint step needs before **the
-iteration converges** -- that is, before the interface flow goes flat,
-``|q_pcc(k) - q_pcc(k-1)| -> 0``. The supervisory layer is silent throughout,
-so what is measured is the subordinate loop alone.
+**``n_s`` is a final-value band count, not a flatness count.**
+``eq:param:timescales:settling``: after a step, the flow counts as settled from
+the iteration ``n_s`` after which
 
-**Convergence is flatness, not arrival.** The subordinate controller is
-multi-objective: it trades interface-Q tracking against voltage regulation, so
-its optimum generally sits at a non-zero Q offset from the commanded setpoint.
-A converged loop therefore need NOT reach ``q_set``, and requiring it to would
-score a correctly-converged controller as a failure.
+    ``|q_pcc(k) - q_pcc_inf| <= 1 Mvar``
+
+holds for the rest of the response, where ``q_pcc_inf`` is the *settled* flow.
+That is ``n_settle_final_1mvar`` here, with the band
+``SETTLE_FINAL_BAND_MVAR = 1.0`` (author decision 2026-09-28), and it is the
+key that feeds ``tab:param:timescales:ninner`` and
+``fig:param:timescales:settling_cdf``. The supervisory layer is silent
+throughout, so what is measured is the subordinate loop alone.
+
+**The reference is the settled flow, not the request.** The subordinate
+controller is multi-objective: it also controls the voltages of its own
+network, so it settles at a compromise set by ``g_q`` and ``g_v`` and its
+optimum generally sits at a non-zero Q offset from the commanded setpoint. A
+correctly settled loop therefore need NOT reach ``q_set``, and measuring
+against the request would score it as a failure.
+
+**The flatness criterion is a separate diagnostic that the chapter does not
+report.** ``DEFAULT_FLAT_MVAR = 0.1`` and ``FLAT_SWEEP_MVAR`` measure when the
+step-to-step change dies away, ``|q_pcc(k) - q_pcc(k-1)| -> 0``, and land in
+the ``n_inner_flat_*`` / ``unconverged_flat_*`` keys. ``Chapter09.tex`` is
+explicit about them: "Never report as settling: the flatness counts of the
+September runs." Those key names still carry the old ``N_inner`` spelling;
+renaming them would change this script's output schema, which the Experiment B
+bank campaign reads, so they are left as they are and flagged here instead.
+
+Until 2026-10-23 this docstring defined ``n_s`` *by* the flatness criterion.
+That paragraph had been the definition of the old, measured ``N_inner`` and was
+carried over unchanged when the module was reframed; it conflated two
+quantities the rest of the file keeps apart -- the summary text already said
+"Not a flatness count".
 
 *Corrected 2026-08-20.* An earlier version defined ``N_inner`` as the first
 iteration at which ``|q_pcc - q_set|`` entered a band and stayed -- a tracking

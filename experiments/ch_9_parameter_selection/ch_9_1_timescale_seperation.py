@@ -1,9 +1,21 @@
 r"""
 experiments/ch_9_parameter_selection/ch_9_1_timescale_seperation.py
 ==================================================================
-The settling battery that fills the settling table of the dissertation
-(\cref{ch:timescales}) and the four bracketed values in the surrounding
-text. One command, one run directory, nothing else.
+The open-loop RMS step battery (\cref{ch:timescales}). One command, one run
+directory, nothing else.
+
+**Superseded, and produces no live table.** It filled
+``tab:param:timescales:settling`` -- max settling at W1 per actuator class
+and output family -- which was retired with the step tests at the
+2026-09-18 colloquium and archived in
+``Chapters/archive/Ch9_sec1_step_tests_CUT.tex``.
+
+Superseded by ``tab:param:timescales:actuators``, which answers the same
+question by a different method: modal residue settling on the linearised
+RMS model at W1-W6 and two droop states, via
+``pf.modal_campaign <W>`` -> ``pf.modal_window`` ->
+``analysis.modal_observability`` -> ``analysis.build_modal_bundle``. Do
+not read this script's output as the chapter's number.
 
 Label note (2026-10-23): this cited ``\cref{ch:param:timescales}``, which
 now exists only in ``Chapters/archive/Chapter09_Parameterisation_SUPERSEDED.tex``.

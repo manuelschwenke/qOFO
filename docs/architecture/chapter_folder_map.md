@@ -63,12 +63,41 @@ unchanged — only numbers moved.
 Dead label, fixed in code 2026-10-23: `ch:param:timescales` exists only in
 `Chapters/archive/Chapter09_Parameterisation_SUPERSEDED.tex`. The citations in
 `ch_9_parameter_selection/__init__.py`, `ch_9_1_timescale_seperation.py` and
-`pf/probes/probe_modal_residue.py` now point at `ch:timescales`. The table
-label `tab:param:timescales:settling` is dead for the same reason; the live
-chapter carries `tab:param:timescales:actuators`,
-`tab:param:timescales:ninner` and `tab:timescales:separations`, and which is
-the successor is the author's call, so no table label is named in the code
-rather than naming the wrong one.
+`pf/probes/probe_modal_residue.py` now point at `ch:timescales`.
+
+## The step battery is a historical instrument
+
+Resolved 2026-10-23 with the thesis side. `tab:param:timescales:settling` held
+the open-loop RMS step-battery results — max settling at W1 per actuator class
+and output family — and was **retired with the step tests at the 2026-09-18
+colloquium**, archived in `Chapters/archive/Ch9_sec1_step_tests_CUT.tex`. So
+`ch_9_1_timescale_seperation.py` produces no live table, and neither does
+`pf/probes/probe_modal_residue.py`, a read-only precursor probe. Both now say
+so, naming their successor rather than claiming production.
+
+The three live tables and what produces each:
+
+| table | is | produced by |
+|---|---|---|
+| `tab:param:timescales:actuators` | the conceptual successor — longest settling per actuator class plus the mode that sets it | modal residue settling on the linearised RMS model at W1–W6, two droop states: `pf.modal_campaign <W>` → `pf.modal_window` → `analysis.modal_observability` → `analysis.build_modal_bundle` |
+| `tab:param:timescales:ninner` | closed-loop subordinate settling, 120 interface set-point steps with the supervisory controllers held (Experiment C) | not the step battery; source data at `qOFO_2027/results/THESIS_ch8_D_settling_20260929/` |
+| `tab:timescales:separations` | the chapter's overview of experiments A–D2 and what each fixes | not a data table |
+
+**What this corrects in the code:** the package docstring claimed the battery
+"fixes `T_DS` and `T_TS`". It does not. The subordinate period follows from the
+modal bound of Experiment A — `Chapter09.tex` line 168 gives
+`T_STS >= 17.7 s`, with the period set to 20 s — which is
+`tab:param:timescales:actuators`, a different pipeline. The thesis side also
+reports that `T_TS = 3 min` is set by definition rather than measured; the
+phrase did not match my greps of `Chapter09.tex`, so that one is recorded as
+their reading, not as verified here. The code now avoids the mechanism
+question entirely rather than encoding an unconfirmed claim.
+
+**Cross-repo point worth a decision.** `graphics/Ch9/data/2026-09-23_modal/README.md`
+records that the modal bundle was produced **in `qOFO_2027` on the PowerFactory
+machine**. If `qOFO` is meant to own that chain now, the four-stage pipeline
+above and its outputs need a home decision; at present the chapter's actuator
+settling table is produced from the other clone.
 
 ## The naming question
 

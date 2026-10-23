@@ -261,6 +261,11 @@ Answer these three from the output above, then choose the path:
 
   Either way the headline number in ch:timescales becomes an OUTPUT
   settling time, never a per-mode one.
+
+  Status (2026-10-23): a read-only precursor probe, comparing the modal
+  screen against the Gate-D step battery (13.2 s). It produces no live
+  table. The chapter's actuator settling now comes from
+  tab:param:timescales:actuators via analysis.build_modal_bundle.
 """.rstrip())
 
 

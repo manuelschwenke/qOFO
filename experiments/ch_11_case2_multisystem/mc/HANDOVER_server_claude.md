@@ -1,5 +1,12 @@
 # Handover prompt for a Claude Code session on the server
 
+> **Historical record (2026-10-07, run from `qOFO_2027`).** The module paths and
+> result folders below are those of that copy. In `qOFO` since 2026-10-23 the
+> driver is `experiments.ch_11_case2_multisystem.mc.run_mc`, the Case-1 config
+> is `experiments.ch_10_case1_svr.run_case1`, and a campaign is one documented
+> run folder under `results\ch_11_case2_multisystem\mc\`. See `README_server.md`
+> in this folder for the current procedure. Adapt the prompt before reusing it.
+
 Paste everything below the line into a Claude Code session on the server.
 
 ---

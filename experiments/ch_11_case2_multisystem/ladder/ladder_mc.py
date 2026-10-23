@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ch_10_6_ladder_mc.py
-====================
+experiments/ch_11_case2_multisystem/ladder/ladder_mc.py
+=======================================================
+
+(Was ``experiments/ch_10_case_study/ch_10_6_ladder_mc.py`` until 2026-10-23.
+Superseded by ``experiments/ch_11_case2_multisystem/mc/run_mc.py``; see this
+folder's README.  Module names below are the current ones:
+``ch_10_1_variant_ladder`` is ``variant_ladder``, ``ch_10_4_pi_screen`` is
+``s1_pi_screen``.)
 
 Monte-Carlo robustness campaign for the dissertation's seven-rung control
 ladder (thesis \\cref{ch:case3}).
@@ -58,9 +64,13 @@ sweep would compare unlike references.
 
 Run::
 
-    python -m experiments.ch_10_case_study.ch_10_6_ladder_mc --runs 100 --jobs 18
-    python -m experiments.ch_10_case_study.ch_10_6_ladder_mc --resume --jobs 18
-    python -m experiments.ch_10_case_study.ch_10_6_ladder_mc --replot
+    python -m experiments.ch_11_case2_multisystem.ladder.ladder_mc --runs 100 --jobs 18
+    python -m experiments.ch_11_case2_multisystem.ladder.ladder_mc --resume --jobs 18
+    python -m experiments.ch_11_case2_multisystem.ladder.ladder_mc --replot
+
+Output: ``results/ch_11_case2_multisystem/ladder/<NNNN>_<stamp>_ladder_mc[_<tag>]/``
+(``experiments/thesis_runs.py``).  ``--resume`` and ``--replot`` act on the
+newest run with the same ``--tag``; without ``--resume`` a new run starts.
 
 Author: Manuel Schwenke / Claude Code
 """
@@ -103,28 +113,40 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parents[1]))
+sys.path.insert(0, str(_HERE.parents[2]))           # the project root
 
 from configs.config import MultiTSOConfig                      # noqa: E402
 from experiments.helpers.records import ContingencyEvent       # noqa: E402
-from experiments.paths import RESULTS_ROOT                     # noqa: E402
 from experiments.runners.multi_tso_dso import run_multi_tso_dso  # noqa: E402
+from experiments.thesis_runs import (                          # noqa: E402
+    annotate_run, latest_run, start_thesis_run,
+)
+
+TARGET = "ch:case3"
 
 # ---------------------------------------------------------------------------
 #  Paths
 # ---------------------------------------------------------------------------
-OUT_DIR = Path(RESULTS_ROOT) / "ch10_ladder_mc"
 #: Worker processes are SPAWNED, so module globals set in main() do not reach
-#: them.  The run tag and the gating switch therefore travel by environment,
-#: which the children inherit at spawn time.
-_TAG = os.environ.get("CH10_MC_TAG", "")
-if _TAG:
-    # A tagged campaign gets its OWN results root.  The 2026-09-05 campaign ran
-    # unscaled with O3 uncoordinated; mixing its rows with a DSO_3 x2 run would
-    # pool two different networks into one distribution.
-    OUT_DIR = Path(RESULTS_ROOT) / f"ch10_ladder_mc_{_TAG}"
-RUNS_DIR = OUT_DIR / "runs"
-SCRATCH_DIR = OUT_DIR / "_scratch"
+#: them.  The campaign folder and the gating switch therefore travel by
+#: environment, which the children inherit at spawn time.  main() points
+#: ``LADDER_MC_OUT`` at the documented run folder before any pool starts.  A
+#: tagged campaign is its own run folder: the 2026-09-05 campaign ran unscaled
+#: with O3 uncoordinated, and mixing its rows with a DSO_3 x2 run would pool
+#: two different networks into one distribution.
+OUT_DIR: Optional[Path] = None
+RUNS_DIR: Optional[Path] = None
+SCRATCH_DIR: Optional[Path] = None
+
+
+def _set_out(path: Path) -> None:
+    global OUT_DIR, RUNS_DIR, SCRATCH_DIR
+    OUT_DIR, RUNS_DIR, SCRATCH_DIR = path, path / "runs", path / "_scratch"
+    os.environ["LADDER_MC_OUT"] = str(path)
+
+
+if os.environ.get("LADDER_MC_OUT"):        # a spawned worker
+    _set_out(Path(os.environ["LADDER_MC_OUT"]))
 
 # ---------------------------------------------------------------------------
 #  Scenario parameters (mirrored from 006; see module docstring)
@@ -179,11 +201,11 @@ V_SET = 1.03
 
 
 # ---------------------------------------------------------------------------
-#  Ladder module (loaded by path, as ch_10_4_pi_screen does)
+#  Ladder module (loaded by path, as s1_pi_screen does)
 # ---------------------------------------------------------------------------
 def _load_ladder():
     spec = importlib.util.spec_from_file_location(
-        "ch10_lad_mc", _HERE / "ch_10_1_variant_ladder.py")
+        "ch10_lad_mc", _HERE / "variant_ladder.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     mod.HORIZON_MIN = HORIZON_MIN
@@ -810,27 +832,48 @@ def main() -> None:
     ap.add_argument("--no-gating", action="store_true",
                     help="diagnostic: run every rung, never discard")
     ap.add_argument("--tag", default=None,
-                    help="write to runs_<tag>/ instead of runs/")
+                    help="campaign tag: a separate run folder per tag")
+    ap.add_argument("--note", default="",
+                    help="free-text description, written to the run's README")
     args = ap.parse_args()
 
     # Env must be set BEFORE the pool spawns, so children see the same settings.
-    global OUT_DIR, RUNS_DIR, NON_GATING
-    if args.tag:
-        os.environ["CH10_MC_TAG"] = args.tag
-        OUT_DIR = Path(RESULTS_ROOT) / f"ch10_ladder_mc_{args.tag}"
-        RUNS_DIR = OUT_DIR / "runs"
+    global NON_GATING
     if args.no_gating:
         os.environ["CH10_MC_NO_GATING"] = "1"
         NON_GATING = ("L1", "L2", "S1", "O1", "O2", "O3", "M")
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
-
+    found = None
+    if args.resume or args.replot:
+        try:
+            found = latest_run(__file__, producer="ladder_mc", tag=args.tag,
+                               require_complete=False)
+        except FileNotFoundError:
+            if args.replot:
+                raise SystemExit("no ladder_mc run to replot") from None
     if args.replot:
+        _set_out(found)
         aggregate(collect_rows())
+        annotate_run(found, by=__file__)
         return
 
+    with start_thesis_run(
+            __file__, target=TARGET, config=lad().make_thesis_config(),
+            parameters={"runs": args.runs, "base_seed": args.seed,
+                        "seeds": args.seeds, "gating": not args.no_gating,
+                        "horizon_min": HORIZON_MIN},
+            time_series=("ensemble of randomised 360-min scenarios, "
+                         "see runs/scenario_<seed>.json"),
+            note=args.note, tag=args.tag, resume=found) as run:
+        _set_out(run.root)
+        for d in (OUT_DIR, RUNS_DIR, SCRATCH_DIR):
+            d.mkdir(parents=True, exist_ok=True)
+        _campaign(args)
+        run.describe_output("runs", "scenario_<seed>.json and ts_<seed>.npz per seed")
+
+
+def _campaign(args: argparse.Namespace) -> None:
+    """Collect ``args.runs`` accepted scenarios into ``OUT_DIR``."""
     L = lad()
     L.assert_ladder_controlled()           # pre-flight, not post-mortem
     el = get_elements()

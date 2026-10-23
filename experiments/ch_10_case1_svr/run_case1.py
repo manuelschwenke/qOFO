@@ -1,8 +1,8 @@
 """
-experiments/case1_svr/run_case1.py
-==================================
+experiments/ch_10_case1_svr/run_case1.py
+========================================
 
-Case 1 of the thesis (``ch:case_svr``, Chapter 9 since 2026-10-06): OFO in
+Case 1 of the thesis (``ch:case_svr``, Chapter 10 since 2026-10-23): OFO in
 place of pilot-node secondary voltage regulation, on transmission resources
 only.  Design record: dissertation repo ``00_daily_log/2026-10-06_part3_case_design.md``.
 
@@ -46,9 +46,14 @@ consecutive variants differ in more than the mechanism the step isolates.
 
 Run
 ---
-    python -m experiments.case1_svr.run_case1 --list
-    python -m experiments.case1_svr.run_case1 --only S1m,O0 --run-dir <dir>
-    python -m experiments.case1_svr.run_case1 --only O0 --minutes 30   # smoke
+    python -m experiments.ch_10_case1_svr.run_case1 --list
+    python -m experiments.ch_10_case1_svr.run_case1 --only K1-REF --note "..."
+    python -m experiments.ch_10_case1_svr.run_case1 --only S1m,O0 --run-dir <run>  # add to a run
+    python -m experiments.ch_10_case1_svr.run_case1 --only O0 --minutes 30 --tag smoke
+
+Output: ``results/ch_10_case1_svr/<NNNN>_<stamp>_run_case1[_<tag>]/``, one
+sub-folder per variant, with the README, manifest and LaTeX provenance block
+written by ``experiments/thesis_runs.py``.
 
 Author: Manuel Schwenke / Claude Code (2026-10-06)
 """
@@ -60,24 +65,27 @@ import dataclasses
 import datetime as _dt
 import json
 import pickle
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from configs.config import MultiTSOConfig
 from configs.paramsets import apply_paramset
-from experiments.paths import RESULTS_ROOT
 from experiments.run_multi_system_ofo import make_config
 from experiments.runners.multi_tso_dso import run_multi_tso_dso
+from experiments.thesis_runs import add_run_arguments, start_thesis_run
 
-EXPERIMENT = "THESIS_case1_svr"
 PARAMSET = "ch9_selected"
 HORIZON_MIN = 360
+
+#: Where the results are reported, and what they feed (thesis labels).
+TARGET = "ch:case_svr"
+FEEDS = ("tab:case_svr:reference", "fig:case_svr:equivalence",
+         "fig:case_svr:pareto")
 
 #: Pilot buses of the classical scheme, selected once on the base case
 #: (``008_PILOT_BUS_SELECT.py``, archived to ``_local_archive/`` on
 #: 2026-10-22) and held fixed; the
-#: same as in ``experiments/ch_10_case_study/ch_10_1_variant_ladder.py`` and
+#: same as in ``experiments/ch_11_case2_multisystem/ladder/variant_ladder.py`` and
 #: thesis ``tab:svr:pilots``.
 PILOT_BUSES: Dict[int, int] = {1: 25, 2: 7, 3: 20}
 
@@ -223,31 +231,6 @@ def assert_case1_controlled() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _provenance(out: Path) -> None:
-    """Record the code state the campaign ran on (once per run directory)."""
-    p = out / "provenance.json"
-    if p.exists():
-        return
-    root = Path(__file__).resolve().parents[2]
-
-    def _git(*args: str) -> str:
-        try:
-            return subprocess.run(["git", *args], cwd=root, capture_output=True,
-                                  text=True, timeout=60).stdout.strip()
-        except Exception as exc:  # provenance must never kill a run
-            return f"unavailable: {exc}"
-
-    p.write_text(json.dumps({
-        "created": _dt.datetime.now().isoformat(timespec="seconds"),
-        "code_root": str(root),
-        "git_head": _git("rev-parse", "HEAD"),
-        "git_status": _git("status", "--porcelain"),
-        "paramset": PARAMSET,
-        "horizon_min_default": HORIZON_MIN,
-    }, indent=2), encoding="utf-8")
-    (out / "code_diff.patch").write_text(_git("diff"), encoding="utf-8")
-
-
 def run_one(name: str, out: Path, minutes: int) -> int:
     cfg = resolved(name, minutes)
     d = out / name
@@ -283,9 +266,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default=None,
                     help="comma-separated names, or K1-REF / K1-PAR")
-    ap.add_argument("--run-dir", default=None)
+    ap.add_argument("--run-dir", default=None,
+                    help="add the variants to this existing run of run_case1 "
+                         "(it must carry a run_manifest.json)")
     ap.add_argument("--minutes", type=int, default=HORIZON_MIN)
     ap.add_argument("--list", action="store_true")
+    add_run_arguments(ap)
     args = ap.parse_args()
 
     if args.list:
@@ -303,16 +289,29 @@ def main() -> None:
     for s in sel:
         resolved(s)                      # validates the name early
 
-    if args.run_dir:
-        out = Path(args.run_dir)
-    else:
-        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        out = Path(RESULTS_ROOT) / EXPERIMENT / stamp
-    out.mkdir(parents=True, exist_ok=True)
-    _provenance(out)
-    print(f"run dir: {out}  |  horizon {args.minutes} min  |  {sel}")
-    for s in sel:
-        run_one(s, out, args.minutes)
+    # The run's config is the shared base; each variant's own resolved config
+    # is in <variant>/config_repr.txt, and assert_case1_controlled has checked
+    # that the variants differ from it only in their mechanism.
+    with start_thesis_run(
+            __file__, target=TARGET, feeds=FEEDS,
+            config=base_config(args.minutes), paramset=PARAMSET,
+            parameters={"variants": sel, "horizon_min": args.minutes,
+                        "network": "DSO_3 x2 (load and DER)"},
+            note=args.note, tag=args.tag, resume=args.run_dir) as run:
+        out = run.root
+        print(f"run dir: {out}  |  horizon {args.minutes} min  |  {sel}")
+        failed = []
+        for s in sel:
+            n = run_one(s, out, args.minutes)
+            status = json.loads((out / s / "status.json").read_text(
+                encoding="utf-8"))["status"]
+            if status != "ok":
+                failed.append(s)
+            run.describe_output(s, f"variant {s}: {status}, {n} records "
+                                   f"(log.pkl, status.json, config_repr.txt)")
+            run.write()
+        if failed:
+            run.fail(f"variant(s) failed: {', '.join(failed)}; see <variant>/status.json")
 
 
 if __name__ == "__main__":

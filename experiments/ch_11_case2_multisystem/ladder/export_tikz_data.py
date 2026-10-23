@@ -1,16 +1,21 @@
 """
-ch_10_3_export_tikz_data.py
-===========================
+experiments/ch_11_case2_multisystem/ladder/export_tikz_data.py
+==============================================================
 
-Export the Ch 10 ladder time series as pgfplots ``.dat`` tables, for the
-hand-authored TikZ figures in ``graphics/Ch10``.
+(Was ``experiments/ch_10_case_study/ch_10_3_export_tikz_data.py`` until
+2026-10-23.  Part of the superseded seven-rung ladder, see this folder's
+README.  Since then the default output is the run's own ``tikz_data/``
+folder; pass ``--out`` to export into the thesis.)
+
+Export the seven-rung ladder time series as pgfplots ``.dat`` tables, for
+hand-authored TikZ figures.
 
 The thesis draws its own figures: this writes DATA only, never TikZ.  That is
 the house convention (see ``graphics/Ch9/data/``) and it is the right split --
 styling belongs with the document, numbers belong with the run that produced
 them.
 
-Writes into ``graphics/Ch10/data/<date>_ch10_ladder/``:
+Writes into ``--out`` (default ``<run>/tikz_data``):
 
     voltage_tracking.dat   t + one column per variant, the system-wide RMS
                            voltage-tracking error [pu]
@@ -20,7 +25,8 @@ Writes into ``graphics/Ch10/data/<date>_ch10_ladder/``:
     README.md              provenance
 
 Run:
-    python -m experiments.ch_10_case_study.ch_10_3_export_tikz_data
+    python -m experiments.ch_11_case2_multisystem.ladder.export_tikz_data
+    python -m experiments.ch_11_case2_multisystem.ladder.export_tikz_data --out <thesis>/graphics/<ChN>/data/<date>_ladder
 """
 
 from __future__ import annotations
@@ -37,15 +43,12 @@ from experiments.helpers.comparison_metrics import (
     q_iface_per_trafo,
     voltage_rms_err_all,
 )
-from experiments.paths import RESULTS_ROOT
+from experiments.thesis_runs import annotate_run, latest_run
 
-RESULT_DIR = Path(RESULTS_ROOT) / "THESIS_ch10_variants_single_run"
-THESIS_DATA = Path(
-    r"C:\Users\Manuel Schwenke\Desktop\Daten\01_Forschung\12_Dissertation"
-    r"\latex_diss_ms\graphics\Ch10\data"
-)
+#: The producer whose runs this script exports (not imported: it pulls the plant).
+_VARIANT_LADDER = Path(__file__).with_name("variant_ladder.py")
 
-LADDER = ["L1", "L2", "S1", "O1", "O2", "O3", "M"]
+LADDER =["L1", "L2", "S1", "O1", "O2", "O3", "M"]
 PROPOSED = "O3"
 PILOT_BUSES = {1: 25, 2: 7, 3: 20}
 V_SET = 1.03
@@ -153,12 +156,15 @@ def export_metrics(logs, out: Path) -> Dict[str, Dict[str, float]]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", default=str(RESULT_DIR / "g_w_gen_1e9"))
-    ap.add_argument("--tag", default=f"{date.today().isoformat()}_ch10_ladder")
+    ap.add_argument("--run-dir", default=None,
+                    help="a variant_ladder run (default: the newest complete one)")
+    ap.add_argument("--out", default=None,
+                    help="output folder (default: <run>/tikz_data)")
     args = ap.parse_args()
 
-    run_dir = Path(args.run_dir)
-    out = THESIS_DATA / args.tag
+    run_dir = (Path(args.run_dir) if args.run_dir
+               else latest_run(_VARIANT_LADDER, producer="variant_ladder"))
+    out = Path(args.out) if args.out else run_dir / "tikz_data"
     out.mkdir(parents=True, exist_ok=True)
 
     logs = load(run_dir)
@@ -168,16 +174,15 @@ def main() -> None:
     m = export_metrics(logs, out)
 
     (out / "README.md").write_text(
-        f"# Ch 10 variant ladder -- pgfplots data\n\n"
+        f"# Seven-rung variant ladder -- pgfplots data\n\n"
         f"Exported {date.today().isoformat()} by "
-        f"`experiments/ch_10_case_study/ch_10_3_export_tikz_data.py`.\n\n"
+        f"`experiments/ch_11_case2_multisystem/ladder/export_tikz_data.py`.\n\n"
         f"Source run: `{run_dir}`\n\n"
         f"Validated weight set (`experiments/run_multi_system_ofo.make_config`),\n"
         f"scenario rural_700, 360 min at dt = 20 s, all six contingencies,\n"
         f"**one run per variant** -- no confidence statement is supported.\n\n"
-        f"Full provenance, including the five configuration defects repaired\n"
-        f"during the campaign, is in the README beside the logs:\n"
-        f"`results/THESIS_ch10_variants_single_run/README.md`.\n\n"
+        f"Full provenance (commit, parameters, invocations) is in the source\n"
+        f"run's `README.md`.\n\n"
         f"## Files\n\n"
         f"- `voltage_tracking.dat` -- `t` [min] + one column per variant, the\n"
         f"  system-wide RMS voltage-tracking error [pu]. Full resolution\n"
@@ -191,6 +196,11 @@ def main() -> None:
         f"300 line restore - 330 load off\n",
         encoding="utf-8")
     print(f"\nwritten to {out}")
+    if out.resolve() == (run_dir / "tikz_data").resolve():
+        annotate_run(run_dir, by=__file__,
+                     outputs={"tikz_data": "pgfplots .dat tables"})
+    else:
+        annotate_run(run_dir, by=__file__, exports=[out.resolve()])
     print(f"\n{'':>4}{'e_v':>10}{'e_v,p':>10}{'v_min':>8}{'v_max':>8}{'N_sw':>7}")
     for n in LADDER:
         if n in m:

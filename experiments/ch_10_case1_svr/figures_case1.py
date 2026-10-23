@@ -1,6 +1,6 @@
 """
-experiments/case1_svr/figures_case1.py
-======================================
+experiments/ch_10_case1_svr/figures_case1.py
+============================================
 
 Thesis figures of Case 1 (``ch:case_svr``) from a Case-1 run directory.
 
@@ -20,7 +20,10 @@ in a Palatino face at 8 pt so they need no scaling in LaTeX.
 
 Run
 ---
-    python -m experiments.case1_svr.figures_case1 --run-dir <dir> --out <dir>
+    python -m experiments.ch_10_case1_svr.figures_case1 [--run-dir <dir>] --out <dir>
+
+Without ``--run-dir`` the newest complete run of ``run_case1`` is used.  The
+exported files are listed in that run's README.
 
 Author: Manuel Schwenke / Claude Code (2026-10-07)
 """
@@ -39,6 +42,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+from experiments.thesis_runs import annotate_run, latest_run  # noqa: E402
+
+#: The producer whose runs this script draws (not imported: it pulls the plant).
+_RUN_CASE1 = Path(__file__).with_name("run_case1.py")
+
 CM = 1 / 2.54
 WIDTH = 12.0 * CM
 PILOT_AREA1 = 25
@@ -47,7 +55,7 @@ EVENTS = [30, 120, 180, 210, 300, 330]
 #: TU Darmstadt corporate colours, as defined in the thesis preamble
 #: (ClassicThesis.tex: tured, tuamber, tuteal, ...; qOFO configs/color_config.py).
 #: The variant -> colour mapping is the validated Part III palette of
-#: experiments/ch_10_case_study/ch_10_2_figures.PALETTE (S1 red, O1 amber,
+#: experiments/ch_11_case2_multisystem/ladder/figures.PALETTE (S1 red, O1 amber,
 #: O2 teal, O3 dark blue), so a variant has one colour in every chapter.
 #: S1^- = O0 is not in that palette and takes TU purple (11c).
 TU = {
@@ -175,15 +183,23 @@ def fig_pareto(run: Path, out: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--run-dir", default=None,
+                    help="a run_case1 run folder (default: the newest complete one)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
-    run, out = Path(args.run_dir), Path(args.out)
+    run = (Path(args.run_dir) if args.run_dir
+           else latest_run(_RUN_CASE1, producer="run_case1"))
+    out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    print(f"run dir: {run}")
     _setup()
     fig_equivalence(run, out)
     fig_pareto(run, out)
     print("written:", sorted(os.listdir(out)))
+    annotate_run(run, by=__file__, exports=[
+        (out / name).resolve() for name in
+        ("case_svr_equivalence.pdf", "case_svr_pareto.pdf", "case_svr_data.csv")
+        if (out / name).exists()])
 
 
 if __name__ == "__main__":

@@ -1,10 +1,13 @@
-"""Matplotlib quick look at a saved Ch 10 ladder; writes only RUN/figures.
+"""Matplotlib quick look at a saved seven-rung ladder run; writes only RUN/figures.
+
+(Was ``experiments/ch_10_case_study/ch_10_2_preview.py`` until 2026-10-23.
+Part of the superseded seven-rung ladder, see this folder's README.)
 
 From the project root::
 
-    python -m experiments.ch_10_case_study.ch_10_2_preview --run-dir results/ch10_ladder/0002
+    python -m experiments.ch_11_case2_multisystem.ladder.preview --run-dir <variant_ladder run>
 
-Without --run-dir, use the newest numbered ch10_ladder run. PNG and PDF are
+Without --run-dir, use the newest variant_ladder run. PNG and PDF are
 saved by default; --formats png saves PNG only. No simulation or TeX export.
 
 Voltage curves use logged post-power-flow spatial RMS errors over the TS
@@ -32,21 +35,21 @@ import numpy as np
 
 # Support both python -m and execution of this file from an IDE.
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from experiments.ch_10_case_study.ch_10_2_figures import LADDER, PALETTE, STYLE
+from experiments.ch_11_case2_multisystem.ladder.figures import LADDER, PALETTE, STYLE
 from experiments.helpers.comparison_metrics import q_iface_per_trafo
-from experiments.paths import RESULTS_ROOT
+from experiments.thesis_runs import annotate_run, latest_run as _latest_thesis_run
 
 ZONES = (1, 2, 3)
 
 
 def latest_run() -> Path:
-    base = Path(RESULTS_ROOT) / "ch10_ladder"
-    runs = [p for p in base.iterdir() if p.is_dir() and p.name.isdigit()] if base.is_dir() else []
-    if not runs:
-        raise ValueError(f"No numbered ladder runs in {base}; specify --run-dir")
-    return max(runs, key=lambda p: int(p.name))
+    try:
+        return _latest_thesis_run(Path(__file__).with_name("variant_ladder.py"),
+                                  producer="variant_ladder", require_complete=False)
+    except FileNotFoundError as exc:
+        raise ValueError(f"{exc}; specify --run-dir") from None
 
 
 def load_logs(run_dir: Path, names: list[str]) -> dict:
@@ -230,6 +233,8 @@ def main() -> None:
         "Single-run descriptive comparison; no statistical confidence statement.\n",
         encoding="utf-8",
     )
+    annotate_run(run_dir, by=__file__,
+                 outputs={"figures": "matplotlib preview (preview_notes.txt)"})
     print(f"\nPreview saved in {out}")
 
 

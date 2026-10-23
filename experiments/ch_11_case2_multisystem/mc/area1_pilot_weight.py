@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-experiments/part3_mc/area1_pilot_weight.py
-==========================================
+experiments/ch_11_case2_multisystem/mc/area1_pilot_weight.py
+============================================================
 
 Check of the area-1 hypothesis of the first Monte-Carlo slice (2026-10-08).
 
@@ -29,8 +29,13 @@ and S1 were ``ok`` -- no selection on the outcome of interest.
 
 Run
 ---
-    python -m experiments.part3_mc.area1_pilot_weight --mc-dir <THESIS_part3_mc> --jobs 12
-    python -m experiments.part3_mc.area1_pilot_weight --mc-dir <...> --report
+    python -m experiments.ch_11_case2_multisystem.mc.area1_pilot_weight [--mc-dir <campaign>] --jobs 12
+    python -m experiments.ch_11_case2_multisystem.mc.area1_pilot_weight --report
+
+Without ``--mc-dir`` the newest complete untagged ``run_mc`` campaign is read.
+Results go into one documented run folder,
+``results/ch_11_case2_multisystem/mc/<NNNN>_<stamp>_area1_pilot_weight/``; a
+call without ``--new`` continues the newest one.
 
 Author: Manuel Schwenke / Claude Code (2026-10-08)
 """
@@ -57,12 +62,15 @@ from typing import Any, Dict, List
 import numpy as np
 import pandas as pd
 
-from experiments.case1_svr.report_case1 import area_metrics
-from experiments.case1_svr.run_case1 import PILOT_BUSES, resolved
-from experiments.part3_mc import run_mc as M
-from experiments.paths import RESULTS_ROOT
+from experiments.ch_10_case1_svr.report_case1 import area_metrics
+from experiments.ch_10_case1_svr.run_case1 import PILOT_BUSES, resolved
+from experiments.ch_11_case2_multisystem.mc import run_mc as M
+from experiments.thesis_runs import (
+    add_run_arguments, annotate_run, latest_run, start_thesis_run,
+)
 
-OUT = Path(RESULTS_ROOT) / "THESIS_part3_mc_area1_pilot"
+#: A diagnostic of the first Monte-Carlo slice; reported where that slice is.
+TARGET = "ch:case3:montecarlo"
 AREA = 1
 #: 1.0 = plain O2, the same-machine baseline.  Capped at 6 by the loop gain:
 #: zone-1 curvature lambda_max (stable iff < 2, budget ceiling 1.6) measured
@@ -184,28 +192,52 @@ def report(mc_dir: Path, out: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mc-dir", required=True)
+    ap.add_argument("--mc-dir", default=None,
+                    help="the run_mc campaign (default: the newest complete, "
+                         "untagged one)")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--n", type=int, default=N_EPISODES)
     ap.add_argument("--factors", default=",".join(str(f) for f in FACTORS))
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--new", action="store_true",
+                    help="start a fresh check instead of continuing the newest")
+    add_run_arguments(ap)
     args = ap.parse_args()
-    mc_dir = Path(args.mc_dir)
-    for sub in ("runs", "logs", "_scratch"):
-        (OUT / sub).mkdir(parents=True, exist_ok=True)
+    mc_dir = (Path(args.mc_dir) if args.mc_dir
+              else latest_run(M.__file__, producer="run_mc", tag=None))
+    print(f"campaign: {mc_dir}", flush=True)
+    try:
+        found = None if args.new else latest_run(
+            __file__, producer="area1_pilot_weight", tag=args.tag,
+            require_complete=False)
+    except FileNotFoundError:
+        found = None
     if args.report:
-        report(mc_dir, OUT)
+        if found is None:
+            raise SystemExit("no area1_pilot_weight run to report on")
+        report(mc_dir, found)
+        annotate_run(found, by=__file__)
         return
-    seeds = select_seeds(mc_dir, args.n)
     factors = [float(x) for x in args.factors.split(",")]
-    jobs = [(s, k, str(OUT)) for k in factors for s in seeds
-            if not (OUT / "runs" / f"{s}_{_name(k)}.json").exists()]
-    print(f"seeds {seeds}\nfactors {factors}\n{len(jobs)} run(s)", flush=True)
-    with ProcessPoolExecutor(max_workers=max(1, args.jobs)) as ex:
-        futs = [ex.submit(task, *j) for j in jobs]
-        for f in as_completed(futs):
-            print(time.strftime("%H:%M"), f.result(), flush=True)
-    report(mc_dir, OUT)
+    with start_thesis_run(
+            __file__, target=TARGET,
+            parameters={"mc_dir": str(mc_dir), "area": AREA,
+                        "factors": factors, "n_episodes": args.n},
+            time_series=("episodes of the campaign in mc_dir: the first N seeds "
+                         "on which O2 and S1 were ok, see runs/"),
+            note=args.note, tag=args.tag, resume=found) as run:
+        out = run.root
+        for sub in ("runs", "logs", "_scratch"):
+            (out / sub).mkdir(parents=True, exist_ok=True)
+        seeds = select_seeds(mc_dir, args.n)
+        jobs = [(s, k, str(out)) for k in factors for s in seeds
+                if not (out / "runs" / f"{s}_{_name(k)}.json").exists()]
+        print(f"seeds {seeds}\nfactors {factors}\n{len(jobs)} run(s)", flush=True)
+        with ProcessPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+            futs = [ex.submit(task, *j) for j in jobs]
+            for f in as_completed(futs):
+                print(time.strftime("%H:%M"), f.result(), flush=True)
+        report(mc_dir, out)
 
 
 if __name__ == "__main__":

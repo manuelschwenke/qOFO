@@ -1,29 +1,32 @@
 # Experiments
 
 Entry points, grouped by what they produce. `helpers/` and `runners/` are
-shared implementation infrastructure, not entry points; `results_io.py` creates
-immutable numbered run directories with exact and human-readable configuration
-snapshots, and `paths.py` resolves the result roots.
+shared implementation infrastructure, not entry points. `thesis_runs.py`
+creates the documented run folders of the thesis chapters (below);
+`results_io.py` creates the numbered run directories of the non-chapter entry
+points; `paths.py` resolves the result roots.
 
 ## Thesis chapters
 
-Each chapter folder carries its own `README.md` mapping sections to scripts, so
-every reported value has a single traceable producer. Start there rather than
-here.
+Since 2026-10-23 every thesis producer lives in a chapter folder
+`ch_NN_<description>/[<sub-experiment>/]`, and `results/` mirrors that tree.
+A producer calls `thesis_runs.start_thesis_run(__file__, target=<label>, ...)`,
+which derives the results folder from the script's location and writes
+`README.md`, `run_manifest.json` and the thesis's `RESULT PROVENANCE` block
+(`latex_header.tex`) into the run. The LaTeX label is the stable key; the
+number in the folder name is the chapter number of 2026-10-23. Layout,
+archive rule and the thesis check: `results/README.md`.
 
-- `ch_9_parameter_selection/` — Ch. 9, the parameterisation of the hierarchy:
-  the dispatch periods (§9.1), the dead band (§9.2) and the objective and
-  step-size weights (§9.3). Its `README.md` is the section map and
-  `RUNBOOK_ch9.md` the procedure. `ch_9_1_timescale_seperation.py` produces
-  Table 9.1 and needs a PowerFactory seat; `--dry-run` and `--self-test` do
-  not.
-- `ch_10_case_study/` — Ch. 10, the variant ladder and the PI screens.
-- `case1_svr/run_case1.py` — the classical pilot-node SVR case study, the `S1`
-  baseline (`ch:case_svr`).
-- `part3_mc/run_mc.py` — the Part-3 Monte-Carlo campaign;
-  `area1_pilot_weight.py` is its area-1 pilot-weight probe.
-- `reference_period/characterise_reference_period.py` — characterisation of the
-  reference period the campaigns sample from.
+Each chapter folder carries its own `README.md` mapping the scripts to thesis
+labels. Start there rather than here.
+
+| Folder | Label | Contents |
+|---|---|---|
+| `ch_08_setup/` | `ch:setup` | `reference_period/`: characterisation of the reference period |
+| `ch_9_parameter_selection/` | `ch:timescales` | Experiments A–D2. **Not yet renamed to `ch_09_parameter_selection`**: the Experiment B bank campaign running on another machine calls these scripts by path. Rename only after it has finished. Its `README.md` is the section map, `RUNBOOK_ch9.md` the procedure. |
+| `ch_10_case1_svr/` | `ch:case_svr` | `run_case1.py`, `report_case1.py`, `figures_case1.py` (was `case1_svr/`) |
+| `ch_11_case2_multisystem/` | `ch:case3` | `mc/`: the Monte-Carlo campaign (was `part3_mc/`); `ladder/`: the superseded seven-rung ladder (was `ch_10_case_study/`) |
+| `ch_12_case3_sts_support/` | `ch:case_sts` | no producer yet |
 
 ## Coordination mechanisms
 
@@ -104,16 +107,12 @@ history. Fourteen files:
   partition changes, not code on any path.
 - `009_S1_VS_O1.py`, the paper's `S1` (classical pilot-node SVR) against `O1`
   (TS-OFO on the continuous actuators only). The thesis makes its own
-  comparison in `case1_svr/` and the chapter-10 ladder.
+  comparison in `ch_10_case1_svr/` (and, superseded, in
+  `ch_11_case2_multisystem/ladder/`).
 
 None of the four carries a `ch:` label, which is the evidence that they are the
 paper's rather than the dissertation's. `005` does not either, but it is kept
 for the import reason above.
-
-One open point from that move: the thesis write-up handoff
-(`docs/handoff/2026-08-17_thesis_writeup_handoff.md` §8) states the boundary
-model as Thévenin, while `tie_boundary` defaults to `"pq"`. Worth reconciling
-before that section is written.
 
 One open point from that move: the thesis write-up handoff
 (`docs/handoff/2026-08-17_thesis_writeup_handoff.md` §8) states the boundary

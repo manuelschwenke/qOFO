@@ -1,6 +1,9 @@
 """
-ch_10_4_pi_screen.py
-====================
+experiments/ch_11_case2_multisystem/ladder/s1_pi_screen.py
+==========================================================
+
+(Was ``experiments/ch_10_case_study/ch_10_4_pi_screen.py`` until 2026-10-23.
+Part of the superseded seven-rung ladder, see this folder's README.)
 
 Full-horizon screen of the S1 PI gains, with and without the pilot-voltage
 priority safeguard.
@@ -14,14 +17,17 @@ Grid: k_p in {0.1, 0.2, 0.4} x safeguard {on, off}.  Both loops take the same
 k_p, matching the "guard plus both Kp" case that screened best.  The two
 k_p = 0 corners are NOT re-run -- they exist already:
     I-only + guard    the ladder rerun of 2026-09-04
-    I-only, no guard  results/.../\_archive_S1_classical/S1_Ionly_noguard.pkl
+    I-only, no guard  results/.../_archive_S1_classical/S1_Ionly_noguard.pkl
 
 Reported per case: horizon RMS over each area's reference set and on the pilot
 nodes, plus the peak error in the 30 min after the generator trip (t = 30) and
 after the line trip (t = 210) -- the two events the safeguard was built for.
 
 Run:
-    python -m experiments.ch_10_case_study.ch_10_4_pi_screen
+    python -m experiments.ch_11_case2_multisystem.ladder.s1_pi_screen [--note "..."]
+
+Output: ``results/ch_11_case2_multisystem/ladder/<NNNN>_<stamp>_s1_pi_screen/``,
+one sub-folder per grid point plus ``screen.json``.
 """
 
 from __future__ import annotations
@@ -34,10 +40,9 @@ from typing import Dict, List
 
 import numpy as np
 
-from experiments.paths import RESULTS_ROOT
+from experiments.thesis_runs import add_run_arguments, start_thesis_run
 
-RESULT_DIR = Path(RESULTS_ROOT) / "THESIS_ch10_variants_single_run"
-OUT_DIR = Path(RESULTS_ROOT) / "ch10_s1_pi_screen"
+TARGET = "ch:case3"
 
 #: k_p = 0.2 is taken from the 42-minute screen and NOT re-tuned.  S1 is a
 #: reference, not the contribution: it needs to be a fair opponent, not an
@@ -87,18 +92,28 @@ def evaluate(log) -> Dict[str, float]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--minutes", type=int, default=360)
+    add_run_arguments(ap)
     args = ap.parse_args()
 
     import importlib.util as u
     here = Path(__file__).parent
-    spec = u.spec_from_file_location("lad", here / "ch_10_1_variant_ladder.py")
+    spec = u.spec_from_file_location("lad", here / "variant_ladder.py")
     lad = u.module_from_spec(spec)
     spec.loader.exec_module(lad)
     lad.HORIZON_MIN = args.minutes
 
+    with start_thesis_run(
+            __file__, target=TARGET, config=lad.make_thesis_config(),
+            parameters={"variant": "S1", "k_p": K_P_GRID, "safeguard": GUARD_GRID,
+                        "horizon_min": args.minutes},
+            note=args.note, tag=args.tag) as run:
+        _screen(lad, run.root)
+        run.describe_output("screen.json", "metrics per grid point")
+
+
+def _screen(lad, OUT_DIR: Path) -> None:
     from experiments.runners.multi_tso_dso import run_multi_tso_dso
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
     results: Dict[str, Dict[str, float]] = {}
 
     for guard in GUARD_GRID:

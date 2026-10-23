@@ -1,6 +1,10 @@
 """
-ch_10_5_pi_candidates.py
-========================
+experiments/ch_11_case2_multisystem/ladder/s1_pi_candidates.py
+==============================================================
+
+(Was ``experiments/ch_10_case_study/ch_10_5_pi_candidates.py`` until
+2026-10-23.  Part of the superseded seven-rung ladder, see this folder's
+README.)
 
 The two surviving S1 PI candidates, on the full 360-minute horizon.
 
@@ -10,19 +14,24 @@ pair isolates the pilot-voltage safeguard and nothing else.  The gains are
 deliberately NOT re-tuned here: S1 is the reference scheme, not the
 contribution, and it needs to be a fair opponent rather than an optimal one.
 
-Both are run regardless of how ``ch_10_4_pi_screen`` comes out.  Whichever is
+Both are run regardless of how ``s1_pi_screen`` comes out.  Whichever is
 chosen is needed at 360 minutes anyway, and the screen's short horizon reaches
 only the generator trip at 30 min -- the line trip at 210 min, which is the
 event the safeguard was built for, fires only here.
 
-Config construction follows ``ch_10_4_pi_screen.main()`` exactly: the
-authoritative factory via ``ch_10_1_variant_ladder.make_thesis_config``, the
+Config construction follows ``s1_pi_screen.main()`` exactly: the
+authoritative factory via ``variant_ladder.make_thesis_config``, the
 ``VARIANTS["S1"]`` overrides on top, then the two swept fields.  No weight is
 restated -- see the ladder's module docstring for why that matters.
 
 Run:
-    python -m experiments.ch_10_case_study.ch_10_5_pi_candidates
-    python -m experiments.ch_10_case_study.ch_10_5_pi_candidates --minutes 360
+    python -m experiments.ch_11_case2_multisystem.ladder.s1_pi_candidates
+    python -m experiments.ch_11_case2_multisystem.ladder.s1_pi_candidates --only kp0.2_guard
+    python -m experiments.ch_11_case2_multisystem.ladder.s1_pi_candidates --new
+
+Output: ``results/ch_11_case2_multisystem/ladder/<NNNN>_<stamp>_s1_pi_candidates/``.
+The sweep can be split across calls: without ``--new`` a call continues the
+newest run of this script, and ``candidates.json`` merges the entries.
 """
 
 from __future__ import annotations
@@ -34,9 +43,9 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from experiments.paths import RESULTS_ROOT
+from experiments.thesis_runs import add_run_arguments, latest_run, start_thesis_run
 
-OUT_DIR = Path(RESULTS_ROOT) / "ch10_s1_candidates"
+TARGET = "ch:case3"
 
 #: (k_p on both loops, safeguard).  One field apart, by construction.
 CANDIDATES = [
@@ -56,6 +65,9 @@ def main() -> None:
     ap.add_argument("--only", default=None,
                     help="comma-separated tags to run, e.g. kp0.2_guard; "
                          "default runs both")
+    ap.add_argument("--new", action="store_true",
+                    help="start a fresh run instead of continuing the newest")
+    add_run_arguments(ap)
     args = ap.parse_args()
 
     wanted = ([t.strip() for t in args.only.split(",")] if args.only
@@ -66,15 +78,33 @@ def main() -> None:
 
     import importlib.util as u
     here = Path(__file__).parent
-    spec = u.spec_from_file_location("lad", here / "ch_10_1_variant_ladder.py")
+    spec = u.spec_from_file_location("lad", here / "variant_ladder.py")
     lad = u.module_from_spec(spec)
     spec.loader.exec_module(lad)
     lad.HORIZON_MIN = args.minutes
 
-    from experiments.runners.multi_tso_dso import run_multi_tso_dso
-    from experiments.ch_10_case_study.ch_10_4_pi_screen import evaluate
+    try:
+        found = None if args.new else latest_run(
+            __file__, producer="s1_pi_candidates", tag=args.tag,
+            require_complete=False)
+    except FileNotFoundError:
+        found = None
+    with start_thesis_run(
+            __file__, target=TARGET, config=lad.make_thesis_config(),
+            parameters={"variant": "S1", "candidates": wanted,
+                        "horizon_min": args.minutes},
+            note=args.note, tag=args.tag, resume=found) as run:
+        failed = _run_candidates(lad, run.root, wanted, args.minutes)
+        run.describe_output("candidates.json", "metrics per candidate (merged)")
+        if failed:
+            raise SystemExit(1)
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+def _run_candidates(lad, OUT_DIR: Path, wanted, minutes: int) -> bool:
+    """Run the wanted candidates into ``OUT_DIR``; True if one failed."""
+    from experiments.runners.multi_tso_dso import run_multi_tso_dso
+    from experiments.ch_11_case2_multisystem.ladder.s1_pi_screen import evaluate
+
     results: Dict[str, Optional[Dict[str, Any]]] = {}
     failed = False
 
@@ -95,7 +125,7 @@ def main() -> None:
         print("\n" + "=" * 70)
         print(f"  S1  k_p={cfg.svr_k_p_rvr:g}  "
               f"safeguard={'on' if cfg.svr_rpr_voltage_priority else 'off'}  "
-              f"horizon={args.minutes} min")
+              f"horizon={minutes} min")
         print(f"  contingencies fired: {len(fired)}  {fired}")
         if skipped:
             print(f"  SKIPPED (beyond horizon): {skipped}")
@@ -145,8 +175,7 @@ def main() -> None:
         print(f"{tag:>16}{r['records']:>10d}{m['e_v']:>10.5f}{m['e_p']:>10.5f}"
               f"{m['peak_gen_trip']:>11.5f}{m['peak_line_trip']:>11.5f}")
     print(f"\nwritten: {OUT_DIR/'candidates.json'}")
-    if failed:
-        raise SystemExit(1)
+    return failed
 
 
 if __name__ == "__main__":

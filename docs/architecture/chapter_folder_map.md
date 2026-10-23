@@ -1,8 +1,11 @@
 # Chapter folders vs the dissertation — what to change
 
 Updated 2026-10-23 after the chapter split, and after three corrections from
-the thesis side. Still **not applied** to the folder names: see the naming
-question at the end, which is worth settling before a fourth rename.
+the thesis side. **Applied the same afternoon** to four of the five folders,
+after the author settled the naming question (see the end). The layout, the
+run folders and the archive rule are documented in `results/README.md` and
+`experiments/thesis_runs.py`; the change record is
+`docs/daily_log/10_2026/2026-10-23_chapter_results_layout.md`.
 
 Authoritative source: the `\include` list in `ClassicThesis.tex` and the
 `\chapter{...}` / `\label{ch:...}` lines in each `Chapters/ChapterNN.tex`, at
@@ -51,14 +54,29 @@ unchanged — only numbers moved.
 
 ## Folder names against the live numbering
 
+Done on 2026-10-23 (plain moves, not `git mv`, so the shared index was not
+touched; git sees deletions plus untracked folders until they are staged):
+
+| was | now | serves |
+|---|---|---|
+| `experiments/reference_period/` | `experiments/ch_08_setup/reference_period/` | `ch:setup:scenarios:reference` |
+| `experiments/case1_svr/` | `experiments/ch_10_case1_svr/` | `ch:case_svr` |
+| `experiments/part3_mc/` | `experiments/ch_11_case2_multisystem/mc/` | `ch:case3:montecarlo`, `ch:setup:montecarlo` |
+| `experiments/ch_10_case_study/ch_10_N_*.py` | `experiments/ch_11_case2_multisystem/ladder/*.py` (prefixes dropped) | the superseded seven-rung ladder |
+| — | `experiments/ch_12_case3_sts_support/` (README only) | `ch:case_sts` |
+
+Still open:
+
 | folder | serves | now | note |
 |---|---|---:|---|
-| `experiments/ch_9_parameter_selection/` | `ch:timescales` | **Ch 9** | name is the chapter's *old* title, "Parameterisation of the Control Hierarchy" |
-| `experiments/case1_svr/` | `ch:case_svr` | **Ch 10** | "case1" is the case number, not the chapter |
-| `experiments/ch_10_case_study/` | `ch:case3` | **Ch 11** | number now wrong |
-| `experiments/reference_period/`, `experiments/part3_mc/` | `ch:setup:*` | **Ch 8** | |
+| `experiments/ch_9_parameter_selection/` | `ch:timescales` | **Ch 9** | rename to `ch_09_parameter_selection/` **deferred**: the Experiment B bank campaign on another machine (`results/THESIS_ch8_expB_banks_20261022/driver.py`) calls `ch_9_3_stage2_screen.py`, `ch_9_3_select.py`, `ch_9_1_ninner_isolated_sts.py` by path. Call sites to edit then: the folder's modules, `tuning/stage1_screen.py`, `pf/timescale_study.py`, `tests/experiments/test_ch9_*.py`, `configs/paramsets/ch9_selected.json`, `README.md`, `RUNBOOK_ch9.md` |
 | `analysis/e1_interface_column_norms.py` | `ch:architectures:cascade:aggregation` | **Ch 5**, a section | leave in `analysis/` |
-| — | `ch:case_sts` | **Ch 12** | no folder; the switched-shunt / STS work belongs to it |
+
+Stale path *comments* left on purpose in files the running campaign imports:
+`configs/config.py:361` (`experiments/part3_mc/...`), `tuning/stage2_search.py:258`
+(`experiments/ch_10_case_study/...`), `experiments/run_multi_system_ofo.py` (two
+mentions; that file also carries uncommitted edits of another session). Fix them
+with the deferred rename.
 
 Dead label, fixed in code 2026-10-23: `ch:param:timescales` exists only in
 `Chapters/archive/Chapter09_Parameterisation_SUPERSEDED.tex`. The citations in
@@ -215,7 +233,14 @@ already what the scripts carry in their comments, so the folder name and the
 thesis reference would stay in lockstep without maintenance. The cost is a
 one-off rename of the three existing folders and their READMEs.
 
-Not done, because it is a decision rather than a repair.
+**Decided by the author on 2026-10-23: chapter numbers, zero-padded**
+(`ch_NN_<description>`), because a reader browses by chapter. The churn is
+contained instead of avoided: every run README, manifest and thesis
+`RESULT PROVENANCE` block carries the LaTeX label as the stable key, and
+records the number only "as of" the run date (from the thesis `.aux`).
+`python -m experiments.thesis_runs check` reports a block whose run or label
+no longer resolves. A future renumbering therefore means renaming folders and
+updating their header paths, not reconstructing what came from where.
 
 ## Two things a strict sort should not do
 
@@ -223,9 +248,10 @@ Not done, because it is a decision rather than a repair.
   `modal_reduce` is imported by a test and the other two are documented as
   `python -m analysis.X`; they are libraries and entry points. Point the
   chapter README at them instead.
-- **Two scripts carry several chapter labels** — `part3_mc/run_mc.py` has three
-  (setup *and* case 3) and `ch_9_1_timescale_seperation.py` two. One directory
-  cannot express that; the README cross-reference is the honest home.
+- **Two scripts carry several chapter labels** — `ch_11_case2_multisystem/mc/run_mc.py`
+  has three (setup *and* case 3) and `ch_9_1_timescale_seperation.py` two. One
+  directory cannot express that; the script sits in its primary chapter and its
+  run README names every label (`target` in `thesis_runs.start_thesis_run`).
 
 ## Also pending
 

@@ -1,6 +1,6 @@
 """
-experiments/case1_svr/report_case1.py
-=====================================
+experiments/ch_10_case1_svr/report_case1.py
+===========================================
 
 Metrics of the Case 1 campaign (thesis ``ch:case_svr``).  Reads
 ``<run_dir>/<variant>/log.pkl`` as written by ``run_case1.py``.
@@ -33,7 +33,10 @@ Writes ``metrics.csv``, ``epost.csv``, ``pareto.csv``, ``equivalence.json``.
 
 Run
 ---
-    python -m experiments.case1_svr.report_case1 --run-dir <dir> [--v-lo 0.95 --v-hi 1.05]
+    python -m experiments.ch_10_case1_svr.report_case1 [--run-dir <dir>] [--v-lo 0.95 --v-hi 1.05]
+
+Without ``--run-dir`` the newest complete run of ``run_case1`` is read.  The
+four files are listed in that run's README afterwards.
 
 Author: Manuel Schwenke / Claude Code (2026-10-06)
 """
@@ -49,9 +52,11 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from experiments.case1_svr.run_case1 import (
+from experiments.ch_10_case1_svr import run_case1 as _run_case1
+from experiments.ch_10_case1_svr.run_case1 import (
     K1_EXTRA, K1_PAR, K1_REF, PILOT_BUSES, base_config, resolved,
 )
+from experiments.thesis_runs import annotate_run, latest_run
 
 
 def _load(run_dir: Path, name: str) -> Optional[list]:
@@ -178,13 +183,16 @@ def equivalence(a: list, b: list) -> Dict[str, float]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--run-dir", default=None,
+                    help="a run_case1 run folder (default: the newest complete one)")
     ap.add_argument("--v-lo", type=float, default=0.95,
                     help="lower edge of the normal operating range [pu]")
     ap.add_argument("--v-hi", type=float, default=1.05,
                     help="upper edge of the normal operating range [pu]")
     args = ap.parse_args()
-    run_dir = Path(args.run_dir)
+    run_dir = (Path(args.run_dir) if args.run_dir
+               else latest_run(_run_case1.__file__, producer="run_case1"))
+    print(f"run dir: {run_dir}")
 
     cfg = base_config()
     zones = sorted(PILOT_BUSES)
@@ -232,6 +240,14 @@ def main() -> None:
         print("\n== equivalence S1m vs O0 " + "=" * 47)
         for k, v in eq.items():
             print(f"  {k:32s} {v}")
+
+    annotate_run(run_dir, by=__file__, outputs={
+        "metrics.csv": f"metrics per variant and area, normal range "
+                       f"[{args.v_lo}, {args.v_hi}] pu",
+        "epost.csv": "post-event error growth per contingency",
+        "pareto.csv": "error and effort columns of the error--effort front",
+        "equivalence.json": "largest S1m vs O0 deviation",
+    })
 
 
 if __name__ == "__main__":

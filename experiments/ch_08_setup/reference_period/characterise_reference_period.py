@@ -1,12 +1,13 @@
 """
-experiments/reference_period/characterise_reference_period.py
-=============================================================
+experiments/ch_08_setup/reference_period/characterise_reference_period.py
+=========================================================================
 
 One-off characterisation of the REFERENCE PERIOD of Part III (thesis
 ``ch:setup:scenarios:reference``): 05 January 2016, 08:00, 360 min, with the
-six scheduled disturbances of ``make_config()``.  Chapters 9 and 10 show their
-detailed (single-run) results on this period; the Monte-Carlo ensemble is
-drawn elsewhere in the year (``experiments/part3_mc``).
+six scheduled disturbances of ``make_config()``.  The case chapters
+(``ch:case_svr``, ``ch:case3``) show their detailed (single-run) results on
+this period; the Monte-Carlo ensemble is drawn elsewhere in the year
+(``experiments/ch_11_case2_multisystem/mc``).
 
 What is computed, and from what
 -------------------------------
@@ -33,9 +34,13 @@ Outputs
 
 Run
 ---
-    python -m experiments.reference_period.characterise_reference_period \
-        --run-dir results/THESIS_case1_svr/20261006_K1 \
-        --out results/THESIS_reference_period --fig-dir <thesis>/graphics/setup
+    python -m experiments.ch_08_setup.reference_period.characterise_reference_period \
+        [--run-dir <Case-1 run>] --fig-dir <thesis>/graphics/setup
+
+Without ``--run-dir`` the L2 log of the newest complete ``run_case1`` run is
+read.  Without ``--out`` the tables go into a new documented run folder,
+``results/ch_08_setup/reference_period/<NNNN>_<stamp>_characterise_reference_period/``,
+whose README names the source run and the exported figure.
 
 Author: Manuel Schwenke / Claude Code (2026-10-07)
 """
@@ -57,7 +62,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from core.profiles import DEFAULT_PROFILES_CSV, load_profiles, snapshot_base_values
-from experiments.case1_svr.run_case1 import resolved
+from experiments.ch_10_case1_svr import run_case1 as _run_case1
+from experiments.ch_10_case1_svr.run_case1 import PARAMSET, resolved
+from experiments.thesis_runs import add_run_arguments, latest_run, start_thesis_run
 from network.ieee39 import add_hv_networks, build_ieee39_net
 from network.ieee39.dso_overrides import apply_dso_overrides
 from network.zone_partition import fixed_zone_partition_ieee39
@@ -65,6 +72,9 @@ from network.zone_partition import fixed_zone_partition_ieee39
 CM = 1 / 2.54
 WIDTH = 12.0 * CM
 HORIZON_MIN = 360
+
+TARGET = "ch:setup:scenarios:reference"
+FEEDS = ("fig:setup:reference", "tab:setup:reference:events")
 
 #: TU Darmstadt corporate colours as defined in the thesis preamble
 #: (ClassicThesis.tex) and in qOFO configs/color_config.py.
@@ -282,13 +292,42 @@ def tripped_gen_dispatch(log: list, minute: float) -> Dict[str, float]:
 # ---------------------------------------------------------------------------
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", required=True, help="K1 dir holding L2/log.pkl")
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--run-dir", default=None,
+                    help="Case-1 run holding L2/log.pkl "
+                         "(default: the newest complete run of run_case1)")
+    ap.add_argument("--out", default=None,
+                    help="write here instead of a new documented run folder")
     ap.add_argument("--fig-dir", default=None)
+    add_run_arguments(ap)
     args = ap.parse_args()
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    run_dir = (Path(args.run_dir) if args.run_dir
+               else latest_run(_run_case1.__file__, producer="run_case1"))
+    print(f"source run: {run_dir}")
+    if args.out:
+        characterise(run_dir, Path(args.out), args.fig_dir)
+        return
 
+    cfg = resolved("L2", HORIZON_MIN)
+    with start_thesis_run(
+            __file__, target=TARGET, feeds=FEEDS, config=cfg, paramset=PARAMSET,
+            parameters={"source_run": str(run_dir), "source_variant": "L2",
+                        "horizon_min": HORIZON_MIN},
+            note=args.note, tag=args.tag) as run:
+        characterise(run_dir, run.root, args.fig_dir)
+        for name, meaning in (
+                ("reference_period_inputs.csv", "15-min exogenous series"),
+                ("reference_period_pf.csv", "1-min power-flow series of the L2 run"),
+                ("reference_period_summary.json", "the numbers quoted in the thesis"),
+                ("reference_period_summary.md", "the same, readable")):
+            run.describe_output(name, meaning)
+        if args.fig_dir:
+            for name in ("reference_period.pdf", "reference_period.png"):
+                run.record_export(Path(args.fig_dir).resolve() / name, __file__)
+
+
+def characterise(run_dir: Path, out: Path, fig_dir: str | None) -> None:
+    """Write the four tables into ``out`` and, with ``fig_dir``, the figure."""
+    out.mkdir(parents=True, exist_ok=True)
     cfg = resolved("L2", HORIZON_MIN)
     t0 = cfg.start_time
     t1 = t0 + _dt.timedelta(minutes=HORIZON_MIN)
@@ -299,7 +338,7 @@ def main() -> None:
     win = year.loc[t0:t1]
     win.to_csv(out / "reference_period_inputs.csv")
 
-    with open(Path(args.run_dir) / "L2" / "log.pkl", "rb") as f:
+    with open(run_dir / "L2" / "log.pkl", "rb") as f:
         log = pickle.load(f)
     pf = pf_series(log)
     trips = [e.minute for e in cfg.contingencies
@@ -411,8 +450,8 @@ def main() -> None:
                                                      encoding="utf-8")
     print("\n".join(md))
 
-    if args.fig_dir:
-        figure(win, pf, events, t0, Path(args.fig_dir))
+    if fig_dir:
+        figure(win, pf, events, t0, Path(fig_dir))
 
 
 def figure(win: pd.DataFrame, pf: pd.DataFrame, events: List[Dict],

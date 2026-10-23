@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-experiments/part3_mc/run_mc.py
-==============================
+experiments/ch_11_case2_multisystem/mc/run_mc.py
+================================================
 
 Monte-Carlo ensemble of Part III of the thesis (``ch:setup:montecarlo``,
 ``ch:case3:montecarlo``).  The first slice runs L2, S1 and O2 -- the
@@ -10,11 +10,11 @@ Monte-Carlo ensemble of Part III of the thesis (``ch:setup:montecarlo``,
 statistics of Case 1 (``tab:case_svr:stats``).  S2, O3 and M are added later on
 the SAME episodes (same master seed), once implemented.
 
-Successor of ``experiments/ch_10_case_study/ch_10_6_ladder_mc.py`` (machinery:
+Successor of ``experiments/ch_11_case2_multisystem/ladder/ladder_mc.py`` (machinery:
 seeded paired episodes, slot-based event draw, base-case prescreen, process
 pool, compact per-episode files).  What changed, and why:
 
-* configuration from ``experiments.case1_svr.run_case1.resolved`` (paramset
+* configuration from ``experiments.ch_10_case1_svr.run_case1.resolved`` (paramset
   ``ch9_selected``, DSO_3 x2) instead of ``make_thesis_config`` with the old
   pinned ``g_w_gen = 1e9``: the ensemble must test the controller Chapter 8
   selects and Chapter 9 shows;
@@ -56,10 +56,17 @@ An episode on which every variant run so far fails is reported as
 
 Run (see README_server.md)
 --------------------------
-    python -m experiments.part3_mc.run_mc --jobs 30                # simulate
-    python -m experiments.part3_mc.run_mc --jobs 30                # resume = same call
-    python -m experiments.part3_mc.run_mc --report                 # tables only
-    python -m experiments.part3_mc.run_mc --smoke --jobs 4         # 2 episodes x 10 min
+    python -m experiments.ch_11_case2_multisystem.mc.run_mc --jobs 30        # simulate
+    python -m experiments.ch_11_case2_multisystem.mc.run_mc --jobs 30        # resume = same call
+    python -m experiments.ch_11_case2_multisystem.mc.run_mc --report         # tables only
+    python -m experiments.ch_11_case2_multisystem.mc.run_mc --smoke --jobs 4 # 2 episodes x 10 min
+    python -m experiments.ch_11_case2_multisystem.mc.run_mc --new --jobs 30  # fresh campaign
+
+The campaign is ONE documented run folder,
+``results/ch_11_case2_multisystem/mc/<NNNN>_<stamp>_run_mc[_smoke]/``
+(``experiments/thesis_runs.py``).  A call without ``--new`` continues the
+newest campaign with the same tag and is recorded as a further invocation in
+its README -- that is how S2, O3 and M join the same episodes later.
 
 Author: Manuel Schwenke / Claude Code (2026-10-07)
 """
@@ -81,7 +88,6 @@ import dataclasses
 import datetime as _dt
 import json
 import shutil
-import subprocess
 import sys
 import time
 import traceback
@@ -94,19 +100,24 @@ import numpy as np
 import pandas as pd
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parents[1]))
+sys.path.insert(0, str(_HERE.parents[2]))           # the project root
 
-from experiments.case1_svr.report_case1 import area_metrics, epost  # noqa: E402
-from experiments.case1_svr.run_case1 import (  # noqa: E402
+from experiments.ch_10_case1_svr.report_case1 import area_metrics, epost  # noqa: E402
+from experiments.ch_10_case1_svr.run_case1 import (  # noqa: E402
     PARAMSET, PILOT_BUSES, VARIANTS as CASE1_VARIANTS, resolved,
 )
 from experiments.helpers.records import ContingencyEvent  # noqa: E402
-from experiments.paths import RESULTS_ROOT  # noqa: E402
+from experiments.thesis_runs import (  # noqa: E402
+    MANIFEST, add_run_arguments, annotate_run, latest_run, start_thesis_run,
+)
+
+#: Where the ensemble is reported, and what it feeds (thesis labels).
+TARGET = ("ch:case3:montecarlo", "ch:setup:montecarlo")
+FEEDS = ("tab:case3:mc", "fig:case3:mc", "tab:case_svr:stats")
 
 # ---------------------------------------------------------------------------
 #  Declared campaign constants (2026-10-07)
 # ---------------------------------------------------------------------------
-CAMPAIGN = "THESIS_part3_mc"
 MASTER_SEED = 20261007
 N_VALID = 100
 HORIZON_MIN = 180
@@ -142,8 +153,6 @@ FIRST_SLICE = ["S1", "O2", "L2"]          # longest first: better pool packing
 
 #: Pre-declared comparisons: (candidate, comparator).
 COMPARISONS: List[Tuple[str, str]] = [("O2", "S1")]
-
-OUT_DIR = Path(os.environ.get("PART3_MC_OUT", str(Path(RESULTS_ROOT) / CAMPAIGN)))
 
 
 def _dirs(out: Path) -> Dict[str, Path]:
@@ -648,34 +657,33 @@ def report(out: Path, n_valid: int) -> None:
 # ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
-def _provenance(out: Path, args: argparse.Namespace) -> None:
-    root = _HERE.parents[1]
+def _campaign_parameters(args: argparse.Namespace) -> Dict[str, Any]:
+    """The declared constants, for the run's README and provenance block.
 
-    def _git(*a: str) -> str:
-        try:
-            return subprocess.run(["git", *a], cwd=root, capture_output=True,
-                                  text=True, timeout=60).stdout.strip()
-        except Exception as exc:                   # noqa: BLE001
-            return f"unavailable: {exc}"
+    Code state (commit, dirty flag, diff) is recorded per invocation by
+    ``thesis_runs``; the drawable elements go to ``elements.json``.
+    """
+    return {"master_seed": MASTER_SEED, "n_valid": args.n,
+            "horizon_min": args.minutes, "variants": args.variants,
+            "slot_min": SLOT_MIN, "slot_prob": SLOT_PROB,
+            "revert_min": REVERT_MIN,
+            "load_q_mvar": [LOAD_Q_MIN_MVAR, LOAD_Q_MAX_MVAR],
+            "delta_mpu": DELTA_MPU, "v_range": [V_LO, V_HI],
+            "v_hard": [V_HARD_LO, V_HARD_HI],
+            "excluded_days": sorted(str(x) for x in EXCLUDED_DAYS)}
 
-    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    el = enumerate_elements()
-    info = {"created": stamp, "code_root": str(root),
-            "git_head": _git("rev-parse", "HEAD"),
-            "git_status": _git("status", "--porcelain"),
-            "paramset": PARAMSET, "master_seed": MASTER_SEED,
-            "n_valid": args.n, "horizon_min": args.minutes,
-            "variants": args.variants, "elements": el,
-            "constants": {"SLOT_MIN": SLOT_MIN, "SLOT_PROB": SLOT_PROB,
-                          "REVERT_MIN": REVERT_MIN,
-                          "LOAD_Q_MVAR": [LOAD_Q_MIN_MVAR, LOAD_Q_MAX_MVAR],
-                          "DELTA_MPU": DELTA_MPU, "V_RANGE": [V_LO, V_HI],
-                          "V_HARD": [V_HARD_LO, V_HARD_HI],
-                          "EXCLUDED_DAYS": sorted(str(x) for x in EXCLUDED_DAYS)},
-            "python": sys.version, "host": os.environ.get("COMPUTERNAME", "")}
-    (out / f"provenance_{stamp}.json").write_text(json.dumps(info, indent=2),
-                                                 encoding="utf-8")
-    (out / f"code_diff_{stamp}.patch").write_text(_git("diff"), encoding="utf-8")
+
+def _campaign_folder(args: argparse.Namespace) -> Optional[Path]:
+    """The campaign to continue: ``--out``, else the newest one with this tag."""
+    if args.out:
+        return Path(args.out)
+    if args.new:
+        return None
+    try:
+        return latest_run(__file__, producer="run_mc", tag=args.tag,
+                          require_complete=False)
+    except FileNotFoundError:
+        return None
 
 
 def _check_gurobi(allow: bool) -> None:
@@ -737,26 +745,30 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=N_VALID, help="valid episodes")
     ap.add_argument("--variants", default=",".join(FIRST_SLICE))
     ap.add_argument("--minutes", type=int, default=HORIZON_MIN)
-    ap.add_argument("--out", default=str(OUT_DIR))
+    ap.add_argument("--out", default=None,
+                    help="explicit campaign folder outside the documented "
+                         "results tree (no README is written there)")
+    ap.add_argument("--new", action="store_true",
+                    help="start a fresh campaign instead of continuing the newest")
     ap.add_argument("--report", action="store_true", help="tables only")
     ap.add_argument("--smoke", action="store_true",
-                    help="2 episodes x 10 min into <out>_smoke")
+                    help="2 episodes x 10 min, a campaign tagged 'smoke'")
     ap.add_argument("--allow-no-gurobi", action="store_true")
+    add_run_arguments(ap)
     args = ap.parse_args()
 
     if args.smoke:
-        args.n, args.minutes = 2, 10
-        args.out = args.out.rstrip("\\/") + "_smoke"
-    out = Path(args.out)
+        args.n, args.minutes, args.tag = 2, 10, "smoke"
     if args.minutes != HORIZON_MIN:
         # The draw depends on the horizon; children read it from the env.
         os.environ["PART3_MC_HORIZON_MIN"] = str(args.minutes)
         HORIZON_MIN = args.minutes
-    d = _dirs(out)
-    for p in d.values():
-        p.mkdir(parents=True, exist_ok=True)
+    found = _campaign_folder(args)
     if args.report:
-        report(out, args.n)
+        if found is None:
+            raise SystemExit("no campaign to report on; run one first")
+        report(found, args.n)
+        annotate_run(found, by=__file__, outputs={"report.md": "campaign tables"})
         return
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -764,8 +776,41 @@ def main() -> None:
     if unknown:
         raise SystemExit(f"unknown variant(s) {unknown}; available {sorted(VARIANTS)}")
     _check_gurobi(args.allow_no_gurobi)
-    _provenance(out, args)
+
+    if found is not None and not (found / MANIFEST).exists():
+        print(f"  [campaign] WARNING: {found} is not a documented run folder; "
+              f"no README or provenance block is written", flush=True)
+        documented = contextlib.nullcontext(None)
+    else:
+        documented = start_thesis_run(
+            __file__, target=TARGET, feeds=FEEDS, config=resolved("L2", args.minutes),
+            paramset=PARAMSET, parameters=_campaign_parameters(args),
+            time_series=(f"ensemble of {args.n} episodes x {args.minutes} min, "
+                         f"start uniform over 2016 on a 15-min grid without the "
+                         f"W1--W6 days; per-episode start and events in "
+                         f"prescreen/<seed>.json"),
+            note=args.note, tag=args.tag, resume=found)
+    with documented as run:
+        _simulate(run.root if run is not None else found, args, variants)
+        if run is not None:
+            for name, meaning in (
+                    ("prescreen", "one JSON per drawn seed: start, events, valid"),
+                    ("runs", "one JSON per (seed, variant): outcome and metrics"),
+                    ("logs", "worker logs"),
+                    ("elements.json", "the drawable machines, lines, load buses"),
+                    ("report.md", "campaign tables")):
+                run.describe_output(name, meaning)
+
+
+def _simulate(out: Path, args: argparse.Namespace, variants: List[str]) -> None:
+    """Prescreen until N valid seeds are known, then run what is missing."""
+    d = _dirs(out)
+    for p in d.values():
+        p.mkdir(parents=True, exist_ok=True)
     el = enumerate_elements()
+    (out / "elements.json").write_text(
+        json.dumps(el, indent=2, default=lambda o: o.item() if hasattr(o, "item") else str(o)),
+        encoding="utf-8")
     print(f"  [campaign] {out}\n  [campaign] N={args.n} horizon={args.minutes} min "
           f"variants={variants} jobs={args.jobs} master_seed={MASTER_SEED}")
     print(f"  [elements] gens={el['gens']} lines={len(el['lines'])} "

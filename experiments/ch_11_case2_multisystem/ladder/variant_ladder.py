@@ -1,6 +1,10 @@
 """
-ch_10_1_variant_ladder.py
-=========================
+experiments/ch_11_case2_multisystem/ladder/variant_ladder.py
+============================================================
+
+(Was ``experiments/ch_10_case_study/ch_10_1_variant_ladder.py`` until
+2026-10-23.  The seven-rung ladder is the pre-2026-10-06 design of Case 2 and
+is superseded by the 2x2 variant design; see this folder's README.)
 
 The dissertation's control-variant ladder (thesis \\cref{ch:case3}), on the
 **validated** parameter set.
@@ -60,9 +64,12 @@ load 120, gen restore 180, line trip 210, line restore 300, load trip 360).
 The contingency schedule itself is inherited, not restated.
 
 Run:
-    python -m experiments.ch_10_case_study.ch_10_1_variant_ladder
-    python -m experiments.ch_10_case_study.ch_10_1_variant_ladder --only S1,O1
-    python -m experiments.ch_10_case_study.ch_10_1_variant_ladder --report
+    python -m experiments.ch_11_case2_multisystem.ladder.variant_ladder
+    python -m experiments.ch_11_case2_multisystem.ladder.variant_ladder --only S1,O1
+    python -m experiments.ch_11_case2_multisystem.ladder.variant_ladder --report
+
+Output: ``results/ch_11_case2_multisystem/ladder/<NNNN>_<stamp>_variant_ladder[_<tag>]/``,
+one sub-folder per variant (``experiments/thesis_runs.py``).
 """
 
 from __future__ import annotations
@@ -77,11 +84,11 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from configs.config import MultiTSOConfig
-from experiments.paths import RESULTS_ROOT
 from experiments.run_multi_system_ofo import make_config
 from experiments.runners.multi_tso_dso import run_multi_tso_dso
+from experiments.thesis_runs import add_run_arguments, latest_run, start_thesis_run
 
-EXPERIMENT = "ch10_ladder"
+TARGET = "ch:case3"
 
 #: Default horizon [min].  360 fires all six inherited contingencies
 #: (gen trip 30, load 120, gen restore 180, line trip 210, line restore
@@ -379,18 +386,9 @@ def assert_ladder_controlled() -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_dir(create: bool = False) -> Path:
-    base = Path(RESULTS_ROOT) / EXPERIMENT
-    if create:
-        base.mkdir(parents=True, exist_ok=True)
-        n = 1 + max([int(p.name.split("_")[0]) for p in base.iterdir()
-                     if p.is_dir() and p.name.split("_")[0].isdigit()] or [0])
-        d = base / f"{n:04d}"
-        d.mkdir(exist_ok=True)
-        return d
-    runs = sorted((p for p in base.iterdir() if p.is_dir()), reverse=True) \
-        if base.is_dir() else []
-    return runs[0] if runs else base
+def run_dir() -> Path:
+    """Newest run of this script, finished or not (a sweep may be writing)."""
+    return latest_run(__file__, producer="variant_ladder", require_complete=False)
 
 
 def run_one(name: str, out: Path) -> List:
@@ -512,11 +510,12 @@ def main() -> None:
                     help="override g_w_gen for EVERY variant (sweep axis); "
                          "default inherits make_config")
     ap.add_argument("--run-dir", default=None,
-                    help="reuse an existing run directory instead of "
+                    help="reuse an existing run of this script instead of "
                          "creating one (resume a partial sweep)")
     ap.add_argument("--minutes", type=int, default=HORIZON_MIN,
                     help=f"horizon in minutes (default {HORIZON_MIN}); "
                          "shorter truncates the contingency schedule")
+    add_run_arguments(ap)
     args = ap.parse_args()
     HORIZON_MIN = int(args.minutes)
     G_W_GEN = args.g_w_gen
@@ -557,11 +556,17 @@ def main() -> None:
     if bad:
         raise SystemExit(f"unknown variants {bad}; valid {LADDER}")
 
-    out = Path(args.run_dir) if args.run_dir else run_dir(create=True)
-    out.mkdir(parents=True, exist_ok=True)
-    print(f"run dir: {out}")
-    logs = {n: run_one(n, out) for n in sel}
-    report(logs, cfg)
+    with start_thesis_run(
+            __file__, target=TARGET, config=cfg,
+            parameters={"variants": sel, "horizon_min": HORIZON_MIN,
+                        "g_w_gen_override": G_W_GEN},
+            note=args.note, tag=args.tag, resume=args.run_dir) as run:
+        out = run.root
+        print(f"run dir: {out}")
+        logs = {n: run_one(n, out) for n in sel}
+        for n in sel:
+            run.describe_output(n, f"variant {n}: log.pkl")
+        report(logs, cfg)
 
 
 if __name__ == "__main__":

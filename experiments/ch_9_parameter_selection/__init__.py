@@ -46,7 +46,14 @@ would let the two drift apart.
 
 The 2026-10-22 minimal-codebase pass removed ``pf/`` and briefly took these
 two modules with it.  Both were restored, with the subset of ``pf/`` and
-``export/`` they need, once it became clear that §9.1 Table 9.1 and §9.2
-``dU_db`` have no non-PowerFactory producer: see ``README.md`` for the
-section-to-script map and ``docs/daily_log/10_2026/`` for the reasoning.
+``export/`` they need, once it became clear that the settling table and the
+dead-band half-width ``dU_db`` have no non-PowerFactory producer: see
+``README.md`` for the section-to-script map and ``docs/daily_log/10_2026/``
+for the reasoning.
+
+Thesis references in this package cite **labels, not numbers**. The chapter has
+been renumbered three times (2026-10-06, and the 2026-09-29 and 2026-10-23
+restructures), and each renumbering silently invalidated every hard-coded
+number while leaving the labels untouched.  Where an old number does appear it
+is describing superseded material on purpose, and says so.
 """

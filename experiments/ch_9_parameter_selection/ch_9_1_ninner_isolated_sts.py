@@ -212,7 +212,8 @@ V_MIN_PU, V_MAX_PU = 0.9, 1.1
 #:
 #: These windows are excluded by default, and the exclusion is REPORTED: a
 #: window with no admissible traversal is not a failed measurement, and
-#: counting it as one would put a spurious censoring fraction into eq. (9.2).
+#: counting it as one would put a spurious censoring fraction into the
+#: reported ``n_s`` statistics.
 DEAD_ZONE_STRATA = ("none",)
 
 #: Window banks this experiment can be measured on.
@@ -953,7 +954,7 @@ def aggregate(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not sub:
             continue
         n = [float(r["n_inner"]) for r in sub]
-        # The population that actually answers eq. (9.2): steps the area could
+        # The population that actually answers the settling question: steps the area could
         # deliver. A capability-limited step that never settles measures the
         # limit, not the loop.
         free = [r for r in sub if not r.get("capability_limited")]
@@ -1089,7 +1090,11 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
                 w.writerow(r)
 
     ov = (meta or {}).get("constants", {}).get("der_q_override_pu")
-    md = ["# N_inner on the isolated subordinate loop (thesis eq. 9.2)", ""]
+    md = ["# Subordinate-loop settling `n_s` on the isolated loop", "",
+              "Feeds `tab:param:timescales:ninner` and "
+              "`fig:param:timescales:settling_cdf`; checked against "
+              "`n_s,95 <= 3*N_inner` by Experiment C "
+              "(`ch:param:experiment:e`).", ""]
     if ov is not None:
         md += [f"> **DIAGNOSTIC RUN — DER reactive capability forced to "
                f"`[-{ov:g}*S_n, +{ov:g}*S_n]`.** This is not a physical model: "
@@ -1178,9 +1183,9 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
         md += ["", "## Windows excluded (no admissible traversal)", "",
                "The DER reactive capability is structurally zero in these "
                "windows (VDE dead zone), so there is no capability band to "
-               "traverse and no `N_inner` to measure. They are excluded, not "
+               "traverse and no settling to measure. They are excluded, not "
                "failed: counting them would put a spurious censoring fraction "
-               "into eq. (9.2).", ""]
+               "into the reported `n_s` statistics.", ""]
         md += [f"- `{w}`" for w in meta["excluded_windows"]]
 
     if failures:
@@ -1465,7 +1470,9 @@ def self_test() -> int:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Isolated-STS measurement of N_inner (thesis eq. 9.2).")
+        description="Isolated-STS settling measurement: `n_s` feeding "
+                    "tab:param:timescales:ninner. It does not measure "
+                    "N_inner, which follows from T_TS / T_STS.")
     ap.add_argument("--paramset", default=SELECTED_PARAMSET,
                     help=f"controller weights, from configs/paramsets/. "
                          f"{INITIAL_PARAMSET!r} is the Stage-I ANALYTIC design "

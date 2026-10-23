@@ -1,6 +1,8 @@
-r"""Sweep the supervisory period ``T_TS`` -- the selection evidence for Sec. 9.1.
+r"""Sweep the supervisory period ``T_TS`` -- selection evidence for
+``ch:timescales:period:initial``.
 
-**What this answers.** Eq. (9.2) fixes ``T_TS = N_inner * T_STS`` with
+**What this answers.** ``eq:param:timescales:ninner`` fixes
+``T_TS = N_inner * T_STS`` with
 ``N_inner = 9`` an educated guess that has never been evaluated. This script
 does not measure ``N_inner`` (that is ``ch_9_1_ninner_isolated_sts.py``, the
 isolated-STS experiment). It answers the *other* question: across
@@ -25,7 +27,8 @@ so any RMS residual accumulated over time mixes "residual per dispatch" with
 "dispatch frequency" and would show 60 s in a flattering light for a reason
 that has nothing to do with control.
 
-Weights are the Sec. 9.3 selection, rebuilt and asserted by
+Weights are the Experiment B selection (``ch:param:experiment:d``),
+rebuilt and asserted by
 ``_ch9_selected_design`` -- ``N_inner`` is a joint property of the period ratio
 and of ``G_w``, so the file defaults of ``run_multi_system_ofo.py`` would
 answer for a different controller.
@@ -107,7 +110,8 @@ PILOT_N_WINDOWS = 3
 STS_PERIOD_S = 20.0
 
 #: Default settling band on the interface flow [Mvar]. 1 Mvar absolute is what
-#: the open-loop RMS battery used, so reusing it keeps Sec. 9.1 internally
+#: the open-loop RMS battery used, so reusing it keeps the supervisory-period
+#: section internally
 #: consistent. **It is a CLI flag because it is a real decision**: at a PCC
 #: with a ~200 Mvar CAIR width this is 0.5 %, which a MIQP with discrete taps
 #: may never reach -- and then every interval returns censored and the sweep
@@ -142,7 +146,7 @@ def _git(*args: str) -> Optional[str]:
 
 
 def provenance(args: argparse.Namespace, design: Dict[str, Any]) -> Dict[str, Any]:
-    """Everything needed to say where a number in Sec. 9.1 came from.
+    """Everything needed to say where a number in ``ch:timescales`` came from.
 
     ``git_dirty`` is the one that matters: the handoff records that two of the
     three existing runs of record were made from an uncommitted tree and are
@@ -583,7 +587,8 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
         for r in agg:
             w.writerow(r)
 
-    md = ["# T_TS sweep (thesis Sec. 9.1, selection of the supervisory period)",
+    md = ["# T_TS sweep (selection of the supervisory period, "
+              "`ch:timescales:period:initial`)",
           "",
           "`rho_k = r_k / delta_k` is the fraction of the requested correction "
           "still outstanding when the next dispatch lands. `n_k` is the "
@@ -595,8 +600,10 @@ def write_outputs(out_dir: Path, rows: List[Dict[str, Any]],
           "residual-per-dispatch with dispatch frequency.",
           "",
           "**`N_inner` is not read off this sweep.** This is the closed-loop "
-          "selection evidence for `T_TS`; the isolated measurement of eq. (9.2) "
-          "is `ch_9_1_ninner_isolated_sts.py`.",
+          "selection evidence for `T_TS`. `N_inner` "
+          "(`eq:param:timescales:ninner`) follows from `T_TS` / `T_STS`; the "
+          "isolated settling measurement that Experiment C checks is "
+          "`ch_9_1_ninner_isolated_sts.py`.",
           "",
           "## Pooled over all interfaces", "",
           "| T_TS [s] | N_inner cfg | intervals | scored | rho med | rho p95 | "
@@ -929,7 +936,8 @@ def self_test() -> int:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Sweep T_TS at fixed T_STS = 20 s (thesis Sec. 9.1).")
+        description="Sweep T_TS at fixed T_STS = 20 s "
+                    "(selection evidence for ch:timescales:period:initial).")
     ap.add_argument("--paramset", default=SELECTED_PARAMSET,
                     help=f"controller weights, from configs/paramsets/. "
                          f"{INITIAL_PARAMSET!r} = Stage-I analytic point, "

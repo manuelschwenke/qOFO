@@ -112,8 +112,19 @@ SHUNT_FIELDS: tuple[str, ...] = (
 )
 
 #: Cadence, carried in a parameter set so that a weight set and the periods it
-#: was designed against cannot drift apart.  ``N_inner = tso_period_s /
-#: dso_period_s`` is a *measured* quantity (Experiment B) and is not a field.
+#: was designed against cannot drift apart.
+#:
+#: ``N_inner = tso_period_s / dso_period_s`` *follows* from the two periods
+#: and is not a field: ``T_TS`` = 180 s by definition and ``T_STS`` = 20 s
+#: from the modal bound, so ``N_inner`` = 9.  Experiment C
+#: (``ch:param:experiment:e``) checks ``n_s,95 <= 3*N_inner`` at the final
+#: weights; it does not measure ``N_inner``.
+#:
+#: This said "a *measured* quantity (Experiment B)" until 2026-10-23.  That
+#: described the superseded chapter, where the multiplier was measured on the
+#: isolated subordinate loop; the 2026-09-29 restructure made it derived and
+#: also remapped the experiment letters (former B + D -> B, E -> C,
+#: F1/F2 -> D1/D2), so the old letter pointed at the weight selection.
 TIMING_FIELDS: tuple[str, ...] = ("tso_period_s", "dso_period_s", "dt_s")
 
 #: Fields always pinned when a parameter set is applied.  Headless and

@@ -1,6 +1,22 @@
-r"""Measure ``N_inner`` on the isolated subordinate loop -- thesis eq. (9.2).
+r"""Settling of the isolated subordinate loop: ``n_s`` against the ``N_inner``
+budget.
 
-``N_inner`` is the number of subordinate (STS-OFO) iterations a
+Produces the data behind ``tab:param:timescales:ninner`` and
+``fig:param:timescales:settling_cdf``: the settling counts that Experiment C
+(``ch:param:experiment:e``) checks against the requirement
+``n_s,95 <= 3*N_inner`` = 27 at the final weights.
+
+**It does not measure ``N_inner``, and the chapter no longer asks it to.**
+This file was written for the superseded chapter, where ``N_inner`` was
+"measured rather than assumed" as eq. (9.2) of §9.1.  Since the 2026-09-29
+restructure ``T_TS`` = 180 s is set by definition and ``N_inner`` = 9 follows
+from ``T_TS / T_STS``; what this script contributes is ``n_s``, the settling
+count, which is checked against a budget *expressed* in ``N_inner``.  The
+equation is also no longer numbered 9.2, so cite the label rather than the
+number.
+
+The measurement definition below is unchanged and is the part that matters:
+``n_s`` is the number of subordinate (STS-OFO) iterations a
 capability-band-traversing interface-Q setpoint step needs before **the
 iteration converges** -- that is, before the interface flow goes flat,
 ``|q_pcc(k) - q_pcc(k-1)| -> 0``. The supervisory layer is silent throughout,
@@ -686,7 +702,8 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
     from tuning.runner import run_scenario_with_records as _run_scenario
 
     # The controller identity is carried in the JOB, not defaulted here: the
-    # initial-weight (Experiment C) and final-weight (Experiment E) legs run
+    # initial-weight (former Experiment C, dropped) and final-weight
+    # (Experiment C since the 2026-09-29 letter remap, was E) legs run
     # the same request bank and must be distinguishable from the run record
     # alone.  Before 2026-09-15 this called build_selected_config() with no
     # arguments and the worker silently ran whatever the module constant was.
@@ -1453,7 +1470,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          f"{INITIAL_PARAMSET!r} is the Stage-I ANALYTIC design "
                          f"point (Experiment C, initial weights); "
                          f"{SELECTED_PARAMSET!r} is the Stage-II selection "
-                         f"(Experiment E, final weights). Recorded in "
+                         f"(Experiment C, final weights; letter was E "
+                         f"before 2026-09-29). Recorded in "
                          f"run_meta.json and resolved_config.json either way.")
     ap.add_argument("--bank", choices=BANKS, default=DEFAULT_BANK,
                     help="window bank. 'conditions' = W1-W6 of the thesis "

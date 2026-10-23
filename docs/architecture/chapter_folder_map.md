@@ -107,14 +107,37 @@ The thesis names the code side at ll. 216–217: `tuning/parameters.py`
 `dso_period_s` 20. `TIMING_FIELDS` is confirmed at `tuning/parameters.py:117`,
 so that link holds in both directions.
 
-**One open point this turned up.** `tuning/parameters.py:115` says
-"`N_inner = tso_period_s / dso_period_s` is a *measured* quantity
-(Experiment B) and is not a field", while the chapter has `N_inner` following
-arithmetically from a period set by definition. Both agree it is not a field
-and is the quotient of the two periods; they disagree on whether its value is
-measured or derived. Likely Experiment B measures the *achievable* `N_inner`
-while 9 is the configured consequence — but that is a thesis-and-code
-semantics question, not a repair, so it is recorded rather than resolved.
+**Resolved: `N_inner` is derived, and the code comment was stale.** It was not
+shorthand, as I had guessed — `tuning/parameters.py:115` was describing the
+*superseded* chapter, where `Chapter09_Parameterisation_SUPERSEDED.tex:128` has
+the multiplier "measured rather than assumed" and a `\todo` to measure it on
+the isolated subordinate loop. The 2026-09-29 restructure
+(`Chapter09.tex:195–200`) made it derived: "no experiment in this section.
+`T_TS` is set by definition (3 min), `N_inner` = 9 follows, and the section
+states the requirement the final weights must meet; Experiment C checks it."
+
+That comment also **remapped the experiment letters** — "Former letters:
+B + D → B, E → C, F1/F2 → D1/D2" — so the code's "Experiment B" pointed at the
+weight selection, which measures nothing about `N_inner`. Experiment C
+(`ch:param:experiment:e`, ll. 423–433) runs 120 ±10 Mvar interface steps with
+the supervisory controllers held and checks `n_s,95 <= 27 = 3·N_inner` plus a
+median residual ≤ 1 Mvar; it got 23.05 and 0.39 Mvar, and "the ratio
+`N_inner` = 9, and thus `T_TS` = 180 s, is therefore kept". A check against a
+budget, not a measurement of the budget.
+
+Fixed in code 2026-10-23: the `parameters.py` comment, and in
+`ch_9_1_ninner_isolated_sts.py` both the headline claim ("Measure `N_inner`
+… thesis eq. (9.2)") and two retired "Experiment E" letters.
+
+**And the answer to the question the thesis side could not see.** That script
+computes `n_settle_final_1mvar` and `n_settle_censored` — i.e. it produces
+`n_s`, not `N_inner`. So it *is* still the producer behind
+`tab:param:timescales:ninner` and `fig:param:timescales:settling_cdf`; only
+the interpretation changed, from measuring the multiplier to supplying the
+settling counts checked against it. Its docstring now says so and cites both
+labels. Note the data itself lives at
+`qOFO_2027/results/THESIS_ch8_D_settling_20260929/` — in the other clone, and
+untracked.
 
 **Cross-repo point worth a decision.** `graphics/Ch9/data/2026-09-23_modal/README.md`
 records that the modal bundle was produced **in `qOFO_2027` on the PowerFactory

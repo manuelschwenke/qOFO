@@ -139,6 +139,32 @@ labels. Note the data itself lives at
 `qOFO_2027/results/THESIS_ch8_D_settling_20260929/` — in the other clone, and
 untracked.
 
+## The experiment-label trap
+
+**The letters were remapped in 2026-09-29; the labels were not.** So the letter
+inside a label is not the experiment's letter, and citing by letter gets it
+wrong. Verified against `Chapter09.tex`:
+
+| experiment | cite this label | what the label is attached to |
+|---|---|---|
+| A — modal analysis, `T_STS` = 20 s | `ch:param:experiment:a` | l. 128 |
+| B — weight selection | `ch:param:experiment:d` | l. 260, `\paragraph{Experiment B: weight selection.}` |
+| C — settling confirmation | `ch:param:experiment:e` | l. 423 |
+| D1 | `ch:param:experiment:f1` | l. 479 |
+| D2 | `ch:param:experiment:f2` | l. 517 |
+
+The sharp edge is `ch:param:experiment:b`, which **does exist** and is
+therefore not a dangling reference — it is attached to
+`\paragraph{Analytical starting weights.}` at l. 264, a sub-paragraph *inside*
+Experiment B. Citing `:b` for "Experiment B" lands in the right chapter one
+level too deep, and compiles cleanly, so nothing flags it. There is no
+`ch:param:experiment:c` at all.
+
+Current code citations check out: `ch:param:experiment:e` in
+`tuning/parameters.py:120`, `ch_9_1_ninner_isolated_sts.py:6` and this note
+(all Experiment C), and `ch:param:experiment:d` in
+`docs/tuning/2026-10-16_protocol_experiment_B_rerun.md` (Experiment B).
+
 **Cross-repo point worth a decision.** `graphics/Ch9/data/2026-09-23_modal/README.md`
 records that the modal bundle was produced **in `qOFO_2027` on the PowerFactory
 machine**. If `qOFO` is meant to own that chain now, the four-stage pipeline

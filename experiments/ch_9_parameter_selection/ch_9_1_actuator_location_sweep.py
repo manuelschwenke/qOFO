@@ -1,4 +1,15 @@
-"""Actuator-only location sweep for open-loop settling experiment A.
+"""Actuator-only location sweep, for the open-loop settling battery.
+
+    Letter note (2026-10-23): this said "experiment A". In the live Ch 9,
+    Experiment A is the *modal analysis* that gives T_STS = 20 s via
+    tab:param:timescales:actuators, a different pipeline
+    (pf.modal_campaign -> pf.modal_window -> analysis.modal_observability ->
+    analysis.build_modal_bundle). The open-loop settling battery this sweep
+    belongs to was retired with the step tests at the 2026-09-18 colloquium,
+    and its table tab:param:timescales:settling is archived in
+    Chapters/archive/Ch9_sec1_step_tests_CUT.tex. Whether this sweep still
+    has a reported role is the author's call; it is not Experiment A.
+
 
 Discrete actuator locations/directions are exhaustive in RMS. Continuous
 Q/V-reference locations are ranked by deterministic AC-power-flow impact and

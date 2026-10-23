@@ -219,7 +219,8 @@ DEAD_ZONE_STRATA = ("none",)
 #:
 #: ``conditions`` -- the six operating conditions W1-W6 of thesis table
 #: ``tab:timescales:conditions``, declared in ``tuning/scenarios_mc_v2.py``.
-#: This is the default from 2026-09-15: F1 and F2 are specified on W1-W6, and a
+#: This is the default from 2026-09-15: D1 and D2 (letters F1/F2 before the
+#: 2026-09-29 remap) are specified on W1-W6, and a
 #: subordinate-response measurement taken on a different bank cannot be read
 #: alongside them.  W5 has structurally zero DER reactive capability at both
 #: levels and is excluded by :data:`DEAD_ZONE_STRATA`, so five windows are
@@ -1475,7 +1476,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          f"run_meta.json and resolved_config.json either way.")
     ap.add_argument("--bank", choices=BANKS, default=DEFAULT_BANK,
                     help="window bank. 'conditions' = W1-W6 of the thesis "
-                         "conditions table, which is also what F1/F2 use "
+                         "conditions table, which is also what D1/D2 use "
                          "(W5 excluded as zero-capability, so 5 windows "
                          "measured). 'design12' = the twelve tier1_design_set "
                          "search windows of the 240-measured archive.")

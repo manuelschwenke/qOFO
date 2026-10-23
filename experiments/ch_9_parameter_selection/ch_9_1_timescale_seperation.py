@@ -1,10 +1,18 @@
 r"""
 experiments/ch_9_parameter_selection/ch_9_1_timescale_seperation.py
 ==================================================================
-The settling battery that fills **Table 9.1** of the dissertation
-(``tab:param:timescales:settling``, \cref{ch:param:timescales}) and the four
-bracketed values in the surrounding text. One command, one run directory,
-nothing else.
+The settling battery that fills the settling table of the dissertation
+(\cref{ch:timescales}) and the four bracketed values in the surrounding
+text. One command, one run directory, nothing else.
+
+Label note (2026-10-23): this cited ``\cref{ch:param:timescales}``, which
+now exists only in ``Chapters/archive/Chapter09_Parameterisation_SUPERSEDED.tex``.
+The live chapter is ``ch:timescales``. The table label it also cited,
+``tab:param:timescales:settling``, is dead for the same reason; the live
+chapter carries ``tab:param:timescales:actuators``,
+``tab:param:timescales:ninner`` and ``tab:timescales:separations``, and
+which of those is the successor is the author's call, so no table label is
+named here rather than naming the wrong one.
 
 Moved here from ``pf/timescale_study.py`` on 2026-08-06 so that every number
 in Ch. 9 has an entry point named after the section it fills; ``pf/`` keeps

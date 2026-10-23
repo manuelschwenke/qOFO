@@ -259,7 +259,7 @@ Answer these three from the output above, then choose the path:
   statistics (y_init, y_final, step, t_settle, overshoot) and NOT the time
   series -- the modal content of those runs is unrecoverable.
 
-  Either way the headline number in ch:param:timescales becomes an OUTPUT
+  Either way the headline number in ch:timescales becomes an OUTPUT
   settling time, never a per-mode one.
 """.rstrip())
 

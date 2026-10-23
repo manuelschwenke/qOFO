@@ -77,9 +77,9 @@ Every run writes, next to its results:
                         runs, so an aborted run still records what it tried
 * ``run.log``        -- the full console transcript
 * ``_latest.txt``    -- written one level up; the stamp of the newest run, so
-                        "which run is Table 9.1 from" has a single answer
+                        "which run is the settling table from" has a single answer
 
-and the exit code is non-zero if any row of Table 9.1 is missing, so an
+and the exit code is non-zero if any row of the settling table is missing, so an
 incomplete battery cannot be mistaken for a complete one.
 
 The post-processing (settling -> table -> derived quantities) is verifiable
@@ -89,7 +89,7 @@ without a PowerFactory seat:
 
 Outputs, in ``results/THESIS_ch9_1_timescale_settling/<label>/<stamp>/``
 -------------------------------------------------
-* ``timescale_table.tex``     -- the tabular *body* of Table 9.1, ready to
+* ``timescale_table.tex``     -- the tabular *body* of the settling table, ready to
                                  paste over the ``[TBD]`` rows
 * ``timescale_summary.md``    -- the same numbers plus the derived design
                                  quantities and the run's provenance
@@ -138,7 +138,7 @@ from pf.screening import (  # noqa: E402
 
 #: Settling bands. Same values the dead-band study and the earlier battery
 #: used, so numbers remain comparable across chapters. Quoted verbatim in the
-#: caption of Table 9.1 -- change one and the caption is wrong.
+#: caption of the settling table -- change one and the caption is wrong.
 BAND_VOLTAGE_PU = 1e-3
 BAND_Q_MVAR = 1.0
 BAND_DIAGNOSTIC = 1e-4
@@ -172,11 +172,11 @@ OLTC_COOLDOWN_NC_S = 60.0
 OLTC_COOLDOWN_MT_S = 180.0
 
 #: Case-name substring identifying the two-step tap. It is an instrument, not
-#: a dispatch, and is therefore excluded from the bound of eq. (9.1) while
+#: a dispatch, and is therefore excluded from the period bound while
 #: still being tabulated (the thesis table labels it "instrument only").
 INSTRUMENT_ONLY: Tuple[str, ...] = ("tap_+2seq",)
 
-#: Thesis Table 9.1 row order: (required substrings, caption, is_disturbance).
+#: Settling-table row order: (required substrings, caption, is_disturbance).
 #:
 #: Matched by LITERAL substring, deliberately not by regex: the StepDef names
 #: contain ``+`` (``tap_+1_NC3W_DSO_1_t0``), which a regex reads as a
@@ -264,7 +264,7 @@ def _git(*args: str) -> Optional[str]:
 
 
 def provenance(args: argparse.Namespace) -> Dict[str, Any]:
-    """Everything needed to say where a number in Table 9.1 came from.
+    """Everything needed to say where a number in the settling table came from.
 
     ``git_dirty`` is the one that matters: a settling time measured from an
     uncommitted working tree cannot be reproduced from the commit hash alone,
@@ -511,7 +511,7 @@ def run_case(ctx: ScreeningContext, sd: Any, mons: List[Tuple[Any, str, str]],
     # A settling time equal to the horizon is NOT a settling time: the
     # trajectory left the band at the last sample the run holds, so the true
     # value is >= horizon and unknown. Flagged rather than silently reported,
-    # because such a row would otherwise set the bound of eq. (9.1) at a
+    # because such a row would otherwise set the period bound at a
     # value that is an artefact of the run length.
     censored = worst["t_settle"] >= horizon - 1e-9
     # The MIRROR failure of censoring, and the one the acceptance criterion
@@ -536,7 +536,7 @@ def run_case(ctx: ScreeningContext, sd: Any, mons: List[Tuple[Any, str, str]],
     # plant excursion is large but whose net step is small, so 0 of its 54
     # controlled signals clear the band while its measured T_s is 305.82 s.
     # Such a test would have flagged all three load rows inert and replaced
-    # the only disturbance evidence in Table 9.1 with "[$<$band]". Caught
+    # the only disturbance evidence in the settling table with "[$<$band]". Caught
     # 2026-08-21 against the trajectories of run 20260820-135439.
     inert = _is_inert(worst)
     return {"case": sd.name, "note": sd.note, "kind": sd.kind,
@@ -599,7 +599,11 @@ def _tap_split(disp: List[Dict[str, Any]], one_sub: str, two_sub: str,
 
 
 def derive(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    r"""Turn the measured rows into the design quantities of eq. (9.1).
+    r"""Turn the measured rows into the design quantities of the period bound.
+
+    The live chapter reaches that bound by a different route: it is
+    ``eq:param:timescales:period_bound``, derived from the modal analysis
+    (Experiment A) rather than from this battery.
 
     Two things are computed and they are not the same.
 
@@ -712,7 +716,7 @@ def _case_mvar(case: str) -> str:
 
 
 def build_table(results: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
-    """Table 9.1 body plus the list of captions no measured case filled."""
+    """Settling-table body plus the list of captions no measured case filled."""
     tex: List[str] = [r"\multicolumn{3}{l}{\emph{Dispatches}} \\"]
     missing: List[str] = []
     emitted: set = set()
@@ -760,7 +764,7 @@ def write_outputs(out_dir: Path, results: List[Dict[str, Any]],
     tex, missing = build_table(results)
     (out_dir / "timescale_table.tex").write_text("\n".join(tex), encoding="utf-8")
 
-    md = ["# Timescale study (thesis Table 9.1)", "",
+    md = ["# Timescale study (settling table, retired 2026-09-18)", "",
           "Dispatch rows bound `T_DS`; disturbance rows do not and are "
           "reported only to establish for how many periods after an event a "
           "controller still samples a transient.", "",
@@ -798,10 +802,11 @@ def write_outputs(out_dir: Path, results: List[Dict[str, Any]],
            f"{OLTC_COOLDOWN_MT_S/T_DS_S:.0f} dispatch intervals, so a "
            f"multi-step command cannot arise",
            f"- `T_TS` = {T_TS_S:.0f} s over `T_DS` = {T_DS_S:.0f} s is the "
-           f"**configured** ratio {T_TS_S/T_DS_S:.0f}. This is NOT the "
-           f"measured `N_inner` of eq. (9.2): that is a closed-loop property "
-           f"of the isolated DSO-OFO and this open-loop battery does not "
-           f"measure it. Do not quote this line as evidence for `N_inner`."]
+           f"**configured** ratio {T_TS_S/T_DS_S:.0f}. This is NOT "
+           f"`N_inner` (`eq:param:timescales:ninner`), which follows from "
+           f"`T_TS` / `T_STS` in the live chapter and is checked by "
+           f"Experiment C; this open-loop battery does not measure it. "
+           f"Do not quote this line as evidence for `N_inner`."]
 
     # Both tap classes, side by side. The thesis caption asserts the
     # mechanical block parameter (5 s) is what a tap costs; whether that
@@ -837,7 +842,7 @@ def write_outputs(out_dir: Path, results: List[Dict[str, Any]],
 
     not_tabulated = [r for r in results if not r["tabulated"]]
     if not_tabulated:
-        md += ["", "## Measured but not in Table 9.1", "",
+        md += ["", "## Measured but not in the settling table", "",
                "These cases ran and enter the derived quantities where the "
                "docstring of `derive` says they do, but the thesis table has "
                "no row for them. Listed so the omission is visible rather "
@@ -887,7 +892,7 @@ def write_outputs(out_dir: Path, results: List[Dict[str, Any]],
 # =====================================================================
 
 def _synthetic_results() -> List[Dict[str, Any]]:
-    """One row per Table 9.1 case, with the name shapes the catalogue emits."""
+    """One row per settling-table case, with the name shapes the catalogue emits."""
     def row(case, kind, dist, t, note="synthetic", signal="u_TN_bus16",
             horizon=60.0):
         return {"case": case, "note": note, "kind": kind, "disturbance": dist,
@@ -940,7 +945,7 @@ def self_test() -> int:
     print("[self-test] post-processing of the timescale battery")
     res = _synthetic_results()
     tex, missing = build_table(res)
-    check("every Table 9.1 row is filled", not missing, f"missing: {missing}")
+    check("every settling-table row is filled", not missing, f"missing: {missing}")
     check("no '[not run]' in the emitted body",
           not any("[not run]" in line for line in tex))
     check("row count = one line per table row + 2 group headers + 1 midrule",
@@ -1038,8 +1043,9 @@ def self_test() -> int:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Settling battery for the timescale selection "
-                    "(thesis Sec. 9.1, Table 9.1).")
+        description="Settling battery for the timescale selection. Produced the "
+                    "settling table, retired 2026-09-18; see the module "
+                    "docstring.")
     ap.add_argument("--label", default="full_t0_wecc",
                     help="snapshot label for the results folder")
     ap.add_argument("--project", default=DEFAULT_PROJECT_PATH)
@@ -1205,7 +1211,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   f"{', '.join(c for c, _ in failures)}")
             rc = 2
         if missing:
-            print(f"[timescale] Table 9.1 INCOMPLETE -- {len(missing)} row(s) "
+            print(f"[timescale] settling table INCOMPLETE -- {len(missing)} row(s) "
                   f"unfilled: {'; '.join(missing)}")
             print("[timescale] do NOT paste timescale_table.tex into the "
                   "thesis until every row is filled")

@@ -122,3 +122,43 @@ first. If no candidate passes, the protocol stops and reports it.
 - 2026-10-22 ~22:40 — Smoke of the per-window path (start weights, W4, 1 h,
   outside the campaign): row complete incl. bank-wear fields, 302 s wall per
   simulated hour under the current load, i.e. ~20–25 h for the bank.
+- 2026-10-23 15:22 — Stage II finished: 720 / 720 units ok, 0 failed,
+  120 candidate records, 16.85 h (median 37.4 min per 12 h unit, as in
+  October).
+- 2026-10-23 15:24 — Selection (`selection/selection_frozen.json`):
+  **41 / 120 feasible**. Rejection reasons (a candidate may have several):
+  tap hunting 54, interface-Q > 3 × start 25, bank hunting 22, corridor
+  violations 12, tap budget 4, bank budget 3. Budget sensitivity
+  (`budget_sensitivity.json`): 38 feasible at 4 / bank / day, 41 at 8, 12, 24
+  and 48; the top five identical at every budget — the selection does not
+  depend on N3. Ranking: **1. faf088d2570e** e_v(TS) 0.00507, e_v(DS)
+  0.00844, e_q 115 393, λ_max(B) 1.487, alone in the 2 % band (rank 2
+  7295750e02f4 at 0.00532); 3. ed3e7ff339d4 0.00544; 4. starting weights
+  3cb66225e1a7 0.00547 / 0.00749 / 1 039 596. No candidate dominates the
+  starting weights on both voltage criteria.
+- 2026-10-23 15:24–18:44 — Experiment C on ranks 1–4 in parallel
+  (`expC/criterion_results.json`): **faf088d2570e PASS** (p95 21.05, per DSO
+  17.0 / 14.0 / 23.55 / 11.65, 2 / 120 steps > 27, max 33, median residual
+  0.30 Mvar); 7295750e02f4 FAIL (35.0, 3.14 Mvar); ed3e7ff339d4 FAIL (46.0,
+  7.01 Mvar, 21 censored); starting weights FAIL (31.1, 2.26 Mvar — as in
+  October). The ranking winner passes, so the repeated selection is not
+  needed.
+- **2026-10-23 18:44 — RESULT: `configs/paramsets/ch9_selected_10_2026_banks.json`
+  = faf088d2570e**, not adopted as `SELECTED_PARAMSET` (§5). Weights:
+  g_q 0.3561, dso_g_v 4240, g_w_der 0.02355, g_w_pcc 0.3433, g_w_gen
+  1.213·10⁷, g_w_tso_oltc 15.67, **g_w_tso_shunt 46.32** (Δv_eng,sh ≈ 0.017 pu
+  at the strongest bank), g_w_dso_der 1.144, g_w_dso_oltc 16.22;
+  g_w_pcc / g_w_der 14.6. Driver total 20.2 h.
+- Box-edge check (§4, offset in fractions of the span from the Stage-I
+  point): g_w_gen −0.92 and **g_w_tso_shunt +0.92** above 90 %, to be stated;
+  g_q +0.63, g_w_der −0.60, g_w_pcc +0.57, g_w_dso_der +0.36, g_w_tso_oltc
+  −0.27, dso_g_v −0.25, g_w_dso_oltc −0.02.
+- Bank activity of the winner: no commit in W1–W4, W6; 11 in W5 (unranked).
+  Starting weights: 2 / 0 / 6 / 3 / 12 / 0 in W1–W6.
+- Orientation (§4, declared, not part of the selection; `orientation/`):
+  `ch9_selected_10_2026` weights at the Stage-I bank price 27.21 (key
+  cffa2ca108c5): feasible, e_v(TS) **0.00504**, e_v(DS) **0.00697**, e_q
+  126 338, λ_max(B) 1.467, bank commits 0 / 0 / 4 / 3 / 20 / 0. It
+  **dominates the winner** on both voltage criteria (−0.6 % TS, inside the
+  2 % band; −17 % DS) and lies outside the box (g_w_der −1.17 of the span) —
+  the pattern of October run 1. Not used; for the author's decision.

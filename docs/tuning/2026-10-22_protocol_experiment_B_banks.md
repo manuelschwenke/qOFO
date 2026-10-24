@@ -219,3 +219,25 @@ kept unchanged, and `SELECTED_PARAMSET` is not switched.
   **dominates the winner** on both voltage criteria (−0.6 % TS, inside the
   2 % band; −17 % DS) and lies outside the box (g_w_der −1.17 of the span) —
   the pattern of October run 1. Not used; for the author's decision.
+- 2026-10-24 — Amendment 1 (widening) analysed and not adopted; Amendment
+  1-alt adopted and frozen (commit a1a1840) before its Experiment C run.
+- 2026-10-24 09:53–11:08 — Amendment 1-alt, Experiment C on cffa2ca108c5
+  (30 workers, same command and criterion as run 1;
+  `expC/cand_cffa2ca108c5/20261024-095313`): **PASS**, p95 23.05 (per DSO
+  20.55 / 14.65 / 25.0 / 11.0), 2 / 120 steps > 27, max 33, 0 censored, median
+  residual 0.40 Mvar.
+- 2026-10-24 11:09 — Selection over the union (`amendment1alt/selection_union.json`,
+  bank budget 12): 42 / 121 feasible. Ranking: **1. cffa2ca108c5** (e_v(TS)
+  0.00504), 2. faf088d2570e (0.00507, inside the 2 % band; e_v(DS) 0.00844
+  against 0.00697), 3. 7295750e02f4, 4. ed3e7ff339d4, 5. starting weights.
+  The ranking winner passes Experiment C, so no further repetition.
+- **2026-10-24 11:09 — RESULT of Amendment 1-alt:
+  `configs/paramsets/ch9_selected_10_2026_banks_a1.json` = cffa2ca108c5**,
+  i.e. the nine weights of `ch9_selected_10_2026` (df17c0c32904) with
+  `g_w_tso_shunt` = 27.2121 from the Stage-I rule (Δv_eng,sh 0.010).
+  e_v(TS) 0.00504, e_v(DS) 0.00697, e_q 126 338 (0.12 × the starting
+  weights), λ_max(B) 1.467, bank commits per bank and day ≤ 4 in the ranked
+  windows, no tap or bank hunting. Its Experiment C p95 equals the October
+  value (23.05) measured without banks in the MIQP. Not adopted as
+  `SELECTED_PARAMSET`; `ch9_selected_10_2026_banks` (run 1) unchanged.
+

@@ -108,7 +108,64 @@ first. If no candidate passes, the protocol stops and reports it.
 | N7 | `g_w_tso_shunt` required | yes | A |
 
 ## 10. Amendments after freezing
-(none)
+
+**Amendment 1 (widening) — 2026-10-24, drafted at the author's request, NOT
+adopted.** The author chose Amendment 1-alt below after seeing the coverage
+finding. Kept as drafted, with its cost and finding, as the record of why.
+Like 1-alt, it was considered after seeing the run's result (§11: the
+declared orientation run, the October weights at the Stage-I bank price,
+dominates the selected faf088d2570e and lies outside the box).
+
+- **Change:** `g_w_der` and `g_w_pcc` spans 1.0 → **1.5 decades** (the D4
+  value of the predecessor's run 1), so the October point (g_w_der at −1.17
+  of the current span) lies inside the box (−0.78 / +0.50 of the new span).
+  1.25 decades would also contain it, at −0.93, close to the edge.
+- **Unchanged:** Stage-I point `stage1_start_10_2026_banks`, all other spans,
+  Sobol n 512, seed 20260910, screen, filter, ranking, Experiment C rule,
+  bank budget. A new 12 h bank of all survivors; the baseline's 6 units are
+  reused. Run 1 of this protocol stays as recorded.
+- **Cost** (analytic dry run, `amendment1_options.py` / `.log`; measured
+  43 units/h at 30 workers):
+
+  | g_w_der / g_w_pcc span | n | survivors | 12 h units | Stage II | + selection, Exp C |
+  |---|---|---|---|---|---|
+  | 1.0 (run 1, reference) | 512 | 119 | 714 | 16.6 h | ~3.3 h |
+  | 1.25 | 512 | 113 | 678 | ~15.8 h | ~3 h |
+  | **1.5** | **512** | **104** | **624** | **~14.5 h** | **~3 h** |
+  | 1.25 | 1024 | 215 | 1290 | ~30 h | ~3 h |
+  | 1.5 | 1024 | 196 | 1176 | ~27 h | ~3 h |
+
+- **Coverage finding (fact, from the dry run): widening puts the October
+  point inside the box but does not sample its region.** The nearest
+  surviving draw is 0.58 decades away at 1.5 (0.66 at 1.25; 0.69 for run 1),
+  with no survivor within 0.5 decade in any option. Doubling n does not help:
+  the 1024-point Sobol design begins with the 512-point one, and none of the
+  added points falls closer. At about 110 survivors in 9 dimensions the
+  design's spacing is ~0.6 spans, so a point inside the box is not thereby
+  evaluated. (The predecessor's run 2 re-found the September optimum at
+  0.04 decades because the same seed in the same 8-D box re-drew the same
+  point; with the ninth coordinate and the shifted centre that no longer
+  holds.)
+
+**Amendment 1-alt — ADOPTED 2026-10-24 by the author, frozen before its
+Experiment C run. Decided after seeing run 1's result** (the orientation run
+dominating the selected candidate), and recorded as such: the candidate set
+is enlarged after the outcome was known, by one point that is itself a search
+result of the predecessor protocol. Everything else — filter, limits incl.
+bank budget 12, ranking, Experiment C criterion, repeated selection — is
+unchanged and applied to the union as it stands.
+Candidate set = run 1's bank ∪ the October selection re-evaluated on this
+configuration at the Stage-I bank price (key cffa2ca108c5: the orientation
+run, already simulated 12 h in W1–W6 with the same driver and flags). The
+October weights are themselves a search result (predecessor run 2), not a
+hand-set point. The unchanged rule would rank cffa2ca108c5 first (e_v(TS)
+0.00504, inside the 2 % band of 0.00507; e_v(DS) 0.00697 < 0.00844), so it
+needs Experiment C — its October C result was measured on a controller
+without banks in the MIQP and does not transfer. **Cost: one Experiment C
+run, ~1 h at 24 workers; no new 12 h units.** If it fails C, the repeated
+selection returns faf088d2570e. A new winner is written as
+`ch9_selected_10_2026_banks_a1`; `ch9_selected_10_2026_banks` (run 1) is
+kept unchanged, and `SELECTED_PARAMSET` is not switched.
 
 ## 11. Execution record
 - 2026-10-22 ~22:20 — Operating points rebuilt with bank columns and STS

@@ -87,10 +87,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: on the final configuration under docs/tuning/2026-10-16_protocol_experiment_
 #: B_rerun.md (candidate df17c0c32904, every weight within +-5.4 % of the
 #: September selection 399e30d3b60b; shunt_int_g_w 0.1605).  Was "ch9_selected".
-SELECTED_PARAMSET = "ch9_selected_10_2026"
+#:
+#: 2026-10-25 (author decision): ``ch9_selected_final_2026_10`` -- candidate
+#: c08b1d3d33ab, the single application of the frozen procedure
+#: docs/tuning/2026-10-24_weight_selection_procedure.md on the final
+#: configuration (banks in the TS-MIQP; ``g_w_tso_shunt`` is a weight).  Every
+#: earlier set lacks ``g_w_tso_shunt`` and no longer runs with the banks in
+#: the MIQP.  Was "ch9_selected_10_2026".
+SELECTED_PARAMSET = "ch9_selected_final_2026_10"
 
 #: The Stage-I analytic design point, for the initial-weight legs (B and C).
-INITIAL_PARAMSET = "stage1_start"
+#: 2026-10-25: the Stage-I point of that procedure (was "stage1_start", which
+#: lacks ``g_w_tso_shunt``).
+INITIAL_PARAMSET = "stage1_start_10_2026_banks"
 
 #: Per-DSO scenario multipliers of the 2026-09-09 "frozen network".
 #:

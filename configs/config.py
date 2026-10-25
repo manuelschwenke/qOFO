@@ -340,6 +340,25 @@ class MultiTSOConfig:
     ``{zone_id: v_max_pu}``.  See :attr:`zone_v_min_pu`; routed to
     ``TSOControllerConfig.v_max_pu``."""
 
+    # -- Voltage band of the DSO controllers (added 2026-10-25) ---------------
+    dso_v_min_pu: float = 0.90
+    """Lower edge of the voltage band every DSO controller holds its observed
+    HV buses in [p.u.], routed to ``DSOControllerConfig.v_min_pu``.  Enforced
+    like the TS corridor: a soft output constraint whose slack is priced by
+    :attr:`g_z_voltage`.  The default equals the grid-code limit and the
+    controller's own dataclass default, so leaving it untouched reproduces
+    every run made before this field existed (the runner never passed it).
+
+    Setting it inside the grid-code band is an operating margin the DSO keeps
+    for itself: ``experiments.run_multi_system_ofo.make_config`` uses
+    0.92 .. 1.08 pu (author decision 2026-10-25), after the selected weights
+    of 2026-10-25 let one STS reach 1.096 pu with nothing in the controller
+    holding it back."""
+
+    dso_v_max_pu: float = 1.10
+    """Upper edge of the DSO controllers' voltage band [p.u.]; see
+    :attr:`dso_v_min_pu`."""
+
     # -- Objective weights -----------------------------------------------------
     g_v:            Optional[float] = None
     zone_g_v: Optional[Dict[int, float]] = None
@@ -2172,6 +2191,10 @@ class MultiTSOConfig:
         :attr:`g_q`: ``dataclasses.replace`` re-runs this hook, so anything
         that read its own previous output would compound on every copy.
         """
+        if not (0.0 < float(self.dso_v_min_pu) < float(self.dso_v_max_pu)):
+            raise ValueError(
+                f"DSO voltage band must satisfy 0 < dso_v_min_pu < dso_v_max_pu, "
+                f"got [{self.dso_v_min_pu}, {self.dso_v_max_pu}]")
         _install_dso_v_relief(self)
 
 

@@ -4,6 +4,12 @@
 output is the weight set used in Part III, whatever it is. Execution:
 `results/THESIS_ch8_weight_selection_20261024/` (`driver.py`, `driver.log`).
 
+**Superseded 2026-10-25** by `2026-10-25_weight_selection_procedure.md`: the
+configuration now includes a DSO operating band of 0.92–1.08 pu (author
+decision after this application's result reached 1.096 pu in one STS), and
+the procedure is applied again on it. This document and its record below are
+kept unchanged as the record of that application.
+
 Development history (not part of the procedure): the procedure was developed
 on preliminary campaigns, recorded in `2026-10-16_protocol_experiment_B_rerun.md`
 and `2026-10-22_protocol_experiment_B_banks.md`.

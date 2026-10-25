@@ -289,6 +289,10 @@ def make_config() -> MultiTSOConfig:
         dt_s=20.0,
         dso_gamma_oltc_q=0.0,
         zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},
+        # -- DSO operating band: 0.02 pu margin to the grid-code limits ------
+        # (author decision 2026-10-25; the DSO controllers held 0.90..1.10).
+        dso_v_min_pu=0.92,
+        dso_v_max_pu=1.08,
         # -- TSO tertiary shunts (MSC/MSR) -----------------------------------
         install_tso_tertiary_shunts=True,
         shunt_dispatch="miqp",

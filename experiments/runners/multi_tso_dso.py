@@ -1389,6 +1389,10 @@ def run_multi_tso_dso(
             g_v=config.dso_g_v,
             gamma_oltc_q=config.dso_gamma_oltc_q,
             qv_slope_pu=config.dso_qv_slope_pu,
+            # The DSO's operating band (2026-10-25); never passed before, i.e.
+            # the class default 0.90 .. 1.10, which the config default equals.
+            v_min_pu=config.dso_v_min_pu,
+            v_max_pu=config.dso_v_max_pu,
         )
 
         dso_s_rated = np.array(
@@ -2666,7 +2670,7 @@ def run_multi_tso_dso(
         _plotter_dso = CascadeDSOLivePlotter(
             dso_ids=dso_ids,
             v_setpoint_pu=config.v_setpoint_pu,
-            v_min_pu=0.9, v_max_pu=1.1,
+            v_min_pu=config.dso_v_min_pu, v_max_pu=config.dso_v_max_pu,
             sub_minute=False, update_every=1, slot_idx=1,
             layout=config.live_plot_layout,
             show_line_currents=config.live_plot_show_line_currents,

@@ -237,6 +237,11 @@ def main(argv: List[str] | None = None) -> int:
                         "per-bus spatial RMS (v_rms_ts / v_rms_ds), as the "
                         "thesis text reads; required by the 2026-10-16 "
                         "protocol (D1). Both are stored either way.")
+    p.add_argument("--windows", default="",
+                   help="Comma-separated subset of the bank's windows to "
+                        "SIMULATE (default: all). The analytic screen always "
+                        "uses every condition. Added 2026-10-25 to drop W5, "
+                        "which enters neither the filter nor the ranking.")
     p.add_argument("--span", action="append", default=[], metavar="NAME=DECADES",
                    help="Override one log-span of the search box (repeatable), "
                         "e.g. --span g_w_pcc=1.5. Unlisted coordinates keep "
@@ -352,6 +357,7 @@ def main(argv: List[str] | None = None) -> int:
         "v_metric": args.v_metric,
         "searched": list(SEARCHED_FIELDS),
         "conditions": [o.condition for o in ops],
+        "simulated_windows": args.windows or "all",
         "lambda_max_all": lam_all,
         "estimated_wall_h": est_h,
         "argv": sys.argv,
@@ -369,6 +375,13 @@ def main(argv: List[str] | None = None) -> int:
     # comparison is quoted against.  An explicit shortlist that already
     # contains the baseline is the normal way this happens.
     window_names = [o.condition for o in ops]
+    if args.windows:
+        wanted = [w.strip() for w in args.windows.split(",") if w.strip()]
+        unknown = sorted(set(wanted) - set(window_names))
+        if unknown:
+            raise SystemExit(f"--windows: unknown window(s) {unknown}; the bank "
+                             f"has {window_names}")
+        window_names = [w for w in window_names if w in wanted]
     jobs: List[Dict[str, Any]] = []
     seen_keys: set = set()
     cand_meta: Dict[str, Dict[str, Any]] = {}

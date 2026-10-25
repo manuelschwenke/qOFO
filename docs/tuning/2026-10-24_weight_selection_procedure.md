@@ -78,3 +78,36 @@ The first candidate that passes is the result, written as
 - Settling results already measured with the same code for candidates in the
   set are reused for the same reason.
 - 30 workers; Stage II-b ≤ 4 rounds × ~4 h; settling checks ~1.5–3 h.
+
+## Execution record (results only; the procedure above is unchanged)
+
+- 2026-10-24 14:55 — Driver started (code state `code_state/`, HEAD b0c601a).
+  Stage II-a records copied: 120 candidates, 720 windows; 41 / 120 feasible,
+  best faf088d2570e.
+- 2026-10-24 15:22 — Reproduction check passed: the Stage-I point in W1 and
+  faf088d2570e in W5 re-simulated reproduce every stored metric exactly.
+- Stage II-b, f = 0.5 throughout (every round found a new best, so the stage
+  ended at the 4-round cap, not by the span rule):
+
+  | round | centre | survivors / 64 | new best | e_v(TS) | e_v(DS) |
+  |---|---|---|---|---|---|
+  | 1 | faf088d2570e | 32 | e552b328fd76 | 0.00507 | 0.00607 |
+  | 2 | e552b328fd76 | 35 | ff3f747d3f96 | 0.00471 | 0.00796 |
+  | 3 | ff3f747d3f96 | 38 | c08b1d3d33ab | 0.00449 | 0.00997 |
+  | 4 | c08b1d3d33ab | 17 | 301c285ee52b | 0.00456 | 0.00861 |
+
+- 2026-10-25 08:58 — Selection over all 242 evaluated candidates: 84
+  feasible. Ranking 1. 301c285ee52b, 2. c08b1d3d33ab, 3. e27ce5e4f01e,
+  4. 67ad1cf843ac. Settling check: 301c285ee52b FAIL (p95 31.0),
+  c08b1d3d33ab PASS (22.05, median residual 0.25 Mvar), e27ce5e4f01e PASS
+  (22.05, 0.24), 67ad1cf843ac FAIL (33.0, 1.22). Ranking recomputed without
+  the failures: c08b1d3d33ab first.
+- **2026-10-25 14:02 — RESULT: `configs/paramsets/ch9_selected_final_2026_10.json`
+  = c08b1d3d33ab.** e_v(TS) 0.00449, e_v(DS) 0.00997, e_q 137 603
+  (Stage-I point: 0.00547 / 0.00749 / 1 039 596), λ_max(B) 1.414, taps
+  ≤ 4 per transformer and day, bank commits ≤ 4 per bank and day, no
+  hunting in W1–W4, W6; settling p95 22.05 (per DSO 21.95 / 15.1 / 23.55 /
+  11.65), 2 / 120 steps > 27, median residual 0.25 Mvar. Weights: g_q 0.6354,
+  dso_g_v 2186, g_w_der 0.01110, g_w_pcc 0.1714, g_w_gen 9.44·10⁵,
+  g_w_tso_oltc 16.70, g_w_tso_shunt 25.50, g_w_dso_der 2.071, g_w_dso_oltc
+  4.627. Driver total 24.1 h.

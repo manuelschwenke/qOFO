@@ -21,9 +21,14 @@ D1 -- routine droop inactivity
        ``d_ik = max |U_f - U_anchor|`` over the solves of the interval.
        Intervals that start in the first ``WARMUP_S`` are the start-up phase,
        reported separately.
-    2. ``Delta* = min{d in CANDIDATES : d >= max_routine d_ik + EPS_U}``
+    2. ``Delta* = min{d in CANDIDATES : d >= max_drift d_ik + EPS_U}``
        (eq:param:deadband:detector); the candidate set is extended by 0.005 pu
-       steps if no width qualifies.
+       steps if no width qualifies.  "Drift" = the routine intervals that
+       contain no discrete event -- a converter capability step at the
+       P/S_n = 0.1 threshold, or an OLTC or bank operation (author decision
+       2026-10-27, after run 0005 showed that these events alone set the
+       maximum over all routine intervals; that maximum and the width it would
+       give are reported alongside).
     3. Confirmation runs, droop active, at Delta* and at the adjacent narrower
        width: dead-zone activations, delivered support, and the deviation of
        the trajectories from the suppressed reference.
@@ -96,7 +101,17 @@ from tuning.scenarios_mc_v2 import CONDITIONS, MC_NETWORK  # noqa: E402
 
 # -- protocol (docs/tuning/2026-10-27_D1_D2_deadband_plan.md) -------------------
 CANDIDATES: Sequence[float] = (0.005, 0.0075, 0.010, 0.0125, 0.015, 0.020)
-EPS_U = 0.001          # pu, converter voltage-measurement accuracy
+# pu: voltage-measurement accuracy of an HV converter, from the project's own
+# noise model (configs/config.py, profile "minimum": HV voltage transformer
+# 0.2 % + meter 0.1 %).  Was 0.001 (the EHV transformer alone) until
+# 2026-10-27, when the author moved D1 to the drift-based rule below.
+EPS_U = 0.003
+# A converter's capability band that jumps by more than this between two
+# solves marks a discrete event: the P/S_n = 0.1 threshold of the
+# VDE-AR-N 4120 curve in controller.der_qv_local_loop._qv_capability, where
+# the band steps from +-0.1 S_n to 0.  Inside the 0.1-0.2 ramp the band moves
+# by far less than 1 Mvar per 10 s.
+CAP_STEP_MVAR = 1.0
 SUPPRESSED = 1.0       # pu half-width no routine excursion reaches = droop off
 DT_S = 10.0
 D1_HOURS = 2.0
@@ -210,23 +225,66 @@ def _pool(jobs: List[Dict[str, Any]], workers: int) -> List[Dict[str, Any]]:
 
 # -- D1 reduction -----------------------------------------------------------------------
 
-def excursions(probe: pd.DataFrame) -> pd.DataFrame:
+def discrete_solves(run_dir: Path) -> set:
+    """``(t_s, solve)`` of every solve at which a discrete event changes the plant.
+
+    * a converter's capability band jumps by more than ``CAP_STEP_MVAR``,
+      at the solve that first shows it;
+    * an OLTC (TS or STS) or a bank operates, at the end-of-step solve of the
+      dispatch that commanded it (the records carry the positions at dispatch
+      steps only, so each is compared with the previous dispatch).
+
+    Author decision 2026-10-27: D1 selects the width from the routine
+    excursions WITHOUT these events; the excursions they cause are reported
+    separately, together with the activations they produce.
+    """
+    p = pd.read_csv(run_dir / "probe.csv.gz").sort_values(["sgen", "t_s", "solve"])
+    jump = (p.groupby("sgen")["q_max_mvar"].diff().abs() > CAP_STEP_MVAR) | \
+           (p.groupby("sgen")["q_min_mvar"].diff().abs() > CAP_STEP_MVAR)
+    keys = set(zip(p.loc[jump, "t_s"], p.loc[jump, "solve"]))
+    last = p.groupby("t_s")["solve"].max()
+    prev: Dict[str, Any] = {}
+    for r in _records(run_dir):
+        for f in ("zone_oltc_taps", "zone_tso_shunt_states", "dso_trafo_tap_pos"):
+            cur = r[f]
+            if not cur:
+                continue
+            old = prev.get(f)
+            if old is not None and any(np.any(np.asarray(v) != np.asarray(old.get(k, v)))
+                                       for k, v in cur.items()):
+                if r["t_s"] in last.index:
+                    keys.add((r["t_s"], int(last[r["t_s"]])))
+            prev[f] = cur
+    return keys
+
+
+def excursions(probe: pd.DataFrame, discrete: set = frozenset()) -> pd.DataFrame:
     """One row per (converter, anchor interval): d_ik and its context.
 
     An interval runs from the solve that carries a new anchor to the last
     solve before the next one, so the pre-dispatch solve at t_k+1 (anchor still
     held) closes interval k and the post-dispatch solve opens k+1.
+    ``discrete`` marks the intervals that contain a discrete-event solve
+    (:func:`discrete_solves`): the step it causes persists until re-anchoring.
     """
     df = probe.sort_values(["sgen", "t_s", "solve"]).reset_index(drop=True)
     new = df.groupby("sgen")["anchor_pu"].diff().fillna(1.0).ne(0.0)
     df["k"] = new.astype(int).groupby(df["sgen"]).cumsum()
     df["abs_v_eff"] = df["v_eff_pu"].abs()
     df["has_cap"] = (df["q_max_mvar"] - df["q_min_mvar"]) > 0.0
+    df["disc"] = [(t, s) in discrete for t, s in zip(df["t_s"], df["solve"])]
+    # Drift part of an interval: its solves before the first discrete event in
+    # it (all of them if there is none), so excluding an event never hides the
+    # drift that preceded it.
+    after = df.groupby(["sgen", "k"])["disc"].cumsum() > 0
+    df["abs_v_eff_drift"] = df["abs_v_eff"].where(~after)
     g = df.groupby(["sgen", "k"])
     return pd.DataFrame({
         "level": g["level"].first(), "t_start_s": g["t_s"].first(),
         "t_end_s": g["t_s"].last(), "n_solves": g.size(),
         "d_pu": g["abs_v_eff"].max(), "has_cap": g["has_cap"].any(),
+        "discrete": g["disc"].any(),
+        "d_drift_pu": g["abs_v_eff_drift"].max().fillna(0.0),
     }).reset_index()
 
 
@@ -281,11 +339,22 @@ def confirm_metrics(run_dir: Path, ref_dir: Path, warmup_s: float) -> Dict[str, 
     cap = (p["q_max_mvar"] - p["q_min_mvar"]) > 0.0
     deliv = droop_delivered(p).abs() > TOL_Q_MVAR
     routine = p["t_s"] >= warmup_s
+    # Rows in an anchor interval that contains a discrete event of this run.
+    disc = discrete_solves(run_dir)
+    q = p.sort_values(["sgen", "t_s", "solve"])
+    k = q.groupby("sgen")["anchor_pu"].diff().fillna(1.0).ne(0.0).astype(int) \
+        .groupby(q["sgen"]).cumsum()
+    hit = pd.Series([(t, s) in disc for t, s in zip(q["t_s"], q["solve"])], index=q.index)
+    in_disc = hit.groupby([q["sgen"], k]).transform("any").reindex(p.index)
     out: Dict[str, Any] = {}
     for lev in ("TS", "STS"):
         m = p["level"] == lev
         out[f"activations_{lev}"] = int((p["dz_active"] & m).sum())
         out[f"activations_routine_{lev}"] = int((p["dz_active"] & m & routine).sum())
+        out[f"activations_routine_drift_{lev}"] = int(
+            (p["dz_active"] & m & routine & ~in_disc).sum())
+        out[f"activations_routine_discrete_{lev}"] = int(
+            (p["dz_active"] & m & routine & in_disc).sum())
         out[f"activations_with_capability_{lev}"] = int((p["dz_active"] & cap & m).sum())
         out[f"delivered_solves_{lev}"] = int((deliv & m).sum())
         if (p["dz_active"] & m & routine).any():
@@ -399,6 +468,8 @@ def main(argv=None) -> int:
               "warmup_s": warmup, "event_s": ev_s, "observe_s": obs_s,
               "events": {k: EVENTS[k] for k in events}, "windows": [w for w, _ in win],
               "measurement_noise": False, "tested_width_from_s": warmup,
+              "d1_rule": "drift (routine intervals without a discrete event)",
+              "cap_step_mvar": CAP_STEP_MVAR,
               "stage1_from": args.stage1_from}
     with start_thesis_run(
             __file__, target=["ch:timescales:deadband"],
@@ -429,17 +500,35 @@ def main(argv=None) -> int:
 
         ex = []
         for w, _s in win:
-            e = excursions(pd.read_csv(root / "d1" / "suppressed" / w / "probe.csv.gz"))
+            d = root / "d1" / "suppressed" / w
+            e = excursions(pd.read_csv(d / "probe.csv.gz"), discrete_solves(d))
             ex.append(e.assign(window=w))
         ex = pd.concat(ex, ignore_index=True)
         ex["startup"] = ex["t_start_s"] < warmup
         ex.to_csv(root / "d1" / "excursions.csv.gz", index=False)
         routine = ex[~ex.startup]
-        sel = select_width(float(routine["d_pu"].max()))
-        sel["d_max_with_capability_pu"] = float(routine.loc[routine.has_cap, "d_pu"].max())
+        drift = routine.assign(d_pu=routine["d_drift_pu"])
+        # Drift-based rule (author decision 2026-10-27): the width covers the
+        # routine excursions up to the first discrete event of each interval;
+        # the rule as first written (all routine intervals) is reported
+        # alongside.
+        sel = select_width(float(drift["d_pu"].max()))
+        sel["rule"] = ("drift: routine intervals without a discrete event "
+                       "(capability step > CAP_STEP_MVAR, OLTC or bank operation)")
+        sel["cap_step_mvar"] = CAP_STEP_MVAR
+        sel["d_max_all_routine_pu"] = float(routine["d_pu"].max())
+        sel["delta_rule_as_written_pu"] = select_width(sel["d_max_all_routine_pu"])["delta_star_pu"]
+        sel["n_routine_intervals"] = int(len(routine))
+        sel["n_discrete_intervals"] = int(routine.discrete.sum())
+        sel["discrete_above_delta_star"] = int((routine.discrete
+                                                & (routine.d_pu > sel["delta_star_pu"])).sum())
+        sel["d_max_with_capability_pu"] = float(drift.loc[drift.has_cap, "d_pu"].max())
         sel["d_max_startup_pu"] = float(ex.loc[ex.startup, "d_pu"].max()) if ex.startup.any() else None
-        sel["per_window_level"] = (routine.groupby(["window", "level"]).d_pu.max()
+        sel["per_window_level"] = (drift.groupby(["window", "level"]).d_pu.max()
                                    .unstack("level").round(6).to_dict(orient="index"))
+        sel["per_window_level_all_routine"] = (
+            routine.groupby(["window", "level"]).d_pu.max()
+            .unstack("level").round(6).to_dict(orient="index"))
         dt20 = excursions(pd.read_csv(root / "d1" / "dtcheck_W1_dt20" / "probe.csv.gz"))
         sel["dtcheck_W1_d_max_dt20_pu"] = float(dt20.loc[dt20.t_start_s >= warmup, "d_pu"].max())
         sel["dtcheck_W1_d_max_dt10_pu"] = float(routine.loc[routine.window == "W1", "d_pu"].max())

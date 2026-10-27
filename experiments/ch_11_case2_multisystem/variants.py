@@ -29,7 +29,8 @@ Variants
 ==== ============================================== =====================
 L2   local q(v) at both layers, taps held, no banks  floor
 S1   integral RVR + RPR + safeguard (Case 1's S1)    classical, no access
-S2   S1 with the couplers in the alignment law       NOT YET (plan 1.5)
+S2   S1 with the couplers in the alignment law;     classical, with access
+     the STS-OFOs track the resulting references
 O2   TS-OFO, STS under local q(v)                    OFO, no access
 O3   TS-OFO + interface set-points + STS-OFO         proposed cascade
 M    one OFO on the coupled model, every step        bound (not a rung)
@@ -67,6 +68,10 @@ _O_STS_LABELS = dict(local_der_mode="qv", tso_q_mode="qv", dso_q_mode="qv")
 VARIANTS: Dict[str, Dict[str, Any]] = {
     "L2": dict(_rc1.VARIANTS["L2"]),
     "S1": dict(_rc1.VARIANTS["S1"]),
+    # S1 with access: the couplers of each area's child STS join the
+    # alignment law between their neutral point and the CAIR interval edges,
+    # and the STS-OFOs track the references (design note 2026-10-27, approved).
+    "S2": dict(_rc1.VARIANTS["S1"], dso_mode="ofo", svr_sts_access=True),
     "O2": dict(_rc1.VARIANTS["O2"]),
     # The runner default is the cascade.  ``local_der_mode`` is only a
     # provenance label in dso_mode="ofo"; it is set as in O2 so that O2 -> O3
@@ -95,6 +100,11 @@ _SVR_FIELDS = set(_rc1._SVR_FIELDS)
 #: What each controlled step may change.  Enforced on RESOLVED configs.
 STEP_ALLOWED: Dict[Tuple[str, str], set] = {
     ("L2", "S1"): _SVR_FIELDS,
+    # The access step under the classical law.
+    ("S1", "S2"): {"dso_mode", "svr_sts_access"},
+    # The law step with the access held (objective and discrete devices too).
+    ("S2", "O3"): _SVR_FIELDS | {"tso_oltc_mode", "install_tso_tertiary_shunts",
+                                 "shunt_dispatch", "svr_sts_access"},
     # The law step: SVR -> OFO, which brings the MT taps and the banks.
     ("S1", "O2"): _SVR_FIELDS | {"tso_oltc_mode",
                                  "install_tso_tertiary_shunts",

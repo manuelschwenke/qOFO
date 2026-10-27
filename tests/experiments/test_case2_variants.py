@@ -68,3 +68,11 @@ def test_m_targets_the_selected_designs_loop_gain():
     m = v.resolved("M", 10)
     assert m.central_lambda_target == pytest.approx(v.selected_lambda_max())
     assert 0.0 < m.central_lambda_target < 2.0
+
+
+def test_s1_to_s2_changes_only_the_sts_controller_and_the_access():
+    a, b = v.resolved("S1", 10), v.resolved("S2", 10)
+    diff = {f.name for f in dataclasses.fields(a)
+            if f.name not in ("result_dir", "verbose")
+            and getattr(a, f.name) != getattr(b, f.name)}
+    assert diff == {"dso_mode", "svr_sts_access"}

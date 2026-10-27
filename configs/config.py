@@ -1598,6 +1598,14 @@ class MultiTSOConfig:
                  ``svr_k_p_rpr == 0`` and ``svr_rpr_voltage_priority == False``.
     Added 2026-10-06 (Case 1 of the thesis)."""
 
+    svr_sts_access: bool = False
+    """Classical reference WITH sub-transmission access (thesis variant S2,
+    ``eq:svr-alignment-sts``): with ``tso_mode='svr'`` and ``dso_mode='ofo'``
+    the couplers of each area's child STS join the RVR alignment law, between
+    the neutral point and the edges of their CAIR interval, and the STS-OFOs
+    track the resulting reference.  Design note
+    ``docs/architecture/2026-10-27_S2_design_note.md``; added 2026-10-27."""
+
     # -- Discrete-actuator ownership at the TSO layer -------------------------
     tso_oltc_mode: str = "ofo"
     """Who dispatches the TSO-layer OLTCs.

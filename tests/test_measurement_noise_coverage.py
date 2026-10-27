@@ -36,6 +36,7 @@ def _result_net():
     net["res_bus"] = pd.DataFrame({"vm_pu": [1.02, 0.99]}, index=[0, 1])
     net["res_gen"] = pd.DataFrame({"p_mw": [100.0], "q_mvar": [40.0]}, index=[40])
     net["res_sgen"] = pd.DataFrame({"p_mw": [10.0], "q_mvar": [5.0]}, index=[30])
+    net["res_trafo3w"] = pd.DataFrame({"p_hv_mw": [50.0], "q_hv_mvar": [0.0]}, index=[20])
     return net
 
 
@@ -51,6 +52,8 @@ def test_view_carries_the_packet_errors_on_shared_channels():
     assert view.res_gen.at[40, "q_mvar"] == pytest.approx(packet.gen_q_mvar[0], abs=1e-12)
     assert view.res_gen.at[40, "p_mw"] == pytest.approx(packet.gen_p_mw[0], abs=1e-12)
     assert view.res_sgen.at[30, "q_mvar"] == pytest.approx(packet.der_q_mvar[0], abs=1e-12)
+    assert view.res_trafo3w.at[20, "q_hv_mvar"] == pytest.approx(
+        packet.interface_q_hv_side_mvar[0], abs=1e-12)
 
 
 def test_view_leaves_the_plant_and_everything_else_untouched():

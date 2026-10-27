@@ -388,9 +388,10 @@ class MeasurementNoiseModel:
     def result_view(self, net, *, sample_id: Hashable):
         """Noisy view of the result tables for a controller that reads ``net``.
 
-        ``res_bus.vm_pu``, ``res_gen`` P/Q and ``res_sgen`` P/Q are perturbed
-        with exactly the channel keys of :meth:`apply` (VT/meter per bus;
-        CT/meter/phase per generator and per DER), so at the same
+        ``res_bus.vm_pu``, ``res_gen`` P/Q, ``res_sgen`` P/Q and the coupler
+        flows ``res_trafo3w.q_hv_mvar`` are perturbed with exactly the channel
+        keys of :meth:`apply` (VT/meter per bus; CT/meter/phase per generator,
+        per DER and per interface), so at the same
         ``sample_id`` a channel carries the same error whether an OFO packet or
         the classical SVR reads it.  Everything else is the true ``net``.
         Returns ``net`` itself when the model is disabled.
@@ -428,10 +429,24 @@ class MeasurementNoiseModel:
             out["q_mvar"] = q
             return out
 
+        res_t3 = getattr(net, "res_trafo3w", None)
+        if (res_t3 is not None and not res_t3.empty
+                and "q_hv_mvar" in res_t3.columns):
+            res_t3 = res_t3.copy()
+            q_hv = res_t3["q_hv_mvar"].to_numpy(dtype=float, copy=True)
+            for pos, idx in enumerate(res_t3.index):
+                _, q_hv[pos] = self._perturb_complex_power(
+                    self._interface_active_power(net, int(idx)), q_hv[pos], net,
+                    voltage_bus=self._interface_hv_bus(net, int(idx)),
+                    ct_channel_key=("trafo", int(idx), "hv"),
+                    meter_channel_key=("interface_power", int(idx), "hv"),
+                )
+            res_t3["q_hv_mvar"] = q_hv
         return NoisyResultView(
             net, res_bus,
             _power_table(net.res_gen, net.gen, "gen", "generator_power"),
             _power_table(net.res_sgen, net.sgen, "sgen", "der_power"),
+            res_t3,
         )
 
 
@@ -443,11 +458,13 @@ class NoisyResultView:
     exactly, as a real controller reads its own commands.
     """
 
-    def __init__(self, net, res_bus, res_gen, res_sgen) -> None:
+    def __init__(self, net, res_bus, res_gen, res_sgen, res_trafo3w=None) -> None:
         self._net = net
         self.res_bus = res_bus
         self.res_gen = res_gen
         self.res_sgen = res_sgen
+        if res_trafo3w is not None:
+            self.res_trafo3w = res_trafo3w
 
     def __getattr__(self, name: str):
         return getattr(self._net, name)

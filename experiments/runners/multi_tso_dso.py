@@ -1995,6 +1995,11 @@ def _run_multi_tso_dso_impl(
     # that it DOES command the continuous TSO actuators, through its own
     # dispatch block below.
     _svr_tso = config.tso_mode == "svr"
+    if config.svr_sts_access and not (_svr_tso and config.dso_mode == "ofo"):
+        raise ValueError(
+            "svr_sts_access (variant S2) requires tso_mode='svr' and "
+            "dso_mode='ofo': the couplers join the classical alignment law and "
+            "the STS-OFOs track the resulting references")
     _local_tso = config.tso_mode in ("local", "svr")
     # Plant-side Q(V) loops (QVLocalLoop / CosPhiConstLoop) plus any
     # DiscreteTapControl on couplers / machine trafos must be iterated
@@ -2600,6 +2605,8 @@ def _run_multi_tso_dso_impl(
             print(f"  [T] g_w preconditioning: {perf_counter() - _t:.2f} s")
 
     # ── Send initial DSO capability messages to TSO controllers ──────────
+    # Latest CAIR message per DSO, for the classical scheme with access (S2).
+    _svr_cap_inbox: Dict[str, Any] = {}
     # Without this, PCC capability bounds stay at the default ±1e-6 Mvar
     # until the first DSO step inside the loop.  The first TSO step then
     # sees near-zero capability and locks q_pcc; the second TSO step
@@ -2621,6 +2628,7 @@ def _run_multi_tso_dso_impl(
             if ctrl.controller_id == tso_id
         )
         target_tso.receive_capability(cap_msg)
+        _svr_cap_inbox[dso_id] = cap_msg
     if verbose >= 1:
         print(f"  [T] DSO capability messages loop: {perf_counter() - _t:.2f} s")
         for z, ctrl in tso_controllers.items():
@@ -3093,6 +3101,7 @@ def _run_multi_tso_dso_impl(
                     ofo_v_max_pu=float(config.v_max_pu),
                     ofo_g_z_v=float(config.g_z_voltage),
                     ofo_g_z_q=float(config.g_z_q_gen),
+                    sts_access=bool(config.svr_sts_access),
                 ),
                 # Same withholding the OFO gets (see _non_dispatchable_gens):
                 # without this the reference scheme would command the slack
@@ -3904,6 +3913,12 @@ def _run_multi_tso_dso_impl(
                     and config.measurement_noise.apply_to_svr):
                 _svr_net = measurement_noise_model.result_view(
                     _svr_net, sample_id=("control", step))
+            if config.svr_sts_access:
+                _tso_zone = {c.controller_id: z for z, c in tso_controllers.items()}
+                for _cm in _svr_cap_inbox.values():
+                    svr_coordinator.controllers[
+                        _tso_zone[_cm.target_controller_id]
+                    ].receive_capability(_cm)
             svr_outputs = svr_coordinator.step(
                 _svr_net, float(config.dt_s),
                 rvr_due=bool(run_tso), dt_rvr_s=float(config.tso_period_s),
@@ -3943,6 +3958,35 @@ def _run_multi_tso_dso_impl(
                 rec.zone_svr_ofo_rpr_active[z] = svr_out.ofo_rpr_active.copy()
                 rec.zone_svr_ofo_rpr_box_active[z] = svr_out.ofo_rpr_box_active.copy()
                 rec.zone_contraction_lhs[z] = float("nan")
+
+            # S2: the PCC block holds the coupler references of the alignment
+            # law; at each RVR update they go to the STS-OFOs through the same
+            # path and records as the cascade's interface set-points.
+            if config.svr_sts_access and run_tso:
+                for z, svr_out in svr_outputs.items():
+                    zd_s = zone_defs[z]
+                    n_der_s = len(zd_s.tso_der_indices)
+                    q_pcc_s = {
+                        int(t): float(svr_out.u_new[n_der_s + k])
+                        for k, t in enumerate(zd_s.pcc_trafo_indices)
+                    }
+                    for dso_id_s in sorted(set(zd_s.pcc_dso_ids)):
+                        dso_c = dso_controllers[dso_id_s]
+                        itf_s = [int(t) for t in dso_c.config.interface_trafo_indices]
+                        q_vec_s = np.array([q_pcc_s[t] for t in itf_s],
+                                           dtype=np.float64)
+                        dso_c.receive_setpoint(SetpointMessage(
+                            source_controller_id=f"svr_zone_{z}",
+                            target_controller_id=dso_c.controller_id,
+                            iteration=step,
+                            interface_transformer_indices=np.array(
+                                itf_s, dtype=np.int64),
+                            q_setpoints_mvar=q_vec_s,
+                        ))
+                        rec.dso_q_set_mvar[dso_id_s] = float(q_vec_s.sum())
+                        last_dso_q_set_mvar[dso_id_s] = q_vec_s.copy()
+                    for t_s, q_s in q_pcc_s.items():
+                        last_pcc_set_per_trafo[t_s] = q_s
 
             if verbose >= 2 and run_tso:
                 _parts = " ".join(
@@ -4726,6 +4770,8 @@ def _run_multi_tso_dso_impl(
                     if ctrl.controller_id == tso_id
                 )
                 target_tso.receive_capability(cap_msg)
+                # The classical scheme with access (S2) reads the same message.
+                _svr_cap_inbox[dso_id] = cap_msg
 
                 # ── PCC capability diagnostic ───────────────────────────
                 # Print, on each TSO tick, the per-coupling-trafo bounds

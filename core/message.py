@@ -215,6 +215,7 @@ class CapabilityMessage:
         interface_transformer_indices: NDArray[np.int64],
         q_min_mvar: NDArray[np.float64],
         q_max_mvar: NDArray[np.float64],
+        q_neutral_mvar: Optional[NDArray[np.float64]] = None,
     ) -> None:
         """
         Initialise a CapabilityMessage.
@@ -240,6 +241,12 @@ class CapabilityMessage:
         self.interface_transformer_indices = interface_transformer_indices
         self.q_min_mvar = q_min_mvar
         self.q_max_mvar = q_max_mvar
+        #: Neutral point per interface [Mvar, ABSOLUTE, load convention at the
+        #: HV port]: the flow with every subordinate converter at Q = 0,
+        #: ``Q_j - sum_i s_ji Q_i`` from the subordinate's own interface
+        #: sensitivities.  One scalar per coupler, read only by the classical
+        #: reference with sub-transmission access (S2); ``None`` if not sent.
+        self.q_neutral_mvar = q_neutral_mvar
 
     @property
     def n_interfaces(self) -> int:

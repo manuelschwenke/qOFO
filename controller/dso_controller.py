@@ -572,6 +572,12 @@ class DSOController(BaseOFOController):
         )
         self._last_capability_q_iface_min_mvar = q_iface_now + q_interface_min
         self._last_capability_q_iface_max_mvar = q_iface_now + q_interface_max
+        # Neutral point (S2): the flow with every converter at Q = 0, from the
+        # same open-loop sensitivities and the same measurement as the
+        # interval, so it lies inside it whenever 0 lies inside every unit's
+        # envelope.
+        q_neutral = q_iface_now - dQ_interface_dQ_der[:n_interfaces, :n_der] @ (
+            np.asarray(q_der_current, dtype=np.float64)[:n_der])
 
         return CapabilityMessage(
             source_controller_id=self.controller_id,
@@ -582,6 +588,7 @@ class DSOController(BaseOFOController):
             ),
             q_min_mvar=q_interface_min,
             q_max_mvar=q_interface_max,
+            q_neutral_mvar=np.asarray(q_neutral, dtype=np.float64),
         )
     
     def apply_qw_reset(self, measurement: Measurement) -> None:

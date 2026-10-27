@@ -79,11 +79,41 @@ Author decisions of 2026-10-27 that this implements:
   M stays in `NOT_READY` until a run with a bank switch confirms the commit path.
 - M weights the STS buses with the paramset's `dso_g_v` (2186) instead of the default 2e4.
 
+## Evening (≈16:00–17:30): merge, WMI, screening, S2
+
+- **Merge of `minimal/thesis-core`** (tuning session: folder renamed to `ch_09_parameter_selection`,
+  band set selected). One import path in `run_case1.py` followed the rename. The selected set is
+  now `ch9_selected_band_2026_10`, with **λ_max_B = 1.467**, the value the author recalled. M's
+  loop-gain target follows it automatically. The 1.414 quoted earlier belonged to
+  `ch9_selected_final_2026_10`.
+- **WMI on e5power** (author granted Execute Methods, Enable Account and Remote Enable on
+  `ROOT\CIMV2`): WMI reads work, and a process started with `Win32_Process.Create` from a WinRM
+  session survives the session. e5power has **18 physical cores** (36 logical), not 30.
+- **Screening of the reference candidates** (L2 and O2, 360 min each, all `ok`; O2 still on the
+  previous paramset, L2 weight-independent):
+  - A: L2 area 2 outside [0.95, 1.05] 67 % of the time; each area is hit by one event.
+  - B: mild (4.5 %); the line trip barely registers.
+  - C: hardest in area 2 (71 %); area 3 is hit only indirectly.
+  - Proposal to the author: A.
+  - W (withdrawn interface support) is non-zero without STS controllers (70–89 Mvar·min
+    after a machine trip, from tap relays and profile drift), so it is read only as a paired
+    difference (O3 − O2, S2 − S1).
+- **S2 implemented** per the approved design note:
+  - Q_0,j in the CAIR message;
+  - SVR coupler alignment and the one-time s_p,a coupler term;
+  - runner capability inbox and set-point dispatch at the RVR updates;
+  - interface flows in the noisy view;
+  - guard pairs (S1,S2) and (S2,O3).
+
+  Tests: `tests/test_svr_sts_access.py` (6), 164 regression tests pass. 10-min smoke on
+  e5power `ok`:
+  - s_p,a zone 2 0.0836 → 0.140, zone 3 0.102 → 0.128;
+  - all 12 couplers receive references, 100 % of them inside CAIR;
+  - final tracking error 0.03–0.92 Mvar.
+
 ## Not done / open
 
-- S2: the design note waits for the author.
-- M: a run with a bank switch is outstanding before M leaves `NOT_READY`.
-- Reference scenario: screening of A/B/C with L2 and O2 running on e5power; the author picks.
-- e5power: the author grants mschwenke WMI rights (Remote Enable + Execute Methods on
-  `root\cimv2`). Long runs are then launched detached via `Win32_Process.Create`.
-  Until then: one worker per WinRM session, held open from e5wimi.
+- The reference scenario: the author's choice (A proposed).
+- M: re-check κ and λ_max with the band set, and a run with a bank switch, before M leaves
+  `NOT_READY`.
+- Worker-scaling test on e5power (18 cores), then the reference run of record.

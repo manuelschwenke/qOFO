@@ -38,6 +38,27 @@ Author decisions of 2026-10-27 that this implements:
   - O3 stopped on a cp1252 console print in the ad-hoc smoke script, not in the code;
     `run_ref` sets `PYTHONUTF8` for its workers.
 
+## e5power (14:00)
+
+- **Env.** `F:\python_environments\qOFO_clean` was copied from e5wimi as a zip over WinRM, to
+  the same prefix (author's request). Python 3.12.14 with the reference pins (numpy 2.3.5,
+  scipy 1.16.3, pandas 2.3.3, pandapower 3.4.0, cvxpy 1.8.1, gurobipy 12.0.1, networkx 3.6.1,
+  numba 0.65.1). Gurobi accepts the academic licence of mschwenke (ID 2830712, expires
+  2027-06-03).
+- **Code.** `git bundle` of `case2/ref` → clone `F:\qOFO_runs\qOFO_case2` at beeaf87. A rename
+  to `F:\qOFO_runs\qOFO` was refused (a handle in the folder); the next push clones into
+  `qOFO` directly, so `thesis_runs` records the project as `qOFO` again.
+- **Smoke, 10 min of scenario A, single worker per WinRM session:** L2, O2, O3, S1 `ok`,
+  30 records each. Wall time incl. init on e5power: L2 1.8 min, O2 1.8, O3 1.6, S1 6.2.
+  Run folders `results/ch_11_case2_multisystem/ref/0002…0005_*_smoke_e5power_*` on e5power,
+  with README, manifest, header and report; provenance shows beeaf87, clean, paramset sha256.
+- **Four workers inside ONE WinRM session were killed** within seconds (BrokenProcessPool,
+  empty console logs), consistent with the per-shell memory/process quota. One worker per
+  session works.
+- **Detached processes cannot be started from WinRM** (breakaway refused), and WMI is denied
+  for mschwenke. Long campaigns therefore need one of: WMI rights, a scheduled-task runner
+  with a stored password, or local admin (author's choice).
+
 ## Not done / open
 
 - S2 (design note waits for the author).

@@ -195,6 +195,57 @@ def _controller_lambda_max(ctrl) -> float:
         return float("nan")
 
 
+def _central_lambda(central_controller, central_cfg, meta, rule: str,
+                    kappa_discrete: float = 1.0) -> float:
+    """``lambda_max`` of the central objective curvature under a counting rule.
+
+    ``rule``: "all" | "ch9" (MSC/MSR exclusion, as
+    ``tuning.stage1_screen.lambda_max_B``) | "continuous".  ``kappa_discrete``
+    multiplies the g_w of taps and banks (a candidate scaling, evaluated
+    without installing it).
+    """
+    H = central_controller._expand_H_to_der_level(
+        central_controller._build_sensitivity_matrix())
+    n_v = len(central_cfg.voltage_bus_indices)
+    Hv = np.asarray(H[:n_v, :], dtype=np.float64)
+    gw, _ = central_controller._get_per_variable_weights()
+    if gw is None:
+        gw = np.broadcast_to(np.asarray(central_controller.params.g_w,
+                                        dtype=np.float64), (Hv.shape[1],))
+    gw = np.asarray(gw, dtype=np.float64).copy()
+    gv = np.asarray(central_controller.g_v_per_bus, dtype=np.float64)
+    n_der = len(central_cfg.der_indices)
+    n_gen = len(central_cfg.gen_indices)
+    n_ol = len(central_cfg.oltc_trafo_indices)
+    n_sh = len(central_cfg.shunt_bus_indices)
+    if Hv.shape[1] != n_der + n_gen + n_ol + n_sh + len(central_cfg.oltc_trafo3w_indices):
+        raise ValueError("central H columns do not match the control layout")
+    disc0 = n_der + n_gen
+    gw[disc0:] *= float(kappa_discrete)
+    A = np.sqrt(gv)[:, None] * Hv / np.sqrt(gw)[None, :]
+    C = A.T @ A
+    cols = list(range(C.shape[0]))
+    if rule == "continuous":
+        cols = list(range(disc0))
+    elif rule == "ch9":
+        sts_of = {int(b): hv.net_id for hv in meta.hv_networks
+                  for b in hv.coupling_lv_bus_indices}
+        groups: Dict[str, List[int]] = {}
+        for k, b in enumerate(central_cfg.shunt_bus_indices):
+            groups.setdefault(sts_of.get(int(b), f"bus{b}"), []).append(
+                disc0 + n_ol + k)
+        drop = set()
+        for grp in groups.values():
+            if len(grp) > 1:
+                keep = max(grp, key=lambda i: C[i, i])
+                drop.update(i for i in grp if i != keep)
+        cols = [i for i in cols if i not in drop]
+    elif rule != "all":
+        raise ValueError(f"central_lambda_rule must be all|ch9|continuous, got {rule!r}")
+    Cs = C[np.ix_(cols, cols)]
+    return float(np.linalg.eigvalsh(0.5 * (Cs + Cs.T))[-1])
+
+
 def _central_curvature_spectrum(central_controller, central_cfg):
     """Curvature spectrum of the central controller's voltage objective.
 
@@ -2507,31 +2558,67 @@ def _run_multi_tso_dso_impl(
         # The bound must itself be a stable loop: refuse lambda_max >= 2
         # (the per-tick error map I - M would not contract).  Printed at
         # every verbosity -- the loop gain is part of the result.
-        _lam_c = float(_central_curvature_spectrum(
-            central_controller, central_cfg).lambda_max)
+        _rule = config.central_lambda_rule
+        if _rule == "continuous" and config.central_ts_discrete_cooldown is None:
+            raise ValueError(
+                "central_lambda_rule='continuous' leaves the taps and banks out "
+                "of the loop gain; it requires central_ts_discrete_cooldown so "
+                "that they are rate-limited as in the cascade")
+        central_controller.ts_discrete_cooldown = config.central_ts_discrete_cooldown
+        _lam_c = _central_lambda(central_controller, central_cfg, meta, _rule)
         central_gw_kappa = 1.0
         if config.central_lambda_target is not None:
             _target = float(config.central_lambda_target)
             if not 0.0 < _target < 2.0:
                 raise ValueError(
                     f"central_lambda_target must lie in (0, 2), got {_target}")
-            central_gw_kappa = _lam_c / _target
             _gw0, _ = central_controller._get_per_variable_weights()
             if _gw0 is None:
                 _gw0 = np.broadcast_to(
                     np.asarray(central_controller.params.g_w, dtype=np.float64),
                     (central_controller.n_controls,))
-            central_controller.apply_preconditioned_g_w(
-                np.asarray(_gw0, dtype=np.float64) * central_gw_kappa)
-            _lam_new = float(_central_curvature_spectrum(
-                central_controller, central_cfg).lambda_max)
-            print(f"  [central] g_w x kappa = {central_gw_kappa:.4g} to the "
-                  f"target loop gain {_target:.4g}: lambda_max "
-                  f"{_lam_c:.4g} -> {_lam_new:.4g}", flush=True)
+            _gw0 = np.asarray(_gw0, dtype=np.float64).copy()
+            # kappa only ever slows M down: a loop gain below the target is
+            # left as it is (the selected weights).
+            if _lam_c > _target:
+                if config.central_kappa_scope == "all":
+                    central_gw_kappa = _lam_c / _target
+                    _gw_new = _gw0 * central_gw_kappa
+                elif config.central_kappa_scope == "discrete":
+                    if _central_lambda(central_controller, central_cfg, meta,
+                                       _rule, kappa_discrete=1e9) >= _target:
+                        raise ValueError(
+                            "central_kappa_scope='discrete': the continuous "
+                            "actuators alone exceed the target loop gain")
+                    _lo_k, _hi_k = 1.0, 2.0
+                    while _central_lambda(central_controller, central_cfg, meta,
+                                          _rule, kappa_discrete=_hi_k) > _target:
+                        _lo_k, _hi_k = _hi_k, 2.0 * _hi_k
+                    for _ in range(60):
+                        _mid = np.sqrt(_lo_k * _hi_k)
+                        if _central_lambda(central_controller, central_cfg, meta,
+                                           _rule, kappa_discrete=_mid) > _target:
+                            _lo_k = _mid
+                        else:
+                            _hi_k = _mid
+                    central_gw_kappa = _hi_k
+                    _gw_new = _gw0.copy()
+                    _n_cont = (len(central_cfg.der_indices)
+                               + len(central_cfg.gen_indices))
+                    _gw_new[_n_cont:] *= central_gw_kappa
+                else:
+                    raise ValueError("central_kappa_scope must be all|discrete")
+                central_controller.apply_preconditioned_g_w(_gw_new)
+            _lam_new = _central_lambda(central_controller, central_cfg, meta, _rule)
+            print(f"  [central] rule {_rule}, scope {config.central_kappa_scope}: "
+                  f"g_w x kappa = {central_gw_kappa:.4g} (target "
+                  f"{_target:.4g}): lambda_max {_lam_c:.4g} -> {_lam_new:.4g}",
+                  flush=True)
             _lam_c = _lam_new
         central_lambda_max = _lam_c
-        print(f"  [central] curvature lambda_max(M) = {_lam_c:.4g} "
-              f"(stable iff < 2)", flush=True)
+        print(f"  [central] curvature lambda_max(M) = {_lam_c:.4g} under rule "
+              f"{_rule} (stable iff < 2); TS-device cooldown "
+              f"{config.central_ts_discrete_cooldown}", flush=True)
         if not _lam_c < 2.0:
             raise ValueError(
                 f"central controller loop gain lambda_max = {_lam_c:.4g} >= 2: "
@@ -3352,6 +3439,10 @@ def _run_multi_tso_dso_impl(
             # loop — call adapter.finalise() after the run for the
             # settlement plane).
             "sbxv_runtime": sbxv_runtime,
+            # The single central controller (control_scope='central'), else
+            # None -- for diagnostics of the bound M.
+            "central_controller": central_controller,
+            "central_cfg": central_cfg,
         }
         _hook_result = pre_loop_hook(_hook_state)
         if _hook_result:

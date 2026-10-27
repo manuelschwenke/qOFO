@@ -194,6 +194,38 @@ class CentralOFOController(TSOController):
             taps[k] = float(measurement.oltc3w_tap_positions[idx[0]])
         return np.concatenate([u_base, taps])
 
+    #: Lock (central steps) of a transmission tap or bank after a switch;
+    #: None = the global ``int_cooldown``.  Set by the runner from
+    #: ``MultiTSOConfig.central_ts_discrete_cooldown``.
+    ts_discrete_cooldown: Optional[int] = None
+
+    def ts_discrete_indices(self) -> List[int]:
+        """Control indices of the transmission taps and banks.
+
+        Layout ``[Q_DER | V_gen | s_OLTC2w | s_shunt | s_OLTC3w]``; the
+        coupler taps (STS devices) are excluded.
+        """
+        cfg = self.config
+        n_ol, n_sh = len(cfg.oltc_trafo_indices), len(cfg.shunt_bus_indices)
+        start = self.n_controls - len(cfg.oltc_trafo3w_indices) - n_sh - n_ol
+        return list(range(start, start + n_ol + n_sh))
+
+    def step(self, measurement, sim_time_s=None):
+        """One central OFO step; transmission devices keep the TS timescale.
+
+        After the parent step, a transmission tap or bank that switched is
+        locked for ``ts_discrete_cooldown`` central steps instead of the
+        global ``int_cooldown``.
+        """
+        u_prev = None if self._u_current is None else self._u_current.copy()
+        out = super().step(measurement, sim_time_s=sim_time_s)
+        n = self.ts_discrete_cooldown
+        if n is not None and u_prev is not None:
+            for idx in self.ts_discrete_indices():
+                if self._u_current[idx] != u_prev[idx]:
+                    self._int_lock_until[idx] = self.iteration + int(n)
+        return out
+
     def _compute_input_bounds(
         self,
         tso_dso_interface_q_current: NDArray[np.float64],

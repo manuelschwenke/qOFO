@@ -1365,6 +1365,26 @@ class MultiTSOConfig:
         ``central_dso_g_v`` for HV buses (no interface-Q / tie-Q tracking)."""
 
     central_period_s: Optional[float] = None
+    central_lambda_rule: str = "all"
+    """Which columns count in the central loop gain ``lambda_max(M)``:
+    ``"all"`` every column; ``"ch9"`` the Ch 9 rule of
+    ``tuning.stage1_screen.lambda_max_B`` (of the MSC and MSR of one STS only
+    the stronger column, since they never move in one direction together);
+    ``"continuous"`` the continuous actuators only (AVR, TS-IBG, STS-IBG) --
+    admissible only with ``central_ts_discrete_cooldown`` set, so that the
+    discrete devices are rate-limited as in the cascade."""
+
+    central_kappa_scope: str = "all"
+    """Which actuator classes the factor kappa scales: ``"all"`` the whole
+    ``g_w`` block; ``"discrete"`` only taps and banks (the continuous
+    actuators keep the selected weights)."""
+
+    central_ts_discrete_cooldown: Optional[int] = None
+    """Lock, in central steps, of a transmission tap or bank after it moved
+    (default: the global ``int_cooldown``).  ``int_cooldown x N_inner`` gives
+    the cascade's timescale: the TS-OFO steps every 180 s, so its 5-iteration
+    lock is 15 min, which is 45 central steps of 20 s."""
+
     central_lambda_target: Optional[float] = None
     """When set, scale the central controller's whole ``g_w`` block by one
     factor kappa so that its loop gain ``lambda_max(M)`` equals this value.

@@ -86,8 +86,22 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
               central_period_s=None, **_O_STS_LABELS),
 }
 
+# Candidate tunings of M under evaluation (2026-10-27): at the selected weights
+# M's loop gain is 3.55 counting every column, 3.00 under the Ch 9 rule and
+# 0.98 for the continuous actuators alone.  Not part of the 2x2 design.
+VARIANTS["M_ch9"] = dict(VARIANTS["M"], central_lambda_rule="ch9")
+VARIANTS["M_disc"] = dict(VARIANTS["M"], central_lambda_rule="ch9",
+                          central_kappa_scope="discrete")
+# The cascade's timescale for the transmission devices: int_cooldown TS
+# iterations of N_inner central steps each.
+VARIANTS["M_rate"] = dict(VARIANTS["M"], central_lambda_rule="continuous",
+                          central_ts_discrete_cooldown=5 * 9)
+
 #: Registered variants that must not enter a run of record yet.
 NOT_READY: Dict[str, str] = {
+    "M_ch9": "candidate tuning of M under evaluation (2026-10-27)",
+    "M_disc": "candidate tuning of M under evaluation (2026-10-27)",
+    "M_rate": "candidate tuning of M under evaluation (2026-10-27)",
     "M": "central controller not repaired for the MIQP shunt banks and its STS "
          "voltage weight is a default (plan Phase 1.6)",
 }
@@ -138,7 +152,7 @@ def resolved(name: str, minutes: int, events: Iterable[Any] = (),
                        f"valid: {sorted(VARIANTS)}")
     cfg = base_config(minutes, events, noise_seed)
     cfg = dataclasses.replace(cfg, **VARIANTS[name])
-    if name == "M":
+    if name.startswith("M"):
         # "At the same weights": M weights the STS buses as the STS-OFOs do
         # (the paramset's dso_g_v), not with the dataclass default 2e4, which
         # was ~9x the selected value.

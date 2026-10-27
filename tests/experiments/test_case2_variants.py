@@ -62,3 +62,9 @@ def test_m_weights_the_sts_buses_like_the_sts_controllers():
     m = v.resolved("M", 10)
     assert m.central_dso_g_v == pytest.approx(m.dso_g_v)
     assert m.control_scope == "central"
+
+
+def test_m_targets_the_selected_designs_loop_gain():
+    m = v.resolved("M", 10)
+    assert m.central_lambda_target == pytest.approx(v.selected_lambda_max())
+    assert 0.0 < m.central_lambda_target < 2.0

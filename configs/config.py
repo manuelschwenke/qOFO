@@ -1365,13 +1365,14 @@ class MultiTSOConfig:
         ``central_dso_g_v`` for HV buses (no interface-Q / tie-Q tracking)."""
 
     central_period_s: Optional[float] = None
-    central_match_tso_loop_gain: bool = False
-    """Scale the central controller's whole ``g_w`` block by one factor kappa
-    so that its loop gain ``lambda_max(M)`` equals the largest loop gain of
-    the zone TS-OFOs built with the same weights in the same run.  At the
-    selected weights the single central loop has lambda_max ~5 (2026-10-27,
-    not contracting); this keeps the relative weights and states kappa.
-    Ignored unless ``control_scope == 'central'``."""
+    central_lambda_target: Optional[float] = None
+    """When set, scale the central controller's whole ``g_w`` block by one
+    factor kappa so that its loop gain ``lambda_max(M)`` equals this value.
+    Case 2 sets it to the selected design's ``lambda_max_B`` (paramset
+    provenance): at the selected weights the single central loop has
+    lambda_max ~5 (2026-10-27, not contracting).  Keeps the relative weights;
+    kappa is printed and recorded.  Ignored unless
+    ``control_scope == 'central'``."""
     """Control period [s] of the single centralized controller
     (``control_scope='central'``, CIGRE V5).  ``None`` (default) fires the
     controller every simulation step (``dt_s``) — the correct best-case

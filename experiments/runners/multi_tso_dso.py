@@ -2505,14 +2505,11 @@ def _run_multi_tso_dso_impl(
         _lam_c = float(_central_curvature_spectrum(
             central_controller, central_cfg).lambda_max)
         central_gw_kappa = 1.0
-        if config.central_match_tso_loop_gain:
-            _lam_ts = [_controller_lambda_max(_c) for _c in tso_controllers.values()]
-            _lam_ts = [x for x in _lam_ts if np.isfinite(x)]
-            if not _lam_ts:
+        if config.central_lambda_target is not None:
+            _target = float(config.central_lambda_target)
+            if not 0.0 < _target < 2.0:
                 raise ValueError(
-                    "central_match_tso_loop_gain: no zone TS-OFO loop gain "
-                    "could be read to match")
-            _target = max(_lam_ts)
+                    f"central_lambda_target must lie in (0, 2), got {_target}")
             central_gw_kappa = _lam_c / _target
             _gw0, _ = central_controller._get_per_variable_weights()
             if _gw0 is None:
@@ -2524,7 +2521,7 @@ def _run_multi_tso_dso_impl(
             _lam_new = float(_central_curvature_spectrum(
                 central_controller, central_cfg).lambda_max)
             print(f"  [central] g_w x kappa = {central_gw_kappa:.4g} to the "
-                  f"TS-OFO loop gain {_target:.4g}: lambda_max "
+                  f"target loop gain {_target:.4g}: lambda_max "
                   f"{_lam_c:.4g} -> {_lam_new:.4g}", flush=True)
             _lam_c = _lam_new
         central_lambda_max = _lam_c

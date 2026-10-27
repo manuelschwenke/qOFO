@@ -35,10 +35,11 @@ O3   TS-OFO + interface set-points + STS-OFO         proposed cascade
 M    one OFO on the coupled model, every step        bound (not a rung)
 ==== ============================================== =====================
 
-``M`` is registered but listed in :data:`NOT_READY`: the central controller
-predates the shunt banks in the MIQP and takes a default STS voltage weight
-(plan Phase 1.6).  A producer refuses a not-ready variant unless told
-otherwise, so a run of record cannot contain it by accident.
+``M`` weights the STS buses with the paramset's ``dso_g_v`` (the STS-OFOs'
+own weight), dispatches the banks through the same holding-time / mutual-
+exclusion / rank-1 machinery as the zones, and refuses to run if its loop gain
+``lambda_max`` reaches 2 (rebuilt 2026-10-27).  It stays in :data:`NOT_READY`
+until a smoke run has confirmed it.
 
 Author: Manuel Schwenke / Claude Code (2026-10-27)
 """
@@ -97,7 +98,8 @@ STEP_ALLOWED: Dict[Tuple[str, str], set] = {
     ("O2", "O3"): {"dso_mode"},
     # Information, not a rung: one controller, full model, every step.
     ("O3", "M"): {"control_scope", "dso_mode", "local_sensitivities_tso",
-                  "local_sensitivities_dso", "central_period_s"},
+                  "local_sensitivities_dso", "central_period_s",
+                  "central_dso_g_v"},
 }
 
 
@@ -120,7 +122,13 @@ def resolved(name: str, minutes: int, events: Iterable[Any] = (),
         raise KeyError(f"unknown Case-2 variant {name!r}; "
                        f"valid: {sorted(VARIANTS)}")
     cfg = base_config(minutes, events, noise_seed)
-    return dataclasses.replace(cfg, **VARIANTS[name])
+    cfg = dataclasses.replace(cfg, **VARIANTS[name])
+    if name == "M":
+        # "At the same weights": M weights the STS buses as the STS-OFOs do
+        # (the paramset's dso_g_v), not with the dataclass default 2e4, which
+        # was ~9x the selected value.
+        cfg = dataclasses.replace(cfg, central_dso_g_v=float(cfg.dso_g_v))
+    return cfg
 
 
 def assert_case2_controlled(minutes: int = 10,

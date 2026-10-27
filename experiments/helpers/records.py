@@ -433,6 +433,8 @@ class MultiTSOIterationRecord:
     pre_control_zone_v_rms_err_pu: Dict[int, float] = field(default_factory=dict)
     pre_control_trafo_q_mvar: Dict[str, float] = field(default_factory=dict)
     events_fired: List[str] = field(default_factory=list)
+    # Loop gain lambda_max of each acting controller, on the first record only.
+    controller_lambda_max: Dict[str, float] = field(default_factory=dict)
 
     slack_p_mw: float = 0.0
     slack_q_mvar: float = 0.0

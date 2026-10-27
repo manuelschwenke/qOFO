@@ -56,3 +56,9 @@ def test_unknown_variant_is_refused():
 def test_m_is_registered_but_not_ready():
     assert "M" in v.VARIANTS and "M" in v.NOT_READY
     assert "M" not in v.WAVE_1
+
+
+def test_m_weights_the_sts_buses_like_the_sts_controllers():
+    m = v.resolved("M", 10)
+    assert m.central_dso_g_v == pytest.approx(m.dso_g_v)
+    assert m.control_scope == "central"

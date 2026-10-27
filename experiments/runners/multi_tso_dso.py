@@ -175,6 +175,48 @@ from experiments.runners._multi_tso_helpers import (
 #  V5 (central) closed-loop curvature probe
 # =============================================================================
 
+def _controller_lambda_max(ctrl) -> float:
+    """lambda_max of a controller's weighted-objective curvature (stable iff < 2).
+
+    Diagnostic: NaN when the controller cannot report its curvature inputs.
+    """
+    try:
+        _vci = ctrl.objective_curvature_inputs()
+        if _vci is None:
+            return float("nan")
+        _Hv, _gv = _vci
+        _gw, _ = ctrl._get_per_variable_weights()
+        if _gw is None:
+            _gw = np.broadcast_to(
+                np.asarray(ctrl.params.g_w, dtype=np.float64), (_Hv.shape[1],))
+        return float(curvature_spectrum(
+            _Hv, _gv, np.asarray(_gw, dtype=np.float64)).lambda_max)
+    except Exception:                      # diagnostic only
+        return float("nan")
+
+
+def _central_curvature_spectrum(central_controller, central_cfg):
+    """Curvature spectrum of the central controller's voltage objective.
+
+    ``M = H_V G_w^{-1} H_V^T diag(g_v)`` on the expanded H and the
+    per-variable ``g_w`` the MIQP sees; the per-tick error map is
+    ``I - M``, stable iff ``eig(M)`` lies in (0, 2).  Read-only.
+    """
+    H = central_controller._expand_H_to_der_level(
+        central_controller._build_sensitivity_matrix()
+    )
+    n_v = len(central_cfg.voltage_bus_indices)
+    H_v = np.asarray(H[:n_v, :], dtype=np.float64)
+    g_w_vec, _ = central_controller._get_per_variable_weights()
+    if g_w_vec is None:
+        g_w_vec = np.broadcast_to(
+            np.asarray(central_controller.params.g_w, dtype=np.float64),
+            (H_v.shape[1],),
+        )
+    g_v_vec = np.asarray(central_controller.g_v_per_bus, dtype=np.float64)
+    return curvature_spectrum(H_v, g_v_vec, np.asarray(g_w_vec, dtype=np.float64))
+
+
 def _dump_central_curvature(central_controller, central_cfg) -> None:
     """Print the closed-loop curvature spectrum of the central V5 controller.
 
@@ -2441,6 +2483,7 @@ def _run_multi_tso_dso_impl(
             sample_id=("initialisation", 0),
             initialisation=True,
         ))
+    central_lambda_max = float("nan")
     if _central and central_controller is not None:
         # The centralized controller always uses the FULL-network Jacobian
         # rebuilt at the post-Phase-2 operating point (overriding any
@@ -2455,6 +2498,19 @@ def _run_multi_tso_dso_impl(
         ))
         if getattr(config, "debug_central_curvature", False):
             _dump_central_curvature(central_controller, central_cfg)
+        # The bound must itself be a stable loop: refuse lambda_max >= 2
+        # (the per-tick error map I - M would not contract).  Printed at
+        # every verbosity -- the loop gain is part of the result.
+        _lam_c = float(_central_curvature_spectrum(
+            central_controller, central_cfg).lambda_max)
+        central_lambda_max = _lam_c
+        print(f"  [central] curvature lambda_max(M) = {_lam_c:.4g} "
+              f"(stable iff < 2)", flush=True)
+        if not _lam_c < 2.0:
+            raise ValueError(
+                f"central controller loop gain lambda_max = {_lam_c:.4g} >= 2: "
+                f"the per-step error map does not contract; the bound would "
+                f"be an unstable loop. Retune its g_w before using it.")
     if verbose >= 1:
         print(f"  [T] controller .initialise() loop: {perf_counter() - _t:.2f} s")
 
@@ -3424,6 +3480,17 @@ def _run_multi_tso_dso_impl(
         rec = MultiTSOIterationRecord(
             step=step, time_s=time_s, tso_active=run_tso, dso_active=run_dso
         )
+        if step == 1:
+            # Loop gain of every controller that acts in this variant.
+            if _central:
+                rec.controller_lambda_max["central"] = central_lambda_max
+            else:
+                if config.tso_mode == "ofo":
+                    for _z, _c in tso_controllers.items():
+                        rec.controller_lambda_max[f"tso_{_z}"] = (
+                            _controller_lambda_max(_c))
+                for _d, _c in dso_controllers.items():
+                    rec.controller_lambda_max[str(_d)] = _controller_lambda_max(_c)
         # Preserve the exact noisy packets presented to each controller.
         # They are recorded separately from the post-control plant truth.
         tso_plot_measurements: Dict[int, Measurement] = {}
@@ -3725,10 +3792,64 @@ def _run_multi_tso_dso_impl(
             # command rather than incrementing from the realised Q — producing
             # the discrete DER jumps and poor tracking otherwise observed.
             central_controller.apply_qw_reset(meas_central)
+            # ── Switched-shunt banks, exactly as in the zone path: the
+            # bounds carry the holding time, the level limits and the
+            # mutual exclusion; a committed switch is followed by the rank-1
+            # update of the cached model and the bank's own state.  The
+            # central u is [Q_DER | V_gen | s_OLTC2w | s_shunt | s_OLTC3w].
+            _c_banks: List[ShuntBank] = []
+            if zone_banks:
+                _all_banks_c = [b for bs in zone_banks.values() for b in bs]
+                _c_banks = [b for _zb in sorted(zone_defs)
+                            for b in zone_banks.get(_zb, [])]
+                if ([b.config.bus_idx for b in _c_banks]
+                        != [int(x) for x in central_cfg.shunt_bus_indices]):
+                    raise ValueError(
+                        "central bank order does not match its control vector")
+                _lo_c, _hi_c = [], []
+                for _b in _c_banks:
+                    _dirs = _b.available_directions(
+                        time_s,
+                        opposite_engaged=(config.shunt_sts_mutual_exclusion
+                                          and opposite_engaged(_b, _all_banks_c)),
+                    )
+                    _lo_c.append(_b.level + min([0] + _dirs))
+                    _hi_c.append(_b.level + max([0] + _dirs))
+                central_controller.set_shunt_bank_state(_lo_c, _hi_c)
             central_out = central_controller.step(meas_central, sim_time_s=time_s)
+            _prev_c = (shunt_steps_for_buses(
+                plant.read_y(), central_cfg.shunt_bus_indices) if _c_banks else [])
             plant.apply_u(writes_from_central(
                 plant.read_y(), central_cfg, central_out.u_new,
             ))
+            if _c_banks:
+                _off_c = (len(central_cfg.der_indices) + len(central_cfg.gen_indices)
+                          + len(central_cfg.oltc_trafo_indices))
+                _changed_c = []
+                for _k, (_b, _sp) in enumerate(zip(_c_banks, _prev_c)):
+                    _sn = int(round(float(central_out.u_new[_off_c + _k])))
+                    if _sn != int(_sp):
+                        _changed_c.append((_k, _b, int(_sp), _sn))
+                for _k, _b, _sp, _sn in _changed_c:
+                    if not central_controller.sensitivities.apply_shunt_step_change_smw(
+                            _b.config.bus_idx, _sn, shunt_idx=_b.config.shunt_idx):
+                        raise ValueError(
+                            f"Rank-1 update of the central model failed for the "
+                            f"bank at bus {_b.config.bus_idx} (step -> {_sn})")
+                if _changed_c:
+                    central_controller.invalidate_sensitivity_cache()
+                for _k, _b, _sp, _sn in _changed_c:
+                    _commit = _b.commit_selected(
+                        _sn - _sp, time_s,
+                        opposite_engaged=(config.shunt_sts_mutual_exclusion
+                                          and opposite_engaged(_b, _all_banks_c)),
+                    )
+                    rec.shunt_commits.append({
+                        "zone": "central", "shunt_idx": _commit.shunt_idx,
+                        "dso_id": _commit.dso_id, "kind": _commit.kind,
+                        "direction": _commit.direction,
+                        "new_level": _commit.new_level,
+                    })
             if verbose >= 1:
                 _n_int = len(central_out.u_integer)
                 print(f"  [central t={int(time_s/60):3d} min] "

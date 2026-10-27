@@ -157,6 +157,47 @@ The numbers below are one trajectory with no statistics. Units: mpu, RMS over th
 - Attribution: the TS actuators move only at dispatches, in same-sign steps with 0 reversals; between dispatches only the machines follow the drift. This is the ramp lag of a 180 s supervisory loop, **not** droop re-anchoring and not hunting.
 - O3 has none: its STS-OFOs move 286 Mvar between dispatches against 51 at them.
 
+## M investigated (author request, 22:00–23:30)
+
+**Why M switched no bank** (diagnostic over 360 min,
+`0007_*_m_tuning/m_bank_diagnostic.json`):
+- the banks were free in every step (holding time, limits and exclusion never bound);
+- the bank gradient reached 2.87 per Mvar at the load step and 1.73 at the generator
+  trip, the range in which the cascade switches (1–3);
+- M's bank price is the selected bank weight × κ (2.42), and the gradient falls within
+  20–60 s as M's continuous actuators act.
+
+**Why M is not better than O3: the loop gain at the selected weights.**
+
+| counting rule | λ_max(M) |
+|---|---|
+| every column | 3.55 |
+| Ch 9 rule (MSC/MSR exclusion, as `tuning.stage1_screen.lambda_max_B`) | 3.00 |
+| continuous actuators alone | **0.98** |
+
+- The stiff mode is 39 % machine-transformer taps and 33 % banks.
+- `int_cooldown` = 5 steps, i.e. 15 min for the 180 s TS-OFO but 100 s for M, so M moved the
+  transmission devices nine times as often as the cascade.
+
+**Candidates** (code 0bc6c52; same scenario A, O3 re-run on the same code and identical to
+the run of record):
+
+| | e_v | e_vp | worst A2 | STS min margin | TS taps / banks |
+|---|---|---|---|---|---|
+| O3 | 6.83 | 3.46 | 75.1 | −4.9 | 3 / 5 |
+| M (κ 2.42, all columns) | 7.79 | 3.66 | 57.3 | −0.5 | 2 / 0 |
+| M_ch9 (κ 2.04) | 7.69 | 3.57 | 56.3 | −3.8 | 3 / 2 |
+| M_disc (taps/banks × 4.11) | 7.39 | 3.14 | 57.7 | −0.0 | 1 / 0 |
+| **M_rate** (κ 1, TS taps/banks cooldown 45 steps = 15 min, λ over the continuous part 0.98) | **6.25** | **2.98** | **45.7** | **+3.4** | 11 / 8 |
+
+- M_rate is better than O3 in every area.
+- Its eight bank commits (all MSCs at 30.7 and 121.7 min) exercise the central commit path
+  without failure.
+- It moves more: AVR travel area 1 0.16 vs 0.04 pu.
+- It also uses the STS slightly more than O3 (u_q,STS 0.48–0.70 vs 0.42–0.65).
+- Proposal to the author: M_rate as the definition of M ("same weights, the cascade's
+  timescale for the transmission devices, more information"). Not adopted yet.
+
 ## Not done / open
 
 - The reference scenario: the author's choice (A proposed).

@@ -5,10 +5,14 @@ experiments/ch_11_case2_multisystem/ref/scenarios.py
 Candidate disturbance schedules for the reference run of Case 2
 (``ch:case3:nominal``) on the reference period (5 Jan 2016 from 08:00).
 
-The schedule is NOT settled: the author asked (2026-10-27) for a challenging
-but not unrealistic scenario -- one generator outage, one line trip and one load
-step-in -- to be chosen after a screening, instead of the six events of
-``tab:setup:reference:events``.  Each candidate places every event strictly
+**Scenario A is the reference scenario (author decision 2026-10-27)**, chosen
+after the screening of A/B/C with L2 and O2 (daily log 2026-10-27e): G4 out
+(area 3), 250 Mvar connected at bus 12 (area 2), tie line 17-27 out (areas 1/3)
+-- every area hit by one event; with L2 area 2 leaves [0.95, 1.05] pu 67 % of
+the time.  It replaces the six events of ``tab:setup:reference:events``
+(the author asked for a challenging but not unrealistic scenario: one generator
+outage, one line trip and one load step-in).  B and C are kept as the screened
+alternatives.  Each candidate places every event strictly
 between two transmission dispatches (author decision 2026-10-27), at different
 offsets, so the sub-transmission layer acts on the old set-point until the
 next dispatch.
@@ -57,7 +61,7 @@ def _load(bus: int, q: float, t: float, action: str = "connect") -> ContingencyE
 #: each, staggered by 90 min, persisting to the end of the horizon.
 SCENARIOS: Dict[str, Dict[str, object]] = {
     "A": dict(
-        title="G4 out (area 3), 250 Mvar at bus 12 (area 2), tie 17-27 out",
+        title="REFERENCE: G4 out (area 3), 250 Mvar at bus 12 (area 2), tie 17-27 out",
         events=lambda: [_gen(2, _at(30, 40)), _load(11, 250.0, _at(120, 100)),
                         _line(25, _at(210, 140))]),
     "B": dict(
@@ -80,6 +84,10 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
             ContingencyEvent(minute=300, element_type="line", element_index=25, action="restore"),
         ]),
 }
+
+
+#: The reference scenario of ch:case3:nominal (author decision 2026-10-27).
+REFERENCE = "A"
 
 
 def events(name: str) -> List[ContingencyEvent]:

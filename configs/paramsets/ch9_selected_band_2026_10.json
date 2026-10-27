@@ -1,0 +1,338 @@
+{
+  "name": "ch9_selected_band_2026_10",
+  "title": "Controller weights selected by the Ch 8 procedure (Experiment B), final configuration with DSO operating band",
+  "description": [
+    "Selected by docs/tuning/2026-10-25_weight_selection_procedure.md,",
+    "with every DSO controller holding 0.92-1.08 pu (make_config):",
+    "Stage I analytic point; Stage II-a 512 Sobol draws around it, screened analytically and simulated 12 h in W1-W4, W6; Stage II-b local Sobol refinement around the best candidate;",
+    "operational limits as a filter, ranking on the per-bus TS voltage deviation with a 2 % band on the STS deviation, settling requirement in rank order.",
+    "The DSO band is configuration, not part of this parameter set: it is set in experiments.run_multi_system_ofo.make_config."
+  ],
+  "provenance": {
+    "producer": "results\\THESIS_ch8_weight_selection_band_20261025\\driver.py",
+    "procedure": "docs/tuning/2026-10-25_weight_selection_procedure.md",
+    "dso_voltage_band_pu": [
+      0.92,
+      1.08
+    ],
+    "simulated_windows": "W1,W2,W3,W4,W6",
+    "w5_report": {
+      "e_v_ts": 0.0077944856815433975,
+      "e_v_ds": 0.011717692176012741,
+      "v_metric": "bus",
+      "e_v_ts_areamean": 0.0037476430679591255,
+      "e_v_ds_areamean": 0.010609919892558564,
+      "e_v_ts_bus": 0.0077944856815433975,
+      "e_v_ds_bus": 0.011717692176012741,
+      "e_q": 99838.51949266043,
+      "v_band_excess_ts": 0.0031830948740650786,
+      "v_band_excess_ds": 0.006841533617385705,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "v_worst_ts": 0.03969052681653289,
+      "v_worst_ds": 0.04163240040170579,
+      "tap_ops_per_h_tso": 0.16674386289949053,
+      "tap_ops_per_h_dso": 0.08337193144974527,
+      "tap_rev_per_h_tso": 0.08337193144974527,
+      "tap_rev_per_h_dso": 0.0,
+      "pf_failures": 0.0,
+      "wall_s": 1824.4530870988965,
+      "failed": 0.0,
+      "failure_reason": "",
+      "avr_max_step_pu": 0.01085238673171185,
+      "avr_total_variation_pu": 0.569289859879778,
+      "n_hunting": 0,
+      "n_hunting_1h": 0,
+      "n_event_explained": 3,
+      "n_moves": 17,
+      "hunting_detail": [],
+      "moves": [
+        [
+          17280.0,
+          "1[0]",
+          1
+        ],
+        [
+          17280.0,
+          "1[1]",
+          1
+        ],
+        [
+          17280.0,
+          "3[1]",
+          1
+        ],
+        [
+          20880.0,
+          "1[0]",
+          -1
+        ],
+        [
+          20880.0,
+          "1[1]",
+          -1
+        ],
+        [
+          20880.0,
+          "2[2]",
+          -1
+        ],
+        [
+          20880.0,
+          "3[1]",
+          -1
+        ],
+        [
+          20880.0,
+          "DSO_1|trafo_1[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_1|trafo_2[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_2|trafo_3[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_2|trafo_4[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_2|trafo_5[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_3|trafo_7[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_3|trafo_8[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_4|trafo_10[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_4|trafo_9[0]",
+          1
+        ]
+      ],
+      "events_s": [
+        17280.0,
+        20880.0
+      ],
+      "shunt_commits": 16,
+      "shunt_up": 10,
+      "shunt_down": 6,
+      "shunt_reversals": 5,
+      "shunt_max_level": 2.0,
+      "shunt_ops_max_bank": 5,
+      "n_shunt_hunting": 2,
+      "n_shunt_event_explained": 3,
+      "shunt_hunting_detail": [
+        {
+          "transformer": "z2[2]",
+          "t0_s": 4140.0,
+          "t1_s": 7740.0,
+          "dwell_s": 3600.0
+        },
+        {
+          "transformer": "z2[4]",
+          "t0_s": 4140.0,
+          "t1_s": 7740.0,
+          "dwell_s": 3600.0
+        }
+      ],
+      "shunt_moves": [
+        [
+          1980.0,
+          "z2[0]",
+          1
+        ],
+        [
+          4140.0,
+          "z2[2]",
+          1
+        ],
+        [
+          4140.0,
+          "z2[4]",
+          1
+        ],
+        [
+          7740.0,
+          "z2[2]",
+          -1
+        ],
+        [
+          7740.0,
+          "z2[4]",
+          -1
+        ],
+        [
+          17280.0,
+          "z2[2]",
+          1
+        ],
+        [
+          17280.0,
+          "z2[4]",
+          1
+        ],
+        [
+          20880.0,
+          "z2[0]",
+          -1
+        ],
+        [
+          20880.0,
+          "z2[2]",
+          -1
+        ],
+        [
+          20880.0,
+          "z2[4]",
+          -1
+        ],
+        [
+          28800.0,
+          "z2[0]",
+          1
+        ],
+        [
+          40320.0,
+          "z2[2]",
+          1
+        ],
+        [
+          40320.0,
+          "z2[4]",
+          1
+        ],
+        [
+          17280.0,
+          "z3[0]",
+          1
+        ],
+        [
+          20880.0,
+          "z3[0]",
+          -1
+        ],
+        [
+          41220.0,
+          "z3[0]",
+          1
+        ]
+      ],
+      "shunt_ops_per_h_bank": 0.4166666666666667
+    },
+    "campaign_dir": "results\\THESIS_ch8_weight_selection_band_20261025",
+    "starting_paramset": "stage1_start_10_2026_banks",
+    "selected_key": "fde2e81af6b1",
+    "stage2b_rounds": 4,
+    "n_candidates": 242,
+    "n_feasible": 94,
+    "failed_settling": [
+      "301c285ee52b"
+    ],
+    "lambda_max_B": 1.467053872714263,
+    "aggregate_ranked_windows_per_bus": {
+      "e_v_ts": 0.004397426081338779,
+      "e_v_ds": 0.013050693444107897,
+      "e_q": 299762.30135398125,
+      "worst_tap_ops_per_day_tso": 4.001852709587773,
+      "worst_tap_ops_per_day_dso": 2.0009263547938865,
+      "worst_tap_rev_per_day_tso": 2.0009263547938865,
+      "worst_tap_rev_per_day_dso": 0.0,
+      "worst_avr_max_step_pu": 0.0035300454686595373,
+      "worst_v_band_excess_ts": 1.4241350401824281e-06,
+      "worst_v_band_excess_ds": 0.019496126565530923,
+      "n_hunting": 0.0,
+      "n_hunting_1h": 0.0,
+      "n_event_explained": 2.0,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "worst_v_worst_ts": 0.01823208473236615,
+      "worst_v_worst_ds": 0.051839169793019925,
+      "pf_failures": 0.0,
+      "n_failed_windows": 0,
+      "has_shunt_wear": 1.0,
+      "worst_shunt_ops_per_day_bank": 4.0,
+      "n_shunt_hunting": 0.0,
+      "n_shunt_event_explained": 6.0,
+      "shunt_commits": 17.0
+    },
+    "baseline_aggregate": {
+      "e_v_ts": 0.005472363990947157,
+      "e_v_ds": 0.0074902849973333,
+      "e_q": 1039596.2957010679,
+      "worst_tap_ops_per_day_tso": 4.001852709587773,
+      "worst_tap_ops_per_day_dso": 4.001852709587773,
+      "worst_tap_rev_per_day_tso": 2.0009263547938865,
+      "worst_tap_rev_per_day_dso": 0.0,
+      "worst_avr_max_step_pu": 2.6740779830225492e-05,
+      "worst_v_band_excess_ts": 4.347932660106289e-05,
+      "worst_v_band_excess_ds": 0.004392994657434253,
+      "n_hunting": 0.0,
+      "n_hunting_1h": 0.0,
+      "n_event_explained": 2.0,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "worst_v_worst_ts": 0.01959966865592795,
+      "worst_v_worst_ds": 0.03782870176782118,
+      "pf_failures": 0.0,
+      "n_failed_windows": 0,
+      "has_shunt_wear": 1.0,
+      "worst_shunt_ops_per_day_bank": 4.0,
+      "n_shunt_hunting": 0.0,
+      "n_shunt_event_explained": 2.0,
+      "shunt_commits": 11.0
+    },
+    "settling": {
+      "run": "results\\THESIS_ch8_weight_selection_band_20261025\\expC\\cand_fde2e81af6b1\\20261027-052217",
+      "n_steps": 120,
+      "p95": 25.0,
+      "per_dso_p95": {
+        "DSO_1": 24.0,
+        "DSO_2": 17.55,
+        "DSO_3": 25.55,
+        "DSO_4": 17.75
+      },
+      "n_over": 4,
+      "censored": 0,
+      "max": 33,
+      "median_residual_mvar": 0.35329692497868775,
+      "pass": true
+    },
+    "weight_fingerprint": "fde2e81af6b1"
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.17383197941335615,
+    "dso_g_v": 659.9142387232084,
+    "g_w_der": 0.03493213870680279,
+    "g_w_pcc": 0.06767532666687437,
+    "g_w_gen": 727651.4613832595,
+    "g_w_tso_oltc": 25.59424687869795,
+    "g_w_tso_shunt": 23.806808196149543,
+    "g_w_dso_der": 0.7080012274866431,
+    "g_w_dso_oltc": 5.834175284504631
+  }
+}

@@ -377,3 +377,124 @@ class MeasurementNoiseModel:
                 measurement.tie_line_p_mw[pos] = noisy_p
             if has_q:
                 measurement.tie_line_q_mvar[pos] = noisy_q
+
+    # -- coverage beyond the OFO packets ------------------------------------
+
+    def _set_sample(self, sample_id: Hashable) -> None:
+        if sample_id != self._sample_id:
+            self._sample_id = sample_id
+            self._sample_cache.clear()
+
+    def result_view(self, net, *, sample_id: Hashable):
+        """Noisy view of the result tables for a controller that reads ``net``.
+
+        ``res_bus.vm_pu``, ``res_gen`` P/Q and ``res_sgen`` P/Q are perturbed
+        with exactly the channel keys of :meth:`apply` (VT/meter per bus;
+        CT/meter/phase per generator and per DER), so at the same
+        ``sample_id`` a channel carries the same error whether an OFO packet or
+        the classical SVR reads it.  Everything else is the true ``net``.
+        Returns ``net`` itself when the model is disabled.
+        """
+        if not self.config.enabled:
+            return net
+        self._set_sample(sample_id)
+        res_bus = net.res_bus.copy()
+        vm = res_bus["vm_pu"].to_numpy(dtype=float, copy=True)
+        for pos, bus_idx in enumerate(res_bus.index):
+            if not np.isfinite(vm[pos]):
+                continue
+            noisy = vm[pos] * (
+                1.0 + self._voltage_transformer_error(net, int(bus_idx))
+            ) * (1.0 + self._voltage_meter_error(int(bus_idx)))
+            if self.config.clip_nonnegative_magnitudes:
+                noisy = max(0.0, noisy)
+            vm[pos] = noisy
+        res_bus["vm_pu"] = vm
+
+        def _power_table(res, element, ct_name, meter_name):
+            out = res.copy()
+            if out.empty:
+                return out
+            p = out["p_mw"].to_numpy(dtype=float, copy=True)
+            q = out["q_mvar"].to_numpy(dtype=float, copy=True)
+            for pos, idx in enumerate(out.index):
+                p[pos], q[pos] = self._perturb_complex_power(
+                    p[pos], q[pos], net,
+                    voltage_bus=self._element_bus(element, int(idx)),
+                    ct_channel_key=(ct_name, int(idx)),
+                    meter_channel_key=(meter_name, int(idx)),
+                )
+            out["p_mw"] = p
+            out["q_mvar"] = q
+            return out
+
+        return NoisyResultView(
+            net, res_bus,
+            _power_table(net.res_gen, net.gen, "gen", "generator_power"),
+            _power_table(net.res_sgen, net.sgen, "sgen", "der_power"),
+        )
+
+
+class NoisyResultView:
+    """A read-only stand-in for ``net`` whose result tables carry metering errors.
+
+    Only ``res_bus``, ``res_gen`` and ``res_sgen`` are replaced; every other
+    attribute is the true network's, so set-points and topology are read
+    exactly, as a real controller reads its own commands.
+    """
+
+    def __init__(self, net, res_bus, res_gen, res_sgen) -> None:
+        self._net = net
+        self.res_bus = res_bus
+        self.res_gen = res_gen
+        self.res_sgen = res_sgen
+
+    def __getattr__(self, name: str):
+        return getattr(self._net, name)
+
+
+class DerVoltageMeter:
+    """The terminal-voltage reading of a converter's own droop (DAD input).
+
+    One channel per converter (``der_vt``/``der_vmeter`` keyed by the sgen
+    index), the VT class of its bus level and the persistent/per-sample split of
+    the configured profile.  The sample id is the PLANT step, set by the runner
+    before each step's first power flow, so a variant without any supervisory
+    controller (L2) draws the same sequence as the others.
+    """
+
+    def __init__(self, config: MeasurementNoiseConfig) -> None:
+        self._model = MeasurementNoiseModel(config)
+
+    def set_sample(self, sample_id: Hashable) -> None:
+        self._model._set_sample(sample_id)
+
+    def measure(self, net, sgen_idx: int, bus_idx: int) -> float:
+        v = float(net.res_bus.at[bus_idx, "vm_pu"])
+        if not np.isfinite(v):
+            return v
+        m = self._model
+        vt = m._component_error(
+            m._voltage_transformer_bound(net, bus_idx), "der_vt", int(sgen_idx))
+        mt = m._component_error(
+            m.components["voltage_meter"], "der_vmeter", int(sgen_idx))
+        return v * (1.0 + vt) * (1.0 + mt)
+
+
+#: Key under which the runner stores a :class:`DerVoltageMeter` on the plant
+#: net.  Absent (the default) means the droop reads the true voltage.
+DER_VOLTAGE_METER_KEY = "_der_voltage_meter"
+
+
+def measured_der_voltage(net, sgen_idx: int, bus_idx: int) -> float:
+    """The voltage a converter's droop reads at ``bus_idx``.
+
+    The single point through which both the droop law and the anchor written
+    at a dispatch read the terminal voltage, so the two always come from the
+    same channel.  True ``res_bus.vm_pu`` unless a meter is installed.
+    """
+    getter = getattr(net, "get", None)
+    meter = getter(DER_VOLTAGE_METER_KEY) if callable(getter) else None
+    if meter is None:
+        return float(net.res_bus.at[bus_idx, "vm_pu"])
+    return meter.measure(net, int(sgen_idx), int(bus_idx))

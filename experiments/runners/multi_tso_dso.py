@@ -87,7 +87,11 @@ from core.measurement import (
     measure_zone_dso,
     measure_central,
 )
-from core.measurement_noise import MeasurementNoiseModel
+from core.measurement_noise import (
+    DER_VOLTAGE_METER_KEY,
+    DerVoltageMeter,
+    MeasurementNoiseModel,
+)
 from core.reporting import load_and_apply_tuned_params
 from core.profiles import (
     DEFAULT_PROFILES_CSV,
@@ -142,6 +146,7 @@ from core.message import SetpointMessage, ShuntDisturbanceMessage
 from controller.der_qv_local_loop import (
     CosPhiConstLoop,
     QVLocalLoop,
+    _qv_capability,
     clear_seed_lu_cache,
     install_der_q_loops,
     seed_qv_equilibrium,
@@ -331,6 +336,31 @@ def _apply_gw_preconditioning(
     return res
 
 
+def _zone_voltage_error_inputs(net, zd, cfg_v, v_set: float):
+    """The buses, voltages and references of a zone's tracking error.
+
+    One definition for the end-of-step record (``zone_v_rms_err_pu``) and the
+    pre-control sample at an event step, so ``eq:case3:epost`` compares like
+    with like.
+    """
+    vm_bus_ids = [int(b) for b in zd.v_bus_indices if b in net.res_bus.index]
+    vm_zone = np.array(
+        [float(net.res_bus.at[b, "vm_pu"]) for b in vm_bus_ids],
+        dtype=np.float64,
+    )
+    if cfg_v.v_setpoints_pu is None:
+        v_ref_zone = np.full(vm_zone.shape, v_set, dtype=float)
+    else:
+        v_ref_by_bus = {
+            int(bus): float(ref)
+            for bus, ref in zip(cfg_v.voltage_bus_indices, cfg_v.v_setpoints_pu)
+        }
+        v_ref_zone = np.array(
+            [v_ref_by_bus.get(bus, v_set) for bus in vm_bus_ids], dtype=float,
+        )
+    return vm_bus_ids, vm_zone, v_ref_zone
+
+
 # =============================================================================
 #  Main simulation function
 # =============================================================================
@@ -339,6 +369,34 @@ def run_multi_tso_dso(
     config: MultiTSOConfig,
     pre_loop_hook: Optional[Callable[[Dict[str, Any]], Any]] = None,
     plant_factory: Optional[Callable[..., Plant]] = None,
+) -> List[MultiTSOIterationRecord]:
+    """Run the simulation; on ANY abort the records so far travel with it.
+
+    The exception that ends a run (power flow after an event, infeasible
+    MIQP, guard re-solve, ...) gets a ``partial_log`` attribute holding every
+    record appended before it, as :class:`ReachabilityViolation` always had.
+    A failed episode is a result, so its trajectory up to the failure must
+    not be lost (2026-10-27).  See :func:`_run_multi_tso_dso_impl`.
+    """
+    sink: List[MultiTSOIterationRecord] = []
+    try:
+        return _run_multi_tso_dso_impl(config, pre_loop_hook, plant_factory,
+                                       _log_sink=sink)
+    except BaseException as exc:
+        if getattr(exc, "partial_log", None) is None:
+            try:
+                exc.partial_log = sink
+            except Exception:       # an exception type without __dict__
+                pass
+        raise
+
+
+def _run_multi_tso_dso_impl(
+    config: MultiTSOConfig,
+    pre_loop_hook: Optional[Callable[[Dict[str, Any]], Any]] = None,
+    plant_factory: Optional[Callable[..., Plant]] = None,
+    *,
+    _log_sink: Optional[List[MultiTSOIterationRecord]] = None,
 ) -> List[MultiTSOIterationRecord]:
     """
     Execute the multi-TSO / multi-DSO OFO simulation.
@@ -486,6 +544,18 @@ def run_multi_tso_dso(
         scenario=config.scenario,
         verbose=(verbose >= 1),
     )
+
+    # The droop's own terminal-voltage reading (DAD input).  Installed on the
+    # plant net before any power flow, so initialisation and every step read
+    # through the same channel; the sample id is the plant step (set at the
+    # top of each step), so a variant without supervisory controllers draws
+    # the same sequence as the others.
+    _der_vmeter = None
+    if (config.measurement_noise.enabled
+            and config.measurement_noise.apply_to_der_voltage):
+        _der_vmeter = DerVoltageMeter(config.measurement_noise)
+        _der_vmeter.set_sample(("plant", 0))
+        net[DER_VOLTAGE_METER_KEY] = _der_vmeter
 
     # =========================================================================
     # STEP 2: Zone partitioning
@@ -2617,7 +2687,8 @@ def run_multi_tso_dso(
               f"DSO/{config.dso_period_s/60:.0f}min{warmup_str})")
         print()
 
-    log: List[MultiTSOIterationRecord] = []
+    log: List[MultiTSOIterationRecord] = (
+        _log_sink if _log_sink is not None else [])
 
     # ── Voltage-stability / nose-curve reachability guard ────────────────────
     # At every step the converged plant equilibrium is checked against the
@@ -3320,6 +3391,8 @@ def run_multi_tso_dso(
     for step in range(1, n_steps + 1):
         _t_step = perf_counter()
         time_s  = step * config.dt_s
+        if _der_vmeter is not None:
+            _der_vmeter.set_sample(("plant", step))
         # Seconds already advanced this interval by the RMS profile pre-settle
         # (see the profile branch); subtracted from the end-of-step advance so
         # the total stays dt_s.  0 unless profiles + a non-static plant.
@@ -3570,6 +3643,28 @@ def run_multi_tso_dso(
                             enforce_q_lims=False,
                         )
 
+                # The plant after the event, before any controller of this
+                # step reads it: the baseline e(t_e+) of eq:case3:epost.
+                rec.pre_control_bus_vm_pu = {
+                    int(b): float(v) for b, v in net.res_bus["vm_pu"].items()
+                }
+                for _z, _zd in zone_defs.items():
+                    _ids, _vm, _vr = _zone_voltage_error_inputs(
+                        net, _zd, tso_controllers[_z].config, v_set)
+                    if _vm.size:
+                        rec.pre_control_zone_v_rms_err_pu[_z] = float(
+                            np.sqrt(np.mean((_vm - _vr) ** 2)))
+                for _hv in meta.hv_networks:
+                    for _t in _hv.coupling_trafo_indices:
+                        if int(_t) in net.res_trafo3w.index:
+                            rec.pre_control_trafo_q_mvar[f"trafo_{int(_t)}"] = float(
+                                net.res_trafo3w.at[int(_t), "q_hv_mvar"])
+                rec.events_fired = [
+                    f"{ev.element_type}:{ev.action}:"
+                    f"{ev.element_index if ev.element_index >= 0 else ev.bus}"
+                    for ev in fired
+                ]
+
                 # Notify controllers: freeze OOS actuator bounds, zero
                 # their H columns, and invalidate sensitivity caches.
                 coordinator.update_outage_masks(net)
@@ -3658,8 +3753,16 @@ def run_multi_tso_dso(
         if _svr_tso and not _central:
             if run_tso:
                 tso_step_count += 1
+            # The SVR reads the result tables directly; with
+            # ``apply_to_svr`` it reads them through the same metering
+            # errors (channels and sample id) as the OFO packets.
+            _svr_net = plant.read_y()
+            if (config.measurement_noise.enabled
+                    and config.measurement_noise.apply_to_svr):
+                _svr_net = measurement_noise_model.result_view(
+                    _svr_net, sample_id=("control", step))
             svr_outputs = svr_coordinator.step(
-                plant.read_y(), float(config.dt_s),
+                _svr_net, float(config.dt_s),
                 rvr_due=bool(run_tso), dt_rvr_s=float(config.tso_period_s),
             )
             for z, svr_out in svr_outputs.items():
@@ -4791,15 +4894,36 @@ def run_multi_tso_dso(
                             last_pcc_set_per_trafo[_t]
                         )
 
+        # ── Per-unit STS IBG data (every mode; Case-2 metric inputs) ─────────
+        for hv in meta.hv_networks:
+            _ders = [int(s_) for s_ in hv.sgen_indices
+                     if s_ in net.res_sgen.index]
+            if not _ders:
+                continue
+            _p = np.array([float(net.res_sgen.at[s_, "p_mw"]) for s_ in _ders])
+            _q = np.array([float(net.res_sgen.at[s_, "q_mvar"]) for s_ in _ders])
+            _cap = [
+                _qv_capability(
+                    float(net.sgen.at[s_, "sn_mva"]),
+                    str(net.sgen.at[s_, "op_diagram"])
+                    if "op_diagram" in net.sgen.columns
+                    and isinstance(net.sgen.at[s_, "op_diagram"], str)
+                    else "VDE-AR-N-4120-v2",
+                    float(p_),
+                )
+                if bool(net.sgen.at[s_, "in_service"]) else (0.0, 0.0)
+                for s_, p_ in zip(_ders, _p)
+            ]
+            rec.dso_der_idx[hv.net_id] = np.array(_ders, dtype=np.int64)
+            rec.dso_der_p_mw[hv.net_id] = _p
+            rec.dso_der_q_mvar[hv.net_id] = _q
+            rec.dso_der_q_min_mvar[hv.net_id] = np.array([c[0] for c in _cap])
+            rec.dso_der_q_max_mvar[hv.net_id] = np.array([c[1] for c in _cap])
+
         # ── Record plant voltages per zone ────────────────────────────────────
         for z, zd in zone_defs.items():
-            vm_bus_ids = [
-                int(b) for b in zd.v_bus_indices if b in net.res_bus.index
-            ]
-            vm_zone = np.array(
-                [float(net.res_bus.at[b, "vm_pu"]) for b in vm_bus_ids],
-                dtype=np.float64,
-            )
+            vm_bus_ids, vm_zone, v_ref_zone = _zone_voltage_error_inputs(
+                net, zd, tso_controllers[z].config, v_set)
             if vm_zone.size > 0:
                 rec.zone_v_min[z]  = float(vm_zone.min())
                 rec.zone_v_max[z]  = float(vm_zone.max())
@@ -4810,20 +4934,6 @@ def run_multi_tso_dso(
                     rec.bus_vm_pu[int(b)] = float(v)
                 # Spatial RMS of the voltage error to the setpoint across the
                 # zone's observed EHV buses (CIGRE per-zone tracking figure).
-                cfg_v = tso_controllers[z].config
-                if cfg_v.v_setpoints_pu is None:
-                    v_ref_zone = np.full(vm_zone.shape, v_set, dtype=float)
-                else:
-                    v_ref_by_bus = {
-                        int(bus): float(ref)
-                        for bus, ref in zip(
-                            cfg_v.voltage_bus_indices, cfg_v.v_setpoints_pu
-                        )
-                    }
-                    v_ref_zone = np.array(
-                        [v_ref_by_bus.get(bus, v_set) for bus in vm_bus_ids],
-                        dtype=float,
-                    )
                 rec.zone_v_rms_err_pu[z] = float(
                     np.sqrt(np.mean((vm_zone - v_ref_zone) ** 2))
                 )
@@ -4856,6 +4966,14 @@ def run_multi_tso_dso(
                     rec.zone_p_gen[z], gen_vm,
                 )
                 q_act = rec.zone_q_gen[z]
+                rec.gen_q_min_mvar[z] = np.asarray(q_min_cap, dtype=np.float64)
+                rec.gen_q_max_mvar[z] = np.asarray(q_max_cap, dtype=np.float64)
+                rec.zone_gen_idx[z] = np.array(zd.gen_indices, dtype=np.int64)
+                rec.zone_gen_in_service[z] = np.array(
+                    [bool(net.gen.at[g, "in_service"]) for g in zd.gen_indices])
+                rec.zone_gen_is_slack[z] = np.array(
+                    [bool(net.gen.at[g, "slack"]) if "slack" in net.gen.columns
+                     else False for g in zd.gen_indices])
                 rec.gen_q_headroom_mvar[z] = np.minimum(
                     q_max_cap - q_act, q_act - q_min_cap,
                 )

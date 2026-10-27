@@ -39,8 +39,10 @@ Campaigns
 
 Configuration
 -------------
-``make_config()`` + DSO_3 x2 (the Chapter-8 batch network) + paramset
-``ch9_selected`` (the Chapter-8 weights, lambda_max(B) = 1.31) + horizon.
+``make_config()`` + DSO_3 x2 (the Chapter-8 batch network) + the selected
+Chapter-9 paramset ``SELECTED_PARAMSET`` (imported, never restated; it was the
+fixed name ``ch9_selected`` until 2026-10-27, which lacks ``g_w_tso_shunt`` and
+no longer runs) + horizon.
 Nothing else is restated.  ``assert_case1_controlled`` fails loudly if two
 consecutive variants differ in more than the mechanism the step isolates.
 
@@ -73,8 +75,14 @@ from configs.paramsets import apply_paramset
 from experiments.run_multi_system_ofo import make_config
 from experiments.runners.multi_tso_dso import run_multi_tso_dso
 from experiments.thesis_runs import add_run_arguments, start_thesis_run
+from experiments.ch_9_parameter_selection._ch9_selected_design import (
+    SELECTED_PARAMSET,
+)
 
-PARAMSET = "ch9_selected"
+#: The Chapter-9 selection, whatever it currently is.  A run records the name
+#: and sha256 of the set it used (``thesis_runs``), so following the constant
+#: keeps every run traceable without a second place to edit.
+PARAMSET = SELECTED_PARAMSET
 HORIZON_MIN = 360
 
 #: Where the results are reported, and what they feed (thesis labels).

@@ -87,6 +87,21 @@ class MeasurementNoiseConfig:
     apply_during_initialisation: bool = True
     clip_nonnegative_magnitudes: bool = True
 
+    # Coverage beyond the OFO packets (both default off, so earlier runs are
+    # reproduced unchanged; Case 2 switches both on, author decision
+    # 2026-10-27: the same accuracy class for every controller and the droop).
+    apply_to_svr: bool = False
+    """Give the classical SVR (``tso_mode='svr'``) a noisy view of the result
+    tables, drawn on the same channel keys and sample id as the OFO packets, so
+    a shared VT or meter carries the same error in every variant."""
+
+    apply_to_der_voltage: bool = False
+    """Let each converter's dispatch-anchored droop read its terminal voltage
+    through its own VT/meter channel.  The anchor written at a dispatch comes
+    from the same channel, so a persistent bias cancels in V - V_anchor; a
+    droop that is never re-anchored (local q(v) about the nominal reference)
+    sees the bias in full."""
+
     def profile_components(self) -> Dict[str, float]:
         """Return the selected component half-widths with overrides."""
         key = str(self.profile).strip().lower()

@@ -48,6 +48,8 @@ from typing import Dict, Protocol, runtime_checkable
 
 import pandapower as pp
 
+from core.measurement_noise import measured_der_voltage
+
 
 @dataclass(frozen=True)
 class ActuatorWrites:
@@ -139,8 +141,8 @@ def write_der_q_set(net: pp.pandapowerNet, sgen_idx: int,
     if has_res_bus:
         bus = int(net.sgen.at[sgen_idx, "bus"])
         if bus in net.res_bus.index:
-            net.sgen.at[sgen_idx, "qv_vref_anchor_pu"] = float(
-                net.res_bus.at[bus, "vm_pu"]
+            net.sgen.at[sgen_idx, "qv_vref_anchor_pu"] = measured_der_voltage(
+                net, sgen_idx, bus
             )
     net.sgen.at[sgen_idx, "q_set_mvar"] = float(q_mvar)
 

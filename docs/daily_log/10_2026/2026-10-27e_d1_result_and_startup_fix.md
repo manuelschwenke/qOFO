@@ -108,3 +108,49 @@ Timestamp: 2026-10-27, ~18:00–18:20 Europe/Berlin.
     or 1.109 pu (W6) for one 20-s interval, until the STS controllers
     correct it. At Δ\* the droop absorbs the step and the maximum stays at
     1.065 pu.
+
+## Run 0006: drift-based D1 rule (author decision), 22:25–22:59
+
+- **Decision:** the author decided to exclude discrete events from D1 and to
+  choose 0.0075 or 0.010 pu. Implemented in 149f5ff:
+  - `discrete_solves`: capability steps > 1 Mvar; TS/STS OLTC and bank
+    operations at the end-of-step solve of their dispatch.
+  - In an interval containing an event, only the solves before it count as
+    drift.
+  - ε_U = 0.003 pu, from the HV measurement chain of the project's noise
+    model.
+- **Run of record:**
+  `results/ch_09_parameter_selection/0006_2026-10-27_222508_ch_9_4_deadband`
+  (stage 1 reused from 0005, identical traces). Run 0005 is archived,
+  superseded by 0006.
+- **D1 selection:**
+  - 220 of 65 784 routine intervals contain a discrete event.
+  - Drift max is 0.00359 pu (W2, STS); per window and level all are
+    ≤ 0.0036 pu. No unmarked interval exceeds 0.005 pu.
+  - Δ\* = 0.0075 pu, narrower 0.005 pu.
+  - Rule as written: 0.0158 pu → 0.020 pu. 40 discrete intervals exceed Δ\*.
+- **D1 confirmation (droop at Δ\* from 30 min on):**
+  - 0 drift activations in W1–W6, at Δ\* and at 0.005 pu.
+  - Activations only at discrete events, each at most 20 s per converter
+    (one STS period):
+    - W2: 14 solves (capability step at 7170 s), up to 2.7 Mvar per
+      converter;
+    - W4: 10 solves (5420 s), up to 1.0 Mvar;
+    - W5: 64 solves at the TS bank switchings at 1980 s and 4140 s, 0 Mvar
+      delivered (no capability in W5).
+  - Effect on the closed loop: ≤ 0.0067 pu at converter buses, ≤ 0.71 Mvar
+    at the interfaces; tap and bank operations identical to the reference.
+    W1, W3 and W6 are identical to the reference.
+- **D2** (72/72 events verified; legs identical before the event):
+
+  | Event | ΔU at event bus, off | Δ\* = 0.0075: support TS + STS (W1–W3, W6; W4) | ΔU, Δ\* | 2Δ\* = 0.015: support | ΔU, 2Δ\* |
+  |---|---|---|---|---|---|
+  | ±200 Mvar at bus 7 | ∓0.0349 / +0.0356 | 93–100 Mvar; W4 59–63 | ∓0.0250 / +0.0257 | 54–62 Mvar | ∓0.0287 / +0.0294 |
+  | ±200 Mvar at bus 11 | −0.0635 / +0.0642 | 86–97 Mvar; W4 58–63 | −0.0539 / +0.0546 | 40–51 Mvar | −0.0576 / +0.0584 |
+
+  - W5: no support (no capability).
+  - The support is handed back by the second TS dispatch after the event
+    (≤ 360 s).
+  - STS maximum: ≤ 1.082 pu with droop, against 1.114 pu (W2) and 1.110 pu
+    (W6) with the droop off, after the first TS dispatch following the
+    inductive events.

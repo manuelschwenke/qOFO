@@ -111,6 +111,52 @@ Author decisions of 2026-10-27 that this implements:
   - all 12 couplers receive references, 100 % of them inside CAIR;
   - final tracking error 0.03–0.92 Mvar.
 
+## Reference run of record (18:18–21:59, e5power)
+
+Run `results/ch_11_case2_multisystem/ref/0006_2026-10-27_181840_run_ref`:
+- code 20873f4 on `case2/ref` (clean), paramset `ch9_selected_band_2026_10`;
+- scenario A; launched detached via WMI;
+- all six variants `ok`, 1080 records each;
+- figures and CSV data in `figures/` (`figures_ref.py`).
+
+The numbers below are one trajectory with no statistics. Units: mpu, RMS over the areas.
+
+| | L2 | S1 | S2 | O2 | O3 | M |
+|---|---|---|---|---|---|---|
+| e_v | 22.0 | 12.7 | 11.4 | 8.1 | **6.8** | 7.8 |
+| e_v,p | 17.9 | 4.3 | **3.0** | 4.6 | 3.5 | 3.7 |
+
+**Access (same law).**
+- S1 → S2: e_v −10 %, e_vp −30 %.
+- O2 → O3: e_v −15 %, e_vp −24 %.
+- Area 2 under O3: R+ min 483 Mvar (O2: 377), u_q 0.071 (O2: 0.198).
+- Recruited flow: O3−O2 11–43 Mvar per coupler; S2−S1 10–29 Mvar.
+
+**Price of access.**
+- f_V,STS: O3 11–27 mpu vs O2 5–8 mpu.
+- O3's DSO_4 leaves its 0.92–1.08 operating band by 4.9 mpu, but stays within the hard limits.
+- O3 does not reach its references in DSO_2 and DSO_4, which sit at the band (5–15 Mvar short).
+
+**Law, with the access held (S2 → O3).**
+- e_v −40 %.
+- The pilot error is higher in area 1 (4.6 vs 3.3 mpu), the area-1 pilot offset of Case 1 again.
+
+**Inter-dispatch interval (Δe_post, W relative to the no-access pair).**
+- O3 after the 250 Mvar step: area 2 +2.8 mpu, area 3 +0.9 mpu in 80 s. W = 55 Mvar·min against 5 for O2.
+- O3 after the generator trip and after the line trip: ≤ 0.2 mpu.
+- The classical schemes after the generator trip: area 3 +12.0 mpu (S1) and +9.5 mpu (S2), with the safeguard on. Once the event lies off the dispatch grid, their withdrawal reappears.
+- To be discussed with the author before any remedy (thesis todo).
+
+**M.**
+- With the band weights λ_M = 3.55, κ = 2.42 → 1.467.
+- **Not a bound:** e_v 7.8 > O3 6.8.
+- It uses the STS more than O3 (u_q,STS 0.54–0.73 vs 0.42–0.65). The aggregation prediction "M reaches for transmission resources first" is not supported by this run.
+- **No bank switched**, so its commit path is still unexercised.
+
+**Sawtooth in O2/S1/S2.** The period is T_TS during load ramps (60–90, 270–300 min).
+- Attribution: the TS actuators move only at dispatches, in same-sign steps with 0 reversals; between dispatches only the machines follow the drift. This is the ramp lag of a 180 s supervisory loop, **not** droop re-anchoring and not hunting.
+- O3 has none: its STS-OFOs move 286 Mvar between dispatches against 51 at them.
+
 ## Not done / open
 
 - The reference scenario: the author's choice (A proposed).

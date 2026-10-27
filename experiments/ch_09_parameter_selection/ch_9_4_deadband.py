@@ -260,12 +260,26 @@ def _ops(series: list) -> Dict[str, int]:
     return n
 
 
+def droop_delivered(p: pd.DataFrame) -> pd.Series:
+    """Q delivered by the droop [Mvar]: realised Q minus the commanded Q as
+    the capability admits it, where the dead zone is active, else 0.
+
+    ``q_mvar - q_set_mvar`` alone also counts a command outside the
+    capability band, which the plant clips with or without droop; and outside
+    the dead zone the remainder is the convergence residual of the Q(V) loop
+    (up to 0.1 Mvar), not droop action (fixed 2026-10-27 after run 0005's
+    first reduction)."""
+    dq = p["q_mvar"] - p["q_set_mvar"].clip(lower=p["q_min_mvar"],
+                                            upper=p["q_max_mvar"])
+    return dq.where(p["dz_active"].astype(bool), 0.0)
+
+
 def confirm_metrics(run_dir: Path, ref_dir: Path, warmup_s: float) -> Dict[str, Any]:
     """Activations and deviation from the suppressed reference (D1 step 3)."""
     p = pd.read_csv(run_dir / "probe.csv.gz")
     r = pd.read_csv(ref_dir / "probe.csv.gz")
     cap = (p["q_max_mvar"] - p["q_min_mvar"]) > 0.0
-    deliv = (p["q_mvar"] - p["q_set_mvar"]).abs() > TOL_Q_MVAR
+    deliv = droop_delivered(p).abs() > TOL_Q_MVAR
     routine = p["t_s"] >= warmup_s
     out: Dict[str, Any] = {}
     for lev in ("TS", "STS"):
@@ -278,7 +292,7 @@ def confirm_metrics(run_dir: Path, ref_dir: Path, warmup_s: float) -> Dict[str, 
             out[f"first_routine_activation_{lev}_s"] = float(
                 p.loc[p["dz_active"] & m & routine, "t_s"].min())
         out[f"max_abs_delivered_{lev}_mvar"] = float(
-            (p.loc[m, "q_mvar"] - p.loc[m, "q_set_mvar"]).abs().max() or 0.0)
+            droop_delivered(p[m]).abs().max() or 0.0)
     key = ["t_s", "solve", "sgen"]
     j = p.merge(r, on=key, suffixes=("", "_ref"))
     out["n_matched_solves"] = int(len(j))
@@ -320,7 +334,7 @@ def d2_metrics(run_dir: Path, event: str, event_s: float, observe_s: float) -> D
     ev = ev[ev.solve == ev.solve.max()]
     for lev in ("TS", "STS"):
         e = ev[ev.level == lev]
-        out[f"support_{lev}_mvar"] = float((e.q_mvar - e.q_set_mvar).sum())
+        out[f"support_{lev}_mvar"] = float(droop_delivered(e).sum())
         out[f"support_unsat_{lev}_mvar"] = float(e.dq_unsat_mvar.sum())
         out[f"active_{lev}"] = int(e.dz_active.sum())
         out[f"max_abs_v_eff_{lev}_pu"] = float(e.v_eff_pu.abs().max())
@@ -340,7 +354,7 @@ def d2_metrics(run_dir: Path, event: str, event_s: float, observe_s: float) -> D
         out["v_max_sts_pu"] = float(max(max(r["dso_group_v_max_pu"].values()) for r in obs if r["dso_group_v_max_pu"]))
     # hand-over: delivered droop support per end solve after the event
     h = p[(p.t_s >= event_s) & (p.t_s <= event_s + observe_s)]
-    h = h.assign(dq=h.q_mvar - h.q_set_mvar).groupby(["t_s", "solve", "level"]).dq.sum().unstack("level")
+    h = h.assign(dq=droop_delivered(h)).groupby(["t_s", "solve", "level"]).dq.sum().unstack("level")
     h.to_csv(run_dir / "support_series.csv")
     tot = h.sum(axis=1).abs()
     peak = float(tot.max()) if len(tot) else 0.0
@@ -366,6 +380,10 @@ def main(argv=None) -> int:
                     help="an earlier run of this script whose suppressed D1 "
                          "traces and dt check are copied and reused (same "
                          "protocol constants); stage 2 is simulated anew")
+    ap.add_argument("--reduce", default=None,
+                    help="an existing run of this script: append an invocation "
+                         "and recompute its reductions; every simulation is "
+                         "cached (done.json), so nothing is re-simulated")
     add_run_arguments(ap)
     args = ap.parse_args(argv)
 
@@ -389,9 +407,10 @@ def main(argv=None) -> int:
             time_series=(f"W1-W6 of tuning.scenarios_mc_v2.CONDITIONS, D1 "
                          f"{d1_s / 3600:g} h, D2 {(ev_s + obs_s) / 3600:g} h; "
                          f"dt {DT_S:g} s, T_TS 180 s, T_STS 20 s"),
-            note=args.note, tag=args.tag or ("smoke" if args.smoke else None)) as run:
+            note=args.note, tag=args.tag or ("smoke" if args.smoke else None),
+            resume=args.reduce) as run:
         root = run.root
-        if args.stage1_from:
+        if args.stage1_from and not args.reduce:
             # Reuse the finished suppressed traces: their done.json makes the
             # stage-1 jobs below return as cached, and the reduction reruns.
             import shutil

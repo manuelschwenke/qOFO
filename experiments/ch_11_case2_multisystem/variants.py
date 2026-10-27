@@ -38,7 +38,10 @@ M    one OFO on the coupled model, every step        bound (not a rung)
 ``M`` weights the STS buses with the paramset's ``dso_g_v`` (the STS-OFOs'
 own weight), dispatches the banks through the same holding-time / mutual-
 exclusion / rank-1 machinery as the zones, and refuses to run if its loop gain
-``lambda_max`` reaches 2 (rebuilt 2026-10-27).  It stays in :data:`NOT_READY`
+``lambda_max`` reaches 2 (rebuilt 2026-10-27).  At the selected weights the
+single loop has lambda_max ~5.1, so M's whole ``g_w`` block is scaled by one
+factor to the TS-OFO's loop gain (author decision 2026-10-27); the factor is
+printed and recorded (``central_gw_kappa``).  It stays in :data:`NOT_READY`
 until a smoke run has confirmed it.
 
 Author: Manuel Schwenke / Claude Code (2026-10-27)
@@ -73,7 +76,8 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
     # bounds (measured 2026-09-02, superseded ladder).
     "M": dict(control_scope="central", tso_mode="ofo", dso_mode="local",
               local_sensitivities_tso=False, local_sensitivities_dso=False,
-              central_period_s=None, **_O_STS_LABELS),
+              central_period_s=None, central_match_tso_loop_gain=True,
+              **_O_STS_LABELS),
 }
 
 #: Registered variants that must not enter a run of record yet.
@@ -99,7 +103,7 @@ STEP_ALLOWED: Dict[Tuple[str, str], set] = {
     # Information, not a rung: one controller, full model, every step.
     ("O3", "M"): {"control_scope", "dso_mode", "local_sensitivities_tso",
                   "local_sensitivities_dso", "central_period_s",
-                  "central_dso_g_v"},
+                  "central_dso_g_v", "central_match_tso_loop_gain"},
 }
 
 

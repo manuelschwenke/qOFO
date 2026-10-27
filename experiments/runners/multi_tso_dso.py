@@ -2484,6 +2484,7 @@ def _run_multi_tso_dso_impl(
             initialisation=True,
         ))
     central_lambda_max = float("nan")
+    central_gw_kappa = float("nan")
     if _central and central_controller is not None:
         # The centralized controller always uses the FULL-network Jacobian
         # rebuilt at the post-Phase-2 operating point (overriding any
@@ -2503,6 +2504,29 @@ def _run_multi_tso_dso_impl(
         # every verbosity -- the loop gain is part of the result.
         _lam_c = float(_central_curvature_spectrum(
             central_controller, central_cfg).lambda_max)
+        central_gw_kappa = 1.0
+        if config.central_match_tso_loop_gain:
+            _lam_ts = [_controller_lambda_max(_c) for _c in tso_controllers.values()]
+            _lam_ts = [x for x in _lam_ts if np.isfinite(x)]
+            if not _lam_ts:
+                raise ValueError(
+                    "central_match_tso_loop_gain: no zone TS-OFO loop gain "
+                    "could be read to match")
+            _target = max(_lam_ts)
+            central_gw_kappa = _lam_c / _target
+            _gw0, _ = central_controller._get_per_variable_weights()
+            if _gw0 is None:
+                _gw0 = np.broadcast_to(
+                    np.asarray(central_controller.params.g_w, dtype=np.float64),
+                    (central_controller.n_controls,))
+            central_controller.apply_preconditioned_g_w(
+                np.asarray(_gw0, dtype=np.float64) * central_gw_kappa)
+            _lam_new = float(_central_curvature_spectrum(
+                central_controller, central_cfg).lambda_max)
+            print(f"  [central] g_w x kappa = {central_gw_kappa:.4g} to the "
+                  f"TS-OFO loop gain {_target:.4g}: lambda_max "
+                  f"{_lam_c:.4g} -> {_lam_new:.4g}", flush=True)
+            _lam_c = _lam_new
         central_lambda_max = _lam_c
         print(f"  [central] curvature lambda_max(M) = {_lam_c:.4g} "
               f"(stable iff < 2)", flush=True)
@@ -3484,6 +3508,7 @@ def _run_multi_tso_dso_impl(
             # Loop gain of every controller that acts in this variant.
             if _central:
                 rec.controller_lambda_max["central"] = central_lambda_max
+                rec.central_gw_kappa = central_gw_kappa
             else:
                 if config.tso_mode == "ofo":
                     for _z, _c in tso_controllers.items():

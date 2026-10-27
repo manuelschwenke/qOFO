@@ -435,6 +435,8 @@ class MultiTSOIterationRecord:
     events_fired: List[str] = field(default_factory=list)
     # Loop gain lambda_max of each acting controller, on the first record only.
     controller_lambda_max: Dict[str, float] = field(default_factory=dict)
+    # Factor applied to the central controller's g_w (1 = unscaled), first record.
+    central_gw_kappa: float = float("nan")
 
     slack_p_mw: float = 0.0
     slack_q_mvar: float = 0.0

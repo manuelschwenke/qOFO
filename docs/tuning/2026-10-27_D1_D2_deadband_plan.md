@@ -1,6 +1,8 @@
 # Plan: Experiments D1/D2 (dead band of the DAD layer) on the QSS plant
 
-**Status:** PROPOSAL 2026-10-27, for discussion. Nothing implemented.
+**Status:** DECIDED 2026-10-27 (section 6); implemented in
+`experiments/ch_09_parameter_selection/ch_9_4_deadband.py` and
+`_droop_probe.py`.
 
 **Basis:**
 - `Chapters/Chapter09.tex` §`ch:timescales:deadband`: equations
@@ -126,3 +128,20 @@ There is no measurement noise; the thesis states this.
 - **`case2/ref` merge:** it carries an import of the old
   `experiments.ch_9_parameter_selection` path (`run_case1.py:78`), which
   must be updated on merge.
+
+## 6. Decisions (2026-10-27)
+
+| # | Decision | By |
+|---|---|---|
+| 1 | Weights `ch9_selected_band_2026_10`; `SELECTED_PARAMSET` switched | author |
+| 2 | dt = 10 s. Profiles are linear between 15-min points, so a finer grid adds solves but no exogenous information; one W1 trace at dt = 20 s is run as a check of the D1 excursion against dt | author (Claude's reasoning) |
+| 3 | 𝒟 = {0.005, 0.0075, 0.010, 0.0125, 0.015, 0.020} pu, ε_U = 0.001 pu | author |
+| 4 | D2 wider width = 2 Δ\*. The adjacent candidate (0.0025 pu wider) would barely differ from Δ\*; doubling shows the effect of the width, and the droop-disabled leg bounds the other end | Claude, delegated |
+| 5 | Four disturbances: ±200 Mvar at bus 7 and at bus 11 (pandapower TS bus indices; + = additional reactive load, inductive; − = capacitive). Each is a dormant load switched in at 60 min + 10 s and kept; observation 30 min (runs of 90 min). D1 start-up = the first 30 min of each 2-h trace. 6 × 4 × 3 = 72 D2 cells | author (both signs), Claude (timing) |
+| 6 | Recording through the probe plant (`plant_factory`), no runner edit | Claude, delegated |
+
+D1 confirmation compares with the suppressed reference at the same solve
+instants: "identical" means |ΔU| ≤ 1e-6 pu at every converter bus and
+|ΔQ| ≤ 1e-3 Mvar for every converter. The selection uses the rule of the
+thesis (all converters, all six windows); the maximum over converters with
+non-zero capability is reported alongside it.

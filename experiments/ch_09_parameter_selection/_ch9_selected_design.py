@@ -94,7 +94,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: configuration (banks in the TS-MIQP; ``g_w_tso_shunt`` is a weight).  Every
 #: earlier set lacks ``g_w_tso_shunt`` and no longer runs with the banks in
 #: the MIQP.  Was "ch9_selected_10_2026".
-SELECTED_PARAMSET = "ch9_selected_final_2026_10"
+#:
+#: 2026-10-27 (author decision): ``ch9_selected_band_2026_10`` -- candidate
+#: fde2e81af6b1, the single application of the frozen procedure
+#: docs/tuning/2026-10-25_weight_selection_procedure.md with the DSO operating
+#: band 0.92-1.08 pu in make_config (run of record
+#: results/ch_09_parameter_selection/0001_2026-10-25_215433_weight_selection_
+#: driver_band).  Was "ch9_selected_final_2026_10".
+SELECTED_PARAMSET = "ch9_selected_band_2026_10"
 
 #: The Stage-I analytic design point, for the initial-weight legs (B and C).
 #: 2026-10-25: the Stage-I point of that procedure (was "stage1_start", which

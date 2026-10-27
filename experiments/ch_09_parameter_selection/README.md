@@ -10,6 +10,7 @@ single traceable producer.
 | 9.1 | `N_inner` (eq. 9.2) | `ch_9_1_ninner_isolated_sts.py` | `results/THESIS_ch9_1_ninner/` | run of record is archived at `docs/data/2026-08-21_ch9_b1_b2_corrected/B1_ninner_10mvar/`, not in `results/` |
 | 9.1 | `T_TS` sweep (context only) | `ch_9_1_ts_period_sweep.py` | `results/THESIS_ch9_1_ts_period_sweep/` | run of record archived at `docs/data/2026-08-21_ch9_b1_b2_corrected/B2_ts_period_sweep/`; selection of 180 s remains **unmeasured** |
 | 9.2 | dead-band half-width `ΔU_db` | `run_qstep_sweep.ps1`, `run_qstep_falseactivation.ps1`, `run_e1_drift.ps1`, `run_e3_tracking.ps1` — **parked in the untracked `local_ps_scripts/`** since 2026-10-22 | `results/THESIS_ch9_2_deadband_droop{,_e1_drift,_e3_tracking}/`, `results/qstep_sweep/` | done, thesis filled |
+| `ch:timescales:deadband` (2026-10-27) | D1/D2 on the QSS plant: dead-band half-width and disturbance response | `ch_9_4_deadband.py` (+ `_droop_probe.py`); plan `docs/tuning/2026-10-27_D1_D2_deadband_plan.md` | `results/ch_09_parameter_selection/<NNNN>_..._ch_9_4_deadband/` (documented run) | replaces the RMS/PowerFactory row above for the thesis |
 | 9.3 | objective / step-size weights | `tuning/` (was `tuning_mc/`), reproduced by `_ch9_selected_design.py` | `results/tuning_mc/stage1/` — see `results/THESIS_ch9_3_weight_selection_POINTER.md` | selected `fe010aa3ead1`; **chapter text still names the superseded `aa4f6d4a8654`** |
 | 9.4 | shunt persistent-need threshold | — | — | pending |
 

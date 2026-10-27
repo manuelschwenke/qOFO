@@ -1,5 +1,5 @@
 r"""
-experiments/ch_9_parameter_selection/ch_9_1_timescale_seperation.py
+experiments/ch_09_parameter_selection/ch_9_1_timescale_seperation.py
 ==================================================================
 The open-loop RMS step battery (\cref{ch:timescales}). One command, one run
 directory, nothing else.
@@ -85,7 +85,7 @@ incomplete battery cannot be mistaken for a complete one.
 The post-processing (settling -> table -> derived quantities) is verifiable
 without a PowerFactory seat:
 
-    python experiments\ch_9_parameter_selection\ch_9_1_timescale_seperation.py --self-test
+    python experiments\ch_09_parameter_selection\ch_9_1_timescale_seperation.py --self-test
 
 Outputs, in ``results/THESIS_ch9_1_timescale_settling/<label>/<stamp>/``
 -------------------------------------------------
@@ -98,11 +98,11 @@ Outputs, in ``results/THESIS_ch9_1_timescale_settling/<label>/<stamp>/``
 
 Usage
 -----
-    python experiments\ch_9_parameter_selection\ch_9_1_timescale_seperation.py --label full_t0_wecc --save-trajectories
-    python experiments\ch_9_parameter_selection\ch_9_1_timescale_seperation.py --dry-run     # no PF, no licence
-    python experiments\ch_9_parameter_selection\ch_9_1_timescale_seperation.py --self-test   # no PF, checks the post-processing
+    python experiments\ch_09_parameter_selection\ch_9_1_timescale_seperation.py --label full_t0_wecc --save-trajectories
+    python experiments\ch_09_parameter_selection\ch_9_1_timescale_seperation.py --dry-run     # no PF, no licence
+    python experiments\ch_09_parameter_selection\ch_9_1_timescale_seperation.py --self-test   # no PF, checks the post-processing
 
-See ``experiments/ch_9_parameter_selection/README.md`` and
+See ``experiments/ch_09_parameter_selection/README.md`` and
 ``docs/handover_timescale_study.md`` for the full run procedure.
 
 Author: Manuel Schwenke / Claude Code (2026-08-04, relocated 2026-08-06)

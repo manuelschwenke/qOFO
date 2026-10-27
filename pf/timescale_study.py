@@ -4,7 +4,7 @@ pf/timescale_study.py
 **Moved 2026-08-06.** The timescale settling battery now lives with the other
 Ch. 9 parameter-selection entry points:
 
-    experiments\ch_9_parameter_selection\ch_9_1_timescale_seperation.py
+    experiments\ch_09_parameter_selection\ch_9_1_timescale_seperation.py
 
 This module is a forwarding shim so the command in
 ``docs/handover_timescale_study.md`` and in the Chapter 9 source comment keeps
@@ -25,7 +25,7 @@ from typing import Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from experiments.ch_9_parameter_selection.ch_9_1_timescale_seperation import (  # noqa: E402,F401
+from experiments.ch_09_parameter_selection.ch_9_1_timescale_seperation import (  # noqa: E402,F401
     BAND_Q_MVAR,
     BAND_VOLTAGE_PU,
     TABLE_ROWS,
@@ -42,7 +42,7 @@ from experiments.ch_9_parameter_selection.ch_9_1_timescale_seperation import (  
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     print("[timescale] NOTE: pf/timescale_study.py has moved to "
-          "experiments/ch_9_parameter_selection/ch_9_1_timescale_seperation.py; "
+          "experiments/ch_09_parameter_selection/ch_9_1_timescale_seperation.py; "
           "this shim forwards to it.")
     return _main(argv)
 

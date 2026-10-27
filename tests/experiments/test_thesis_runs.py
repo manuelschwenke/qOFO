@@ -203,3 +203,80 @@ def test_check_flags_an_undefined_label(project, capsys):
         + (run.root / tr.HEADER).read_text(encoding="utf-8"), encoding="utf-8")
     assert tr.check_thesis(project["thesis"], project_root=project["root"]) == 1
     assert "'ch:missing' is not defined" in capsys.readouterr().out
+
+
+def _campaign(project, name="THESIS_demo_campaign"):
+    src = project["root"] / "results" / name
+    (src / "code_state").mkdir(parents=True)
+    (src / "driver.py").write_text("# driver\n", encoding="utf-8")
+    (src / "code_state" / "tracked_changes.patch").write_text("diff\n", encoding="utf-8")
+    return src
+
+
+_GIT = {"commit": "9d03c34af10f", "branch": "main", "dirty": True,
+        "dirty_files": ["core/x.py"], "diff_file": "code_state/tracked_changes.patch"}
+
+
+def _adopt(project, src, **kw):
+    kw.setdefault("invocations", [
+        {"started": "2026-10-25T21:54:33+01:00", "finished": "2026-10-27T11:58:15+01:00",
+         "status": "complete", "command": "python driver.py", "git": _GIT}])
+    return tr.adopt_run(
+        src, experiment="ch_10_demo", producer="demo_driver",
+        script="results/ch_10_demo/x/driver.py", target="ch:demo",
+        results_root=project["root"] / "results", thesis_dir=project["thesis"], **kw)
+
+
+def test_adopt_moves_a_campaign_and_documents_it_from_its_own_records(project):
+    src = _campaign(project)
+    run = _adopt(project, src, feeds=["fig:demo"], tag="band",
+                 outputs={"driver.py": "the campaign driver"})
+    assert not src.exists()
+    assert run.root.parent == project["root"] / "results" / "ch_10_demo"
+    assert run.root.name == "0001_2026-10-25_215433_demo_driver_band"
+    assert (run.root / "driver.py").exists()
+    m = json.loads((run.root / tr.MANIFEST).read_text(encoding="utf-8"))
+    assert m["status"] == "complete"
+    assert m["adopted"]["from"] == "results/THESIS_demo_campaign"
+    assert m["invocations"][0]["git"]["commit"] == "9d03c34af10f"   # not fake_git's
+    assert m["target_numbers"] == {"ch:demo": "10"}
+    assert "adopted from `results/THESIS_demo_campaign`" in (
+        run.root / tr.README).read_text(encoding="utf-8")
+    header = (run.root / tr.HEADER).read_text(encoding="utf-8")
+    assert "Code    : proj 9d03c34 on main, dirty" in header
+
+
+def test_adopt_continues_the_counter_and_refuses_bad_input(project):
+    (project["root"] / "results" / "ch_10_demo" / "0004_2026-01-01_000000_x").mkdir(parents=True)
+    run = _adopt(project, _campaign(project))
+    assert run.root.name.startswith("0005_")
+    with pytest.raises(ValueError, match="already a documented run"):
+        _adopt(project, run.root)
+    with pytest.raises(ValueError, match="not a chapter folder"):
+        tr.adopt_run(_campaign(project, "THESIS_b"), experiment="ch_9_demo",
+                     producer="p", script="s", target="ch:demo",
+                     invocations=[{"started": "2026-10-25T21:54:33", "finished": None,
+                                   "status": "complete", "command": "c", "git": _GIT}],
+                     results_root=project["root"] / "results")
+    with pytest.raises(ValueError, match="lacks"):
+        _adopt(project, project["root"] / "results" / "THESIS_b",
+               invocations=[{"started": "2026-10-25T21:54:33"}])
+
+
+def test_adopt_with_a_failed_invocation_is_failed(project):
+    inv = {"started": "2026-10-25T21:54:33", "finished": "2026-10-26T10:00:00",
+           "command": "c", "git": _GIT}
+    run = _adopt(project, _campaign(project), invocations=[
+        dict(inv, status="complete"), dict(inv, status="failed")])
+    assert run.status == "failed"
+
+
+def test_adopt_header_names_the_primary_invocation(project):
+    base = {"finished": "2026-10-27T11:58:15", "status": "complete"}
+    run = _adopt(project, _campaign(project), invocations=[
+        dict(base, started="2026-10-25T21:54:33", command="python driver.py", git=_GIT),
+        dict(base, started="2026-10-26T17:18:04", command="python followup.py",
+             git=dict(_GIT, commit="d9633fe12700"))])
+    header = (run.root / tr.HEADER).read_text(encoding="utf-8")
+    assert "Command : python driver.py" in header and "9d03c34" in header
+    assert "different commits" in (run.root / tr.README).read_text(encoding="utf-8")

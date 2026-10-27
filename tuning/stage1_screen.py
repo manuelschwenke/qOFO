@@ -1014,7 +1014,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.network:
         base = _dc.replace(base, scenario=args.network)
     if args.frozen_network:
-        from experiments.ch_9_parameter_selection._ch9_selected_design import (
+        from experiments.ch_09_parameter_selection._ch9_selected_design import (
             FROZEN_DSO_DER_SCALE, FROZEN_DSO_LOAD_P_SCALE,
         )
         base = _dc.replace(base,

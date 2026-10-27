@@ -3,7 +3,8 @@
 Short reference to the procedure frozen in
 [`2026-10-25_weight_selection_procedure.md`](2026-10-25_weight_selection_procedure.md)
 (the binding text) and executed in
-`results/THESIS_ch8_weight_selection_band_20261025/`.
+`results/ch_09_parameter_selection/0001_2026-10-25_215433_weight_selection_driver_band/`
+(run of record; `README.md` and `latex_header.tex` there).
 
 ## 1. Purpose
 

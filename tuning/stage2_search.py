@@ -255,7 +255,7 @@ def sobol_candidates(box: Box, n: int, seed: int) -> List[Dict[str, float]]:
 def avr_step_metrics(records: Sequence[Any]) -> Dict[str, float]:
     """Smoothness of the generator voltage setpoints.
 
-    ``experiments/ch_10_case_study/ch_10_1_variant_ladder.py::avr_travel``
+    ``experiments/ch_11_case2_multisystem/ladder/variant_ladder.py::avr_travel``
     reports ``max - min`` over a run, which is a RANGE: a trajectory that
     crosses its band once and a trajectory that oscillates across it every tick
     score identically.  What the requirement is about is per-tick jumpiness, so

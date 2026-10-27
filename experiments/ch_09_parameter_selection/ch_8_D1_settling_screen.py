@@ -22,7 +22,7 @@ vector}, "cfg_overrides": {optional MultiTSOConfig fields}, "note": str}``.
 
 Usage::
 
-    python experiments/ch_9_parameter_selection/ch_8_D1_settling_screen.py \
+    python experiments/ch_09_parameter_selection/ch_8_D1_settling_screen.py \
         --sets-json <sets.json> --out results/THESIS_ch8_D_settling_<date>/d1 \
         --workers 36
 """
@@ -237,7 +237,7 @@ def main(argv=None) -> int:
         variant="frozen_ofo", der_q_override_pu=None,
         flat_mvar=sts.DEFAULT_FLAT_MVAR, max_step_mvar=10.0,
         case_design="full", bank="conditions", **vars(a)), {})
-    meta["script_d1"] = "experiments/ch_9_parameter_selection/ch_8_D1_settling_screen.py"
+    meta["script_d1"] = "experiments/ch_09_parameter_selection/ch_8_D1_settling_screen.py"
     meta["excluded_windows"] = ["W5"]
     (a.out / "run_meta.json").write_text(json.dumps(meta, indent=1,
                                                     default=str),

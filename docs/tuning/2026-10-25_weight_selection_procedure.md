@@ -2,8 +2,9 @@
 
 **Status:** FROZEN 2026-10-25 before its application. Applied once; its
 output is the weight set used in Part III, whatever it is. Execution:
-`results/THESIS_ch8_weight_selection_band_20261025/` (`driver.py`,
-`driver.log`).
+`results/ch_09_parameter_selection/0001_2026-10-25_215433_weight_selection_driver_band/` (`driver.py`,
+`driver.log`; the run of record, adopted 2026-10-27 from
+`results/THESIS_ch8_weight_selection_band_20261025/`).
 
 Development history (not part of the procedure): the procedure was developed
 on preliminary campaigns, recorded in `2026-10-16_protocol_experiment_B_rerun.md`,

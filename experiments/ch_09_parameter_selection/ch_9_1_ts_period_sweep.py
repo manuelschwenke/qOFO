@@ -35,9 +35,9 @@ answer for a different controller.
 
 Usage::
 
-    python experiments\ch_9_parameter_selection\ch_9_1_ts_period_sweep.py --self-test
-    python experiments\ch_9_parameter_selection\ch_9_1_ts_period_sweep.py --pilot --workers 6
-    python experiments\ch_9_parameter_selection\ch_9_1_ts_period_sweep.py --workers 6
+    python experiments\ch_09_parameter_selection\ch_9_1_ts_period_sweep.py --self-test
+    python experiments\ch_09_parameter_selection\ch_9_1_ts_period_sweep.py --pilot --workers 6
+    python experiments\ch_09_parameter_selection\ch_9_1_ts_period_sweep.py --workers 6
 """
 
 from __future__ import annotations
@@ -154,7 +154,7 @@ def provenance(args: argparse.Namespace, design: Dict[str, Any]) -> Dict[str, An
     """
     status = _git("status", "--porcelain")
     return {
-        "script": "experiments/ch_9_parameter_selection/ch_9_1_ts_period_sweep.py",
+        "script": "experiments/ch_09_parameter_selection/ch_9_1_ts_period_sweep.py",
         "argv": sys.argv,
         "args": {k: (str(v) if isinstance(v, Path) else v)
                  for k, v in sorted(vars(args).items())},
@@ -430,7 +430,7 @@ def _run_point(job: Dict[str, Any]) -> Dict[str, Any]:
     """
     import dataclasses
     sys.path.insert(0, str(REPO_ROOT))
-    sys.path.insert(0, str(REPO_ROOT / "experiments" / "ch_9_parameter_selection"))
+    sys.path.insert(0, str(REPO_ROOT / "experiments" / "ch_09_parameter_selection"))
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS"):
         os.environ[var] = "1"

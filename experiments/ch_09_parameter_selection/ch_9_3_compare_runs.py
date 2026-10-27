@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-experiments/ch_9_parameter_selection/ch_9_3_compare_runs.py
+experiments/ch_09_parameter_selection/ch_9_3_compare_runs.py
 ===========================================================
 Run the same disturbed scenario under several parameter sets and plot them
 against each other.
@@ -34,7 +34,7 @@ one that is.
 
 Usage::
 
-    python experiments/ch_9_parameter_selection/ch_9_3_compare_runs.py \\
+    python experiments/ch_09_parameter_selection/ch_9_3_compare_runs.py \\
         --paramsets stage1_start ch9_selected --hours 5 --workers 3
 """
 

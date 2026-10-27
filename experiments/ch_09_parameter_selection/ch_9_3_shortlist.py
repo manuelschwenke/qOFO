@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-experiments/ch_9_parameter_selection/ch_9_3_shortlist.py
+experiments/ch_09_parameter_selection/ch_9_3_shortlist.py
 ========================================================
 Stage II-a -> II-b: build the 12 h shortlist from the screening bank by a
 stated rule, so the step that was assembled by hand on 2026-09-11 is a
@@ -54,7 +54,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Shortlist JSON (list of weight dicts).")
     args = p.parse_args(argv)
 
-    from experiments.ch_9_parameter_selection.ch_9_3_select import _pareto
+    from experiments.ch_09_parameter_selection.ch_9_3_select import _pareto
     from tuning.parameters import weight_fingerprint
     from tuning.stage2_search import Limits, check_limits
 

@@ -131,7 +131,7 @@ def main_comparison() -> None:
     # -- a second, independent controller living in the same module as
     # make_config, and differing from it on every weight.
     from configs.paramsets import apply_paramset
-    from experiments.ch_9_parameter_selection._ch9_selected_design import (
+    from experiments.ch_09_parameter_selection._ch9_selected_design import (
         SELECTED_PARAMSET,
     )
 
@@ -346,7 +346,7 @@ def main() -> None:
     # variants used here 2026-10-14..19 ("ch9_selected_shunt_gw006",
     # "ch9_selected_pcc27", "ch9_selected_pcc27_gqceil",
     # "ch9_selected_pcc27_gqceil_comp_q_off") remain as parameter sets.
-    from experiments.ch_9_parameter_selection._ch9_selected_design import (
+    from experiments.ch_09_parameter_selection._ch9_selected_design import (
         SELECTED_PARAMSET,
     )
     cfg = apply_paramset(make_config(), SELECTED_PARAMSET)
@@ -382,7 +382,7 @@ def make_config_ch9_frozen() -> MultiTSOConfig:
     """
     import sys
     from pathlib import Path as _Path
-    _sel = _Path(__file__).resolve().parent / "ch_9_parameter_selection"
+    _sel = _Path(__file__).resolve().parent / "ch_09_parameter_selection"
     if str(_sel) not in sys.path:
         sys.path.insert(0, str(_sel))
     from _ch9_selected_design import build_selected_config

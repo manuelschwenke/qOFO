@@ -3,6 +3,9 @@
 **Status:** FROZEN 2026-10-24 before its application. Applied once; its
 output is the weight set used in Part III, whatever it is. Execution:
 `results/THESIS_ch8_weight_selection_20261024/` (`driver.py`, `driver.log`).
+*Location note 2026-10-27:* archived, with the 2026-10-22 campaign it reused, under
+`_local_archive/results/<same folder name>`; superseded by the run of record
+`results/ch_09_parameter_selection/0001_2026-10-25_215433_weight_selection_driver_band/`.
 
 **Superseded 2026-10-25** by `2026-10-25_weight_selection_procedure.md`: the
 configuration now includes a DSO operating band of 0.92–1.08 pu (author

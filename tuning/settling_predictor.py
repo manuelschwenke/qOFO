@@ -162,7 +162,7 @@ def predict(areas: Sequence[AreaSensitivity], weights: Dict[str, float], *,
     """Predicted ``n_settle_final`` per (condition, area, interface)."""
     import sys
     here = Path(__file__).resolve().parents[1] / "experiments" / \
-        "ch_9_parameter_selection"
+        "ch_09_parameter_selection"
     if str(here) not in sys.path:
         sys.path.insert(0, str(here))
     from ch_9_1_ninner_isolated_sts import n_settle_final

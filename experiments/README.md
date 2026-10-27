@@ -23,7 +23,7 @@ labels. Start there rather than here.
 | Folder | Label | Contents |
 |---|---|---|
 | `ch_08_setup/` | `ch:setup` | `reference_period/`: characterisation of the reference period |
-| `ch_9_parameter_selection/` | `ch:timescales` | Experiments A–D2. **Not yet renamed to `ch_09_parameter_selection`**: the Experiment B bank campaign running on another machine calls these scripts by path. Rename only after it has finished. Its `README.md` is the section map, `RUNBOOK_ch9.md` the procedure. |
+| `ch_09_parameter_selection/` | `ch:timescales` | Experiments A–D2 (was `ch_9_parameter_selection/`, renamed 2026-10-27). Its `README.md` is the section map, `RUNBOOK_ch9.md` the procedure. The producers do not write documented runs yet; the weight-selection campaign of 2026-10-25 was adopted as run of record (`thesis_runs.adopt_run`). |
 | `ch_10_case1_svr/` | `ch:case_svr` | `run_case1.py`, `report_case1.py`, `figures_case1.py` (was `case1_svr/`) |
 | `ch_11_case2_multisystem/` | `ch:case3` | `mc/`: the Monte-Carlo campaign (was `part3_mc/`); `ladder/`: the superseded seven-rung ladder (was `ch_10_case_study/`) |
 | `ch_12_case3_sts_support/` | `ch:case_sts` | no producer yet |

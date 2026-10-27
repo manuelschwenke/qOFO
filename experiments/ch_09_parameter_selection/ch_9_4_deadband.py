@@ -37,6 +37,14 @@ D2 -- disturbance response
     profiled load, which the next profile step would overwrite.  Every cell
     is checked for the event having reached the plant.
 
+Start-up: every run starts with the droop suppressed, and a tested width
+(D1 confirmation, D2 legs) takes effect only at ``WARMUP_S``.  The converters
+start from cold-start anchors, so a width active from t = 0 lets the start-up
+transient activate the droop, and runs that differ only in the width then
+leave start-up in different states -- which would break the comparison with
+the suppressed reference (D1) and the common pre-event state of the D2 legs.
+(Found in run 0003, 2026-10-27; that run's stage 2 is superseded.)
+
 The selected weights are reported in the run's README; the dt sensitivity is
 checked by one extra suppressed W1 trace at dt = 20 s.
 
@@ -141,9 +149,15 @@ def run_case(job: Dict[str, Any]) -> Dict[str, Any]:
         return json.loads((out / "done.json").read_text("utf-8"))
     out.mkdir(parents=True, exist_ok=True)
     events = [_event(e, job["event_s"]) for e in job.get("events", ())]
-    cfg = _config(job["width"], job["start"], job["duration_s"], events,
-                  job.get("dt_s", DT_S))
-    factory = DroopProbeFactory(cfg, watch_buses=WATCH_BUSES)
+    # A tested width starts after the start-up phase: until ``switch_s`` the run
+    # is the suppressed reference, bit for bit, so start-up activations from
+    # the cold-start anchors cannot make runs of different widths diverge.
+    switch_s = job.get("switch_s")
+    cfg = _config(SUPPRESSED if switch_s is not None else job["width"],
+                  job["start"], job["duration_s"], events, job.get("dt_s", DT_S))
+    factory = DroopProbeFactory(
+        cfg, watch_buses=WATCH_BUSES,
+        width_after=None if switch_s is None else (float(switch_s), job["width"]))
     t0 = time.perf_counter()
     failure, log = "", []
     with (out / "run.log").open("w", encoding="utf-8") as fh, \
@@ -170,6 +184,7 @@ def run_case(job: Dict[str, Any]) -> Dict[str, Any]:
     done = {k: job[k] for k in ("case", "window", "width", "dt_s", "duration_s")
             if k in job}
     done.update(events=list(job.get("events", ())), n_records=len(series),
+                width_switched_at_s=None if plant is None else plant.width_switched_at_s,
                 failure=failure, wall_s=round(time.perf_counter() - t0, 1),
                 pf_failed_steps=sum(1 for r in log if not getattr(r, "zone_v_mean", None)))
     (out / "done.json").write_text(json.dumps(done, indent=1, default=str), "utf-8")
@@ -245,18 +260,23 @@ def _ops(series: list) -> Dict[str, int]:
     return n
 
 
-def confirm_metrics(run_dir: Path, ref_dir: Path) -> Dict[str, Any]:
+def confirm_metrics(run_dir: Path, ref_dir: Path, warmup_s: float) -> Dict[str, Any]:
     """Activations and deviation from the suppressed reference (D1 step 3)."""
     p = pd.read_csv(run_dir / "probe.csv.gz")
     r = pd.read_csv(ref_dir / "probe.csv.gz")
     cap = (p["q_max_mvar"] - p["q_min_mvar"]) > 0.0
     deliv = (p["q_mvar"] - p["q_set_mvar"]).abs() > TOL_Q_MVAR
+    routine = p["t_s"] >= warmup_s
     out: Dict[str, Any] = {}
     for lev in ("TS", "STS"):
         m = p["level"] == lev
         out[f"activations_{lev}"] = int((p["dz_active"] & m).sum())
+        out[f"activations_routine_{lev}"] = int((p["dz_active"] & m & routine).sum())
         out[f"activations_with_capability_{lev}"] = int((p["dz_active"] & cap & m).sum())
         out[f"delivered_solves_{lev}"] = int((deliv & m).sum())
+        if (p["dz_active"] & m & routine).any():
+            out[f"first_routine_activation_{lev}_s"] = float(
+                p.loc[p["dz_active"] & m & routine, "t_s"].min())
         out[f"max_abs_delivered_{lev}_mvar"] = float(
             (p.loc[m, "q_mvar"] - p.loc[m, "q_set_mvar"]).abs().max() or 0.0)
     key = ["t_s", "solve", "sgen"]
@@ -342,6 +362,10 @@ def main(argv=None) -> int:
     ap.add_argument("--workers", type=int, default=30)
     ap.add_argument("--smoke", action="store_true",
                     help="W1 only, short runs, one event: a pipeline check")
+    ap.add_argument("--stage1-from", default=None,
+                    help="an earlier run of this script whose suppressed D1 "
+                         "traces and dt check are copied and reused (same "
+                         "protocol constants); stage 2 is simulated anew")
     add_run_arguments(ap)
     args = ap.parse_args(argv)
 
@@ -350,13 +374,14 @@ def main(argv=None) -> int:
     obs_s = 300.0 if args.smoke else OBSERVE_S
     win = _windows(("W1",) if args.smoke else None)
     events = ("b7_ind",) if args.smoke else tuple(EVENTS)
-    warmup = 0.0 if args.smoke else WARMUP_S
+    warmup = 300.0 if args.smoke else WARMUP_S
 
     params = {"paramset": SELECTED_PARAMSET, "dt_s": DT_S, "candidates_pu": list(CANDIDATES),
               "eps_u_pu": EPS_U, "suppressed_pu": SUPPRESSED, "d1_hours": d1_s / 3600.0,
               "warmup_s": warmup, "event_s": ev_s, "observe_s": obs_s,
               "events": {k: EVENTS[k] for k in events}, "windows": [w for w, _ in win],
-              "measurement_noise": False}
+              "measurement_noise": False, "tested_width_from_s": warmup,
+              "stage1_from": args.stage1_from}
     with start_thesis_run(
             __file__, target=["ch:timescales:deadband"],
             feeds=["ch:timescales:deadband:choice", "ch:param:experiment:f2"],
@@ -366,6 +391,13 @@ def main(argv=None) -> int:
                          f"dt {DT_S:g} s, T_TS 180 s, T_STS 20 s"),
             note=args.note, tag=args.tag or ("smoke" if args.smoke else None)) as run:
         root = run.root
+        if args.stage1_from:
+            # Reuse the finished suppressed traces: their done.json makes the
+            # stage-1 jobs below return as cached, and the reduction reruns.
+            import shutil
+            src = Path(args.stage1_from)
+            for sub in ("suppressed", "dtcheck_W1_dt20"):
+                shutil.copytree(src / "d1" / sub, root / "d1" / sub)
         # Stage 1: suppressed traces (+ the dt check: W1 at dt 20 s)
         jobs = [{"case": f"d1_ref_{w}", "window": w, "start": s, "width": SUPPRESSED,
                  "duration_s": d1_s, "out": str(root / "d1" / "suppressed" / w)}
@@ -400,23 +432,37 @@ def main(argv=None) -> int:
         # Stage 2: D1 confirmation and D2, one pool
         legs = {"star": star, "wide": round(2.0 * star, 6), "off": SUPPRESSED}
         jobs = [{"case": f"d1_{tag}_{w}", "window": w, "start": s, "width": width,
-                 "duration_s": d1_s, "out": str(root / "d1" / f"confirm_{tag}" / w)}
+                 "switch_s": warmup, "duration_s": d1_s,
+                 "out": str(root / "d1" / f"confirm_{tag}" / w)}
                 for tag, width in (("star", star), ("narrower", narrow)) for w, s in win]
         jobs += [{"case": f"d2_{w}_{e}_{leg}", "window": w, "start": s, "width": width,
-                  "duration_s": ev_s + obs_s, "events": (e,), "event_s": ev_s,
-                  "out": str(root / "d2" / w / e / leg)}
+                  "switch_s": warmup, "duration_s": ev_s + obs_s, "events": (e,),
+                  "event_s": ev_s, "out": str(root / "d2" / w / e / leg)}
                  for w, s in win for e in events for leg, width in legs.items()]
         print(f"stage 2: {len(jobs)} runs", flush=True)
         _pool(jobs, args.workers)
 
         conf = {tag: {w: confirm_metrics(root / "d1" / f"confirm_{tag}" / w,
-                                         root / "d1" / "suppressed" / w) for w, _ in win}
+                                         root / "d1" / "suppressed" / w, warmup)
+                      for w, _ in win}
                 for tag in ("star", "narrower")}
         (root / "d1" / "confirmation.json").write_text(json.dumps(conf, indent=1), "utf-8")
         rows = [dict(window=w, event=e, leg=leg, width=width,
                      **d2_metrics(root / "d2" / w / e / leg, e, ev_s, obs_s))
                 for w, _s in win for e in events for leg, width in legs.items()]
         d2 = pd.DataFrame(rows)
+        # "All legs start from the same pre-event state": the converter-bus
+        # voltages at the pre-event solve, each leg against the droop-off leg.
+        pre_dv = {}
+        for w, _s in win:
+            for e in events:
+                pre = {leg: pd.read_csv(root / "d2" / w / e / leg / "probe.csv.gz")
+                       .query("t_s == @ev_s and solve == 0").set_index("sgen").v_pu
+                       for leg in legs}
+                for leg in legs:
+                    pre_dv[(w, e, leg)] = float((pre[leg] - pre["off"]).abs().max())
+        d2["pre_event_max_dv_vs_off_pu"] = [pre_dv[(r.window, r.event, r.leg)]
+                                            for r in d2.itertuples()]
         d2.to_csv(root / "d2" / "summary.csv", index=False)
         n_bad = int((~d2["event_reached"].astype(bool)).sum())
         if n_bad:

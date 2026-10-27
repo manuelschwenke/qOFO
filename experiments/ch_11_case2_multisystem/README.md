@@ -3,7 +3,7 @@
 Chapter number as of 2026-10-23; the label is the stable key. Results go to
 `results/ch_11_case2_multisystem/<sub-experiment>/` (see `results/README.md`).
 Plan of the campaign: `~/.claude/plans/i-now-want-to-composed-island.md`
-(approved 2026-10-27); change record `docs/daily_log/10_2026/2026-10-27c_*`.
+(approved 2026-10-27); change record `docs/daily_log/10_2026/2026-10-27e_*`.
 
 | Sub-experiment | Script | Thesis target | Status |
 |---|---|---|---|

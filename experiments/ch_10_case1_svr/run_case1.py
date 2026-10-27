@@ -75,7 +75,7 @@ from configs.paramsets import apply_paramset
 from experiments.run_multi_system_ofo import make_config
 from experiments.runners.multi_tso_dso import run_multi_tso_dso
 from experiments.thesis_runs import add_run_arguments, start_thesis_run
-from experiments.ch_9_parameter_selection._ch9_selected_design import (
+from experiments.ch_09_parameter_selection._ch9_selected_design import (
     SELECTED_PARAMSET,
 )
 

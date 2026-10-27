@@ -59,11 +59,31 @@ Author decisions of 2026-10-27 that this implements:
   for mschwenke. Long campaigns therefore need one of: WMI rights, a scheduled-task runner
   with a stored password, or local admin (author's choice).
 
+## M rebuilt (14:30–15:30, author decisions)
+
+- `controller/central_controller.py`: the parent's bank-column V² rescaling is kept and
+  wrapped (`_AppendFrozenColumns`), so the frozen 3W columns are re-appended. It had been
+  disabled on the stale assumption "no shunts", and with the banks in the MIQP the old M
+  could not solve at all (`set_shunt_bank_state()` was never called).
+- Runner, central step: bank bounds before the solve, then the rank-1 update and the commit
+  after it, as in the zone path. M's commits go to `rec.shunt_commits` (zone "central").
+- `lambda_max(M)` is computed at initialisation and refused if ≥ 2. The first record carries
+  `controller_lambda_max` of every acting controller (and `central_gw_kappa`).
+- At the selected weights **λ_max(M) = 5.11**: the single loop does not contract. Two earlier
+  attempts to fix this did not work:
+  - matching the zone TS-OFOs of the same run reads 2.61, because in M's configuration those
+    controllers have full-network sensitivities and extra rows;
+  - so the target is now `central_lambda_target` = the paramset provenance `lambda_max_B`
+    (1.4136).
+- Result: κ = 3.615, λ_max 5.111 → 1.414. 10-min smoke `ok` on e5power, 8 banks in the MIQP.
+  M stays in `NOT_READY` until a run with a bank switch confirms the commit path.
+- M weights the STS buses with the paramset's `dso_g_v` (2186) instead of the default 2e4.
+
 ## Not done / open
 
-- S2 (design note waits for the author).
-- M repair (shunt banks, weights from the paramset, λ_max check).
-- The choice of the reference scenario (screening of A/B/C).
-- e5power: env copy in progress. Detached launch from a WinRM session is **refused**
-  (`CREATE_BREAKAWAY_FROM_JOB` → access denied), so long runs need a fallback chosen by the
-  author.
+- S2: the design note waits for the author.
+- M: a run with a bank switch is outstanding before M leaves `NOT_READY`.
+- Reference scenario: screening of A/B/C with L2 and O2 running on e5power; the author picks.
+- e5power: the author grants mschwenke WMI rights (Remote Enable + Execute Methods on
+  `root\cimv2`). Long runs are then launched detached via `Win32_Process.Create`.
+  Until then: one worker per WinRM session, held open from e5wimi.

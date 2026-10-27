@@ -82,5 +82,5 @@ _local_archive/
 # account-specific, so they are local tooling rather than source. The four here
 # are the §9.2 dead-band producers, which is why they are parked rather than
 # deleted -- see `local_ps_scripts/README.md` and the §9.2 row of
-# `experiments/ch_9_parameter_selection/README.md`.
+# `experiments/ch_09_parameter_selection/README.md`.
 local_ps_scripts/

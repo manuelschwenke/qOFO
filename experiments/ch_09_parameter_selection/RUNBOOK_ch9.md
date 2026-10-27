@@ -125,11 +125,11 @@ Section 3 of the experiment plan: one complete resolved manifest per controller,
 differing **in the declared weights only**.
 
 ```bash
-python -X utf8 experiments/ch_9_parameter_selection/_ch9_selected_design.py --paramset stage1_start --manifest > /tmp/manifest_initial.json
+python -X utf8 experiments/ch_09_parameter_selection/_ch9_selected_design.py --paramset stage1_start --manifest > /tmp/manifest_initial.json
 ```
 
 ```bash
-python -X utf8 experiments/ch_9_parameter_selection/_ch9_selected_design.py --paramset ch9_selected --manifest > /tmp/manifest_final.json
+python -X utf8 experiments/ch_09_parameter_selection/_ch9_selected_design.py --paramset ch9_selected --manifest > /tmp/manifest_final.json
 ```
 
 Diff them. Expected differences: the nine weights, `shunt_int_g_w`, and the three cadence
@@ -161,7 +161,7 @@ there is no verified initial-weight response measurement, and an old final-weigh
 cannot be relabelled as one.
 
 ```bash
-python -X utf8 experiments/ch_9_parameter_selection/ch_9_1_ninner_isolated_sts.py --paramset stage1_start --label C_initial_weights --workers 16 --max-step-mvar 10
+python -X utf8 experiments/ch_09_parameter_selection/ch_9_1_ninner_isolated_sts.py --paramset stage1_start --label C_initial_weights --workers 16 --max-step-mvar 10
 ```
 
 Defaults now supply `--bank conditions` and the frozen network; pass them explicitly in
@@ -236,7 +236,7 @@ needs settling:
 5. **Cadence**, now required rather than optional:
 
 ```bash
-python -X utf8 experiments/ch_9_parameter_selection/ch_9_1_ts_period_sweep.py --paramset ch9_selected --label D_cadence --workers 16
+python -X utf8 experiments/ch_09_parameter_selection/ch_9_1_ts_period_sweep.py --paramset ch9_selected --label D_cadence --workers 16
 ```
 
 4 periods (180, 200, 240, 360 s) × 6 windows × 90 min = 24 runs at the measured 583 s
@@ -255,7 +255,7 @@ result.
 The same bank as C, at the selected weights, so the two are directly comparable.
 
 ```bash
-python -X utf8 experiments/ch_9_parameter_selection/ch_9_1_ninner_isolated_sts.py --paramset ch9_selected --label E_final_weights --workers 16 --max-step-mvar 10
+python -X utf8 experiments/ch_09_parameter_selection/ch_9_1_ninner_isolated_sts.py --paramset ch9_selected --label E_final_weights --workers 16 --max-step-mvar 10
 ```
 
 **E cannot be reused from the archive.** Every archived `ninner` run was measured on the

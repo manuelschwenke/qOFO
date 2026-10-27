@@ -55,20 +55,20 @@ Needs PowerFactory 2025 SP4 with a **free licence seat**, project
 Check the post-processing without a seat (no PF, no licence, runs anywhere):
 
 ```bash
-python experiments\ch_9_parameter_selection\ch_9_1_timescale_seperation.py --self-test
+python experiments\ch_09_parameter_selection\ch_9_1_timescale_seperation.py --self-test
 ```
 
 Check the case resolution without a seat (imports PF nothing, prints the
 generator-index resolution that has bitten before):
 
 ```bash
-python experiments\ch_9_parameter_selection\ch_9_1_timescale_seperation.py --dry-run
+python experiments\ch_09_parameter_selection\ch_9_1_timescale_seperation.py --dry-run
 ```
 
 The run itself:
 
 ```bash
-python experiments\ch_9_parameter_selection\ch_9_1_timescale_seperation.py --label full_t0_wecc --save-trajectories
+python experiments\ch_09_parameter_selection\ch_9_1_timescale_seperation.py --label full_t0_wecc --save-trajectories
 ```
 
 ### Outputs — `results/THESIS_ch9_1_timescale_settling/<label>/<stamp>/`

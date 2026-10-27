@@ -69,10 +69,11 @@ Still open:
 
 | folder | serves | now | note |
 |---|---|---:|---|
-| `experiments/ch_9_parameter_selection/` | `ch:timescales` | **Ch 9** | rename to `ch_09_parameter_selection/` **deferred**: the Experiment B bank campaign on another machine (`results/THESIS_ch8_expB_banks_20261022/driver.py`) calls `ch_9_3_stage2_screen.py`, `ch_9_3_select.py`, `ch_9_1_ninner_isolated_sts.py` by path. Call sites to edit then: the folder's modules, `tuning/stage1_screen.py`, `pf/timescale_study.py`, `tests/experiments/test_ch9_*.py`, `configs/paramsets/ch9_selected.json`, `README.md`, `RUNBOOK_ch9.md` |
+| `experiments/ch_9_parameter_selection/` | `ch:timescales` | **Ch 9** | **Done 2026-10-27** (`git mv` to `ch_09_parameter_selection/`; call sites updated, historical records under `docs/data`, `docs/handover*` and `configs/paramsets/*.json` keep the old path). Was deferred because the Experiment B bank campaign on another machine (`results/THESIS_ch8_expB_banks_20261022/driver.py`) calls `ch_9_3_stage2_screen.py`, `ch_9_3_select.py`, `ch_9_1_ninner_isolated_sts.py` by path. Call sites to edit then: the folder's modules, `tuning/stage1_screen.py`, `pf/timescale_study.py`, `tests/experiments/test_ch9_*.py`, `configs/paramsets/ch9_selected.json`, `README.md`, `RUNBOOK_ch9.md` |
 | `analysis/e1_interface_column_norms.py` | `ch:architectures:cascade:aggregation` | **Ch 5**, a section | leave in `analysis/` |
 
-Stale path *comments* left on purpose in files the running campaign imports:
+Stale path *comments* left on purpose in files the running campaign imports
+(fixed 2026-10-27 with the rename):
 `configs/config.py:361` (`experiments/part3_mc/...`), `tuning/stage2_search.py:258`
 (`experiments/ch_10_case_study/...`), `experiments/run_multi_system_ofo.py` (two
 mentions; that file also carries uncommitted edits of another session). Fix them
@@ -80,7 +81,7 @@ with the deferred rename.
 
 Dead label, fixed in code 2026-10-23: `ch:param:timescales` exists only in
 `Chapters/archive/Chapter09_Parameterisation_SUPERSEDED.tex`. The citations in
-`ch_9_parameter_selection/__init__.py`, `ch_9_1_timescale_seperation.py` and
+`ch_09_parameter_selection/__init__.py`, `ch_9_1_timescale_seperation.py` and
 `pf/probes/probe_modal_residue.py` now point at `ch:timescales`.
 
 ## The step battery is a historical instrument
@@ -185,7 +186,7 @@ Current code citations check out: `ch:param:experiment:e` in
 
 ### Letter audit, 2026-10-23
 
-Letters A, B and C in `experiments/ch_9_parameter_selection/` match the live
+Letters A, B and C in `experiments/ch_09_parameter_selection/` match the live
 chapter and each claim holds against what that experiment now contains. Three
 did not, fixed in `6b2e571`: three retired **F1/F2** references (the live
 chapter uses them nowhere — they became D1/D2), and
@@ -198,7 +199,7 @@ dead.
 
 ## Hard-coded thesis numbers — the same problem as the folder names
 
-**29 of them in `experiments/ch_9_parameter_selection/` alone:** `Table 9.1`
+**29 of them in `experiments/ch_09_parameter_selection/` alone:** `Table 9.1`
 fourteen times, `eq. (9.1)` three, `eq. (9.2)` five, plus bare `§9.1` / `§9.2`.
 Most are already stale — the settling table is retired and the `N_inner`
 equation is no longer the second in the chapter — and all of them go stale

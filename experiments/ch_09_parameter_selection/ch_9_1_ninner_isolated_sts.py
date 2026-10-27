@@ -116,10 +116,10 @@ latter.
 
 Usage::
 
-    python experiments\ch_9_parameter_selection\ch_9_1_ninner_isolated_sts.py --self-test
-    python experiments\ch_9_parameter_selection\ch_9_1_ninner_isolated_sts.py --probe
-    python experiments\ch_9_parameter_selection\ch_9_1_ninner_isolated_sts.py --workers 6
-    python experiments\ch_9_parameter_selection\ch_9_1_ninner_isolated_sts.py --max-step-mvar 20
+    python experiments\ch_09_parameter_selection\ch_9_1_ninner_isolated_sts.py --self-test
+    python experiments\ch_09_parameter_selection\ch_9_1_ninner_isolated_sts.py --probe
+    python experiments\ch_09_parameter_selection\ch_9_1_ninner_isolated_sts.py --workers 6
+    python experiments\ch_09_parameter_selection\ch_9_1_ninner_isolated_sts.py --max-step-mvar 20
 """
 
 from __future__ import annotations
@@ -301,7 +301,7 @@ def _git(*args: str) -> Optional[str]:
 def provenance(args: argparse.Namespace, design: Dict[str, Any]) -> Dict[str, Any]:
     status = _git("status", "--porcelain")
     return {
-        "script": "experiments/ch_9_parameter_selection/ch_9_1_ninner_isolated_sts.py",
+        "script": "experiments/ch_09_parameter_selection/ch_9_1_ninner_isolated_sts.py",
         "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "argv": sys.argv,
         "args": {k: (str(v) if isinstance(v, Path) else v)
@@ -716,7 +716,7 @@ def _run_case(job: Dict[str, Any]) -> Dict[str, Any]:
     """
     import dataclasses
     sys.path.insert(0, str(REPO_ROOT))
-    sys.path.insert(0, str(REPO_ROOT / "experiments" / "ch_9_parameter_selection"))
+    sys.path.insert(0, str(REPO_ROOT / "experiments" / "ch_09_parameter_selection"))
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS"):
         os.environ[var] = "1"

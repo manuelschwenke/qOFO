@@ -14,7 +14,7 @@ import math
 
 import pytest
 
-from experiments.ch_9_parameter_selection.ch_9_1_timescale_seperation import (
+from experiments.ch_09_parameter_selection.ch_9_1_timescale_seperation import (
     TABLE_ROWS,
     T_DS_S,
     _synthetic_results,
@@ -179,7 +179,7 @@ def test_summary_reports_measured_cases_that_have_no_table_row(tmp_path, results
     d = derive(results)
     write_outputs(tmp_path, results, d, meta=None)
     body = (tmp_path / "timescale_summary.md").read_text(encoding="utf-8")
-    assert "Measured but not in Table 9.1" in body
+    assert "Measured but not in the settling table" in body
     assert "tap_+2seq_MT_g0_t0" in body
 
 

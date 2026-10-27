@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-experiments/ch_9_parameter_selection/ch_9_3_stage2_screen.py
+experiments/ch_09_parameter_selection/ch_9_3_stage2_screen.py
 ============================================================
 Stage II-a of the Chapter-9.3 weight campaign: the screening sweep.
 
@@ -33,7 +33,7 @@ What this stage does NOT decide
 
 Usage::
 
-    python experiments/ch_9_parameter_selection/ch_9_3_stage2_screen.py \
+    python experiments/ch_09_parameter_selection/ch_9_3_stage2_screen.py \
         --paramset stage1_start --n 512 --hours 3 --workers 28
 """
 
@@ -106,7 +106,7 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
         # screen that admitted the candidate ran doubled.
         import dataclasses as _dc
 
-        from experiments.ch_9_parameter_selection._ch9_selected_design import (
+        from experiments.ch_09_parameter_selection._ch9_selected_design import (
             FROZEN_DSO_DER_SCALE, FROZEN_DSO_LOAD_P_SCALE,
         )
         base = _dc.replace(
@@ -289,7 +289,7 @@ def main(argv: List[str] | None = None) -> int:
 
     _base = _apply_w(make_config(), centre)
     if args.frozen_network:
-        from experiments.ch_9_parameter_selection._ch9_selected_design import (
+        from experiments.ch_09_parameter_selection._ch9_selected_design import (
             FROZEN_DSO_DER_SCALE, FROZEN_DSO_LOAD_P_SCALE,
         )
         _base = dataclasses.replace(

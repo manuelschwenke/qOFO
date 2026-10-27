@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from export.dynamic_snapshot import load_snapshot
-from experiments.ch_9_parameter_selection import ch_9_1_actuator_location_sweep as sweep
+from experiments.ch_09_parameter_selection import ch_9_1_actuator_location_sweep as sweep
 
 
 SNAPSHOT = (

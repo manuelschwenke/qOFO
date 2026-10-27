@@ -7,6 +7,9 @@ to confirm; **(A)** are the author's. Execution:
 `results/THESIS_ch8_expB_banks_20261022/` (driver `driver.py`, log
 `driver.log`). After freezing, deviations go to §10 with date and reason;
 §1–§9 are not edited.
+*Location note 2026-10-27:* the campaign folder is archived (superseded by
+the run of record `results/ch_09_parameter_selection/0001_2026-10-25_215433_weight_selection_driver_band/`) at
+`_local_archive/results/THESIS_ch8_expB_banks_20261022/`.
 
 Predecessor: `2026-10-16_protocol_experiment_B_rerun.md` (run 2,
 Amendments 1–3), whose rules are carried over unless stated here.

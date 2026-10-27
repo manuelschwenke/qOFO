@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-experiments/ch_9_parameter_selection/ch_9_3_select.py
+experiments/ch_09_parameter_selection/ch_9_3_select.py
 =====================================================
 Apply the selection rule to a Stage-II bank and report the result.
 
@@ -29,7 +29,7 @@ toss rather than a constraint.
 
 Usage::
 
-    python experiments/ch_9_parameter_selection/ch_9_3_select.py \
+    python experiments/ch_09_parameter_selection/ch_9_3_select.py \
         --candidates results/THESIS_ch9_3_stage2/refine/candidates \
         --hours 12 --write-paramset ch9_selected
 """
@@ -235,7 +235,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "No scoring weights enter the selection.",
             ],
             "provenance": {
-                "producer": "experiments/ch_9_parameter_selection/ch_9_3_select.py",
+                "producer": "experiments/ch_09_parameter_selection/ch_9_3_select.py",
                 "candidates_dir": str(args.candidates),
                 "hours": args.hours,
                 "baseline_key": base["key"],

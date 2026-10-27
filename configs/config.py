@@ -377,8 +377,8 @@ class MultiTSOConfig:
     tso_g_v_bus: Optional[Dict[int, float]] = None
     """Optional per-BUS voltage-tracking weight of the TSO OFO,
     ``{bus_index: g_v}`` (added 2026-10-08 for the Case-1 pilot-weight check,
-    experiments/part3_mc/area1_pilot_weight.py).  Applied once, right after the
-    zone controllers are built, through
+    experiments/ch_11_case2_multisystem/mc/area1_pilot_weight.py).  Applied
+    once, right after the zone controllers are built, through
     ``TSOController.update_voltage_tracking_weights`` on the zone that monitors
     the bus; all other buses keep their zone's ``g_v``.  A bus that no zone
     monitors raises.  ``None`` (default) leaves every controller unchanged."""

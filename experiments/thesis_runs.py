@@ -58,12 +58,21 @@ sets ``failed`` and is re-raised.  ``resume=<run dir>`` appends an invocation
 to an existing run instead of creating one (variants added later on the same
 seeds).
 
+Adopted runs
+------------
+A finished campaign that predates this module -- its driver lived in the run
+folder itself (``results/THESIS_*``) -- is moved into the chapter tree with
+``adopt_run``.  Its manifest is built from the campaign's own records (start
+and end times, commit and diff at launch), not from the current tree, and
+names the folder it came from.
+
 Command line
 ------------
 ::
 
     python -m experiments.thesis_runs header  <run_dir>
     python -m experiments.thesis_runs archive <old_run_dir> --by <new_run_dir>
+    python -m experiments.thesis_runs adopt   <campaign_dir> --spec <spec.json>
     python -m experiments.thesis_runs check   [--thesis <latex dir>]
 
 ``check`` reads every ``RESULT PROVENANCE`` block in the thesis chapters and
@@ -98,7 +107,7 @@ from experiments.paths import PROJECT_ROOT, RESULTS_ROOT
 __all__ = [
     "TimeSeries", "ThesisRun", "add_run_arguments", "start_thesis_run",
     "experiment_folder", "latest_run", "annotate_run", "archive_run",
-    "render_header",
+    "adopt_run", "render_header",
     "check_thesis", "thesis_label_numbers",
 ]
 
@@ -330,8 +339,7 @@ def _archive_root(results_root: Path) -> Path:
     return Path(results_root).parent / "_local_archive" / "results"
 
 
-def _new_run_folder(parent: Path, archive_parent: Path, producer: str,
-                    tag: str | None, started: datetime) -> Path:
+def _next_counter(parent: Path, archive_parent: Path) -> int:
     """Next counter in ``parent``; archived runs keep their numbers taken."""
     counters = [
         int(m["counter"])
@@ -339,7 +347,12 @@ def _new_run_folder(parent: Path, archive_parent: Path, producer: str,
         for d in base.iterdir()
         if d.is_dir() and (m := RUN_RE.match(d.name))
     ]
-    counter = max(counters, default=0) + 1
+    return max(counters, default=0) + 1
+
+
+def _new_run_folder(parent: Path, archive_parent: Path, producer: str,
+                    tag: str | None, started: datetime) -> Path:
+    counter = _next_counter(parent, archive_parent)
     suffix = producer + (f"_{tag}" if tag else "")
     while True:
         root = parent / f"{counter:04d}_{started:%Y-%m-%d_%H%M%S}_{suffix}"
@@ -605,9 +618,134 @@ def start_thesis_run(
     return run
 
 
+_INVOCATION_KEYS = ("started", "finished", "status", "command", "git")
+
+
+def adopt_run(
+    source: str | Path,
+    *,
+    experiment: str,
+    producer: str,
+    script: str,
+    target: str | Sequence[str],
+    invocations: Sequence[Mapping[str, Any]],
+    primary: int = 0,
+    feeds: Iterable[str] = (),
+    paramset: str | None = None,
+    parameters: Mapping[str, Any] | None = None,
+    time_series: Any = None,
+    note: str = "",
+    tag: str | None = None,
+    outputs: Mapping[str, str] | None = None,
+    exports: Iterable[Mapping[str, str]] = (),
+    results_root: str | Path | None = None,
+    thesis_dir: str | Path | None = None,
+) -> ThesisRun:
+    """Move a finished campaign folder into the chapter tree as a documented run.
+
+    For campaigns whose driver lived in the campaign folder (``results/THESIS_*``)
+    and so could not use :func:`start_thesis_run`.  The folder is moved, not
+    copied, to ``results/<experiment>/<NNNN>_<first start>_<producer>[_<tag>]/``;
+    nothing in it changes except the three files written here.
+
+    experiment  : the chapter folder, ``ch_NN_<description>`` (no script derives it).
+    producer    : the folder-name word for the producing code.
+    script      : that code's path relative to the project, after the move.
+    invocations : the campaign's recorded runs, oldest first, each with
+                  ``started``/``finished`` (ISO), ``status``, ``command`` and
+                  ``git`` (commit, branch, dirty, dirty_files, diff_file) as the
+                  campaign recorded them at launch -- not the current tree.
+                  Optional ``cwd``, ``host``, ``python``, ``executable``.
+    primary     : index of the invocation that produced the results (the
+                  driver, not a later follow-up); the header names its command
+                  and commit.
+    exports     : files written outside the run, ``{"path", "by", "on"}``.
+    """
+    results_root = Path(results_root or RESULTS_ROOT).resolve()
+    project_root = results_root.parent
+    source = Path(source).resolve()
+    if not source.is_dir():
+        raise FileNotFoundError(f"{source} is not a folder")
+    if (source / MANIFEST).exists():
+        raise ValueError(f"{source} is already a documented run")
+    if not CHAPTER_RE.match(experiment):
+        raise ValueError(f"{experiment!r} is not a chapter folder "
+                         f"(ch_NN_<description> or app_<x>_<description>)")
+    targets = [target] if isinstance(target, str) else list(target)
+    if not targets or not all(targets):
+        raise ValueError("target: name at least one LaTeX label")
+    if not invocations:
+        raise ValueError("invocations: the campaign's runs are its provenance")
+    if not -len(invocations) <= primary < len(invocations):
+        raise ValueError(f"primary {primary} outside the {len(invocations)} invocation(s)")
+    invs = []
+    for inv in invocations:
+        missing = [k for k in _INVOCATION_KEYS if k not in inv]
+        if missing:
+            raise ValueError(f"invocation lacks {missing}")
+        if inv["status"] not in STATUSES:
+            raise ValueError(f"invocation status {inv['status']!r}; valid: {STATUSES}")
+        invs.append({"cwd": None, "host": None, "python": None,
+                     "executable": None, "conda_env": None, **dict(inv)})
+    started = min(_parse(i["started"]) for i in invs)
+    ends = [_parse(i["finished"]) for i in invs]
+    finished = None if None in ends else max(ends)
+
+    parent = results_root / experiment
+    suffix = producer + (f"_{tag}" if tag else "")
+    counter = _next_counter(parent, _archive_root(results_root) / experiment)
+    root = parent / f"{counter:04d}_{started:%Y-%m-%d_%H%M%S}_{suffix}"
+    parent.mkdir(parents=True, exist_ok=True)
+    adopted = {"from": _rel(source, project_root), "on": _iso(_now())}
+    shutil.move(str(source), str(root))
+
+    numbers = thesis_label_numbers(Path(thesis_dir or THESIS_DIR))
+    status = ("complete" if all(i["status"] == "complete" for i in invs)
+              else "failed")
+    run = ThesisRun(root, {
+        "schema": SCHEMA,
+        "project": project_root.name,
+        "experiment": experiment,
+        "producer": producer,
+        "tag": tag,
+        "script": script,
+        "run": _rel(root, project_root),
+        "save_location": str(root.resolve()),
+        "target": targets,
+        "target_numbers": {
+            label: numbers.get(label, "unresolved") for label in targets},
+        "numbers_as_of": _now().date().isoformat(),
+        "feeds": list(feeds),
+        "status": status,
+        "started": _iso(started),
+        "finished": _iso(finished) if finished else None,
+        "invocations": invs,
+        "primary_invocation": primary % len(invs),
+        "paramset": _paramset_info(paramset),
+        "config_fingerprint": None,
+        "config_files": [],
+        "parameters": sanitise(dict(parameters or {})),
+        "time_series": _time_series(time_series, None),
+        "description": note.strip(),
+        "outputs": dict(outputs or {}),
+        "exports": [dict(e) for e in exports],
+        "superseded_by": None,
+        "archived": None,
+        "adopted": adopted,
+    })
+    run.write()
+    return run
+
+
 # ---------------------------------------------------------------------------
 #  Rendering
 # ---------------------------------------------------------------------------
+
+
+def _shown_invocation(m: Mapping) -> Mapping:
+    """The invocation the header and README name: the last one, or for an
+    adopted campaign the one that produced its results (``primary_invocation``)."""
+    return m["invocations"][m.get("primary_invocation", -1)]
 
 
 def _code_text(git: Mapping, long: bool) -> str:
@@ -649,7 +787,7 @@ def _date_text(m: Mapping) -> str:
 def render_header(m: Mapping) -> str:
     """The thesis comment block; identical structure for every run."""
     project = m.get("project", PROJECT_ROOT.name)
-    inv = m["invocations"][-1]
+    inv = _shown_invocation(m)
     rows = [
         ("Target", ", ".join(m["target"])),
         ("Feeds", ", ".join(m.get("feeds") or []) or "--"),
@@ -680,7 +818,7 @@ def _md(value: Any) -> str:
 
 
 def render_readme(m: Mapping) -> str:
-    inv = m["invocations"][-1]
+    inv = _shown_invocation(m)
     numbers = m.get("target_numbers") or {}
     purpose = ", ".join(
         f"`{label}` ({_number_text(label, numbers.get(label))} on "
@@ -691,6 +829,9 @@ def render_readme(m: Mapping) -> str:
     if m.get("archived"):
         a = m["archived"]
         status += f"; archived from `{a['from']}` on {a['on'][:10]}"
+    if m.get("adopted"):
+        a = m["adopted"]
+        status += f"; adopted from `{a['from']}` on {a['on'][:10]}"
     commits = {i["git"].get("commit") for i in m["invocations"]}
     table = [
         ("Status", status),
@@ -972,6 +1113,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     a = sub.add_parser("archive", help="move a superseded run to the archive")
     a.add_argument("run_dir")
     a.add_argument("--by", default=None, help="the run that replaces it")
+    d = sub.add_parser("adopt", help="move a finished campaign into the tree")
+    d.add_argument("campaign_dir")
+    d.add_argument("--spec", required=True,
+                   help="JSON with the keyword arguments of adopt_run")
     c = sub.add_parser("check", help="verify the provenance blocks of the thesis")
     c.add_argument("--thesis", default=str(THESIS_DIR))
     args = ap.parse_args(argv)
@@ -981,6 +1126,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.cmd == "archive":
         print(archive_run(args.run_dir, by=args.by))
+        return 0
+    if args.cmd == "adopt":
+        spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
+        print(adopt_run(args.campaign_dir, **spec).root)
         return 0
     return 1 if check_thesis(Path(args.thesis)) else 0
 

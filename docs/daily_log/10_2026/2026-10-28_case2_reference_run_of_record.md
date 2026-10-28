@@ -75,6 +75,44 @@ the band; its smallest margin is DSO_2 at 3.4 mpu.
 areas. The zone controllers cannot do this, since each controls its own area. To be checked in
 the step tests (load step in one area, error of the other areas).
 
+## Analysis of O3 and of the ripples (afternoon; scratchpad scripts, no code change)
+
+**1. Withdrawal after the load step (O3; S2 the same, larger).**
+- At the event step (121:40) the STS flows move toward more support with no controller acting:
+  DSO_2 −61→−74 Mvar, DSO_3 −29→−48 Mvar.
+- Over the next three steps the STS-OFOs pull the flows back toward the set-points of the
+  120:00 dispatch (DSO_3 to −33, DSO_2 to −67). Area 2's error rises from 24.2 (pre-control)
+  to 27.0 mpu.
+- The re-dispatch at 123:00 brings it to 17.2 mpu.
+- In O2 the error stays flat over the same window (28.4–28.5 mpu).
+- Δe_post in area 2: O3 +2.8 mpu, S2 +7.1 mpu.
+
+**2. DSO_4 above 1.08 pu (O3).**
+- 309 of 1080 samples are above 1.08, but 299 of them by ≤ 0.5 mpu. This is chatter at the
+  STS-OFO's active upper limit: its measured maximum is ≥ 1.0795 in 73 % of the records.
+- All 10 samples above 0.5 mpu fall on TS dispatch instants (84–90, 123, 273–285 min). The worst,
+  4.9 mpu at 123:00 (a single 20-s step), coincides with the first re-dispatch after the load
+  step; the STS-OFO brings it back within about 1.5 min.
+- Measurement error is not the cause: true and measured values agree to < 0.3 mpu once the step
+  timing is taken into account.
+
+**3. Tracking gap (O3, DSO_4 from ~35 min, DSO_2 after the load step; about 10–17 Mvar).**
+- CAIR (`DSOController.generate_capability_message`) maps only the DER Q rails through the
+  open-loop sensitivities. It contains no STS voltage limit and no coupler taps.
+- A voltage-limited STS therefore reports more capability than it can deliver. The TS-OFO
+  dispatches into that part, and the STS-OFO stops at v_max. This leaves no voltage margin for
+  the TS dispatch steps, hence the excursions in point 2.
+
+**4. Ripples in S1/O2.**
+- In O2 and S1 the STS flows drift with the profile ramps between dispatches (over 60–90 min:
+  coupler Q changes 293 Mvar between dispatches in O2, against 38 in O3).
+- The TS layer compensates only at the 180-s dispatches: TS-IBG Q moves only at dispatch
+  instants, with 0 reversals.
+- Outside the event windows: peak-to-peak up to 1.9 mpu (O2, area 2), RMS 0.04–0.17 mpu; O3 stays
+  ≤ 0.55 mpu peak-to-peak.
+- e_v of the raw trace equals e_v of the 180-s period means to 0.01 mpu, so the ripple does not
+  affect the metric.
+
 ## Code changes after the run (wording only; no behaviour change)
 
 - `variants.py`: M is a "centralised reference at equal weights and equal device rate limits",

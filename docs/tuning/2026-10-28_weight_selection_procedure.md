@@ -147,4 +147,27 @@ The first candidate that passes is the result, written as
     without it, and 51 under the full filter.
   - Ranking: 1. 301c285ee52b (θ_STS,min 0.0147 pu), 2. c08b1d3d33ab
     (settling PASS in run 0001), 3. 67ad1cf843ac, 4. 9e48320e8a01.
-- **Settling of 301c285ee52b:** running.
+- **2026-10-28 14:43 — Settling of 301c285ee52b: FAIL.**
+  - p95 31.0 > 27; per DSO 30.55 / 27.55 / 32.0 / 25.55; 29 / 120 steps
+    > 27; max 46.
+  - Median residual 0.78 Mvar.
+  - The candidate is removed, and the next in rank, c08b1d3d33ab, has a
+    measured PASS: p95 22.05 (per DSO 21.95 / 15.1 / 23.55 / 11.65), 2 / 120
+    steps > 27, max 35, median residual 0.25 Mvar.
+  - The result write failed on a path bug of the producer (fixed in
+    c012ea5). The run was resumed at 14:45 without repeating any simulation.
+- **2026-10-28 14:45 — RESULT: `configs/paramsets/ch9_selected_band_2026_10_a1.json`
+  = c08b1d3d33ab.**
+  - Over W1–W4, W6 (Stage-I point in brackets): e_v(TS) 0.00449 (0.00547),
+    e_v(DS) 0.00991 (0.00749), e_q 138 244 (1 039 596), λ_max(B) 1.414,
+    θ_STS,min 0.0191 pu.
+  - Taps: ≤ 4 (TS) and ≤ 2 (STS) operations per transformer per 12 h,
+    8 STS operations in total.
+  - Weights: g_q 0.6354, dso_g_v 2186.4, g_w_der 0.01110, g_w_pcc 0.1714,
+    g_w_gen 9.439·10⁵, g_w_tso_oltc 16.70, g_w_tso_shunt 25.50,
+    g_w_dso_der 2.070, g_w_dso_oltc 4.627.
+  - **Engagement** (run 0008 `probe/`, median of the measured STS voltages,
+    240 area-hours):
+    - deviation ≥ 0.015 pu for 292 min, ≥ 0.020 pu for 16 min;
+    - one episode ≥ 0.02 pu for ≥ 10 min (DSO_3, W4, 14 min) without a tap
+      operation.

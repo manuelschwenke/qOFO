@@ -115,5 +115,11 @@ the buses by sensitivity, not by the median.
 The single commit of the as-frozen set is constraint-driven (ratio 0.27,
 v_max 1.0795 pu).
 
-**Settling** of 301c285ee52b (Experiment C, 8 workers): running, 24/120
-steps at 11:45.
+**Settling** of 301c285ee52b (Experiment C, 8 workers): **FAIL** at 14:43.
+- p95 31.0 > 27; 29 / 120 steps > 27; median residual 0.78 Mvar.
+- Result: **c08b1d3d33ab** (measured PASS in run 0001, p95 22.05), written
+  as `configs/paramsets/ch9_selected_band_2026_10_a1.json` by the resumed
+  run at 14:45. `SELECTED_PARAMSET` points to it.
+
+The consolidated procedure text is
+`2026-10-28_weight_selection_procedure.md`.

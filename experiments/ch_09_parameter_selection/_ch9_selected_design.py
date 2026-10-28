@@ -102,13 +102,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: results/ch_09_parameter_selection/0001_2026-10-25_215433_weight_selection_
 #: driver_band).  Was "ch9_selected_final_2026_10".
 #:
-#: 2026-10-28 (author decision): candidate 301c285ee52b, rank 1 of the frozen
-#: procedure docs/tuning/2026-10-28_weight_selection_procedure.md (run
-#: results/ch_09_parameter_selection/0008_2026-10-28_103321_ch_9_3_amendment1).
-#: PROVISIONAL name ``ch9_candidate_301c285ee52b`` for test runs while its
-#: settling check runs; replaced by ``ch9_selected_band_2026_10_a1`` (same
-#: fields) once run 0008 writes it.  Was "ch9_selected_band_2026_10".
-SELECTED_PARAMSET = "ch9_candidate_301c285ee52b"
+#: 2026-10-28 (author decision): ``ch9_selected_band_2026_10_a1`` -- candidate
+#: c08b1d3d33ab, the result of the single application of the frozen
+#: procedure docs/tuning/2026-10-28_weight_selection_procedure.md (run of
+#: record results/ch_09_parameter_selection/0008_2026-10-28_103321_ch_9_3_
+#: amendment1).  Rank 1 of that procedure, 301c285ee52b, failed the settling
+#: requirement (p95 31.0 > 27); it was used for a few hours as the provisional
+#: set ``ch9_candidate_301c285ee52b`` (withdrawn).  Was "ch9_selected_band_2026_10".
+SELECTED_PARAMSET = "ch9_selected_band_2026_10_a1"
 
 #: The Stage-I analytic design point, for the initial-weight legs (B and C).
 #: 2026-10-25: the Stage-I point of that procedure (was "stage1_start", which

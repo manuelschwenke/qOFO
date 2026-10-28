@@ -131,3 +131,41 @@ the step tests (load step in one area, error of the other areas).
   tests have measured them: a voltage-aware CAIR, and a dispatch-anchored interface droop
   against the withdrawal. The S1/O2 ripples are reported as they are.
 - Plan the step tests (incl. load ramps) and the Monte-Carlo.
+
+## ~15:30: thesis figures and text for ch:case3:nominal; STEP/MC plan
+
+**Figures** (`ref/figures_ref.py`, rewritten in the thesis style of the Case-1 figures: 12 cm,
+Palatino, 7–8 pt):
+
+| File | Content |
+|---|---|
+| `case3_vtrack` | three areas plus the aggregate (RMS over the areas) |
+| `case3_stsv` (new) | f_V,STS(t) per STS |
+| `case3_qtrack` | interface flow vs. reference per STS |
+| `case3_event` (new) | the load step at 20 s resolution, with the pre-control samples: area-2 error and the change of the area-2 interface flow (the withdrawal) |
+| `case3_summary` (new) | bars of ē_v and ē_vp per area plus the aggregate; duration curve of the aggregate error |
+| `case3_tieflow` | flows on the three corridors |
+
+- **Labels:** STS panels are labelled "STS m (area a)". STS_AREA was read from `hv.zone`:
+  DSO_1–3 belong to area 2, DSO_4 to area 3.
+- **Thesis export:** `--thesis` copies the PDFs to `graphics/Ch11/` and the CSVs to
+  `graphics/Ch11/data/2026-10-28_case3_ref/` (with a README), and records the exports in the
+  run manifest.
+- **Feeds:** `run_ref.FEEDS` extended by fig:case3:summary/event/stsv and tab:case3:ref. The
+  manifest of 0009 was updated to match, and its header re-rendered.
+
+**Thesis** (`Z:\latex_diss_clone`, Chapters/Chapter11.tex, NOT committed; the Ch 9 files there
+belong to another session):
+- provenance block of 0009 under `ch:case3:nominal`;
+- scenario A described, with a todo to align Ch 7 / Case 1;
+- results text for voltage tracking, interface tracking and the inter-dispatch interval,
+  sub-transmission voltages (new subsection `ch:case3:nominal:sts`) and tie flows;
+- new `tab:case3:ref`, `fig:case3:summary`, `fig:case3:event`, `fig:case3:stsv`;
+- M is called a "centralised reference" (author decision), with a todo for Ch 7;
+- the aggregate is declared as the RMS over the areas.
+
+`thesis_runs check`: 6 blocks, 0 failing, run from the main tree; the worktree resolves results
+in itself. A LuaLaTeX test build into the scratchpad compiled without errors.
+
+**Plan:** `docs/architecture/2026-10-28_case2_step_mc_plan.md`, a proposal for STEP-R (ramps),
+STEP-E (event battery), STEP-P (phase sweep) and the MC changes, with the open author decisions.

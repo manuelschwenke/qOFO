@@ -63,7 +63,9 @@ from experiments.ch_11_case2_multisystem.ref import scenarios as sc
 from experiments.thesis_runs import add_run_arguments, start_thesis_run
 
 TARGET = "ch:case3:nominal"
-FEEDS = ("fig:case3:vtrack", "fig:case3:qtrack", "fig:case3:tieflow")
+FEEDS = ("fig:case3:vtrack", "fig:case3:summary", "tab:case3:ref",
+         "fig:case3:qtrack", "fig:case3:event", "fig:case3:stsv",
+         "fig:case3:tieflow")
 HORIZON_MIN = 360
 #: One realisation for the reference run (all variants share it).
 NOISE_SEED = 20261027

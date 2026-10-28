@@ -65,4 +65,55 @@ strategy (option (b) of the decision note), not a further amendment.
 
 ## Execution record
 
-(filled in after the run)
+Run `results/ch_09_parameter_selection/0008_2026-10-28_103321_ch_9_3_amendment1/`,
+started 2026-10-28 10:33 on commit dddfa45.
+
+**Selection** (10:34). Of the 242 candidates of run 0001:
+- 140 satisfy the bound; 51 of these are feasible;
+- unchanged ranking: 1. **301c285ee52b**, 2. c08b1d3d33ab,
+  3. 67ad1cf843ac, 4. 9e48320e8a01.
+
+**Replay of the Stage-II path** (`analysis/tap_engagement/replay_path.py`,
+`replay_path.log`). The amended rule picks the same incumbent as the frozen
+rule after II-a (faf088d2570e) and after rounds 1–3 (e552b328fd76,
+ff3f747d3f96, c08b1d3d33ab). Every round finds a new best, so the span factor
+stays at 0.5 and the stage ends at the 4-round cap. An application of the
+amended procedure from scratch would therefore:
+- draw the same seeded points around the same centres;
+- evaluate the same 242 candidates;
+- differ from run 0001 only in the final selection, given bit-exact
+  simulations.
+
+**Engagement probe** (W1–W4, W6, 12 h; `probe/`, `engagement_eval.log`,
+`analysis/tap_engagement/engagement_eval.py`). All 20 units reproduce the
+stored e_v(TS) exactly (difference 0), so the probe does not disturb the
+closed loop.
+
+The deviation is that of the median of the measured STS voltages from
+1.03 pu. It is summed over 4 areas × 5 windows (240 area-hours). A far
+episode is |median dev| ≥ 0.02 pu for ≥ 10 min.
+
+| | STS commits | min ≥ 0.010 | ≥ 0.015 | ≥ 0.020 | ≥ 0.025 | far episodes (served) |
+|---|---|---|---|---|---|---|
+| **301c285ee52b** (amended #1) | 22 | 949 | 25 | 1 | 0 | 0 |
+| c08b1d3d33ab (amended #2) | 8 | 3 328 | 292 | 16 | 0 | 1 (0) |
+| fde2e81af6b1 (as frozen) | 1 | 6 792 | 3 327 | 782 | 78 | 16 (0), 723 min |
+| 3cb66225e1a7 (Stage I) | 19 | 2 170 | 50 | 1 | 0 | 0 |
+
+**Commits of 301c285ee52b.** Of the 22:
+- 9 follow a disturbance and 8 fall in the 30-min start-up;
+- all are +1, i.e. voltage-lowering; there is no reversal and no hunting;
+- at most 2 per coupler per 12 h.
+
+The 5 other commits are all gradient-driven (commit ratio 1.001–1.111). They
+occur at a median deviation of 0.009–0.015 pu (mean 0.011–0.016 pu).
+
+The one commit at median < 0.010 pu (W1, DSO_4|trafo_10, 11.02 h) still has
+a mean deviation of 0.011 pu and v_max 1.076 pu. The commit condition weighs
+the buses by sensitivity, not by the median.
+
+The single commit of the as-frozen set is constraint-driven (ratio 0.27,
+v_max 1.0795 pu).
+
+**Settling** of 301c285ee52b (Experiment C, 8 workers): running, 24/120
+steps at 11:45.

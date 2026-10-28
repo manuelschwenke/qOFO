@@ -33,7 +33,7 @@ S2   S1 with the couplers in the alignment law;     classical, with access
      the STS-OFOs track the resulting references
 O2   TS-OFO, STS under local q(v)                    OFO, no access
 O3   TS-OFO + interface set-points + STS-OFO         proposed cascade
-M    one OFO on the coupled model, every step        bound (not a rung)
+M    one OFO on the coupled model, every step        centralised reference
 ==== ============================================== =====================
 
 ``M`` runs at the selected weights, unscaled, with the paramset's ``dso_g_v``
@@ -115,7 +115,9 @@ STEP_ALLOWED: Dict[Tuple[str, str], set] = {
                                  "shunt_dispatch"},
     # The access step under the OFO law.
     ("O2", "O3"): {"dso_mode"},
-    # Information, not a rung: one controller, full model, every step.
+    # Information, not a rung: one controller, full model, every step --
+    # a centralised reference at equal weights and equal device rate limits,
+    # not a bound (author 2026-10-28).
     ("O3", "M"): {"control_scope", "dso_mode", "local_sensitivities_tso",
                   "local_sensitivities_dso", "central_period_s",
                   "central_dso_g_v", "central_lambda_target",
@@ -177,9 +179,10 @@ def ts_equivalent_cooldown(cfg: MultiTSOConfig) -> int:
 def selected_lambda_max() -> float:
     """``lambda_max_B`` of the selected design, from the paramset provenance.
 
-    M's whole ``g_w`` block is scaled to this loop gain (author decision
-    2026-10-27): at the selected weights the single central loop has
-    lambda_max ~5.1 and does not contract.
+    M's loop-gain ceiling: the runner slows M's weights only if its loop gain
+    over the continuous actuators exceeded it (0.98 < 1.467, so they stay as
+    selected).  Taps and banks are rate-limited instead
+    (:func:`ts_equivalent_cooldown`).
     """
     prov = load_paramset(PARAMSET).get("provenance") or {}
     lam = prov.get("lambda_max_B")

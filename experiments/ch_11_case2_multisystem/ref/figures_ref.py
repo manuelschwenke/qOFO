@@ -19,8 +19,8 @@ to ``<run>/figures/data/`` (the files to copy into the thesis
 Palette: the validated four hues of the earlier Part-III figures
 (``ladder/figures.PALETTE``): S1 red, O2 teal, O3 dark blue; S2 takes amber,
 the slot of O1, which Case 2 does not have.  L2 and M stay grey/black and are
-separated by dash pattern -- the floor and the bound are context, not
-candidates.
+separated by dash pattern -- the floor and the centralised reference are
+context, not candidates.
 
 Run:
     python -m experiments.ch_11_case2_multisystem.ref.figures_ref <run dir>

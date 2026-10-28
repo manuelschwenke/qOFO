@@ -35,6 +35,22 @@ pool, compact per-episode files).  What changed, and why:
   normal operating range [0.95, 1.05] pu and the non-inferiority margin
   delta = 1 mpu per area (both declared 2026-10-07).
 
+Changes of 2026-10-28 (author-approved plan
+``docs/architecture/2026-10-28_case2_step_mc_plan.md`` §5), before any Case-2
+ensemble run:
+
+* configuration from the Case-2 registry ``variants.resolved`` (paramset
+  of record, minimum-class noise for every controller and the droop) for all
+  six variants L2, S1, S2, O2, O3, M; O3 on 300 episodes;
+* every disturbance and its reversal between two TS dispatches: phase uniform
+  on {20, 40, ..., 160} s, drawn per event from ``default_rng([seed, 1])`` --
+  start times and event lists of the declared draw are unchanged;
+* the episode seed is also the noise seed (one realisation per episode,
+  shared by all variants);
+* metrics from ``metrics_case2`` (area incl. u_q and reserve, STS, interface,
+  Delta e_post and withdrawn support per event); the full log is kept
+  (``runs/<seed>_<variant>.log.pkl``).
+
 Declared campaign constants (do not change once results exist)
 --------------------------------------------------------------
 MASTER_SEED 20261007, episode k has seed MASTER_SEED + k; N_VALID 100;
@@ -102,10 +118,17 @@ import pandas as pd
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parents[2]))           # the project root
 
-from experiments.ch_10_case1_svr.report_case1 import area_metrics, epost  # noqa: E402
-from experiments.ch_10_case1_svr.run_case1 import (  # noqa: E402
-    PARAMSET, PILOT_BUSES, VARIANTS as CASE1_VARIANTS, resolved,
-)
+from experiments.ch_10_case1_svr.run_case1 import PILOT_BUSES  # noqa: E402
+from experiments.ch_11_case2_multisystem import metrics_case2 as mc2  # noqa: E402
+from experiments.ch_11_case2_multisystem import variants as case2  # noqa: E402
+
+PARAMSET = case2.PARAMSET
+
+
+def resolved(name: str, minutes: int, events=(), noise_seed: Optional[int] = None):
+    """The Case-2 configuration of ``name`` (variants.py): selected paramset,
+    noise for every controller and the droop, the given events and seed."""
+    return case2.resolved(name, minutes, events, noise_seed)
 from experiments.helpers.records import ContingencyEvent  # noqa: E402
 from experiments.thesis_runs import (  # noqa: E402
     MANIFEST, add_run_arguments, annotate_run, latest_run, start_thesis_run,
@@ -128,6 +151,15 @@ REVERT_MIN = 90               # every disturbance is reverted after this long
 LOAD_Q_MIN_MVAR = 100.0       # purely reactive load step, as in the reference
 LOAD_Q_MAX_MVAR = 400.0
 
+#: Event phase (author decision 2026-10-27/28): every disturbance and its
+#: reversal fall between two TS dispatches, uniformly on this grid of seconds
+#: after the slot's dispatch instant, drawn per event from the child stream
+#: ``default_rng([seed, 1])`` so the declared draw of start times and events
+#: is unchanged.
+PHASE_GRID_S = tuple(float(x) for x in range(20, 180, 20))
+#: O3 runs on more episodes (failure bound below 1 % at 95 % with 0 of 300).
+N_VALID_O3 = 300
+
 DELTA_MPU = 1.0               # non-inferiority margin, per area, pilot error
 V_LO, V_HI = 0.95, 1.05       # normal operating range ("time outside")
 V_HARD_LO, V_HARD_HI = 0.90, 1.10
@@ -148,11 +180,13 @@ PROFILE_LAST = _dt.datetime(2016, 12, 31, 23, 45)
 
 #: Variants this driver can run.  Case-2 variants (S2, O3, M) are added here
 #: when implemented; their episodes are the same seeds.
-VARIANTS: Dict[str, Dict[str, Any]] = {k: v for k, v in CASE1_VARIANTS.items()}
-FIRST_SLICE = ["S1", "O2", "L2"]          # longest first: better pool packing
+VARIANTS: Dict[str, Dict[str, Any]] = dict(case2.VARIANTS)
+ALL_VARIANTS = ["S1", "L2", "O2", "S2", "O3", "M"]   # longest first: pool packing
 
-#: Pre-declared comparisons: (candidate, comparator).
-COMPARISONS: List[Tuple[str, str]] = [("O2", "S1")]
+#: Pre-declared comparisons: (candidate, comparator) -- the family of the
+#: plan of 2026-10-28 §5 (NI on e_vp; superiority on e_v, worst, t_out).
+COMPARISONS: List[Tuple[str, str]] = [("O2", "S1"), ("O3", "S1"), ("O3", "S2"),
+                                      ("O3", "O2"), ("S2", "S1")]
 
 
 def _dirs(out: Path) -> Dict[str, Path]:
@@ -241,7 +275,14 @@ def draw_start(rng: np.random.Generator) -> _dt.datetime:
     raise RuntimeError("no admissible start time in 1000 draws")
 
 
-def draw_events(rng: np.random.Generator, el: Dict[str, List[int]]
+def _phase(rng_phase: Optional[np.random.Generator]) -> float:
+    if rng_phase is None:
+        return 0.0
+    return PHASE_GRID_S[int(rng_phase.integers(len(PHASE_GRID_S)))]
+
+
+def draw_events(rng: np.random.Generator, el: Dict[str, List[int]],
+                rng_phase: Optional[np.random.Generator] = None
                 ) -> List[ContingencyEvent]:
     """Slot draw.  Each slot fires with SLOT_PROB; the kind is uniform over the
     kinds that are admissible at that instant (at most one element of each
@@ -259,42 +300,49 @@ def draw_events(rng: np.random.Generator, el: Dict[str, List[int]]
             continue
         kind = kinds[int(rng.integers(len(kinds)))]
         back = m + REVERT_MIN
+        ph = _phase(rng_phase)
+        t_on, t_off = 60.0 * m + ph, 60.0 * back + ph
         if kind == "gen":
             g = int(el["gens"][int(rng.integers(len(el["gens"])))])
-            ev.append(ContingencyEvent(minute=m, element_type="gen",
+            ev.append(ContingencyEvent(minute=m, time_s=t_on, element_type="gen",
                                        element_index=g, action="trip"))
             if back < HORIZON_MIN:
-                ev.append(ContingencyEvent(minute=back, element_type="gen",
+                ev.append(ContingencyEvent(minute=back, time_s=t_off,
+                                           element_type="gen",
                                            element_index=g, action="restore"))
         elif kind == "line":
             li = int(el["lines"][int(rng.integers(len(el["lines"])))])
-            ev.append(ContingencyEvent(minute=m, element_type="line",
+            ev.append(ContingencyEvent(minute=m, time_s=t_on, element_type="line",
                                        element_index=li, action="trip"))
             if back < HORIZON_MIN:
-                ev.append(ContingencyEvent(minute=back, element_type="line",
+                ev.append(ContingencyEvent(minute=back, time_s=t_off,
+                                           element_type="line",
                                            element_index=li, action="restore"))
         else:
             b = int(el["load_buses"][int(rng.integers(len(el["load_buses"])))])
             q = round(float(rng.uniform(LOAD_Q_MIN_MVAR, LOAD_Q_MAX_MVAR)), 1)
-            ev.append(ContingencyEvent(minute=m, element_type="load", bus=b,
-                                       p_mw=0.0, q_mvar=q, action="connect"))
+            ev.append(ContingencyEvent(minute=m, time_s=t_on, element_type="load",
+                                       bus=b, p_mw=0.0, q_mvar=q, action="connect"))
             if back < HORIZON_MIN:
-                ev.append(ContingencyEvent(minute=back, element_type="load",
+                ev.append(ContingencyEvent(minute=back, time_s=t_off,
+                                           element_type="load",
                                            bus=b, p_mw=0.0, q_mvar=q,
                                            action="trip"))
         busy_until[kind] = back
-    ev.sort(key=lambda e: (e.minute, e.element_type, e.action))
+    ev.sort(key=lambda e: (e.effective_time_s, e.element_type, e.action))
     return ev
 
 
 def draw_episode(seed: int) -> Tuple[_dt.datetime, List[ContingencyEvent]]:
     rng = np.random.default_rng(seed)
     t0 = draw_start(rng)
-    return t0, draw_events(rng, enumerate_elements())
+    return t0, draw_events(rng, enumerate_elements(),
+                           np.random.default_rng([seed, 1]))
 
 
 def events_to_rows(events: List[ContingencyEvent]) -> List[Dict[str, Any]]:
-    return [{"minute": int(e.minute), "element_type": str(e.element_type),
+    return [{"minute": int(e.minute), "time_s": float(e.effective_time_s),
+             "element_type": str(e.element_type),
              "element_index": int(getattr(e, "element_index", -1)
                                   if getattr(e, "element_index", None) is not None
                                   else -1),
@@ -314,10 +362,12 @@ def episode_class(events: List[ContingencyEvent]) -> str:
 #  One task = one (seed, variant) run, or one prescreen
 # ---------------------------------------------------------------------------
 def _config(name: str, start: _dt.datetime, events: List[ContingencyEvent],
-            scratch: Path, minutes: int, dt_s: Optional[float] = None):
-    cfg = resolved(name, minutes)
-    over = dict(start_time=start, contingencies=list(events),
-                result_dir=str(scratch), verbose=0)
+            scratch: Path, minutes: int, dt_s: Optional[float] = None,
+            noise_seed: Optional[int] = None):
+    """Case-2 configuration; the episode seed is also its noise seed, so all
+    variants of an episode share one realisation (author decision 2026-10-27)."""
+    cfg = resolved(name, minutes, list(events), noise_seed)
+    over = dict(start_time=start, result_dir=str(scratch), verbose=0)
     if dt_s is not None:
         over["dt_s"] = float(dt_s)
     return dataclasses.replace(cfg, **over)
@@ -352,7 +402,8 @@ def _prescreen(seed: int, out: str, minutes: int) -> Dict[str, Any]:
     start, events = draw_episode(seed)
     scratch = d["scratch"] / f"pre_{seed}"
     scratch.mkdir(parents=True, exist_ok=True)
-    cfg = _config("L2", start, [], scratch, minutes, dt_s=PRESCREEN_DT_S)
+    cfg = _config("L2", start, [], scratch, minutes, dt_s=PRESCREEN_DT_S,
+                  noise_seed=seed)
     n_steps = int(round(cfg.n_total_s / cfg.dt_s))
     logf = d["logs"] / f"pre_{seed}.log"
     t0 = time.time()
@@ -470,7 +521,7 @@ def _variant(seed: int, name: str, out: str, minutes: int) -> Dict[str, Any]:
     assert start.isoformat() == pre["start_time"], "episode draw not reproducible"
     scratch = d["scratch"] / f"{seed}_{name}"
     scratch.mkdir(parents=True, exist_ok=True)
-    cfg = _config(name, start, events, scratch, minutes)
+    cfg = _config(name, start, events, scratch, minutes, noise_seed=seed)
     n_steps = int(round(cfg.n_total_s / cfg.dt_s))
     logf = d["logs"] / f"{seed}_{name}.log"
     t0 = time.time()
@@ -486,14 +537,26 @@ def _variant(seed: int, name: str, out: str, minutes: int) -> Dict[str, Any]:
     if outcome == "ok" or (log and len(log) == n_steps):
         refs = {z: float((cfg.zone_v_setpoints_pu or {}).get(z, cfg.v_setpoint_pu))
                 for z in PILOT_BUSES}
-        ev_min = sorted({float(e.minute) for e in events})
+        t_ts, dt = float(cfg.tso_period_s), float(cfg.dt_s)
+        ev_rows = mc2.event_metrics(log, t_ts, dt)
         rec["metrics"] = {}
         for z in sorted(PILOT_BUSES):
-            m = area_metrics(log, z, refs[z], V_LO, V_HI)
-            g = epost(log, z, ev_min, float(cfg.tso_period_s))
-            m["epost_max"] = float(max(g.values())) if g else float("nan")
+            m = mc2.area_metrics(log, z, refs[z], V_LO, V_HI)
+            g = [r["epost"] for r in ev_rows if int(r["area"]) == int(z)]
+            m["epost_max"] = float(max(g)) if g else float("nan")
             rec["metrics"][str(z)] = m
+        sts_ids = next((sorted(r.dso_group_v_min_pu) for r in log
+                        if r.dso_group_v_min_pu), [])
+        rec["sts"] = {g: mc2.sts_metrics(log, g, float(cfg.dso_v_min_pu),
+                                         float(cfg.dso_v_max_pu)) for g in sts_ids}
+        rec["interface"] = mc2.interface_metrics(log, t_ts, dt)
+        rec["events"] = [dict(r, w_total_mvar_min=float(sum(r["w_sts_mvar_min"].values())))
+                         for r in ev_rows]
         np.savez_compressed(d["runs"] / f"{seed}_{name}.npz", **_series(log))
+    if log:
+        import pickle
+        with open(d["runs"] / f"{seed}_{name}.log.pkl", "wb") as fh:
+            pickle.dump(log, fh)
     (d["runs"] / f"{seed}_{name}.json").write_text(
         json.dumps(rec, indent=2, default=float), encoding="utf-8")
     shutil.rmtree(scratch, ignore_errors=True)
@@ -664,6 +727,11 @@ def _campaign_parameters(args: argparse.Namespace) -> Dict[str, Any]:
     ``thesis_runs``; the drawable elements go to ``elements.json``.
     """
     return {"master_seed": MASTER_SEED, "n_valid": args.n,
+            "n_valid_o3": getattr(args, "n_o3", N_VALID_O3),
+            "event_phase_s": list(PHASE_GRID_S),
+            "phase_stream": "default_rng([seed, 1]), one draw per event",
+            "noise_seed": "the episode seed (shared by all variants)",
+            "configuration": "experiments/ch_11_case2_multisystem/variants.py",
             "horizon_min": args.minutes, "variants": args.variants,
             "slot_min": SLOT_MIN, "slot_prob": SLOT_PROB,
             "revert_min": REVERT_MIN,
@@ -743,7 +811,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--jobs", type=int, default=1, help="worker processes")
     ap.add_argument("--n", type=int, default=N_VALID, help="valid episodes")
-    ap.add_argument("--variants", default=",".join(FIRST_SLICE))
+    ap.add_argument("--variants", default=",".join(ALL_VARIANTS))
+    ap.add_argument("--n-o3", type=int, default=N_VALID_O3,
+                    help="valid episodes for O3 (the failure bound)")
     ap.add_argument("--minutes", type=int, default=HORIZON_MIN)
     ap.add_argument("--out", default=None,
                     help="explicit campaign folder outside the documented "
@@ -758,7 +828,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.smoke:
-        args.n, args.minutes, args.tag = 2, 10, "smoke"
+        args.n, args.n_o3, args.minutes, args.tag = 2, 3, 10, "smoke"
     if args.minutes != HORIZON_MIN:
         # The draw depends on the horizon; children read it from the env.
         os.environ["PART3_MC_HORIZON_MIN"] = str(args.minutes)
@@ -817,16 +887,18 @@ def _simulate(out: Path, args: argparse.Namespace, variants: List[str]) -> None:
           f"(excluded, islanding: {el['lines_excluded_islanding']}) "
           f"load buses={len(el['load_buses'])}", flush=True)
 
-    # Phase 1: prescreen in seed order until the first N valid seeds are known.
+    # Phase 1: prescreen in seed order until the first N valid seeds are known
+    # (N_O3 when O3 is part of the call).
+    n_need = max(args.n, getattr(args, "n_o3", 0) if "O3" in variants else 0)
     k = 0
     while True:
         done = {int(p.stem): json.loads(p.read_text(encoding="utf-8"))["valid"]
                 for p in d["pre"].glob("*.json")}
         seeds = [MASTER_SEED + i for i in range(k)]
         valid = [s for s in seeds if done.get(s)]
-        if len(valid) >= args.n and all(s in done for s in seeds):
+        if len(valid) >= n_need and all(s in done for s in seeds):
             break
-        need = args.n - len(valid)
+        need = n_need - len(valid)
         batch = [MASTER_SEED + i for i in range(k, k + max(need + need // 4 + 1,
                                                            args.jobs))]
         k += len(batch)
@@ -834,7 +906,7 @@ def _simulate(out: Path, args: argparse.Namespace, variants: List[str]) -> None:
         if todo:
             print(f"  [prescreen] {len(todo)} draw(s)", flush=True)
             _pool_map(prescreen_task, todo, args.jobs, "prescreen")
-    valid = sorted(s for s, ok in done.items() if ok)[:args.n]
+    valid = sorted(s for s, ok in done.items() if ok)[:n_need]
     print(f"  [prescreen] {len(valid)} valid of {k} drawn", flush=True)
 
     # Phase 2: variant runs, longest variant first; skip what exists (resume).
@@ -844,12 +916,16 @@ def _simulate(out: Path, args: argparse.Namespace, variants: List[str]) -> None:
             return True
         return json.loads(p.read_text(encoding="utf-8"))["outcome"] == "task_crash"
 
-    todo = [(s, v, str(out), args.minutes) for v in variants for s in valid
-            if _missing(s, v)]
+    todo = [(s, v, str(out), args.minutes) for v in variants
+            for s in (valid if v == "O3" else valid[:args.n]) if _missing(s, v)]
     print(f"  [runs] {len(todo)} run(s) to go", flush=True)
     if todo:
         _pool_map(variant_task, todo, args.jobs, "run")
-    report(out, args.n)
+    try:
+        report(out, args.n)
+    except Exception:                              # noqa: BLE001 -- tables later
+        print("  [report] failed; the runs are complete, rerun with --report", flush=True)
+        traceback.print_exc()
 
 
 # Spawned workers re-import this module: honour a non-default horizon.

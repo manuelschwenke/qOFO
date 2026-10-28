@@ -1167,6 +1167,19 @@ class MultiTSOConfig:
     ``Plant.apply_exogenous`` (EvtLod) with no new plumbing.
     """
 
+    hold_profiles: bool = False
+    """Hold every profile at its value at ``start_time`` (step tests of
+    ch:case3): loads, infeed and the zonal generator dispatch stay at the
+    operating point, so the test disturbance is the only exogenous change.
+    See :mod:`experiments.helpers.profile_ramps`."""
+
+    profile_ramps: Tuple[Dict[str, Any], ...] = ()
+    """Load ramps on the interpolated profile frame (exact at ``dt_s``), each a
+    dict of :func:`experiments.helpers.profile_ramps.apply_profile_ramps`:
+    ``kind="bus"`` adds a load at one bus that ramps to (P, Q);
+    ``kind="ts_loads"`` scales every transmission load by ``1 + rel*shape``
+    (the sub-transmission buses are excluded by the runner)."""
+
     use_zonal_gen_dispatch: bool = True
 
     scenario: str = "rural_700"

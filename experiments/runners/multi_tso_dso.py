@@ -93,6 +93,9 @@ from core.measurement_noise import (
     MeasurementNoiseModel,
 )
 from core.reporting import load_and_apply_tuned_params
+from experiments.helpers.profile_ramps import (
+    apply_profile_ramps, hold_profile_frame, sts_bus_set,
+)
 from core.profiles import (
     DEFAULT_PROFILES_CSV,
     apply_profiles,
@@ -1986,6 +1989,19 @@ def _run_multi_tso_dso_impl(
         # rows that compute_zonal_gen_dispatch would scan in vain.
         t_end = start_time + timedelta(seconds=config.n_total_s)
         profiles = profiles.loc[start_time:t_end]
+
+        # Held profiles and load ramps (step tests of ch:case3), on the
+        # clipped frame: exact at dt_s, applied through apply_profiles like
+        # any profile change, inert unless the config asks for them.
+        if getattr(config, "hold_profiles", False):
+            profiles = hold_profile_frame(profiles, start_time)
+        _ramps = list(getattr(config, "profile_ramps", ()) or ())
+        if _ramps:
+            _sts_buses = sts_bus_set(meta.hv_networks)
+            _ramps = [dict(r, exclude_buses=list(r.get("exclude_buses") or _sts_buses))
+                      if r.get("kind") == "ts_loads" else dict(r) for r in _ramps]
+            profiles = apply_profile_ramps(net, profiles, start_time, _ramps,
+                                           verbose=verbose)
 
         # Apply initial profiles
         _t = perf_counter()

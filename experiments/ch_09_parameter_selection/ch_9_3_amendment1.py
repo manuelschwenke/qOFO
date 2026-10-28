@@ -94,7 +94,10 @@ def _log(root: Path, msg: str) -> None:
 
 
 def _rel(p: Path) -> str:
-    return os.path.relpath(p, REPO_ROOT)
+    # Resolved on both sides: on the e5 hosts the repository is reached both
+    # as a mapped drive (Z:) and as its UNC path, and relpath refuses to
+    # relate the two (failed run 0008 on 2026-10-28 at the result write).
+    return os.path.relpath(Path(p).resolve(), REPO_ROOT)
 
 
 def _pin_threads() -> None:
@@ -196,6 +199,8 @@ def stage_settle(root: Path, rep: Dict[str, Any], workers: int) -> Dict[str, Any
     # Measured results of the same campaign are reused; an aborted run is not one.
     results = {k: {**v, "reused_from": _rel(RUN0001)} for k, v in prior.items()
                if "error" not in v}
+    if path.exists():                       # a resumed run keeps its own results
+        results.update(json.loads(path.read_text("utf-8")))
     feasible = {r["key"]: r for r in rep["ranked"]}
     while True:
         remaining = [r for k, r in feasible.items()
@@ -399,25 +404,26 @@ def write_result(root: Path, win: Dict[str, Any], rep: Dict[str, Any],
     fields = {k: float(win["weights"][k]) for k in WEIGHT_FIELDS}
     doc = {
         "name": RESULT,
-        "title": "Controller weights selected by the Ch 8 procedure with "
-                 "Amendment 1 (STS coupler engagement inside the operating band)",
+        "title": "Controller weights selected by the Ch 8 procedure "
+                 "(Experiment B), final configuration with DSO operating band "
+                 "and STS coupler engagement bound",
         "description": [
-            "Procedure docs/tuning/2026-10-25_weight_selection_procedure.md, "
-            "applied in run 0001 (result ch9_selected_band_2026_10), with "
-            "Amendment 1 of 2026-10-28 "
-            "(docs/tuning/2026-10-28_amendment1_sts_engagement_bound.md):",
-            f"the filter additionally requires theta_STS,min <= {THETA_MAX:g} pu "
-            "(strongest STS coupler commits on a uniform offset inside the "
-            "0.92-1.08 pu band around V_ref = 1.03 pu).",
-            "Re-selection over the 242 candidates of run 0001 (no new Stage-II "
-            "simulation); ranking and settling requirement unchanged.",
+            "Selected by docs/tuning/2026-10-28_weight_selection_procedure.md "
+            "(applied once, run 0008), with every DSO controller holding "
+            "0.92-1.08 pu (make_config):",
+            f"filter including theta_STS,min <= {THETA_MAX:g} pu (strongest STS "
+            "coupler commits on a uniform offset inside the band around "
+            "V_ref = 1.03 pu); ranking on the per-bus TS voltage deviation with "
+            "a 2 % band on the STS deviation; settling requirement in rank order.",
+            "Stage-II units from run 0001 (identical decision path, bit-exact "
+            "simulations; analysis/tap_engagement/replay_path.py).",
             "The DSO band is configuration, not part of this parameter set.",
         ],
         "provenance": {
             "producer": _rel(Path(__file__)),
             "run": _rel(root),
-            "procedure": "docs/tuning/2026-10-25_weight_selection_procedure.md",
-            "amendment": "docs/tuning/2026-10-28_amendment1_sts_engagement_bound.md",
+            "procedure": "docs/tuning/2026-10-28_weight_selection_procedure.md",
+            "bound_declared_in": "docs/tuning/2026-10-28_amendment1_sts_engagement_bound.md",
             "campaign_dir": _rel(RUN0001),
             "theta_sts_max_pu": THETA_MAX,
             "theta_sts_min_pu": rep["_theta"][win["key"]],
@@ -454,6 +460,10 @@ def main(argv: List[str] | None = None) -> int:
                    help="Probe window length (12 h = the campaign's).")
     p.add_argument("--skip-settle", action="store_true")
     p.add_argument("--skip-probe", action="store_true")
+    p.add_argument("--resume", type=Path, default=None,
+                   help="Run folder to resume: selection is recomputed "
+                        "(deterministic), settling continues from that run's "
+                        "criterion_results.json, the result is written.")
     add_run_arguments(p)
     args = p.parse_args(argv)
 
@@ -470,7 +480,7 @@ def main(argv: List[str] | None = None) -> int:
                          "180 s, T_STS 20 s, dt 20 s (re-selection reads run 0001; "
                          "the probe re-simulates); Experiment C: 120 isolated "
                          "interface steps"),
-            note=args.note, tag=args.tag) as run:
+            note=args.note, tag=args.tag, resume=args.resume) as run:
         root = run.root
         rep = stage_select(root)
         keys = [k for k in args.probe_keys.split(",") if k] or list(dict.fromkeys(
@@ -489,7 +499,7 @@ def main(argv: List[str] | None = None) -> int:
             if win is None:
                 _log(root, "no admitted candidate passes the settling requirement")
             else:
-                _log(root, f"RESULT (Amendment 1): {win['key']}")
+                _log(root, f"RESULT: {win['key']}")
                 write_result(root, win, rep, settle_out["results"])
         run.describe_output("amendment.log", "every stage with times")
         run.describe_output("selection/", "theta_STS,min per candidate, admitted "

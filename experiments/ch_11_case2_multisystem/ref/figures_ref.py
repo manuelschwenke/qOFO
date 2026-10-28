@@ -13,6 +13,8 @@ width, Palatino, 7-8 pt):
 * ``case3_qtrack``  -- ``fig:case3:qtrack``: interface flow of each STS (sum
   over its couplers) against the dispatched reference, O3 and S2, with O2's
   flow for comparison;
+* ``case3_qerr``    -- ``fig:case3:qerr``: interface tracking error of each STS,
+  realised minus dispatched flow, O3 and S2;
 * ``case3_event``   -- ``fig:case3:event``: the load step in area 2 at the
   20-s resolution -- area error and the change of the area-2 interface flows
   until the next dispatches (the withdrawal of eq:case3:epost);
@@ -272,6 +274,43 @@ def fig_qtrack(logs, events, out: Path) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
+def fig_qerr(logs, events, out: Path) -> pd.DataFrame:
+    """Interface tracking error of each STS: realised minus dispatched flow
+    (sum over its couplers), O3 and S2, with its time-RMS in the legend."""
+    fig, axes = plt.subplots(2, 2, figsize=(WIDTH, 8.0 * CM), sharex=True, sharey=True)
+    data = {}
+    for ax, g in zip(axes.flat, sorted(STS_AREA)):
+        ax.axhline(0.0, color="#555555", lw=0.5, zorder=1)
+        for name, ls in (("S2", (0, (3, 1.5))), ("O3", "-")):
+            if name not in logs:
+                continue
+            t = _t(logs[name])
+            act, ref = _sts_series(logs[name], "act"), _sts_series(logs[name], "set")
+            if g not in ref or g not in act:
+                continue
+            err = act[g] - ref[g]
+            rms = float(np.sqrt(np.nanmean(err ** 2)))
+            ax.plot(t, err, color=PALETTE[name], ls=ls, lw=0.9 if name == "S2" else 1.1,
+                    label=f"{name} ({rms:.1f} Mvar RMS)")
+            data[f"t_min_{name}"] = pd.Series(t)
+            data[f"{g}_{name}_err_mvar"] = pd.Series(err)
+        _mark(ax, events)
+        ax.text(0.03, 0.93, f"STS {g.split('_')[-1]} (area {STS_AREA[g]})",
+                transform=ax.transAxes, ha="left", va="top", fontsize=7,
+                bbox=dict(fc="white", ec="none", alpha=0.85, pad=1.0))
+        ax.legend(loc="lower right", fontsize=6.5, frameon=False, handlelength=1.8)
+        _grid(ax)
+    for ax in axes[:, 0]:
+        ax.set_ylabel(r"$Q - Q^{\mathrm{ref}}$ [Mvar]")
+    for ax in axes[-1]:
+        ax.set_xlabel("time [min]")
+        ax.set_xlim(0, 360)
+        ax.set_xticks(range(0, 361, 60))
+    fig.tight_layout(h_pad=0.6, w_pad=0.6)
+    _save(fig, out, "case3_qerr")
+    return pd.DataFrame(data)
+
+
 def fig_event(logs, events, out: Path, t_ts_min: float = 3.0) -> pd.DataFrame:
     """The load step (event 2) in area 2: e_v,2 and the change of the summed
     interface flow of the area-2 STSs since the step's pre-event state."""
@@ -422,8 +461,8 @@ def fig_tieflow(logs, events, out: Path) -> pd.DataFrame:
 #  Driver
 # ---------------------------------------------------------------------------
 
-STEMS = ("case3_vtrack", "case3_stsv", "case3_qtrack", "case3_event",
-         "case3_summary", "case3_tieflow")
+STEMS = ("case3_vtrack", "case3_stsv", "case3_qtrack", "case3_qerr",
+         "case3_event", "case3_summary", "case3_tieflow")
 
 
 def make_figures(run: Path, thesis: Optional[Path] = None) -> List[str]:
@@ -439,6 +478,7 @@ def make_figures(run: Path, thesis: Optional[Path] = None) -> List[str]:
         "case3_vtrack": lambda: fig_vtrack(logs, events, out),
         "case3_stsv": lambda: fig_stsv(logs, events, out),
         "case3_qtrack": lambda: fig_qtrack(logs, events, out),
+        "case3_qerr": lambda: fig_qerr(logs, events, out),
         "case3_event": lambda: fig_event(logs, events, out),
         "case3_summary": lambda: fig_summary(logs, metrics, out),
         "case3_tieflow": lambda: fig_tieflow(logs, events, out),

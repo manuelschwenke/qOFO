@@ -198,6 +198,29 @@ the run of record):
 - Proposal to the author: M_rate as the definition of M ("same weights, the cascade's
   timescale for the transmission devices, more information"). Not adopted yet.
 
+## 2026-10-28 ~09:30: M adopted (author decision)
+
+**Definition.** M_rate becomes M, with the cooldowns made exactly equal to the cascade's:
+- **Transmission taps and banks** are locked after a switch until iteration k + 1 + n with
+  n = (1 + int_cooldown)·T_TS/T_STS − 1 = 53, so they are free again after 18 min as in the
+  TS-OFO (`variants.ts_equivalent_cooldown`, derived from the config).
+- M_rate had 45 steps, i.e. 15.3 min.
+- The banks' 30-min holding time applies on top in both M and the cascade.
+- The coupler taps were already equal (2 min); the STS-OFO and M both step every 20 s.
+
+**Rest of the definition.** Selected weights, κ = 1, loop gain checked over the continuous
+actuators (0.98). The candidates are retired; their record is run 0007.
+
+**Check run** `0008_*_m_check` (06d403b):
+- `ok`, identical to M_rate: e_v 6.25 and e_vp 2.98 mpu, 8 bank commits.
+- In scenario A every tap or bank move is ≥ 30 min after the previous one, so the lock never
+  binds there.
+- The lock itself is covered by a unit test (`tests/test_central_updater_wrapper.py`): TS
+  devices locked 53 steps, coupler taps the global lock.
+
+**New reference run of record** with all six variants on 06d403b, launched 09:37. It
+supersedes 0006 (old M).
+
 ## Not done / open
 
 - The reference scenario: the author's choice (A proposed).

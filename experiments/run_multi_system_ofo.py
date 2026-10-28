@@ -340,16 +340,15 @@ def main() -> None:
     :func:`main_comparison` is the coordinated-vs-uncoordinated study and
     builds its own paired config; call it directly.
     """
-    # 2026-10-20 (author decision): back to the chapter's controller identity,
-    # now the re-run Experiment B result ch9_selected_10_2026
-    # (docs/tuning/2026-10-16_protocol_experiment_B_rerun.md).  The hand-set
-    # variants used here 2026-10-14..19 ("ch9_selected_shunt_gw006",
-    # "ch9_selected_pcc27", "ch9_selected_pcc27_gqceil",
-    # "ch9_selected_pcc27_gqceil_comp_q_off") remain as parameter sets.
+    # The chapter's controller identity: SELECTED_PARAMSET, since 2026-10-28
+    # ch9_selected_band_2026_10_a1 = c08b1d3d33ab (weight-selection procedure
+    # 2026-10-28 with the STS engagement bound).  Earlier sets remain as
+    # parameter sets and can be applied here by name instead.
     from experiments.ch_09_parameter_selection._ch9_selected_design import (
         SELECTED_PARAMSET,
     )
     cfg = apply_paramset(make_config(), SELECTED_PARAMSET)
+    print(f"Controller weights: {SELECTED_PARAMSET}")
     run_dir = new_run_dir("run_multi_system_ofo", cfg)
     log = run_multi_tso_dso(cfg)
     with (run_dir.root / "records.pkl").open("wb") as handle:

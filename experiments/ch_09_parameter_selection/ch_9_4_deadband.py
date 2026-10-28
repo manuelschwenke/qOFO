@@ -269,6 +269,9 @@ def excursions(probe: pd.DataFrame, discrete: set = frozenset()) -> pd.DataFrame
     held) closes interval k and the post-dispatch solve opens k+1.
     ``discrete`` marks the intervals that contain a discrete-event solve
     (:func:`discrete_solves`): the step it causes persists until re-anchoring.
+    ``after_discrete`` marks the converter's next interval, in which the
+    controllers correct the step against an anchor set at the stepped voltage
+    (author decision 2026-10-28: counted as part of the event).
     """
     df = probe.sort_values(["sgen", "t_s", "solve"]).reset_index(drop=True)
     new = df.groupby("sgen")["anchor_pu"].diff().fillna(1.0).ne(0.0)
@@ -282,13 +285,15 @@ def excursions(probe: pd.DataFrame, discrete: set = frozenset()) -> pd.DataFrame
     after = df.groupby(["sgen", "k"])["disc"].cumsum() > 0
     df["abs_v_eff_drift"] = df["abs_v_eff"].where(~after)
     g = df.groupby(["sgen", "k"])
-    return pd.DataFrame({
+    out = pd.DataFrame({
         "level": g["level"].first(), "t_start_s": g["t_s"].first(),
         "t_end_s": g["t_s"].last(), "n_solves": g.size(),
         "d_pu": g["abs_v_eff"].max(), "has_cap": g["has_cap"].any(),
         "discrete": g["disc"].any(),
         "d_drift_pu": g["abs_v_eff_drift"].max().fillna(0.0),
     }).reset_index()
+    out["after_discrete"] = out.groupby("sgen")["discrete"].shift(1, fill_value=False)
+    return out
 
 
 def select_width(d_max: float) -> Dict[str, Any]:
@@ -348,7 +353,11 @@ def confirm_metrics(run_dir: Path, ref_dir: Path, warmup_s: float) -> Dict[str, 
     k = q.groupby("sgen")["anchor_pu"].diff().fillna(1.0).ne(0.0).astype(int) \
         .groupby(q["sgen"]).cumsum()
     hit = pd.Series([(t, s) in disc for t, s in zip(q["t_s"], q["solve"])], index=q.index)
-    in_disc = hit.groupby([q["sgen"], k]).transform("any").reindex(p.index)
+    iv = hit.groupby([q["sgen"], k]).any()
+    # The correction interval after a discrete step counts with the event.
+    iv = iv | iv.groupby(level=0).shift(1, fill_value=False)
+    in_disc = pd.Series(iv.reindex(list(zip(q["sgen"], k))).to_numpy(),
+                        index=q.index).reindex(p.index)
     out: Dict[str, Any] = {}
     for lev in ("TS", "STS"):
         m = p["level"] == lev
@@ -510,14 +519,17 @@ def main(argv=None) -> int:
         ex["startup"] = ex["t_start_s"] < warmup
         ex.to_csv(root / "d1" / "excursions.csv.gz", index=False)
         routine = ex[~ex.startup]
-        drift = routine.assign(d_pu=routine["d_drift_pu"])
-        # Drift-based rule (author decision 2026-10-27): the width covers the
+        drift = routine.assign(d_pu=routine["d_drift_pu"].where(~routine["after_discrete"]))
+        # Drift-based rule (author decisions 2026-10-27/28): the width covers the
         # routine excursions up to the first discrete event of each interval;
-        # the rule as first written (all routine intervals) is reported
-        # alongside.
+        # the converter's next interval, the correction of the step, counts with
+        # the event.  The rule as first written (all routine intervals) is
+        # reported alongside.
         sel = select_width(float(drift["d_pu"].max()))
-        sel["rule"] = ("drift: routine intervals without a discrete event "
-                       "(capability step > CAP_STEP_MVAR, OLTC or bank operation)")
+        sel["rule"] = ("drift: routine intervals up to a discrete event (capability "
+                       "step > CAP_STEP_MVAR, OLTC or bank operation); the "
+                       "correction interval after it counts with the event")
+        sel["n_correction_intervals"] = int((routine.after_discrete & ~routine.discrete).sum())
         sel["cap_step_mvar"] = CAP_STEP_MVAR
         sel["d_max_all_routine_pu"] = float(routine["d_pu"].max())
         sel["delta_rule_as_written_pu"] = select_width(sel["d_max_all_routine_pu"])["delta_star_pu"]

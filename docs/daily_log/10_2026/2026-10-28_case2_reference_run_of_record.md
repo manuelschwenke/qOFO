@@ -232,3 +232,22 @@ Smoke on e5power (`0001_*_run_mc_smoke`): 13 runs, all ok.
 
 **Figure** `case3_qerr` (`fig:case3:qerr`): realised minus reference per STS, O3 and S2.
 Added to Ch 11 and to the feeds of 0009.
+
+**Smoke tests on e5power (code 11023f6):**
+- `step/0001_*_run_step_smoke`: one short case per part on OP-H, 21 runs, all ok. It covers
+  the ramp windows, timed events with reversal, event rows and recovery; the sawtooth is
+  empty because the windows are shorter than one period.
+- `mc/0001_*_run_mc_smoke`: 13 runs, ok.
+
+**Launched 19:32 on e5power** as one detached queue
+(`launch_logs/20261028_193248_step_then_mc.cmd`):
+1. `run_step --jobs 30`: parts R → P → E, 1350 runs.
+2. then `run_mc --new --jobs 30`: 100 episodes × 6 variants plus 200 more for O3.
+
+At the 0009 rate this is ≈ 355 + 353 core-h. With 30 workers on 18 physical cores the wall time
+is unmeasured; expect the step tests to finish in the course of 29 Oct and the MC about a day
+later.
+
+**Thesis:** new section `ch:case3:step` in Chapter11.tex with the design, the OP table
+`tab:case3:step:ops` and [TBD] results; `fig:case3:qerr` added. Not committed: the thesis repo
+also holds another session's uncommitted Ch 9 files.

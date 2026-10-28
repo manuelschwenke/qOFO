@@ -169,3 +169,66 @@ in itself. A LuaLaTeX test build into the scratchpad compiled without errors.
 
 **Plan:** `docs/architecture/2026-10-28_case2_step_mc_plan.md`, a proposal for STEP-R (ramps),
 STEP-E (event battery), STEP-P (phase sweep) and the MC changes, with the open author decisions.
+
+## ~16:00: STEP and MC implemented (author: "implement the plan", recommended options)
+
+**Runner** (`experiments/helpers/profile_ramps.py`, wired in `multi_tso_dso.py` right after
+the profile frame is clipped; config fields `hold_profiles`, `profile_ramps`, inert by default):
+- `hold_profile_frame`: every row equals the `start_time` row. The zonal dispatch, computed
+  from the frame, is held with it.
+- `apply_profile_ramps`:
+  - `kind="bus"` adds a load row whose base is (P, Q) and whose profile column is the ramp
+    shape;
+  - `kind="ts_loads"` gives every TS load its own copy of its profile columns times
+    (1 + rel·shape); the STS buses are excluded by the runner from `meta.hv_networks`.
+- Exact at dt_s; reaches the plant through `apply_profiles`.
+- Tests: `tests/test_profile_ramps.py` (4).
+
+**OP picker** (`step/pick_ops.py` → `step/ops.json`):
+- yearly exogenous table from the Ch 7 characterisation (`crp.build`, `exogenous_year`);
+- the W1–W6 days excluded;
+- one candidate per day;
+- each candidate checked with L2, held profiles, 10 min.
+- **Finding:** every one of the 15 largest-export days with TS load ≤ P25 fails while the
+  runner initialises (power flow does not converge), under L2 and O3, held or not. These are
+  operating points without a solution in this model.
+  - OP-L is therefore the largest export that passes, found by bisection over the days with
+    export ≥ P75; the plan said P90.
+  - OP-H: 2016-04-13 09:30 (TS load 4866 MW, P100; STS net +616 MW).
+  - OP-M: 2016-11-01 19:30 (3877 MW, P50; STS +222 MW, P50).
+  - OP-L: 2016-12-29 00:00 (3617 MW, P25; STS export 1410 MW, P97), index 20 of 152 days.
+    Feasibility is not monotone in the export (04 Apr and 11 Dec fail between feasible
+    days), so OP-L is the boundary found by the bisection, not provably the largest.
+- **Ramp buses:** area 2 uses bus 11 (IEEE 12); areas 1 and 3 use the load bus with the
+  largest RMS ΔV of the area per +10 Mvar at OP-M: bus 27 (0.86 mpu/10 Mvar) and bus 22
+  (1.05). Bus 11 is also the most sensitive in area 2 (1.19).
+
+**STEP producer** (`step/run_step.py`, window metrics in `step/metrics_step.py`, 3 tests):
+- the parts R, P, E as in the plan;
+- phase 100 s of P comes from E;
+- one noise seed for all cases (20261028);
+- log.pkl, status.json and metrics.json per run;
+- a resumable 30-worker pool (max_tasks_per_child = 4, restart on a broken pool), with the
+  parts in the order R → P → E and the slowest variant first.
+
+| Part | Cases | Runs |
+|---|---|---|
+| R | 21 | 126 |
+| P | 60 | 180 |
+| E | 174 | 1044 |
+
+Estimate: ≈ 355 core-h at the 0009 rate.
+
+**MC** (`mc/run_mc.py`):
+- Case-2 registry;
+- all six variants, O3 on 300 episodes;
+- event phase per event on {20, …, 160} s from `default_rng([seed, 1])`. The declared start
+  times and event lists are unchanged: `tests/experiments/test_mc_draw.py` covers 40 seeds;
+- noise seed = episode seed;
+- `metrics_case2` metrics;
+- full log kept.
+
+Smoke on e5power (`0001_*_run_mc_smoke`): 13 runs, all ok.
+
+**Figure** `case3_qerr` (`fig:case3:qerr`): realised minus reference per STS, O3 and S2.
+Added to Ch 11 and to the feeds of 0009.

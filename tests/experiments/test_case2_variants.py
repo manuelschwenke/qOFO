@@ -53,9 +53,14 @@ def test_unknown_variant_is_refused():
         v.resolved("S9", 10)
 
 
-def test_m_is_registered_but_not_ready():
-    assert "M" in v.VARIANTS and "M" in v.NOT_READY
-    assert "M" not in v.WAVE_1
+def test_m_is_ready_and_has_the_cascade_timescale():
+    assert "M" in v.VARIANTS and "M" not in v.NOT_READY
+    m = v.resolved("M", 10)
+    n = m.central_ts_discrete_cooldown
+    # free again after the same time as a TS-OFO device: (1 + c) * T_TS
+    assert (1 + n) * m.dt_s == pytest.approx((1 + m.int_cooldown) * m.tso_period_s)
+    assert n == 53
+    assert m.central_lambda_rule == "continuous"
 
 
 def test_m_weights_the_sts_buses_like_the_sts_controllers():

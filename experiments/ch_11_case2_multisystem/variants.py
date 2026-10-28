@@ -36,15 +36,18 @@ O3   TS-OFO + interface set-points + STS-OFO         proposed cascade
 M    one OFO on the coupled model, every step        bound (not a rung)
 ==== ============================================== =====================
 
-``M`` weights the STS buses with the paramset's ``dso_g_v`` (the STS-OFOs'
-own weight), dispatches the banks through the same holding-time / mutual-
-exclusion / rank-1 machinery as the zones, and refuses to run if its loop gain
-``lambda_max`` reaches 2 (rebuilt 2026-10-27).  At the selected weights the
-single loop has lambda_max ~5.1, so M's whole ``g_w`` block is scaled by one
-factor to the selected design's loop gain ``lambda_max_B`` (paramset
-provenance; author decision 2026-10-27); the factor is printed and recorded
-(``central_gw_kappa``).  It stays in :data:`NOT_READY`
-until a smoke run has confirmed it.
+``M`` runs at the selected weights, unscaled, with the paramset's ``dso_g_v``
+on the STS buses, and dispatches the banks through the same holding-time /
+mutual-exclusion / rank-1 machinery as the zones.  Its transmission taps and
+banks keep the cascade's timescale: after a switch they are locked as long as
+in the cascade (:func:`ts_equivalent_cooldown`, 18 min), the banks' own
+30-min holding time on top.  The loop gain is checked over the continuous
+actuators (0.98 < 2), the discrete ones being rate-limited.  Adopted
+2026-10-28 (author) after the comparison of four tunings in
+``results/ch_11_case2_multisystem/ref/0007_*_m_tuning`` -- the earlier uniform
+scaling of all weights to the design's loop gain (kappa 2.42) slowed every
+continuous actuator to tame a mode the taps and banks of all areas create when
+they may move every 20 s, and left M worse than O3.
 
 Author: Manuel Schwenke / Claude Code (2026-10-27)
 """
@@ -80,31 +83,18 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
     # One MIQP over every actuator and measurement, fired every step: it
     # replaces the 20 s STS layer as well as the 180 s TS layer, so pinning it
     # to 180 s would make the "bound" nine times slower than the scheme it
-    # bounds (measured 2026-09-02, superseded ladder).
+    # bounds (measured 2026-09-02, superseded ladder).  The selected weights,
+    # unscaled; the transmission taps and banks keep the cascade's timescale
+    # (cooldown set in ``resolved``) and the loop gain is checked over the
+    # continuous actuators (author decision 2026-10-28, candidate "M_rate").
     "M": dict(control_scope="central", tso_mode="ofo", dso_mode="local",
               local_sensitivities_tso=False, local_sensitivities_dso=False,
-              central_period_s=None, **_O_STS_LABELS),
+              central_period_s=None, central_lambda_rule="continuous",
+              **_O_STS_LABELS),
 }
-
-# Candidate tunings of M under evaluation (2026-10-27): at the selected weights
-# M's loop gain is 3.55 counting every column, 3.00 under the Ch 9 rule and
-# 0.98 for the continuous actuators alone.  Not part of the 2x2 design.
-VARIANTS["M_ch9"] = dict(VARIANTS["M"], central_lambda_rule="ch9")
-VARIANTS["M_disc"] = dict(VARIANTS["M"], central_lambda_rule="ch9",
-                          central_kappa_scope="discrete")
-# The cascade's timescale for the transmission devices: int_cooldown TS
-# iterations of N_inner central steps each.
-VARIANTS["M_rate"] = dict(VARIANTS["M"], central_lambda_rule="continuous",
-                          central_ts_discrete_cooldown=5 * 9)
 
 #: Registered variants that must not enter a run of record yet.
-NOT_READY: Dict[str, str] = {
-    "M_ch9": "candidate tuning of M under evaluation (2026-10-27)",
-    "M_disc": "candidate tuning of M under evaluation (2026-10-27)",
-    "M_rate": "candidate tuning of M under evaluation (2026-10-27)",
-    "M": "central controller not repaired for the MIQP shunt banks and its STS "
-         "voltage weight is a default (plan Phase 1.6)",
-}
+NOT_READY: Dict[str, str] = {}
 
 #: First wave of the reference run (S2 and M join later on the same run).
 WAVE_1: List[str] = ["L2", "S1", "O2", "O3"]
@@ -128,7 +118,8 @@ STEP_ALLOWED: Dict[Tuple[str, str], set] = {
     # Information, not a rung: one controller, full model, every step.
     ("O3", "M"): {"control_scope", "dso_mode", "local_sensitivities_tso",
                   "local_sensitivities_dso", "central_period_s",
-                  "central_dso_g_v", "central_lambda_target"},
+                  "central_dso_g_v", "central_lambda_target",
+                  "central_lambda_rule", "central_ts_discrete_cooldown"},
 }
 
 
@@ -152,13 +143,35 @@ def resolved(name: str, minutes: int, events: Iterable[Any] = (),
                        f"valid: {sorted(VARIANTS)}")
     cfg = base_config(minutes, events, noise_seed)
     cfg = dataclasses.replace(cfg, **VARIANTS[name])
-    if name.startswith("M"):
+    if name == "M":
         # "At the same weights": M weights the STS buses as the STS-OFOs do
         # (the paramset's dso_g_v), not with the dataclass default 2e4, which
-        # was ~9x the selected value.
-        cfg = dataclasses.replace(cfg, central_dso_g_v=float(cfg.dso_g_v),
-                                  central_lambda_target=selected_lambda_max())
+        # was ~9x the selected value.  The target is a ceiling only: M's
+        # continuous loop gain (0.98) lies below it, so its weights stay as
+        # selected.
+        cfg = dataclasses.replace(
+            cfg, central_dso_g_v=float(cfg.dso_g_v),
+            central_lambda_target=selected_lambda_max(),
+            central_ts_discrete_cooldown=ts_equivalent_cooldown(cfg))
     return cfg
+
+
+def ts_equivalent_cooldown(cfg: MultiTSOConfig) -> int:
+    """Lock of a transmission tap or bank in M, in central steps, equal in
+    time to the cascade's.
+
+    A device that switches at controller iteration k is locked until
+    iteration ``k + 1 + int_cooldown`` (``BaseOFOController``).  The TS-OFO
+    iterates every ``tso_period_s``, so in the cascade it can move again
+    ``(1 + int_cooldown) * tso_period_s`` after the switch (18 min).  M
+    iterates every ``dt_s``; with its lock ``k + 1 + n`` the same time needs
+    ``n = (1 + int_cooldown) * tso_period_s / dt_s - 1`` (53).  The banks'
+    own holding time (``shunt_t_dwell_s``) applies in both on top.
+    """
+    ratio = float(cfg.tso_period_s) / float(cfg.dt_s)
+    if abs(ratio - round(ratio)) > 1e-9:
+        raise ValueError("tso_period_s must be a multiple of dt_s")
+    return int((1 + int(cfg.int_cooldown)) * round(ratio) - 1)
 
 
 def selected_lambda_max() -> float:

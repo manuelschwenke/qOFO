@@ -14,11 +14,16 @@ Plan of the campaign: `~/.claude/plans/i-now-want-to-composed-island.md`
 | `mc/` | `area1_pilot_weight.py` | `ch:case3:montecarlo` | diagnostic of the first slice |
 | `ladder/` | `variant_ladder.py`, `figures.py`, `preview.py`, `export_tikz_data.py`, `s1_pi_screen.py`, `s1_pi_candidates.py`, `ladder_mc.py` | — | **superseded** seven-rung design, see `ladder/README.md` |
 
-**M (central bound).** At the selected weights the single central loop has
-λ_max = 5.11 and does not contract; its whole `g_w` block is scaled by one
-factor κ to the selected design's `lambda_max_B` from the paramset provenance
-(κ = 3.615 → λ_max 1.414 with `ch9_selected_final_2026_10`; since the merge of 2026-10-27 the selected set is `ch9_selected_band_2026_10`, λ_max_B = 1.467). Author decision
-2026-10-27; κ is printed and recorded (`central_gw_kappa`).
+**M (central bound), adopted 2026-10-28 (author).** The selected weights,
+unscaled (dso_g_v on the STS buses); transmission taps and banks keep the
+cascade's timescale -- after a switch they are locked as long as in the
+cascade, (1 + int_cooldown) x T_TS = 18 min = 53 central steps
+(`variants.ts_equivalent_cooldown`), the banks' 30-min holding time on top; the
+loop gain is checked over the continuous actuators (0.98 < 2). Chosen from four
+tunings compared on scenario A (`results/ch_11_case2_multisystem/ref/0007_*_m_tuning`):
+uniform scaling of all weights (kappa 2.42, the version of 2026-10-27) left M
+worse than O3 (e_v 7.8 vs 6.8 mpu) and switching no bank; the rate-limited form
+(then with a 15.3-min lock) gave 6.25 mpu and kept every STS in its band.
 
 The paramset blocker of 2026-10-23 is resolved: `run_case1.PARAMSET` follows
 `SELECTED_PARAMSET`.

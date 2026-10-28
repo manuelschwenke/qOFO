@@ -112,6 +112,9 @@ EPS_U = 0.003
 # the band steps from +-0.1 S_n to 0.  Inside the 0.1-0.2 ramp the band moves
 # by far less than 1 Mvar per 10 s.
 CAP_STEP_MVAR = 1.0
+# Design margin in candidate steps above the rule's smallest admissible width
+# (author decision 2026-10-28: 0.0075 -> 0.010 pu).
+DESIGN_STEPS = 1
 SUPPRESSED = 1.0       # pu half-width no routine excursion reaches = droop off
 DT_S = 10.0
 D1_HOURS = 2.0
@@ -469,7 +472,7 @@ def main(argv=None) -> int:
               "events": {k: EVENTS[k] for k in events}, "windows": [w for w, _ in win],
               "measurement_noise": False, "tested_width_from_s": warmup,
               "d1_rule": "drift (routine intervals without a discrete event)",
-              "cap_step_mvar": CAP_STEP_MVAR,
+              "cap_step_mvar": CAP_STEP_MVAR, "design_margin_steps": DESIGN_STEPS,
               "stage1_from": args.stage1_from}
     with start_thesis_run(
             __file__, target=["ch:timescales:deadband"],
@@ -532,10 +535,25 @@ def main(argv=None) -> int:
         dt20 = excursions(pd.read_csv(root / "d1" / "dtcheck_W1_dt20" / "probe.csv.gz"))
         sel["dtcheck_W1_d_max_dt20_pu"] = float(dt20.loc[dt20.t_start_s >= warmup, "d_pu"].max())
         sel["dtcheck_W1_d_max_dt10_pu"] = float(routine.loc[routine.window == "W1", "d_pu"].max())
+        # Design value (author decision 2026-10-28): the rule gives the smallest
+        # admissible width; the design width is DESIGN_STEPS candidates wider,
+        # a declared margin for what the QSS traces do not contain (infeed
+        # fluctuations below the 15-min profile step, measurement noise) and
+        # the width at which Experiment B selected the weights.  The confirmation
+        # runs and D2 use the design width; its narrower neighbour is the rule's.
+        cands = sel["candidates"]
+        sel["delta_rule_pu"] = sel["delta_star_pu"]
+        i = cands.index(sel["delta_rule_pu"]) + DESIGN_STEPS
+        while i >= len(cands):
+            cands.append(round(cands[-1] + 0.005, 6))
+        sel["design_margin_steps"] = DESIGN_STEPS
+        sel["delta_design_pu"] = cands[i]
+        sel["delta_star_pu"] = sel["delta_design_pu"]      # what stage 2 tests
+        sel["narrower_pu"] = cands[i - 1]
         (root / "d1" / "selection.json").write_text(json.dumps(sel, indent=1), "utf-8")
         star, narrow = sel["delta_star_pu"], sel["narrower_pu"]
-        print(f"D1: d_max {sel['d_max_pu']:.5f} pu -> Delta* {star} pu "
-              f"(narrower {narrow})", flush=True)
+        print(f"D1: d_max {sel['d_max_pu']:.5f} pu -> rule {sel['delta_rule_pu']} pu, "
+              f"design {star} pu (narrower {narrow})", flush=True)
 
         # Stage 2: D1 confirmation and D2, one pool
         legs = {"star": star, "wide": round(2.0 * star, 6), "off": SUPPRESSED}

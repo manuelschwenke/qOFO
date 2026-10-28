@@ -127,5 +127,7 @@ the step tests (load step in one area, error of the other areas).
 - Thesis: paste `latex_header.tex` under `ch:case3:nominal`. Copy `figures/data/*.csv` to
   `graphics/Ch11/data/2026-10-28_case3_ref/`. Render the label numbers on e5wimi
   (`QOFO_THESIS_DIR`) and run `thesis_runs check`.
-- Discuss the O3 inter-dispatch withdrawal and the O3 DSO_4 band violation before any change.
+- O3 (author decision 2026-10-28): report as is in REF. Remedies are decided after the step
+  tests have measured them: a voltage-aware CAIR, and a dispatch-anchored interface droop
+  against the withdrawal. The S1/O2 ripples are reported as they are.
 - Plan the step tests (incl. load ramps) and the Monte-Carlo.

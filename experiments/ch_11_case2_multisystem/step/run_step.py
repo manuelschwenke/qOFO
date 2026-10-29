@@ -297,7 +297,10 @@ def simulate(out: Path, cases: List[Dict[str, Any]], parts: List[str], jobs: int
         if not todo:
             break
         try:
-            with ProcessPoolExecutor(max_workers=jobs, max_tasks_per_child=4) as pool:
+            # No max_tasks_per_child: on Python 3.12 the executor stops replacing
+            # recycled workers (the first campaign stalled after 30 x 4 = 120
+            # runs, 2026-10-28 21:07); the MC driver's pool runs without it too.
+            with ProcessPoolExecutor(max_workers=jobs) as pool:
                 futs = {pool.submit(run_one, c, n, str(out)): (c["case"], n) for c, n in todo}
                 for k, fut in enumerate(as_completed(futs), start=1):
                     st = fut.result()

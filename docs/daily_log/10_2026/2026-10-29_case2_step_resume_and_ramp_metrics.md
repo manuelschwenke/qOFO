@@ -46,3 +46,23 @@ sawtooth includes the ramp's own rise within a period.
 
 **Open:** S1/S2 in area 1 at OP-M/OP-L end 0–9 mpu worse than L2 after the ramp, and the pilot
 error does not explain it. To be analysed at bus level.
+
+## STEP complete, MC started (15:20)
+
+- **STEP:** `step/0002_2026-10-28_193301_run_step` complete: 1350 runs, 1297 ok, 53 not ok, all at
+  OP-H.
+  - Six OP-H outages (G3, G4, G6 trips; lines 0, 1, 13, 14) have no power-flow solution in the
+    step of the event for every variant including L2: an infeasible class, not a comparison.
+  - Exception: O3 survives the G6 trip at the event and fails later.
+  - Two OFO failures at the 54:00 dispatch: O2 after the G7 trip and O3 after the G6 trip,
+    after about 20 min of steady operation. Hypothesis: the first tap step after an 18-min
+    lock, at a point near the loss of the power-flow solution; to be checked by a replay.
+- **Quality check of the ok runs:**
+  - all have their metrics;
+  - the pre-event spread is ≤ 0.3 mpu;
+  - after the reversal the error is back within 0.1–0.9 mpu of the baseline (median);
+  - the phase sweep is monotone in the expected direction: O3 median growth 0.29 → 0.16 mpu
+    from 20 s to 160 s, S2 6.2 → 4.3, O2 ≈ 0.
+- **MC:** `mc/0002_2026-10-29_152212_run_mc` started at 15:22 with 30 workers.
+- **Copy to the share:** e5power has no tar.exe; the copy uses Python tarfile.
+- **Author:** evaluate STEP together with the MC (30 Oct).

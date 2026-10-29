@@ -283,7 +283,7 @@ def make_config() -> MultiTSOConfig:
     """
     return MultiTSOConfig(
         # -- horizon and cadence ---------------------------------------------
-        n_total_s=60.0 * 60 * 6,
+        n_total_s=60.0 * 60 * 10,
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
         dso_period_s=20.0,            # T_STS, fixed by Experiment A
         dt_s=20.0,
@@ -315,10 +315,10 @@ def make_config() -> MultiTSOConfig:
             ContingencyEvent(minute=180, element_type="gen",  element_index=2, action="restore"),
             ContingencyEvent(minute=120,  element_type="load", bus=11, p_mw=0,   q_mvar=250, action="connect"),
             ContingencyEvent(minute=330, element_type="load", bus=11, p_mw=0,   q_mvar=250, action="trip"),
-            ContingencyEvent(minute=150, element_type="load", bus=5, p_mw=150, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=400, element_type="load", bus=5, p_mw=150, q_mvar=100, action="trip"),
-            ContingencyEvent(minute=210, element_type="line", element_index=25, action="trip"),
-            ContingencyEvent(minute=300, element_type="line", element_index=25, action="restore"),
+            ContingencyEvent(minute=180, element_type="load", bus=5, p_mw=150, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=1000, element_type="load", bus=5, p_mw=150, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=300, element_type="line", element_index=25, action="trip"),
+            ContingencyEvent(minute=420, element_type="line", element_index=25, action="restore"),
         ],
     )
 
@@ -348,6 +348,7 @@ def main() -> None:
         SELECTED_PARAMSET,
     )
     cfg = apply_paramset(make_config(), SELECTED_PARAMSET)
+    cfg = dataclasses.replace(cfg, dso_gamma_oltc_q=1.0)  # TEST: couplers also track interface Q
     print(f"Controller weights: {SELECTED_PARAMSET}")
     run_dir = new_run_dir("run_multi_system_ofo", cfg)
     log = run_multi_tso_dso(cfg)

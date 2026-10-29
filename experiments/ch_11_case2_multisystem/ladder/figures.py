@@ -5,7 +5,8 @@ experiments/ch_11_case2_multisystem/ladder/figures.py
 (Was ``experiments/ch_10_case_study/ch_10_2_figures.py`` until 2026-10-23.
 Part of the superseded seven-rung ladder, see this folder's README.  Since
 then the default output is the run's own ``figures/`` folder, not the thesis:
-``graphics/Ch10`` no longer belongs to this design.)
+the old ladder folder (``graphics/archive/Ch10_ladder_2026-09-03`` in the
+thesis since 2026-10-29) no longer belongs to this design.)
 
 Figures and the single-run metrics table of the seven-rung ladder, from a
 ``variant_ladder`` run (default: the newest complete one).

@@ -66,3 +66,39 @@ error does not explain it. To be analysed at bus level.
 - **MC:** `mc/0002_2026-10-29_152212_run_mc` started at 15:22 with 30 workers.
 - **Copy to the share:** e5power has no tar.exe; the copy uses Python tarfile.
 - **Author:** evaluate STEP together with the MC (30 Oct).
+
+## ~21:00: all Case-2 runs were made with the superseded weights; rerun with c08b1d3d33ab
+
+**Finding:**
+- REF 0009, STEP 0002 and the running MC 0002 used `ch9_selected_band_2026_10` =
+  fde2e81af6b1 (λ_max_B 1.467).
+- The tuning session switched `SELECTED_PARAMSET` to `ch9_selected_band_2026_10_a1` =
+  c08b1d3d33ab (λ_max_B 1.414) on 28 Oct ~15:00 (`2026-10-28c_selected_set_c08b.md`, which lists
+  the Case-2 runs as stale).
+- case2/ref was branched before that.
+
+**Actions:**
+- **MC 0002 stopped** on e5power (only its own process tree; another account's PyCharm job
+  with 35 workers runs there too).
+- **Merge:** `minimal/thesis-core` merged into case2/ref (9c0864d), after committing another
+  session's renumbering edits of thesis graphics paths found uncommitted in this worktree
+  (c0f5ed0).
+  - Outside docs that branch changed Ch 9 analysis/producers, the parameter sets and
+    `_ch9_selected_design.py`; the runner, controllers and config are unchanged. So the Case-2
+    results change only through the weights.
+  - Resolved: PARAMSET `ch9_selected_band_2026_10_a1`, `selected_lambda_max` = 1.4136 (M's
+    ceiling); the guard passes; 43 Case-2 tests pass.
+- **Reruns on 9c0864d, 21:26:**
+  - e5power: `ref/0010_2026-10-29_212624_run_ref` (6 processes) and the MC (`mc/0003`, 30
+    workers);
+  - e5wimi (author: "run step on e5wimi direct, only ref and mc on e5power"): the STEP campaign
+    from a local clone `F:\qOFO_case2_step` (the share is ~3× slower), 20 workers (other
+    users load e5wimi at ~35 %), run dir
+    `F:\qOFO_case2_step\results\ch_11_case2_multisystem\step\0001_2026-10-29_212939_run_step`.
+    It is copied to the share when complete.
+  - A step job briefly started on e5power was stopped before any run. Its empty folder
+    `step/0003_2026-10-29_212633_run_step` there is to be marked aborted.
+- **Stale, to be archived as superseded once the reruns exist:** ref/0009 (share), step/0002
+  (share and e5power), mc/0002 (e5power, partial).
+- **Thesis:** Ch 11 (now Ch 10 after the renumbering) quotes 0009; its numbers and figures must
+  be redone from ref/0010.

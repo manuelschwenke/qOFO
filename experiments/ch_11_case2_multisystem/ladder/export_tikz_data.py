@@ -11,7 +11,7 @@ Export the seven-rung ladder time series as pgfplots ``.dat`` tables, for
 hand-authored TikZ figures.
 
 The thesis draws its own figures: this writes DATA only, never TikZ.  That is
-the house convention (see ``graphics/Ch9/data/``) and it is the right split --
+the house convention (see ``graphics/Ch8/data/``) and it is the right split --
 styling belongs with the document, numbers belong with the run that produced
 them.
 

@@ -26,8 +26,8 @@ width, Palatino, 7-8 pt):
 
 Each figure is written as PDF and PNG to ``<run>/figures/`` and its data as CSV
 to ``<run>/figures/data/``.  With ``--thesis <latex dir>`` the PDFs are also
-copied to ``graphics/Ch11/`` and the CSVs to
-``graphics/Ch11/data/<run date>_case3_ref/`` with a README naming the run.
+copied to ``graphics/Ch10/`` and the CSVs to
+``graphics/Ch10/data/<run date>_case3_ref/`` with a README naming the run.
 
 Palette: the validated four hues of the earlier Part-III figures: S1 red,
 O2 teal, O3 dark blue; S2 takes amber.  L2 and M stay grey/black and are
@@ -499,10 +499,10 @@ def make_figures(run: Path, thesis: Optional[Path] = None) -> List[str]:
 
 
 def _to_thesis(run: Path, out: Path, thesis: Path) -> None:
-    """PDFs to graphics/Ch11/, CSVs to graphics/Ch11/data/<date>_case3_ref/."""
+    """PDFs to graphics/Ch10/, CSVs to graphics/Ch10/data/<date>_case3_ref/."""
     man = json.loads((run / "run_manifest.json").read_text(encoding="utf-8"))
     date = run.name.split("_")[1]
-    gdir = thesis / "graphics" / "Ch11"
+    gdir = thesis / "graphics" / "Ch10"
     ddir = gdir / "data" / f"{date}_case3_ref"
     ddir.mkdir(parents=True, exist_ok=True)
     for stem in STEMS:
@@ -515,7 +515,7 @@ def _to_thesis(run: Path, out: Path, thesis: Path) -> None:
         f"- Run: `qOFO/results/ch_11_case2_multisystem/ref/{run.name}/`\n"
         f"- Code: qOFO {str(code.get('commit', ''))[:7]} on "
         f"{code.get('branch', '')}\n"
-        f"- Figures: `graphics/Ch11/{{{','.join(STEMS)}}}.pdf`, made by "
+        f"- Figures: `graphics/Ch10/{{{','.join(STEMS)}}}.pdf`, made by "
         f"`experiments/ch_11_case2_multisystem/ref/figures_ref.py`\n"
         f"- Files: one CSV per figure (time in min, errors in mpu, flows in "
         f"Mvar); `case3_summary_bars.csv` holds the bar values.\n",
@@ -524,8 +524,8 @@ def _to_thesis(run: Path, out: Path, thesis: Path) -> None:
         from experiments.thesis_runs import ThesisRun
         tr = ThesisRun.load(run)
         for stem in STEMS:
-            tr.record_export(f"graphics/Ch11/{stem}.pdf", __file__)
-        tr.record_export(f"graphics/Ch11/data/{ddir.name}/", __file__)
+            tr.record_export(f"graphics/Ch10/{stem}.pdf", __file__)
+        tr.record_export(f"graphics/Ch10/data/{ddir.name}/", __file__)
         tr.write()
     except Exception as exc:           # a copied folder without a manifest
         print(f"(exports not recorded: {exc})")
@@ -536,7 +536,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="run_ref run folder")
     ap.add_argument("--thesis", default=None,
-                    help="LaTeX root: copy PDFs and data into graphics/Ch11")
+                    help="LaTeX root: copy PDFs and data into graphics/Ch10")
     a = ap.parse_args()
     print("written:", make_figures(Path(a.run), a.thesis and Path(a.thesis)))
 

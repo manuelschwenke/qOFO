@@ -35,7 +35,7 @@ Outputs
 Run
 ---
     python -m experiments.ch_08_setup.reference_period.characterise_reference_period \
-        [--run-dir <Case-1 run>] --fig-dir <thesis>/graphics/setup
+        [--run-dir <Case-1 run>] --fig-dir <thesis>/graphics/Ch7
 
 Without ``--run-dir`` the L2 log of the newest complete ``run_case1`` run is
 read.  Without ``--out`` the tables go into a new documented run folder,

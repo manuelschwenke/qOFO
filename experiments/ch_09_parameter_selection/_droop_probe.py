@@ -57,8 +57,16 @@ class DroopProbePlant(PandapowerStaticPlant):
 
     def __init__(self, net: pp.pandapowerNet, *, start_time: datetime,
                  der_levels: Dict[int, str], watch_buses: Iterable[int] = (),
-                 **kwargs) -> None:
+                 width_after: Optional[tuple] = None, **kwargs) -> None:
+        """``width_after = (t_s, width_pu)`` sets the dead band of every Q(V)
+        converter to ``width_pu`` from the first step at or after ``t_s``.
+        :class:`QVLocalLoop` reads ``net.sgen.qv_deadband_pu`` at every
+        control step, so the change takes effect at that step's solve.  Used
+        to keep the start-up phase identical across runs that differ only in
+        the tested width (the controllers start from cold-start anchors)."""
         super().__init__(net, **kwargs)
+        self.width_after = width_after
+        self.width_switched_at_s: Optional[float] = None
         self.start_time = start_time
         self.der = [s for s in sorted(der_levels)
                     if str(net.sgen.at[s, "q_mode"]) == "qv"]
@@ -80,6 +88,10 @@ class DroopProbePlant(PandapowerStaticPlant):
         super().apply_exogenous(profiles, t)
         self.t_s = (t - self.start_time).total_seconds()
         self.solve = 0
+        if (self.width_after is not None and self.width_switched_at_s is None
+                and self.t_s >= self.width_after[0]):
+            self.net.sgen.loc[self.der, "qv_deadband_pu"] = float(self.width_after[1])
+            self.width_switched_at_s = self.t_s
 
     def advance(self, duration_s: float = 0.0) -> None:
         super().advance(duration_s)
@@ -146,9 +158,11 @@ class DroopProbeFactory:
     what is recorded.
     """
 
-    def __init__(self, config, watch_buses: Iterable[int] = ()) -> None:
+    def __init__(self, config, watch_buses: Iterable[int] = (),
+                 width_after: Optional[tuple] = None) -> None:
         self.config = config
         self.watch_buses = tuple(watch_buses)
+        self.width_after = width_after
         self.plant: Optional[DroopProbePlant] = None
 
     def __call__(self, net, *, meta, zone_map=None) -> DroopProbePlant:
@@ -156,7 +170,7 @@ class DroopProbeFactory:
         levels.update({int(s): "STS" for s in meta.dso_der_indices})
         self.plant = DroopProbePlant(
             net, start_time=self.config.start_time, der_levels=levels,
-            watch_buses=self.watch_buses,
+            watch_buses=self.watch_buses, width_after=self.width_after,
             distributed_slack=self.config.distributed_slack,
             enforce_q_lims=self.config.enforce_q_lims_plant)
         return self.plant

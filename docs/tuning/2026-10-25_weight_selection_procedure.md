@@ -1,5 +1,10 @@
 # Controller weight selection: the procedure (Ch 8, Experiment B)
 
+**Superseded 2026-10-28** by `2026-10-28_weight_selection_procedure.md`,
+which adds the STS coupler engagement bound to the filter (author decision
+2026-10-28). Run 0001 below is its development campaign; its Stage-II units
+are reused there.
+
 **Status:** FROZEN 2026-10-25 before its application. Applied once; its
 output is the weight set used in Part III, whatever it is. Execution:
 `results/ch_09_parameter_selection/0001_2026-10-25_215433_weight_selection_driver_band/` (`driver.py`,

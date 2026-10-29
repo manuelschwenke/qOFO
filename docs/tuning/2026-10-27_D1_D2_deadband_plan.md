@@ -145,3 +145,14 @@ instants: "identical" means |ΔU| ≤ 1e-6 pu at every converter bus and
 |ΔQ| ≤ 1e-3 Mvar for every converter. The selection uses the rule of the
 thesis (all converters, all six windows); the maximum over converters with
 non-zero capability is reported alongside it.
+
+## 7. Revision after run 0005 (author decision, 2026-10-27 evening)
+
+| # | Decision | By |
+|---|---|---|
+| 7 | D1 excludes discrete events from the routine maximum. These are converter capability steps (> 1 Mvar between solves, the P/S_n = 0.1 threshold) and OLTC or bank operations. In an interval that contains one, only the solves before it count as drift. | author ("exclude the discrete events and choose 0.0075 or 0.01") |
+| 8 | ε_U = 0.003 pu: the HV voltage-measurement chain of the project's noise model (VT 0.2 % + meter 0.1 %). Was 0.001 pu, the EHV transformer alone. | Claude, within the author's 0.0075–0.010 |
+
+Result (run 0006): drift max 0.00359 pu, so Δ\* = 0.0075 pu (narrower
+0.005; D2 legs 0.0075 / 0.015 / off). The rule as first written gives
+0.020 pu and is reported alongside.

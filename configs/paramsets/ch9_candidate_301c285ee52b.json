@@ -1,0 +1,58 @@
+{
+  "name": "ch9_candidate_301c285ee52b",
+  "title": "PROVISIONAL: rank 1 of procedure 2026-10-28 (candidate 301c285ee52b), settling check pending",
+  "description": [
+    "Provisional parameter set for test runs (author request 2026-10-28), written before the settling check of run 0008 finished.",
+    "Weights of candidate 301c285ee52b, evaluated in run 0001 (Stage II-b round 4), rank 1 of docs/tuning/2026-10-28_weight_selection_procedure.md (run 0008).",
+    "If 301c285ee52b passes the settling requirement, run 0008 writes the same fields as ch9_selected_band_2026_10_a1, which replaces this set as SELECTED_PARAMSET. If it fails, the result is c08b1d3d33ab and this set is withdrawn.",
+    "Not a result of record: do not cite runs made with this set in the thesis."
+  ],
+  "provenance": {
+    "candidate_file": "results/ch_09_parameter_selection/0001_2026-10-25_215433_weight_selection_driver_band/selection/union_2b_round4/cand_301c285ee52b.json",
+    "procedure": "docs/tuning/2026-10-28_weight_selection_procedure.md",
+    "run": "results/ch_09_parameter_selection/0008_2026-10-28_103321_ch_9_3_amendment1",
+    "rank": 1,
+    "theta_sts_min_pu": 0.01469444492292524,
+    "lambda_max_B": 1.3450070096907307,
+    "aggregate_ranked_windows_per_bus": {
+      "e_v_ts": 0.004563086890874374,
+      "e_v_ds": 0.008605737013997692,
+      "e_q": 247922.71833729168,
+      "worst_tap_ops_per_day_tso": 4.001852709587773,
+      "worst_tap_ops_per_day_dso": 4.001852709587773,
+      "worst_tap_rev_per_day_tso": 2.0009263547938865,
+      "worst_tap_rev_per_day_dso": 0.0,
+      "worst_avr_max_step_pu": 0.0024989506608923406,
+      "worst_v_band_excess_ts": 1.2304899266672804e-05,
+      "worst_v_band_excess_ds": 0.00933896927133071,
+      "n_hunting": 0.0,
+      "n_hunting_1h": 0.0,
+      "n_event_explained": 2.0,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "worst_v_worst_ts": 0.018412298803261572,
+      "worst_v_worst_ds": 0.04711585783969472,
+      "pf_failures": 0.0,
+      "n_failed_windows": 0,
+      "has_shunt_wear": 1.0,
+      "worst_shunt_ops_per_day_bank": 0.0,
+      "n_shunt_hunting": 0.0,
+      "n_shunt_event_explained": 0.0,
+      "shunt_commits": 0.0
+    },
+    "settling": "pending (run 0008 expC)",
+    "weight_fingerprint": "301c285ee52b"
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.4877623613841154,
+    "dso_g_v": 3059.1692177682767,
+    "g_w_der": 0.00816430422976588,
+    "g_w_pcc": 0.20472160605404224,
+    "g_w_gen": 1008315.4317186836,
+    "g_w_tso_oltc": 25.03458925369715,
+    "g_w_tso_shunt": 39.24088049908403,
+    "g_w_dso_der": 4.767344866453713,
+    "g_w_dso_oltc": 4.987283366264792
+  }
+}

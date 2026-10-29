@@ -283,7 +283,7 @@ def make_config() -> MultiTSOConfig:
     """
     return MultiTSOConfig(
         # -- horizon and cadence ---------------------------------------------
-        n_total_s=60.0 * 60 * 6,
+        n_total_s=60.0 * 60 * 10,
         tso_period_s=60.0 * 3,        # TS-OFO every 3 min
         dso_period_s=20.0,            # T_STS, fixed by Experiment A
         dt_s=20.0,
@@ -315,10 +315,10 @@ def make_config() -> MultiTSOConfig:
             ContingencyEvent(minute=180, element_type="gen",  element_index=2, action="restore"),
             ContingencyEvent(minute=120,  element_type="load", bus=11, p_mw=0,   q_mvar=250, action="connect"),
             ContingencyEvent(minute=330, element_type="load", bus=11, p_mw=0,   q_mvar=250, action="trip"),
-            ContingencyEvent(minute=150, element_type="load", bus=5, p_mw=150, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=400, element_type="load", bus=5, p_mw=150, q_mvar=100, action="trip"),
-            ContingencyEvent(minute=210, element_type="line", element_index=25, action="trip"),
-            ContingencyEvent(minute=300, element_type="line", element_index=25, action="restore"),
+            ContingencyEvent(minute=180, element_type="load", bus=5, p_mw=150, q_mvar=100, action="connect"),
+            ContingencyEvent(minute=1000, element_type="load", bus=5, p_mw=150, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=300, element_type="line", element_index=25, action="trip"),
+            ContingencyEvent(minute=420, element_type="line", element_index=25, action="restore"),
         ],
     )
 
@@ -340,16 +340,16 @@ def main() -> None:
     :func:`main_comparison` is the coordinated-vs-uncoordinated study and
     builds its own paired config; call it directly.
     """
-    # 2026-10-20 (author decision): back to the chapter's controller identity,
-    # now the re-run Experiment B result ch9_selected_10_2026
-    # (docs/tuning/2026-10-16_protocol_experiment_B_rerun.md).  The hand-set
-    # variants used here 2026-10-14..19 ("ch9_selected_shunt_gw006",
-    # "ch9_selected_pcc27", "ch9_selected_pcc27_gqceil",
-    # "ch9_selected_pcc27_gqceil_comp_q_off") remain as parameter sets.
+    # The chapter's controller identity: SELECTED_PARAMSET, since 2026-10-28
+    # ch9_selected_band_2026_10_a1 = c08b1d3d33ab (weight-selection procedure
+    # 2026-10-28 with the STS engagement bound).  Earlier sets remain as
+    # parameter sets and can be applied here by name instead.
     from experiments.ch_09_parameter_selection._ch9_selected_design import (
         SELECTED_PARAMSET,
     )
     cfg = apply_paramset(make_config(), SELECTED_PARAMSET)
+    cfg = dataclasses.replace(cfg, dso_gamma_oltc_q=1.0)  # TEST: couplers also track interface Q
+    print(f"Controller weights: {SELECTED_PARAMSET}")
     run_dir = new_run_dir("run_multi_system_ofo", cfg)
     log = run_multi_tso_dso(cfg)
     with (run_dir.root / "records.pkl").open("wb") as handle:

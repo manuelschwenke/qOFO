@@ -1,0 +1,171 @@
+% =====================================================================
+% DRAFT for Chapters/Chapter07.tex (label ch:setup), dissertation repo.
+%
+% WRITTEN 2026-10-29. Fills the gap identified on that date: the thesis
+% states that imbalances are shared in proportion to machine rating
+% (ch:setup:multi, ch:setup:multi:dynamic) but never says how the
+% scheduled active power of each machine is determined, and never gives
+% the voltage-dependent load model as equations. Neither is derivable
+% from the text as it stands; a reader would assume the published
+% IEEE 39 base-case dispatch, which the builder overwrites in full.
+%
+% PLACEMENT: as a new \subsection of \cref{ch:setup:benchmarks},
+% inserted AFTER the IEEE 39 subsection (ch:setup:multi, i.e. after the
+% paragraph anchored at ch:setup:multi:configs) and BEFORE
+% \subsection{Dynamic Model of the IEEE 39 Benchmark}
+% (ch:setup:multi:dynamic).  That order matters: the dynamic subsection's
+% post-outage paragraph and the reference period of
+% \cref{ch:setup:scenarios:reference} both refer back to the sharing law
+% stated here.
+%
+% NOTATION: uses the post-2026-10-28 convention (N1--N21): \Wirkleistung,
+% \Blindleistung, \Spannung for MW / Mvar / p.u.-on-system-base
+% quantities; lower-case \wirkleistung, \blindleistung, \spannung only in
+% p.u. of a device rating (capability diagrams of \cref{ch3}).  Machine
+% nameplate written as $S_{\mathrm{n},i}$, as in \cref{ch:setup:multi}.
+%
+% SOURCE OF TRUTH for every statement below (repo qOFO, branch
+% minimal/thesis-core, 2026-10-29):
+%   network/ieee39/zonal_balancing.py   compute_zonal_gen_dispatch()
+%   network/ieee39/build.py:171-183     slack_weight = sn_mva
+%   network/ieee39/load_model.py        apply_zip_load_model()
+%   network/ieee39/constants.py         LOAD_CONST_FRACTION, PROFILE_MAX,
+%                                       DSO_Q_PROFILE_BASE_MVAR, GEN_NAMEPLATE
+%   network/ieee39/hv_networks.py:224-292  STS load rows
+%   core/actuator_bounds.py:190         compute_generator_q_limits()
+%   experiments/runners/multi_tso_dso.py:1833-1846, 3378-3381
+%   configs/config.py:1155, 1205, 1216, 1293
+% VERIFIED against graphics/setup/reference_period_pf.csv: the law below
+% reproduces ne_P = 1240.0 MW at t=0 and trip_gen_P = 562.4 MW at
+% t = 29.3 min exactly (see the daily log of 2026-10-29).
+% =====================================================================
+
+% ########################################################################
+\subsection{Load Model, Time Series, and Active-Power Schedule} \label{ch:setup:operation}
+% ########################################################################
+The benchmark of \cref{ch:setup:multi} fixes the network; this subsection fixes how it is operated.
+Three conventions are needed before any closed-loop result can be reproduced: the voltage dependence of the loads, the time series that drive load and infeed, and the rule that assigns an active power to each synchronous machine.
+None of them is a contribution of this work.
+\Cref{ch1:sec:scope:dispatch} places active-power dispatch outside the scope, so the schedule below is a declared boundary condition: it must be reproducible and plausible, not economically optimal.
+
+\paragraph{Voltage-dependent load model.}
+Every load of the quasi-steady-state plant, at both voltage levels, is an exponential load anchored at a reference voltage $\Spannung_{\mathrm{a}} = \qty{1.03}{\perunit}$,
+\begin{equation}
+	\Wirkleistung_{l}(t,\Spannung) = \Wirkleistung_{l}^{0}\,\lambda_{\mathrm{p}(l)}(t)\left(\frac{\Spannung}{\Spannung_{\mathrm{a}}}\right)^{\kappa_{\mathrm{p}}},
+	\qquad
+	\Blindleistung_{l}(t,\Spannung) = \Blindleistung_{l}^{0}\,\lambda_{\mathrm{q}(l)}(t)\left(\frac{\Spannung}{\Spannung_{\mathrm{a}}}\right)^{\kappa_{\mathrm{q}}},
+	\label{eq:setup:zip}
+\end{equation}
+with exponents $\kappa_{\mathrm{p}} = 1$ and $\kappa_{\mathrm{q}} = 2$, nominal powers $\Wirkleistung_{l}^{0}$, $\Blindleistung_{l}^{0}$ and the profile value $\lambda_{\pi}(t)$ of \cref{eq:setup:profile_split} below.
+The anchor is a modelling convention, not a physical property: the profile series are voltage-agnostic power scalings, and $\Spannung_{\mathrm{a}}$ only fixes the voltage at which the profile value is served exactly.
+It is set to the network voltage setpoint so that the power balance at the initial operating point is the profile balance.
+The same exponents are imposed on the \gls{RMS} model of \cref{ch:setup:multi:dynamic}, which is what makes the parity between the two plants a statement about dynamics rather than about load representation.
+The loads carry no recovery dynamics, a limitation returned to in \cref{ch:conclusions:limitations}.
+Two deliberate exceptions: the reactive load steps of \cref{ch:setup:scenarios:n1} stay constant-power, because they are specified disturbance magnitudes and not physical demand, and the auxiliary buses of \cref{tab:app:dso:buses} exist only to keep a co-located generator from corrupting the load composition of its bus.
+
+\paragraph{Time series.}
+Load and infeed follow measured \SI{15}{\minute} profiles of the SimBench dataset \cite{meinecke.2020} over the calendar year \num{2016}, linearly interpolated to the simulation step.
+Transmission loads carry the \gls{HV} profile of their area, \texttt{HS4} in areas~1 and~2 and \texttt{HS5} in area~3; sub-transmission loads carry a measured rural profile, wind parks the profiles \texttt{WP7} and \texttt{WP10}, and photovoltaic plants \texttt{PV3}.
+Each profile-driven load row is split into a constant and a profile-driven share, as stated in \cref{ch:setup:multi},
+\begin{equation}
+	\Wirkleistung_{l}^{0}(t) = \Wirkleistung_{l}^{\mathrm{ref}}\left[c + (1-c)\,\frac{\lambda_{\pi}(t)}{\lambda_{\pi}^{\max}}\right],
+	\qquad c = \num{0.4},
+	\label{eq:setup:profile_split}
+\end{equation}
+normalised to the annual maximum $\lambda_{\pi}^{\max}$ of the profile, so that the reference load is recovered at the annual peak and the constant share is the asymptotic floor of the affine law.
+Sub-transmission active loads follow the same law, distributed over the ten buses with the \numrange{1}{2} weighting of \cref{ch:setup:multi:hv}; their reactive demand, by contrast, has no constant share and follows its profile directly from an aggregate base of \qty{500}{\MVar} per area.
+That profile is negative in \SI{85}{\percent} of the year, so the aggregated \gls{HV}/\gls{MV} substations are capacitive most of the time, with a per-area reactive exchange between about \qty{-70}{\MVar} and \qty{+172}{\MVar}.
+This is a material boundary condition for every interface result of \cref{pt:CaseStudies} and is the reason the interface reactive flow of \cref{fig:dso:annual:pq} reverses sign over the operating range.
+
+\paragraph{Active-power schedule.}
+Reactive power is never scheduled: machines are voltage-controlling buses whose reactive output is the dependent injection of \cref{ch3:sec3:gen}, and \gls{IBG} reactive power is the output of the control layer.
+Active power is scheduled open-loop, per control area and per time step, from the profiles alone.
+Let $\mathcal{L}_{a}$ and $\mathcal{E}_{a}$ be the loads and the exogenous injectors --- wind and photovoltaic plants --- of area $a$, where both sets include the buses of the \glspl{STS} attached to that area, and let $\mathcal{G}_{a}$ be its dispatchable synchronous machines.
+The area residual is
+\begin{equation}
+	R_{a}(t) = \sum_{l \in \mathcal{L}_{a}} \Wirkleistung_{l}^{0}(t) - \sum_{m \in \mathcal{E}_{a}} \Wirkleistung_{m}^{\mathrm{ref}}\,\lambda_{\pi(m)}(t),
+	\label{eq:setup:residual}
+\end{equation}
+and each machine covers a share of it in proportion to its nameplate rating,
+\begin{equation}
+	\Wirkleistung_{i}(t) = \min\!\left\{\,R_{a}(t)\,\frac{S_{\mathrm{n},i}}{\sum_{j \in \mathcal{G}_{a}} S_{\mathrm{n},j}},\;\; \alpha\,S_{\mathrm{n},i}\right\},
+	\qquad \alpha = \num{0.85},
+	\label{eq:setup:dispatch}
+\end{equation}
+bounded below by zero, so that no technical minimum is imposed.
+The cap $\alpha$ keeps every machine inside its capability diagram with usable reactive range: at $\wirkleistung = \alpha$ the stator limit \cref{eq:gen_stator_limit} still admits $\blindleistung \approx \num{0.53}$.
+Where the clipping in \cref{eq:setup:dispatch} leaves an area residual uncovered, it is redistributed in proportion to the remaining headroom $\alpha S_{\mathrm{n},i} - \Wirkleistung_{i}$, first inside the area and then, if the area as a whole is capped, across all machines of the system.
+The remainder --- the network losses, and any residual beyond $\sum_{i} \alpha S_{\mathrm{n},i}$ --- falls to the distributed slack of \cref{eq:setup:sharing}.
+
+Three consequences carry into the results and are properties of the benchmark, not of the controllers.
+The machines are distributed very unevenly over the areas, with \num{12000}, \num{800} and \qty{1500}{\MVA} of dispatchable rating in areas~1 to~3; area~1 holds the \qty{10000}{\MVA} equivalent, which therefore covers about \SI{83}{\percent} of its area residual and, in addition, the losses and the system-wide remainder.
+Area~2 faces three exporting \glspl{STS} with a single \qty{800}{\MVA} machine, so its residual is small and its machine lightly loaded, which leaves that machine a wide reactive range.
+And because \cref{eq:setup:dispatch} is proportional to rating rather than to marginal cost, the schedule is not a merit-order dispatch and no result of \cref{pt:CaseStudies} may be read as a statement about unit commitment.
+What the schedule does guarantee is the property the reactive-power study needs: each area covers its own active residual, so the interface and tie-line flows are set by the area's own load and infeed rather than by an arbitrary allocation.
+
+\paragraph{Imbalance sharing after a disturbance.}
+The quasi-steady-state plant has no frequency variable, and the two mechanisms that answer a disturbance must be distinguished.
+A change that enters through the profiles --- including a scripted active load ramp --- is answered by re-solving \crefrange{eq:setup:residual}{eq:setup:dispatch} at the next step, that is, by a new schedule.
+A contingency is not: generator and line outages and the reactive load steps of \cref{ch:setup:scenarios:n1} never enter the profile frame, so the schedule is untouched and the entire imbalance $\Delta\Wirkleistung$ is taken up by the distributed slack, in proportion to the rating of the machines still in service,
+\begin{equation}
+	\Delta\Wirkleistung_{i} = \Delta\Wirkleistung \,\frac{S_{\mathrm{n},i}}{\sum_{j \,\in\, \text{in service}} S_{\mathrm{n},j}}.
+	\label{eq:setup:sharing}
+\end{equation}
+\Cref{eq:setup:sharing} is the settled outcome of primary frequency control, and the conditions for that identity are visible in the comparison: a governor with per-unit droop $R_{i}$ shares a disturbance as $\Delta\Wirkleistung_{i} = -(\Delta f / R_{i})\,S_{\mathrm{n},i}$, which reduces to \cref{eq:setup:sharing} if and only if every machine has the same per-unit droop, no governor reaches a limit, the load does not depend on frequency, and no secondary control acts.
+The quasi-steady-state plant then reproduces the sharing exactly but at $\Delta f = 0$, and neglects the settled frequency deviation
+\begin{equation}
+	\frac{\Delta f}{f_{\mathrm{n}}} = -R\,\frac{\Delta\Wirkleistung}{\sum_{j} S_{\mathrm{n},j}}
+	\label{eq:setup:df}
+\end{equation}
+that the dynamic model exhibits.
+\Cref{ch:setup:multi:dynamic} checks this representation against the \gls{RMS} model at the operating point after a generator outage, where it matters most, because every post-contingency dispatch of \cref{pt:CaseStudies} starts there.
+
+% =====================================================================
+% AMENDMENTS NEEDED ELSEWHERE, once this subsection is inserted
+% (2026-10-29; all in the dissertation repo, against origin/main):
+%
+% 1. Appendices/AppendixB_Benchmarks.tex, IEEE 39 multi-TSO section:
+%    "each machine carries a reactive-power envelope of $\pm 0.5\,S_{\mathrm{n}}$"
+%    is accurate about the plant data but incomplete and reads as if the
+%    envelope were rectangular.  It is the box that the power flow
+%    enforces; the CONTROLLER bounds generator reactive power with the
+%    P- and V-dependent capability diagram of \cref{ch3:sec3:gen}
+%    (stator, rotor and under-excitation limits, re-evaluated at the
+%    measured operating point once per iteration,
+%    core/actuator_bounds.py:compute_generator_q_limits).  The two agree
+%    at the dispatch cap by construction -- at p = 0.85 the stator circle
+%    gives q = 0.527 -- and the box is conservative below it.  Suggested
+%    clause: "... a reactive-power envelope of $\pm 0.5\,S_{\mathrm{n}}$ in
+%    the power flow, which is the stator limit at the dispatch cap
+%    $\alpha S_{\mathrm{n}}$ of \cref{eq:setup:dispatch}; the controllers
+%    bound the machines with the operating-point-dependent capability
+%    diagram of \cref{ch3:sec3:gen} instead."
+%
+% 2. Chapters/Chapter07.tex, ch:setup:multi, the "Six modifications"
+%    paragraph: after "... a weight proportional to its rating", add
+%    "(\cref{eq:setup:sharing})" so the clause points at the law instead
+%    of standing alone.
+%
+% 3. Chapters/Chapter07.tex, ch:setup:multi:dynamic: the sentence "A change
+%    in active-power balance ... is distributed over the in-service
+%    synchronous machines in proportion to their rating" now duplicates
+%    \cref{eq:setup:sharing}.  Replace with a pointer and keep only the
+%    four conditions, or delete the four conditions here and keep the
+%    pointer -- they must not be stated twice.
+%
+% 4. Chapters/Chapter07.tex, ch:setup:scenarios:reference: "as stated in
+%    \cref{ch:setup:multi}" should become "\cref{eq:setup:sharing}".
+%
+% 5. The settled frequency deviation row of tab:setup:multi:outage is
+%    [TBD].  \Cref{eq:setup:df} predicts, for the G 04 outage of the
+%    reference period ($\Delta P = \qty{562.4}{\MW}$,
+%    $\sum S_{\mathrm{n}} = \qty{13500}{\MVA}$, R = 4 %, f_n = 60 Hz),
+%    $\Delta f = \qty{-0.100}{\hertz}$, or -0.098 Hz once the 13.4 MW
+%    loss reduction is netted out.  A materially smaller measured value
+%    locates load frequency dependence (k_pf, never documented); a larger
+%    one locates a governor at its limit.
+%
+% 6. CHECK before inserting: \cref{eq:gen_stator_limit} and
+%    \cref{ch:conclusions:limitations} must exist under those labels in
+%    the current build; both were present on origin/main at 5054ae2.
+% =====================================================================

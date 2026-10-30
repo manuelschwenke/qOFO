@@ -26,7 +26,9 @@ NOTE = ("Weekend 2026-10-30: harmonised limits (AVR [0.95, 1.05] pu, TS taps "
         "15 min, couplers 120 s, local TS tap relays 1.03 +/- 0.01 pu and local "
         "bank rule in LOC/SVR/SVR+), weights c08b1d3d33ab")
 ENV = dict(os.environ, PYTHONUTF8="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
-           OPENBLAS_NUM_THREADS="1", PYTHONPATH=str(ROOT))
+           OPENBLAS_NUM_THREADS="1", PYTHONPATH=str(ROOT),
+           # the run records read git; the worktree's git dir is on a share
+           GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="safe.directory", GIT_CONFIG_VALUE_0="*")
 
 
 def log(msg):

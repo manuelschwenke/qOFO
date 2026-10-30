@@ -364,7 +364,11 @@ class MultiTSOIterationRecord:
     against: an isolated one-level step lowers the objective iff
     ``|g_H · q_step| > g_w_tso_shunt``."""
     shunt_commits: List[Dict[str, Any]] = field(default_factory=list)
-    """Committed bank, direction, new level and interface contribution."""
+    """Committed bank, direction, new level and interface contribution
+    (``zone='local'`` for a commit of the local bank rule, 2026-10-30)."""
+    local_tap_moves: List[Dict[str, Any]] = field(default_factory=list)
+    """Tap moves of the local TS tap relays (``trafo_idx``, ``direction``,
+    ``new_pos``; :mod:`controller.local_rules`, 2026-10-30)."""
 
     # Per-HV-group line loading stats and balance aggregates.
     dso_group_i_max_pct:    Dict[str, float] = field(default_factory=dict)

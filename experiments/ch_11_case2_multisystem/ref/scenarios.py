@@ -19,8 +19,8 @@ next dispatch.
 
 Element indices (pandapower, from ``run_mc.enumerate_elements`` and the fixed
 zone partition): machines G4 = 2 (area 3), G3 = 1 (area 2); lines 25 = 17-27
-(tie, areas 1/3), 7 = 4-14 (area 2); load buses 11 = IEEE 12, 7 = IEEE 8
-(area 2).
+(tie, areas 1/3), 7 = 4-14 (area 2); load buses 11 = IEEE 12, 7 = IEEE 8,
+3 = IEEE 4 (area 2).
 
 Author: Manuel Schwenke / Claude Code (2026-10-27)
 """
@@ -68,6 +68,14 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
         title="area-2 stress: G3 out, line 4-14 out, 250 Mvar at bus 8",
         events=lambda: [_gen(1, _at(30, 40)), _line(7, _at(120, 100)),
                         _load(7, 250.0, _at(210, 140))]),
+    # Declared 2026-10-30 before any run (docs/analysis/
+    # 2026-10-30_scenarios_B_D_declaration.md): B with the load moved by the
+    # location rule to IEEE 4 (load bus 3) -- no MSC, no TS tap at the bus,
+    # area 2's machine out.  Reported together with B, whatever the outcome.
+    "D": dict(
+        title="area-2 Q-scarce, rule bus: G3 out, line 4-14 out, 250 Mvar at bus 4",
+        events=lambda: [_gen(1, _at(30, 40)), _line(7, _at(120, 100)),
+                        _load(3, 250.0, _at(210, 140))]),
     "C": dict(
         title="G3 out (area 2), 250 Mvar at bus 12 (area 2), tie 17-27 out",
         events=lambda: [_gen(1, _at(30, 40)), _load(11, 250.0, _at(120, 100)),

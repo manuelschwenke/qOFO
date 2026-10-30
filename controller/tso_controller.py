@@ -141,7 +141,7 @@ class TSOControllerConfig:
     gen_indices: List[int] = field(default_factory=list)
     gen_bus_indices: List[int] = field(default_factory=list)
     gen_vm_min_pu: float = 0.95
-    gen_vm_max_pu: float = 1.07
+    gen_vm_max_pu: float = 1.05  # 1.07 -> 1.05 on 2026-10-30 (harmonised with SVR)
 
     non_dispatchable_gen_indices: Set[int] = field(default_factory=set)
     """``net.gen`` indices whose AVR setpoint the controller must NOT move.

@@ -1240,7 +1240,9 @@ def _run_multi_tso_dso_impl(
             g_u=np.zeros_like(gw_diag),
             alpha=1.0,  # Q_cor mode does not use command relaxation
             int_max_step=config.int_max_step,
-            int_cooldown=config.int_cooldown,
+            # The TS layer has its own lock (15 min since 2026-10-30).
+            int_cooldown=(config.int_cooldown if config.tso_int_cooldown is None
+                          else config.tso_int_cooldown),
             int_cooldown_s=config.ofo_oltc_cooldown_s,  # 0 = off since 2026-10-14
             adapt_g_w_classes=config.tso_adapt_g_w_classes(),
             g_w_adapt_meta=config.make_g_w_adapt_meta(),
@@ -1276,6 +1278,8 @@ def _run_multi_tso_dso_impl(
             non_dispatchable_gen_indices=_non_dispatchable_gens,
             gen_oltc_map=_gen_oltc_map,
             enable_saturation_mode=config.enable_avr_saturation_mode,
+            gen_vm_min_pu=config.gen_vm_min_pu,
+            gen_vm_max_pu=config.gen_vm_max_pu,
             g_q_tso=config.tso_g_q_pcc,
             pcc_capability_on_output=config.tso_pcc_capability_on_output,
             g_res_sg=_zone_scalar(config.zone_tso_g_res_sg, z, config.tso_g_res_sg),
@@ -1772,6 +1776,8 @@ def _run_multi_tso_dso_impl(
             g_v=config.g_v,
             gen_indices=c_gen_indices,
             gen_bus_indices=c_gen_buses,
+            gen_vm_min_pu=config.gen_vm_min_pu,
+            gen_vm_max_pu=config.gen_vm_max_pu,
             g_q_tso=0.0,
             qv_slope_pu=config.tso_qv_slope_pu,
             oltc_trafo3w_indices=c_oltc3w,
@@ -3154,6 +3160,70 @@ def _run_multi_tso_dso_impl(
     )
     _oltc_limiter_active = _oltc_local_active and _oltc_limiter.active
 
+    # ── Local rules for the discrete TS devices no MIQP dispatches ───────
+    # Author decision 2026-10-30: under LOC, SVR and SVR+ (and in Case 1
+    # wherever the TS taps or the banks stay outside the MIQP) the TS taps
+    # hold their HV side at 1.03 +/- 0.01 pu like the coupler relays, and the
+    # banks follow the local rule of ``shunt_dispatch='local'``.  Same
+    # holding times as the MIQP variants (15 min TS taps, 30 min banks).
+    # Explicit one-step rules, not DiscreteTapControl: see
+    # :mod:`controller.local_rules` for the divergence that rules out the
+    # latter on machine transformers under SVR.  The slack machine's
+    # transformer stays held, as it is excluded from the MIQP too.
+    from controller.local_rules import BankRelay, LocalDiscreteRules, TapRelay
+    _tap_relays: List[TapRelay] = []
+    if (not _central and not _install_local_taps
+            and (_local_tso or _svr_tso or _tso_oltc_local)):
+        _hold_mt = (config.oltc_cooldown_s_mt
+                    if config.oltc_cooldown_s_mt is not None
+                    else config.oltc_cooldown_s)
+        for _tidx in meta.machine_trafo_indices:
+            if int(net.trafo.at[_tidx, "lv_bus"]) in slack_gen_term_buses:
+                continue
+            _tap_relays.append(TapRelay(
+                trafo_idx=int(_tidx),
+                v_ref_pu=float(config.oltc_init_v_target_pu),
+                tol_pu=float(config.dso_oltc_init_tol_pu),
+                hold_s=float(_hold_mt),
+            ))
+    _bank_relays: List[BankRelay] = []
+    if _shunt_mode == "local":
+        for sh_idx, sb, q_step, kind, nlev in zip(
+            meta.tso_tertiary_shunt_indices,
+            meta.tso_tertiary_shunt_buses,
+            meta.tso_tertiary_shunt_q_steps_mvar,
+            meta.tso_tertiary_shunt_kinds,
+            meta.tso_tertiary_shunt_n_levels,
+        ):
+            dso_id_b = shunt_bus_to_dso_id.get(int(sb))
+            hv_b = hv_info_map.get(dso_id_b) if dso_id_b is not None else None
+            _lv_buses = ([int(b) for b in hv_b.coupling_lv_bus_indices]
+                         if hv_b is not None else [])
+            if int(sb) not in _lv_buses:
+                raise ValueError(
+                    f"Tertiary shunt at bus {sb} is not on a coupling-"
+                    f"transformer tertiary of {dso_id_b}")
+            t3w_b = int(hv_b.coupling_trafo_indices[_lv_buses.index(int(sb))])
+            _bank_relays.append(BankRelay(
+                bank=make_bank(ShuntBankConfig(
+                    shunt_idx=int(sh_idx), bus_idx=int(sb),
+                    interface_trafo3w_idx=t3w_b, dso_id=str(dso_id_b),
+                    kind=str(kind), q_step_mvar=float(q_step),
+                    n_levels=int(nlev), t_dwell_s=float(config.shunt_t_dwell_s),
+                )),
+                primary_bus=int(net.trafo3w.at[t3w_b, "hv_bus"]),
+                v_low_pu=config.shunt_local_v_ref_pu - config.shunt_local_dv_pu,
+                v_high_pu=config.shunt_local_v_ref_pu + config.shunt_local_dv_pu,
+            ))
+    _local_rules = LocalDiscreteRules(
+        _tap_relays, _bank_relays,
+        mutual_exclusion=config.shunt_sts_mutual_exclusion)
+    if verbose >= 1 and _local_rules:
+        print(f"  [local rules] {len(_tap_relays)} TS tap relay(s) "
+              f"(HV side {config.oltc_init_v_target_pu:.3f} +/- "
+              f"{config.dso_oltc_init_tol_pu:.3f} pu), "
+              f"{len(_bank_relays)} bank relay(s)")
+
     # ── SVR reference construction (thesis variant S1) ────────────────────
     # Built AFTER the local tap controls are installed and the plant has been
     # brought to its initial operating point, because calibration perturbs a
@@ -3193,6 +3263,8 @@ def _run_multi_tso_dso_impl(
                     rvr_p_every_step=bool(config.svr_rvr_p_every_step),
                     deadband_pu=float(config.svr_deadband_pu),
                     rpr_voltage_priority=bool(config.svr_rpr_voltage_priority),
+                    v_set_min_pu=float(config.gen_vm_min_pu),
+                    v_set_max_pu=float(config.gen_vm_max_pu),
                     # OFO form of the two loops (variant O0, 2026-10-06).  The
                     # tracking weight, voltage limits and slack weights are the
                     # TS-OFO's own, so O0 differs from the TS-OFO only in its
@@ -4995,7 +5067,21 @@ def _run_multi_tso_dso_impl(
             or (run_dso and not _local_dso)
             or run_central
         )
-        _needs_end_pf = _miqp_acted or _contingency_fired_this_step
+        # Local tap and bank rules act on the latest power flow (the one the
+        # controllers read), then need the end-of-step PF like any command.
+        _local_acted = False
+        if _local_rules:
+            _local_actions = _local_rules.step(net, time_s)
+            for _a in _local_actions:
+                if _a["device"] == "bank":
+                    rec.shunt_commits.append(
+                        {k: v for k, v in _a.items() if k != "device"})
+                else:
+                    rec.local_tap_moves.append(
+                        {k: v for k, v in _a.items() if k != "device"})
+            _local_acted = bool(_local_actions)
+        _needs_end_pf = (_miqp_acted or _contingency_fired_this_step
+                         or _local_acted)
         if (_needs_end_pf and isinstance(plant, PandapowerStaticPlant)
                 and not config.disable_qv_seed):
             # Warm-start QVLocalLoops from the linear closed-loop

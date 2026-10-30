@@ -40,7 +40,7 @@ M    one OFO on the coupled model, every step        centralised reference
 on the STS buses, and dispatches the banks through the same holding-time /
 mutual-exclusion / rank-1 machinery as the zones.  Its transmission taps and
 banks keep the cascade's timescale: after a switch they are locked as long as
-in the cascade (:func:`ts_equivalent_cooldown`, 18 min), the banks' own
+in the cascade (:func:`ts_equivalent_cooldown`, 15 min), the banks' own
 30-min holding time on top.  The loop gain is checked over the continuous
 actuators (0.98 < 2), the discrete ones being rate-limited.  Adopted
 2026-10-28 (author) after the comparison of four tunings in
@@ -163,17 +163,19 @@ def ts_equivalent_cooldown(cfg: MultiTSOConfig) -> int:
     time to the cascade's.
 
     A device that switches at controller iteration k is locked until
-    iteration ``k + 1 + int_cooldown`` (``BaseOFOController``).  The TS-OFO
+    iteration ``k + 1 + c`` (``BaseOFOController``), with c the TS layer's
+    lock ``tso_int_cooldown`` (``int_cooldown`` if unset).  The TS-OFO
     iterates every ``tso_period_s``, so in the cascade it can move again
-    ``(1 + int_cooldown) * tso_period_s`` after the switch (18 min).  M
-    iterates every ``dt_s``; with its lock ``k + 1 + n`` the same time needs
-    ``n = (1 + int_cooldown) * tso_period_s / dt_s - 1`` (53).  The banks'
+    ``(1 + c) * tso_period_s`` after the switch (15 min since 2026-10-30, 18
+    before).  M iterates every ``dt_s``; with its lock ``k + 1 + n`` the same
+    time needs ``n = (1 + c) * tso_period_s / dt_s - 1`` (44).  The banks'
     own holding time (``shunt_t_dwell_s``) applies in both on top.
     """
     ratio = float(cfg.tso_period_s) / float(cfg.dt_s)
     if abs(ratio - round(ratio)) > 1e-9:
         raise ValueError("tso_period_s must be a multiple of dt_s")
-    return int((1 + int(cfg.int_cooldown)) * round(ratio) - 1)
+    c = cfg.int_cooldown if cfg.tso_int_cooldown is None else cfg.tso_int_cooldown
+    return int((1 + int(c)) * round(ratio) - 1)
 
 
 def selected_lambda_max() -> float:

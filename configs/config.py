@@ -494,9 +494,19 @@ class MultiTSOConfig:
     int_max_step:   int = 1
     int_cooldown:   int = 5  # 6 -> 5 on 2026-10-14 (author decision, thesis Ch 3)
     """Iterations an OFO integer actuator (OLTC, in-MIQP shunt) is locked
-    after switching, counted in the owning controller's iterations:
-    100 s at T_STS = 20 s, 15 min at T_TS = 180 s.  Since 2026-10-14 this
-    is the only tap lock of the OFO MIQP path (see ``ofo_oltc_cooldown_s``)."""
+    after switching, counted in the owning controller's iterations.  A
+    device that switched at iteration k may switch again at k + 1 +
+    int_cooldown, i.e. (1 + 5) x 20 s = 120 s between two taps of one STS
+    coupler.  The TS layer uses ``tso_int_cooldown`` instead (2026-10-30).
+    Since 2026-10-14 this is the only tap lock of the OFO MIQP path (see
+    ``ofo_oltc_cooldown_s``)."""
+
+    tso_int_cooldown: Optional[int] = 4  # added 2026-10-30
+    """``int_cooldown`` of the TS-OFO zone controllers (``None`` = the
+    global ``int_cooldown``).  4 gives (1 + 4) x 180 s = 15 min between two
+    taps of one TS OLTC, the minimum holding time every variant now shares
+    with the local TS tap relays (``oltc_cooldown_s_mt``); author decision
+    2026-10-30.  Until then the TS layer used the global 5 (18 min)."""
 
     ofo_oltc_cooldown_s: float = 0.0
     """Wall-clock OLTC lock [s] of the OFO MIQP path, passed to
@@ -535,17 +545,28 @@ class MultiTSOConfig:
     entirely (the iteration-based ``int_cooldown`` and per-step
     ``local_oltc_max_step_per_dt`` clamp remain active)."""
 
-    oltc_cooldown_s_mt: Optional[float] = 180.0  # runner default (2026-08-21)
-    """Per-type override of ``oltc_cooldown_s`` for local-mode **machine
-    2-winding (MT) gen-transformer OLTCs** (``net.trafo``).  ``None`` falls
-    back to ``oltc_cooldown_s``.  Wall-clock seconds, so it is independent of
-    ``dt_s`` (e.g. 180 -> at most one MT tap per 3 min)."""
+    oltc_cooldown_s_mt: Optional[float] = 900.0  # 180 -> 900 on 2026-10-30
+    """Minimum holding time [s] of the local **TS tap relays** (machine
+    2-winding transformers and the two network OLTCs at IEEE 12,
+    ``net.trafo``; :class:`controller.local_rules.TapRelay`).  ``None``
+    falls back to ``oltc_cooldown_s``.  900 s = 15 min, equal to the TS-OFO
+    lock (1 + ``tso_int_cooldown``) x T_TS (author decision 2026-10-30)."""
 
-    oltc_cooldown_s_nc: Optional[float] = 60.0  # runner default (2026-08-21)
+    oltc_cooldown_s_nc: Optional[float] = 120.0  # 60 -> 120 on 2026-10-30
     """Per-type override of ``oltc_cooldown_s`` for local-mode **coupler
     3-winding (NC) OLTCs** (``net.trafo3w``) at the TS--STS interface.
-    ``None`` falls back to ``oltc_cooldown_s`` (e.g. 60 -> at most one NC tap
-    per minute)."""
+    ``None`` falls back to ``oltc_cooldown_s``.  120 s equals the STS-OFO
+    lock (1 + ``int_cooldown``) x T_STS, so every variant shares one minimum
+    holding time per coupler (author decision 2026-10-30; was 60 s)."""
+
+    # -- AVR set-point range ----------------------------------------------------
+    gen_vm_min_pu: float = 0.95  # added 2026-10-30
+    gen_vm_max_pu: float = 1.05  # added 2026-10-30
+    """AVR set-point range of every scheme that moves AVR references: the
+    TS-OFO zones, the central controller and the classical SVR.  [0.95,
+    1.05] pu is the continuous range of IEC 60034-1 zone A; harmonised on
+    2026-10-30 (author decision).  Until then the TS-OFO and the central
+    controller used [0.95, 1.07] (class default) and SVR [0.95, 1.05]."""
 
     # -- AVR saturation handling (Feature B) -----------------------------------
     enable_avr_saturation_mode: bool = False
@@ -1860,6 +1881,17 @@ class MultiTSOConfig:
                       constraints stay soft, as for every other actuator.
                       (Until 2026-10-22 at most one bank stepped per zone and
                       iteration and the voltage rows were hard.)
+      * ``'local'`` — the classical local rule of every variant whose TS does
+                      not dispatch banks in an MIQP (LOC, SVR, SVR+; author
+                      decision 2026-10-30): a bank reads the voltage on the
+                      primary (EHV) side of its own coupler; the MSC engages
+                      a level below ``shunt_local_v_ref_pu -
+                      shunt_local_dv_pu`` (1.01 pu) and is released above
+                      the upper threshold, the MSR engages above
+                      ``shunt_local_v_ref_pu + shunt_local_dv_pu`` (1.05 pu)
+                      and is released below the lower one.  Same holding
+                      time and MSC/MSR exclusion as the MIQP
+                      (:class:`controller.local_rules.BankRelay`).
 
     The supervisory variants of October 2026 — an integrating dispatcher
     outside the MIQP, separate memories for subordinate tracking and
@@ -1909,6 +1941,13 @@ class MultiTSOConfig:
     engagement is kept and interface-Q RMSE improves 1.5%, at 900 s an
     engage-release cycle costs 5.6%."""
 
+    shunt_local_v_ref_pu: float = 1.03  # added 2026-10-30
+    shunt_local_dv_pu: float = 0.02  # added 2026-10-30
+    """Thresholds of the local bank rule (``shunt_dispatch='local'``):
+    engage the MSC below ``v_ref - dv`` and the MSR above ``v_ref + dv`` on
+    the primary side of the hosting coupler; release each at the other
+    threshold (author decision 2026-10-30)."""
+
     shunt_sts_mutual_exclusion: bool = True  # added 2026-10-22
     """Forbid engaging a bank while the opposite device (MSC vs MSR) of the
     same STS is engaged; releasing stays allowed.  Enforced as a bound on the
@@ -1932,12 +1971,12 @@ class MultiTSOConfig:
         Raises ``ValueError`` on any inconsistent or out-of-range setting; the
         per-bank numeric guards are additionally enforced by
         :class:`controller.shunt_banks.ShuntBankConfig`."""
-        if self.shunt_dispatch not in ("off", "miqp"):
+        if self.shunt_dispatch not in ("off", "miqp", "local"):
             raise ValueError(
-                f"shunt_dispatch must be 'off' or 'miqp', "
+                f"shunt_dispatch must be 'off', 'miqp' or 'local', "
                 f"got {self.shunt_dispatch!r}"
             )
-        if self.shunt_dispatch != "miqp":
+        if self.shunt_dispatch == "off":
             return
         if not self.install_tso_tertiary_shunts:
             raise ValueError(

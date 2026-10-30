@@ -20,8 +20,8 @@ Variants (thesis ``tab:case_svr:variants``)
 ``O0``   the S1m hierarchy written as one-input OFO steps
          (``svr_rvr_law = svr_rpr_law = 'ofo'``): weights from the match
          condition, the TS-OFO's own voltage limits as soft constraints.
-``O1``   one TS-OFO per area acting directly on AVR set-points and TS-DER Q,
-         machine taps held, no shunts.
+``O1``   one TS-OFO per area acting directly on AVR set-points and TS-DER Q;
+         TS taps and banks under local rules (2026-10-30; held / absent before).
 ``O2``   O1 with machine taps and TSO shunts in the loop.
 
 Campaigns
@@ -97,10 +97,12 @@ FEEDS = ("tab:case_svr:reference", "fig:case_svr:equivalence",
 #: thesis ``tab:svr:pilots``.
 PILOT_BUSES: Dict[int, int] = {1: 25, 2: 7, 3: 20}
 
-#: Switched shunts off below O2: a bank is only dispatched where the TSO MIQP
-#: runs, so leaving them installed would switch a discrete device class on in
-#: O1 but not in S1 (see the ladder script for the full record).
-_NO_SHUNTS = dict(install_tso_tertiary_shunts=False, shunt_dispatch="off")
+#: Below O2 the banks are installed and follow the classical local rule
+#: (MSC in below 1.01 pu, MSR in above 1.05 pu on the coupler's primary side,
+#: 30-min holding time), and the TS taps follow local relays (1.03 +/- 0.01 pu,
+#: 15 min) -- author decision 2026-10-30.  Until then the banks were not
+#: installed below O2 and the TS taps were held.
+_LOCAL_SHUNTS = dict(install_tso_tertiary_shunts=True, shunt_dispatch="local")
 
 _LOCAL_STS = dict(dso_mode="local", local_der_mode="qv",
                   tso_q_mode="qv", dso_q_mode="qv")
@@ -110,12 +112,12 @@ _SVR = dict(
     svr_pilot_buses=PILOT_BUSES, svr_t_rvr_s=300.0, svr_t_rpr_s=60.0,
     # No supervisory dead band: the OFO's tracking has none either.
     svr_deadband_pu=0.0,
-    **_LOCAL_STS, **_NO_SHUNTS,
+    **_LOCAL_STS, **_LOCAL_SHUNTS,
 )
 
 VARIANTS: Dict[str, Dict[str, Any]] = {
     "L2": dict(tso_mode="local", tso_local_mode="qv", tso_oltc_mode="local",
-               **_LOCAL_STS, **_NO_SHUNTS),
+               **_LOCAL_STS, **_LOCAL_SHUNTS),
     "S1m": dict(_SVR, svr_k_p_rvr=0.0, svr_k_p_rpr=0.0,
                 svr_rpr_voltage_priority=False),
     # Integral laws WITH the safeguard (author 2026-10-07; was "S1g" in the
@@ -126,7 +128,7 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
                svr_rpr_voltage_priority=False,
                svr_rvr_law="ofo", svr_rpr_law="ofo"),
     "O1": dict(tso_mode="ofo", tso_oltc_mode="local",
-               **_LOCAL_STS, **_NO_SHUNTS),
+               **_LOCAL_STS, **_LOCAL_SHUNTS),
     "O2": dict(tso_mode="ofo", **_LOCAL_STS),
 }
 
@@ -270,10 +272,21 @@ def run_one(name: str, out: Path, minutes: int) -> int:
     return len(log)
 
 
+def _run_one_logged(name: str, out: str, minutes: int) -> int:
+    """:func:`run_one` in a worker process, its console into ``<variant>/``."""
+    import contextlib
+    d = Path(out) / name
+    d.mkdir(parents=True, exist_ok=True)
+    with open(d / "console.log", "w", encoding="utf-8") as fh,             contextlib.redirect_stdout(fh):
+        return run_one(name, Path(out), minutes)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default=None,
-                    help="comma-separated names, or K1-REF / K1-PAR")
+                    help="comma-separated names, or K1-REF / K1-PAR / K1-ALL")
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="variants run in parallel (2026-10-30); 1 = in turn")
     ap.add_argument("--run-dir", default=None,
                     help="add the variants to this existing run of run_case1 "
                          "(it must carry a run_manifest.json)")
@@ -292,6 +305,8 @@ def main() -> None:
         sel = list(K1_REF)
     elif args.only == "K1-PAR":
         sel = list(K1_PAR)
+    elif args.only == "K1-ALL":
+        sel = list(K1_REF) + list(K1_PAR)
     else:
         sel = [s.strip() for s in args.only.split(",") if s.strip()]
     for s in sel:
@@ -309,8 +324,14 @@ def main() -> None:
         out = run.root
         print(f"run dir: {out}  |  horizon {args.minutes} min  |  {sel}")
         failed = []
+        if args.jobs > 1:
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=args.jobs) as ex:
+                counts = dict(zip(sel, ex.map(
+                    _run_one_logged, sel, [str(out)] * len(sel),
+                    [args.minutes] * len(sel))))
         for s in sel:
-            n = run_one(s, out, args.minutes)
+            n = (counts[s] if args.jobs > 1 else run_one(s, out, args.minutes))
             status = json.loads((out / s / "status.json").read_text(
                 encoding="utf-8"))["status"]
             if status != "ok":

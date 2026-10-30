@@ -824,6 +824,10 @@ def main() -> None:
     ap.add_argument("--smoke", action="store_true",
                     help="2 episodes x 10 min, a campaign tagged 'smoke'")
     ap.add_argument("--allow-no-gurobi", action="store_true")
+    ap.add_argument("--also-seeds", default="",
+                    help="comma-separated valid seeds beyond the first --n on which "
+                         "--variants also run (to classify a failure of O3 on the "
+                         "episodes only O3 covers)")
     add_run_arguments(ap)
     args = ap.parse_args()
 
@@ -916,8 +920,11 @@ def _simulate(out: Path, args: argparse.Namespace, variants: List[str]) -> None:
             return True
         return json.loads(p.read_text(encoding="utf-8"))["outcome"] == "task_crash"
 
+    also = [int(x) for x in args.also_seeds.split(",") if x.strip()]
+    if set(also) - set(valid):
+        raise SystemExit(f"--also-seeds not valid here: {sorted(set(also) - set(valid))}")
     todo = [(s, v, str(out), args.minutes) for v in variants
-            for s in (valid if v == "O3" else valid[:args.n]) if _missing(s, v)]
+            for s in (valid if v == "O3" else valid[:args.n] + also) if _missing(s, v)]
     print(f"  [runs] {len(todo)} run(s) to go", flush=True)
     if todo:
         _pool_map(variant_task, todo, args.jobs, "run")

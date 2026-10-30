@@ -9,8 +9,9 @@ Copy-Item -ToSession $s -Path $bundle -Destination 'F:\qOFO_runs\weekend_2026-10
 Invoke-Command -Session $s -ArgumentList $branch -ScriptBlock {
     param($branch)
     Set-Location F:\qOFO_runs\qOFO_weekend
-    git -c safe.directory=* fetch F:\qOFO_runs\weekend_2026-10-30.bundle "${branch}:${branch}" 2>&1 | Out-String
+    git -c safe.directory=* fetch F:\qOFO_runs\weekend_2026-10-30.bundle $branch 2>&1 | Out-String
     git -c safe.directory=* checkout $branch 2>&1 | Out-String
+    git -c safe.directory=* merge --ff-only FETCH_HEAD 2>&1 | Out-String
     git -c safe.directory=* log --oneline -1
 }
 Remove-PSSession $s

@@ -70,6 +70,14 @@ Outcomes per (episode, variant)
 An episode on which every variant run so far fails is reported as
 ``infeasible`` and kept out of the failure bounds.
 
+Comparison window (amendment of 2026-10-30, author decision)
+-------------------------------------------------------------
+The paired comparisons run over the first ``N_VALID`` valid episodes in draw
+order on which NOT every one of the six variants failed: an infeasible episode
+is replaced by the next valid one (``comparison_window``).  Failures of single
+variants are results and are never replaced.  ``--no-top-up`` gives the
+declared rule of 2026-10-07 (the first ``N_VALID`` valid episodes).
+
 Run (see README_server.md)
 --------------------------
     python -m experiments.ch_11_case2_multisystem.mc.run_mc --jobs 30        # simulate
@@ -187,6 +195,44 @@ ALL_VARIANTS = ["S1", "L2", "O2", "S2", "O3", "M"]   # longest first: pool packi
 #: plan of 2026-10-28 §5 (NI on e_vp; superiority on e_v, worst, t_out).
 COMPARISONS: List[Tuple[str, str]] = [("O2", "S1"), ("O3", "S1"), ("O3", "S2"),
                                       ("O3", "O2"), ("S2", "S1")]
+
+
+def comparison_window(valid: List[int], outcome: Dict[Tuple[int, str], str],
+                      n: int, top_up: bool = True) -> Tuple[List[int], List[int]]:
+    """The episodes the paired comparisons run over, and the ones skipped.
+
+    ``valid`` are the valid seeds in draw order, ``outcome`` maps (seed,
+    variant) to the outcome of a finished run (no ``task_crash``).  With
+    ``top_up`` (amendment of 2026-10-30) a seed is skipped only once all six
+    variants of ``ALL_VARIANTS`` have run on it and all failed; a seed not yet
+    fully run counts as usable, so the window only moves on when its runs show
+    otherwise.  The rule depends on the outcomes of all variants alike, never
+    on one of them, and keeps the draw order.  Without ``top_up`` it is the
+    declared rule: the first ``n`` valid seeds, none skipped.
+    """
+    if not top_up:
+        return list(valid[:n]), []
+    window: List[int] = []
+    skipped: List[int] = []
+    for s in valid:
+        res = [outcome.get((s, v)) for v in ALL_VARIANTS]
+        if all(r is not None for r in res) and all(r != "ok" for r in res):
+            skipped.append(s)
+            continue
+        window.append(s)
+        if len(window) == n:
+            break
+    return window, skipped
+
+
+def _outcomes(runs: Path) -> Dict[Tuple[int, str], str]:
+    """(seed, variant) -> outcome of every finished run in ``runs``."""
+    out: Dict[Tuple[int, str], str] = {}
+    for p in runs.glob("*.json"):
+        r = json.loads(p.read_text(encoding="utf-8"))
+        if r["outcome"] != "task_crash":
+            out[(int(r["seed"]), r["variant"])] = r["outcome"]
+    return out
 
 
 def _dirs(out: Path) -> Dict[str, Path]:
@@ -582,12 +628,14 @@ def _boot_upper_median(d: np.ndarray, conf: float = 0.95, n_boot: int = 10000,
     return float(np.quantile(med, conf))
 
 
-def report(out: Path, n_valid: int) -> None:
+def report(out: Path, n_valid: int, top_up: bool = True) -> None:
     from scipy.stats import wilcoxon
     d = _dirs(out)
     pre = [json.loads(p.read_text(encoding="utf-8"))
            for p in sorted(d["pre"].glob("*.json"))]
-    valid = sorted(r["seed"] for r in pre if r["valid"])[:n_valid]
+    window, skipped = comparison_window(sorted(r["seed"] for r in pre if r["valid"]),
+                                        _outcomes(d["runs"]), n_valid, top_up)
+    valid = sorted(window + skipped)
     n_disc = sum(1 for r in pre if not r["valid"]
                  and r["seed"] < (max(valid) if valid else 0))
     rows, outc = [], []
@@ -612,7 +660,9 @@ def report(out: Path, n_valid: int) -> None:
     oc.to_csv(out / "outcomes_per_episode.csv", index=False)
 
     lines = [f"# Part III Monte-Carlo report ({_dt.datetime.now():%Y-%m-%d %H:%M})",
-             "", f"valid episodes used: {len(valid)} (target {n_valid}); "
+             "", f"comparison window: {len(window)} valid episodes (target {n_valid}), "
+             f"{len(skipped)} infeasible skipped {skipped} "
+             f"({'top-up' if top_up else 'declared rule, no top-up'}); "
              f"draws discarded by the prescreen before the last used seed: {n_disc}",
              f"classes: {pd.Series([r['class'] for r in pre if r['seed'] in valid]).value_counts().to_dict()}",
              ""]
@@ -727,6 +777,7 @@ def _campaign_parameters(args: argparse.Namespace) -> Dict[str, Any]:
     ``thesis_runs``; the drawable elements go to ``elements.json``.
     """
     return {"master_seed": MASTER_SEED, "n_valid": args.n,
+            "top_up": not getattr(args, "no_top_up", False),
             "n_valid_o3": getattr(args, "n_o3", N_VALID_O3),
             "event_phase_s": list(PHASE_GRID_S),
             "phase_stream": "default_rng([seed, 1]), one draw per event",
@@ -828,6 +879,9 @@ def main() -> None:
                     help="comma-separated valid seeds beyond the first --n on which "
                          "--variants also run (to classify a failure of O3 on the "
                          "episodes only O3 covers)")
+    ap.add_argument("--no-top-up", action="store_true",
+                    help="declared rule of 2026-10-07: compare on the first --n valid "
+                         "episodes, without replacing infeasible ones")
     add_run_arguments(ap)
     args = ap.parse_args()
 
@@ -841,7 +895,7 @@ def main() -> None:
     if args.report:
         if found is None:
             raise SystemExit("no campaign to report on; run one first")
-        report(found, args.n)
+        report(found, args.n, not args.no_top_up)
         annotate_run(found, by=__file__, outputs={"report.md": "campaign tables"})
         return
 
@@ -876,24 +930,10 @@ def main() -> None:
                 run.describe_output(name, meaning)
 
 
-def _simulate(out: Path, args: argparse.Namespace, variants: List[str]) -> None:
-    """Prescreen until N valid seeds are known, then run what is missing."""
-    d = _dirs(out)
-    for p in d.values():
-        p.mkdir(parents=True, exist_ok=True)
-    el = enumerate_elements()
-    (out / "elements.json").write_text(
-        json.dumps(el, indent=2, default=lambda o: o.item() if hasattr(o, "item") else str(o)),
-        encoding="utf-8")
-    print(f"  [campaign] {out}\n  [campaign] N={args.n} horizon={args.minutes} min "
-          f"variants={variants} jobs={args.jobs} master_seed={MASTER_SEED}")
-    print(f"  [elements] gens={el['gens']} lines={len(el['lines'])} "
-          f"(excluded, islanding: {el['lines_excluded_islanding']}) "
-          f"load buses={len(el['load_buses'])}", flush=True)
-
-    # Phase 1: prescreen in seed order until the first N valid seeds are known
-    # (N_O3 when O3 is part of the call).
-    n_need = max(args.n, getattr(args, "n_o3", 0) if "O3" in variants else 0)
+def _prescreen_until(d: Dict[str, Path], out: Path, args: argparse.Namespace,
+                     n_need: int) -> List[int]:
+    """Prescreen in seed order until the first ``n_need`` valid seeds are
+    known; return them in draw order."""
     k = 0
     while True:
         done = {int(p.stem): json.loads(p.read_text(encoding="utf-8"))["valid"]
@@ -912,24 +952,59 @@ def _simulate(out: Path, args: argparse.Namespace, variants: List[str]) -> None:
             _pool_map(prescreen_task, todo, args.jobs, "prescreen")
     valid = sorted(s for s, ok in done.items() if ok)[:n_need]
     print(f"  [prescreen] {len(valid)} valid of {k} drawn", flush=True)
+    return valid
+
+
+def _simulate(out: Path, args: argparse.Namespace, variants: List[str]) -> None:
+    """Prescreen until N valid seeds are known, then run what is missing."""
+    d = _dirs(out)
+    for p in d.values():
+        p.mkdir(parents=True, exist_ok=True)
+    el = enumerate_elements()
+    (out / "elements.json").write_text(
+        json.dumps(el, indent=2, default=lambda o: o.item() if hasattr(o, "item") else str(o)),
+        encoding="utf-8")
+    print(f"  [campaign] {out}\n  [campaign] N={args.n} horizon={args.minutes} min "
+          f"variants={variants} jobs={args.jobs} master_seed={MASTER_SEED}")
+    print(f"  [elements] gens={el['gens']} lines={len(el['lines'])} "
+          f"(excluded, islanding: {el['lines_excluded_islanding']}) "
+          f"load buses={len(el['load_buses'])}", flush=True)
+
+    # Phase 1: prescreen in seed order until the first N valid seeds are known
+    # (N_O3 when O3 is part of the call).
+    n_o3 = getattr(args, "n_o3", 0) if "O3" in variants else 0
+    valid = _prescreen_until(d, out, args, max(args.n, n_o3))
 
     # Phase 2: variant runs, longest variant first; skip what exists (resume).
+    # With the top-up the comparison window moves past an episode once all six
+    # variants have failed on it; the loop then runs the next one, prescreening
+    # further seeds if the known valid ones are used up.
     def _missing(s: int, v: str) -> bool:
         p = d["runs"] / f"{s}_{v}.json"
         if not p.exists():
             return True
         return json.loads(p.read_text(encoding="utf-8"))["outcome"] == "task_crash"
 
-    also = [int(x) for x in args.also_seeds.split(",") if x.strip()]
-    if set(also) - set(valid):
-        raise SystemExit(f"--also-seeds not valid here: {sorted(set(also) - set(valid))}")
-    todo = [(s, v, str(out), args.minutes) for v in variants
-            for s in (valid if v == "O3" else valid[:args.n] + also) if _missing(s, v)]
-    print(f"  [runs] {len(todo)} run(s) to go", flush=True)
-    if todo:
+    top_up = not args.no_top_up
+    while True:
+        window, skipped = comparison_window(valid, _outcomes(d["runs"]), args.n, top_up)
+        if len(window) < args.n:
+            valid = _prescreen_until(d, out, args, len(valid) + args.n - len(window))
+            continue
+        also = [int(x) for x in args.also_seeds.split(",") if x.strip()]
+        if set(also) - set(valid):
+            raise SystemExit(f"--also-seeds not valid here: {sorted(set(also) - set(valid))}")
+        o3_seeds = sorted(set(valid[:n_o3]) | set(window))
+        todo = [(s, v, str(out), args.minutes) for v in variants
+                for s in (o3_seeds if v == "O3" else window + also) if _missing(s, v)]
+        print(f"  [runs] {len(todo)} run(s) to go; comparison window {window[0]}.."
+              f"{window[-1]} ({len(window)} episodes, {len(skipped)} infeasible "
+              f"skipped{', top-up' if top_up else ''})", flush=True)
+        if not todo:
+            break
         _pool_map(variant_task, todo, args.jobs, "run")
     try:
-        report(out, args.n)
+        report(out, args.n, top_up)
     except Exception:                              # noqa: BLE001 -- tables later
         print("  [report] failed; the runs are complete, rerun with --report", flush=True)
         traceback.print_exc()

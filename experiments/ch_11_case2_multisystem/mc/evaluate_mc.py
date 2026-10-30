@@ -18,8 +18,11 @@ Evaluation of one ``run_mc`` campaign for the thesis (``ch:case3:montecarlo``,
 
 Statistics, as declared (plan 2026-10-28 §5, Ch 7, Ch 10):
 
-* all paired comparisons are over the first ``N_VALID`` valid episodes on which
-  both variants completed;
+* all paired comparisons are over the comparison window on which both variants
+  completed: the first ``N_VALID`` valid episodes in draw order, an episode on
+  which all six variants failed replaced by the next valid one (amendment of
+  2026-10-30, ``run_mc.comparison_window``; ``--no-top-up`` gives the declared
+  first ``N_VALID`` valid episodes);
 * non-inferiority on the pilot error per area, margin DELTA_MPU: decided by the
   one-sided 95 % bootstrap upper bound of the median difference; a claim over
   the areas needs all three (intersection-union, no correction);
@@ -53,7 +56,7 @@ from scipy.stats import wilcoxon
 
 from experiments.ch_11_case2_multisystem import metrics_case2 as mc2
 from experiments.ch_11_case2_multisystem.mc.run_mc import (
-    DELTA_MPU, MASTER_SEED, _boot_upper_median, _cp_upper,
+    DELTA_MPU, MASTER_SEED, _boot_upper_median, _cp_upper, comparison_window,
 )
 
 V = ["L2", "S1", "S2", "O2", "O3", "M"]
@@ -307,6 +310,8 @@ def main() -> None:
     ap.add_argument("campaign")
     ap.add_argument("--n", type=int, default=100)
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--no-top-up", action="store_true",
+                    help="declared rule of 2026-10-07: the first --n valid episodes")
     a = ap.parse_args()
     root = Path(a.campaign)
     runs = root / "runs"
@@ -315,7 +320,12 @@ def main() -> None:
     df, ev, fl = episodes(runs)
     pre = [json.loads(p.read_text(encoding="utf-8")) for p in sorted((root / "prescreen").glob("*.json"))]
     valid = sorted(int(r["seed"]) for r in pre if r["valid"])
-    seeds = valid[:a.n]
+    outcome = {(int(s), v): o for s, v, o in zip(df.seed, df.variant, df.outcome)
+               if o != "task_crash"}
+    seeds, skipped = comparison_window(valid, outcome, a.n, not a.no_top_up)
+    if len(seeds) < a.n:
+        print(f"WARNING: comparison window has {len(seeds)} of {a.n} episodes; "
+              f"run the driver again to top it up")
     with Pool(a.jobs) as pool:
         extra = pool.map(_log_task, [(str(runs), s) for s in sorted(df.seed.unique())], chunksize=2)
     uq = {(x["seed"], v): u for x in extra for v, u in x["u_q"].items()}
@@ -330,6 +340,10 @@ def main() -> None:
     pr.to_csv(out / "paired.csv", index=False)
     res = tables(df, ev, seeds, out)
     res["first_n_seeds"] = [seeds[0], seeds[-1]]
+    res["window"] = {"top_up": not a.no_top_up, "n": len(seeds), "first": seeds[0],
+                     "last": seeds[-1], "skipped_infeasible": skipped,
+                     "incomplete": sorted(s for s in seeds
+                                          if sum((s, v) in outcome for v in V) < len(V))}
     res["classes_n"] = {str(k): int(v) for k, v in pd.Series([r["class"] for r in pre if int(r["seed"]) in seeds]).value_counts().items()}
     res["draws"] = {"drawn": len(pre), "valid": len(valid)}
     r2 = rec[rec.seed.isin(seeds)]
@@ -363,7 +377,7 @@ def main() -> None:
                     "by_outcome": g.outcome.value_counts().to_dict()}
     res["failures"] = fails
     (out / "summary.json").write_text(json.dumps(res, indent=1, default=float), encoding="utf-8")
-    print(json.dumps({k: res[k] for k in ("n_common", "classes_n", "draws", "infeasible", "failures", "recruited")},
+    print(json.dumps({k: res[k] for k in ("window", "n_common", "classes_n", "draws", "infeasible", "failures", "recruited")},
                      indent=1, default=float))
     print(fl.drop(columns=["exception"]).to_string())
 

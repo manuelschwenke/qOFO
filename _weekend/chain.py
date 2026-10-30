@@ -80,7 +80,7 @@ def e5wimi():
 def e5power():
     wait_all([(f"ref{s}", start(f"ref{s}", [
         "-m", "experiments.ch_11_case2_multisystem.ref.run_ref", "--scenario", s,
-        "--jobs", "6", "--note", NOTE + (f"; declared scenario {s}" if s != "A" else "")]))
+        "--variants", "L2,S1,S2,O2,O3,M", "--jobs", "6", "--note", NOTE + (f"; declared scenario {s}" if s != "A" else "")]))
         for s in ("A", "B", "D")])
     while True:
         if (GATE / "weekend_DECISION_STOP.txt").exists():

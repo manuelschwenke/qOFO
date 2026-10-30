@@ -51,7 +51,8 @@ def wait_all(procs):
 def push_to_e5power(name, text):
     ps = (f"Invoke-Command -ComputerName e5power -ScriptBlock {{ "
           f"Set-Content -Path 'F:\\qOFO_runs\\weekend_{name}' -Value '{text}' }}")
-    rc = subprocess.call(["powershell.exe", "-NoProfile", "-Command", ps])
+    rc = subprocess.call([r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                          "-NoProfile", "-Command", ps])
     log(f"pushed {name} to e5power: exit {rc}")
 
 

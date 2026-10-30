@@ -14,7 +14,9 @@ variants observe.  Two rules:
   (EHV) side of its own coupler.  The MSC engages one level below
   ``v_ref - dv`` (1.01 pu) and is released above ``v_ref + dv``; the MSR
   engages above ``v_ref + dv`` (1.05 pu) and is released below ``v_ref - dv``.
-  Holding time and MSC/MSR exclusion per STS are those of
+  A bank acts only after its condition has held for ``confirm_steps``
+  consecutive steps (3 x 20 s, author decision 2026-10-30; applied to the
+  release as well).  Holding time and MSC/MSR exclusion per STS are those of
   :class:`controller.shunt_banks.ShuntBank`, i.e. the MIQP's.
 
 The TS tap relay is evaluated explicitly once per step, outside the power
@@ -101,10 +103,15 @@ class BankRelay:
     primary_bus: int
     v_low_pu: float
     v_high_pu: float
+    confirm_steps: int = 3
+    _last_want: int = 0
+    _count: int = 0
 
     def __post_init__(self) -> None:
         if not self.v_low_pu < self.v_high_pu:
             raise ValueError("BankRelay needs v_low_pu < v_high_pu")
+        if self.confirm_steps < 1:
+            raise ValueError("BankRelay needs confirm_steps >= 1")
         if self.bank.config.kind not in ("MSC", "MSR"):
             raise ValueError(f"unknown bank kind {self.bank.config.kind!r}")
 
@@ -116,6 +123,14 @@ class BankRelay:
         if v > self.v_high_pu:
             return -1 if msc else 1
         return 0
+
+    def confirmed(self, v: float) -> int:
+        """:meth:`wanted`, once it has held for ``confirm_steps`` consecutive
+        calls (one call per step); 0 before that."""
+        w = self.wanted(v)
+        self._count = self._count + 1 if (w != 0 and w == self._last_want) else int(w != 0)
+        self._last_want = w
+        return w if self._count >= self.confirm_steps else 0
 
 
 class LocalDiscreteRules:
@@ -143,7 +158,7 @@ class LocalDiscreteRules:
                 actions.append({"device": "tap", "trafo_idx": r.trafo_idx,
                                 "direction": d,
                                 "new_pos": int(net.trafo.at[r.trafo_idx, "tap_pos"])})
-        wanted = [(r, r.wanted(float(net.res_bus.at[r.primary_bus, "vm_pu"])))
+        wanted = [(r, r.confirmed(float(net.res_bus.at[r.primary_bus, "vm_pu"])))
                   for r in self.banks]
         all_banks = [r.bank for r in self.banks]
         for want in (-1, 1):
@@ -154,6 +169,7 @@ class LocalDiscreteRules:
                 if w not in r.bank.available_directions(t_s, opposite_engaged=opp):
                     continue
                 c = r.bank.commit_selected(w, t_s, opposite_engaged=opp)
+                r._count = 0                  # the next level needs a new confirmation
                 net.shunt.at[c.shunt_idx, "step"] = int(c.pp_step_new)
                 actions.append({"device": "bank", "zone": "local",
                                 "shunt_idx": c.shunt_idx, "dso_id": c.dso_id,

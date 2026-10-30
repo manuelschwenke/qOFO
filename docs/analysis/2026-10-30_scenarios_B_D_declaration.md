@@ -62,5 +62,5 @@ two TS dispatches.
 - Banks:
   - MIQP-dispatched in OFO, OFO+ and CEN;
   - local rule in LOC, SVR and SVR+ (MSC in below 1.01 pu, MSR in above 1.05 pu on the coupler's
-    primary side);
+    primary side, each after 3 consecutive 20-s steps beyond the threshold);
   - 30-min holding time and MSC/MSR exclusion in every variant.

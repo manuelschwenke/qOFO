@@ -50,8 +50,8 @@ def test_tap_relay_band_and_holding_time():
 def test_bank_rule_thresholds_exclusion_and_release():
     net, b_hv, b_p2 = _net()
     pp.runpp(net)
-    msc = BankRelay(_bank(0, b_hv, "MSC"), b_hv, 1.01, 1.05)
-    msr = BankRelay(_bank(3, b_p2, "MSR"), b_p2, 1.01, 1.05)
+    msc = BankRelay(_bank(0, b_hv, "MSC"), b_hv, 1.01, 1.05, confirm_steps=1)
+    msr = BankRelay(_bank(3, b_p2, "MSR"), b_p2, 1.01, 1.05, confirm_steps=1)
     assert msc.wanted(1.00) == 1 and msc.wanted(1.03) == 0 and msc.wanted(1.06) == -1
     assert msr.wanted(1.06) == 1 and msr.wanted(1.03) == 0 and msr.wanted(1.00) == -1
     rules = LocalDiscreteRules([], [msc, msr], mutual_exclusion=True)
@@ -69,3 +69,16 @@ def test_bank_rule_thresholds_exclusion_and_release():
     # release of the MSC is committed before the MSR engagement
     assert [(a["kind"], a["direction"]) for a in acts] == [("MSC", -1)]
     assert math.isclose(msc.bank.level, 1)
+
+
+def test_bank_rule_needs_three_consecutive_steps():
+    net, b_hv, _ = _net()
+    pp.runpp(net)
+    msc = BankRelay(_bank(0, b_hv, "MSC"), b_hv, 1.01, 1.05)       # default 3
+    rules = LocalDiscreteRules([], [msc], mutual_exclusion=True)
+    seq = [1.00, 1.00, 1.02, 1.00, 1.00, 1.00]       # interrupted, then 3 in a row
+    acted = []
+    for k, v in enumerate(seq):
+        net.res_bus.at[b_hv, "vm_pu"] = v
+        acted.append(bool(rules.step(net, 20.0 * k)))
+    assert acted == [False, False, False, False, False, True]

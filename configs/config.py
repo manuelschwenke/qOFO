@@ -1889,7 +1889,9 @@ class MultiTSOConfig:
                       shunt_local_dv_pu`` (1.01 pu) and is released above
                       the upper threshold, the MSR engages above
                       ``shunt_local_v_ref_pu + shunt_local_dv_pu`` (1.05 pu)
-                      and is released below the lower one.  Same holding
+                      and is released below the lower one, each only after
+                      ``shunt_local_confirm_steps`` (3) consecutive steps
+                      beyond the threshold.  Same holding
                       time and MSC/MSR exclusion as the MIQP
                       (:class:`controller.local_rules.BankRelay`).
 
@@ -1943,10 +1945,13 @@ class MultiTSOConfig:
 
     shunt_local_v_ref_pu: float = 1.03  # added 2026-10-30
     shunt_local_dv_pu: float = 0.02  # added 2026-10-30
+    shunt_local_confirm_steps: int = 3  # added 2026-10-30
     """Thresholds of the local bank rule (``shunt_dispatch='local'``):
     engage the MSC below ``v_ref - dv`` and the MSR above ``v_ref + dv`` on
     the primary side of the hosting coupler; release each at the other
-    threshold (author decision 2026-10-30)."""
+    threshold; act only after the condition has held for
+    ``shunt_local_confirm_steps`` consecutive steps of ``dt_s`` (3 x 20 s)
+    (author decision 2026-10-30)."""
 
     shunt_sts_mutual_exclusion: bool = True  # added 2026-10-22
     """Forbid engaging a bank while the opposite device (MSC vs MSR) of the

@@ -3214,6 +3214,7 @@ def _run_multi_tso_dso_impl(
                 primary_bus=int(net.trafo3w.at[t3w_b, "hv_bus"]),
                 v_low_pu=config.shunt_local_v_ref_pu - config.shunt_local_dv_pu,
                 v_high_pu=config.shunt_local_v_ref_pu + config.shunt_local_dv_pu,
+                confirm_steps=int(config.shunt_local_confirm_steps),
             ))
     _local_rules = LocalDiscreteRules(
         _tap_relays, _bank_relays,

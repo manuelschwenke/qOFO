@@ -44,6 +44,11 @@ inside one `runpp(run_control=True)`, while the AVR holds the LV side of the sam
 explicit rule applies the same law — band 1.03 ± 0.01, one step per action, holding time — once
 per step, outside the power flow.
 
+**Amendment ~15:05 (author):** the bank rule acts only after its condition has held for 3
+consecutive 20-s steps (`shunt_local_confirm_steps` = 3). It is applied to the release as well;
+the counter restarts after a commit. The e5power REF launched at 15:02 without it was stopped and
+restarted.
+
 ## Checks
 
 - **Unit tests:** `test_local_rules`, `test_shunt_banks`, `test_oltc_cooldown`,

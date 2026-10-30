@@ -19,7 +19,8 @@ next dispatch.
 
 Element indices (pandapower, from ``run_mc.enumerate_elements`` and the fixed
 zone partition): machines G4 = 2 (area 3), G3 = 1 (area 2); lines 25 = 17-27
-(tie, areas 1/3), 7 = 4-14 (area 2); load buses 11 = IEEE 12, 7 = IEEE 8,
+(tie, areas 1/3), 7 = 4-14 (area 2), 14 = 9-39 (tie, areas 2/1, to the G1
+equivalent); load buses 11 = IEEE 12, 7 = IEEE 8,
 3 = IEEE 4 (area 2).
 
 Author: Manuel Schwenke / Claude Code (2026-10-27)
@@ -76,6 +77,16 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
         title="area-2 Q-scarce, rule bus: G3 out, line 4-14 out, 250 Mvar at bus 4",
         events=lambda: [_gen(1, _at(30, 40)), _line(7, _at(120, 100)),
                         _load(3, 250.0, _at(210, 140))]),
+    # Declared 2026-10-30 before any run (docs/analysis/
+    # 2026-10-30_scenario_E_declaration.md): D with the tie to G1 (line 9-39)
+    # instead of 4-14, and a deficit beyond area 2's own TS resources -- with
+    # their raising limits the area-2 level stays 27 mpu below 1.03 pu (plant
+    # bound), restorable with 13 % of the STS DER capability.
+    "E": dict(
+        title="area-2 Q-scarce beyond own TS resources: G3 out, line 9-39 out, "
+              "600 Mvar at bus 4",
+        events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
+                        _load(3, 600.0, _at(210, 140))]),
     "C": dict(
         title="G3 out (area 2), 250 Mvar at bus 12 (area 2), tie 17-27 out",
         events=lambda: [_gen(1, _at(30, 40)), _load(11, 250.0, _at(120, 100)),

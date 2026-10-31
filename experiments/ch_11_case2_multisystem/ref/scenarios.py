@@ -104,6 +104,23 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
         start="2016-03-13T09:00:00",
         events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
                         _load(3, 600.0, _at(210, 140))]),
+    # Period with G3 offline (author decision 2026-10-31; rule declared before
+    # the search in docs/analysis/2026-10-31_ref_period_G3_offline_declaration.md):
+    # the earliest 6-h window outside the excluded days, starting at a full hour
+    # between 06:00 and 12:00, with G3 not committed and >= 3 machines
+    # committed, that is operable under LOC without events and whose post-event
+    # states of A's and E's schedules are solvable.  Selected: 08 Jan 06:00
+    # (G10, G9, G4, G7 committed); E's G3 outage is void there.
+    "GA": dict(
+        title="G3 offline (area 2 without a synchronous machine), A's events",
+        start="2016-01-08T06:00:00",
+        events=lambda: [_gen(2, _at(30, 40)), _load(11, 250.0, _at(120, 100)),
+                        _line(25, _at(210, 140))]),
+    "GE": dict(
+        title="G3 offline (area 2 without a synchronous machine), E's events",
+        start="2016-01-08T06:00:00",
+        events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
+                        _load(3, 600.0, _at(210, 140))]),
     "C": dict(
         title="G3 out (area 2), 250 Mvar at bus 12 (area 2), tie 17-27 out",
         events=lambda: [_gen(1, _at(30, 40)), _load(11, 250.0, _at(120, 100)),

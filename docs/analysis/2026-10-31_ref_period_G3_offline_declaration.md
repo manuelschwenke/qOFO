@@ -67,7 +67,7 @@ technical minima first, G1 limited to ±1200 Mvar).
   - fail on E's load step: 08 Jan 08:00, 12 Jan 06:00.
 - **Selected period: 2016-01-08 06:00–12:00**, scenarios GA and GE in
   `experiments/ch_11_case2_multisystem/ref/scenarios.py`. E's G3 outage is void there.
-- **Observation (not part of the rule):** with only three machines and G3 offline, E's 600-Mvar
-  step has no plant solution in most of the windows screened, whenever G9 is also offline.
-  Area 2's reactive deficit in E thus lies at the edge of what the system without G3 can
-  carry.
+- **Observation (not part of the rule):** with G3 offline, E's 600-Mvar step has no plant
+  solution in 4 of the 9 windows screened that initialise (06 Jan 06:00 and 07:00, 08 Jan
+  08:00, 12 Jan 06:00). It is solvable in the other five. Area 2's reactive deficit in E thus
+  lies at the edge of what the system without G3 can carry.

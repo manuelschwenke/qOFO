@@ -103,4 +103,15 @@ were therefore solved separately.
 
 ## 5. G1-limit sensitivity on W6 (LOC, no events)
 
-(Filled in when finished.)
+| G1 Q limit | result | G1 Q max reached | V_min |
+|---|---|---|---|
+| ±500 Mvar | fails after 75 min | +509 | 0.913 |
+| ±1000 Mvar | fails after 114 min | +961 | 0.953 |
+| unlimited | **ok**, 12 h | **+1062** | 0.943 |
+
+- LOC needs about 1.06 GVar from G1 in W6 (G9 decommitted, high export).
+- Any limit below about 1.1 GVar makes this design window inoperable under LOC.
+- Whether the coordinated variants (OFO, OFO+, CEN) hold it with less G1 support is **not
+  tested**. If they do, the G1 limit would itself be a condition under which coordination and
+  access decide operability. That is a stronger statement than an e_v difference, but it needs a
+  declared design first.

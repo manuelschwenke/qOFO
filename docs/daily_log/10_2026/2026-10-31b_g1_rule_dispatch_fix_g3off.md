@@ -262,3 +262,32 @@ e5power has 36 physical cores without hyperthreading and the campaign used 20 of
   - GE started 15:33.
 - **Old base:** REF E of the main session (`F:\qOFO_scarcity`) done 15:19, all six ok.
 - **Re-validation run 0010:** settling e95c, 40 / 120 cases.
+
+**Status 23:50**
+- **Ch 9 rerun, Stage II-a:**
+  - the remote shard ended at 22:55 (rc 0): 395 units in 7.9 h, ≈36 min per unit at 30 workers;
+    its window files are pulled;
+  - the local shard is at 144 / 185 at 23:45. It is the slower half: 14 workers on a host shared
+    with the c08b REF runs until 22:21 and with other sessions' processes (CPU 100 %);
+  - e5power has been idle since 22:55.
+- **Re-validation run 0010 finished by itself at 17:26** (the author had allowed stopping it;
+  there was nothing left to stop):
+  - 9e48 failed settling (p95 34, median residual 1.81 Mvar);
+  - e95c passed (p95 23, residual 0.35 Mvar);
+  - DECISION.json: winner e95cb58c9043, unchanged False.
+  - It is a record only; the full rerun replaces it.
+- **c08b REF on the new base, all finished:**
+  - D (0007) at 17:55, all six ok;
+  - GA (0008) at 22:21, all six ok; S1 e_v 31.0 mpu;
+  - GE (0009) at 19:43: **five of six variants end with `LoadflowNotConverged`** (Newton–Raphson,
+    50 iterations). Only CEN runs the full 360 min. The other five fail in this order, all
+    after the area-2 load connection at 212 min:
+    - SVR at 212 min;
+    - LOC at 313 min;
+    - SVR+ at 335 min;
+    - OFO at 342 min;
+    - OFO+ at 354 min.
+  - In GE, area 2 has no synchronous machine (G3 offline). Its time outside the band is
+    26–50 %, and 58 % for CEN.
+  - Reported as found. Whether the non-convergence is a voltage collapse or a numerical
+    failure is open.

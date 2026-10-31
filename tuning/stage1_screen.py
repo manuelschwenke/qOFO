@@ -689,7 +689,7 @@ def format_table(rows: Sequence[LayerScreen], ceiling: Optional[float] = None) -
 #  CLI
 # ---------------------------------------------------------------------------
 
-def _network_key(cfg) -> str:
+def _network_key(cfg, horizon_s: float = 60.0) -> str:
     """Tag distinguishing per-DSO scenario multipliers in the cache key.
 
     ``cfg.scenario`` names the benchmark (``rural_700``) and is NOT enough on
@@ -707,6 +707,13 @@ def _network_key(cfg) -> str:
 
     The symmetric case without in-MIQP banks keeps the bare key, so operating
     points captured for it stay valid and are not needlessly rebuilt.
+
+    Unit commitment (2026-10-31) is part of the key too: the committed
+    machines are taken out of service before the controllers are built, so
+    the captured curvature depends on the commitment, and the commitment on
+    the window it is computed over (``horizon_s``, the run length of the
+    capture).  Every cache written before that date was captured with all
+    machines in service.
     """
     import hashlib
     import json as _json
@@ -727,6 +734,14 @@ def _network_key(cfg) -> str:
             "sts_exclusion": bool(getattr(cfg, "shunt_sts_mutual_exclusion",
                                           False)),
         }
+    if (getattr(cfg, "use_zonal_gen_dispatch", False)
+            and getattr(cfg, "unit_commitment", False)):
+        parts["commitment"] = {
+            "horizon_s": float(horizon_s),
+            "min_stable": dict(getattr(cfg, "gen_min_stable_frac", None) or {}),
+            "merit": list(getattr(cfg, "gen_merit_order", None) or ()),
+            "slack_q_limit_mvar": getattr(cfg, "slack_q_limit_mvar", None),
+        }
     if not any(parts.values()):
         return ""
     blob = _json.dumps(parts, sort_keys=True)
@@ -746,6 +761,7 @@ def load_or_build_operating_points(
     *,
     rebuild: bool = False,
     verbose: bool = True,
+    horizon_s: float = 60.0,
 ) -> List[OperatingPoint]:
     """Build one operating point per condition, caching the Gram matrices.
 
@@ -754,12 +770,18 @@ def load_or_build_operating_points(
     means the benchmark name *and* the per-DSO scenario multipliers and, with
     in-MIQP bank dispatch, the bank layout; see :func:`_network_key` for why
     neither is optional.
+
+    ``horizon_s`` is the run length of the capture.  The time loop is
+    abandoned before its first step, so it matters only through the unit
+    commitment, which is fixed over the run window: pass the length of the
+    window the screened controller runs in (12 h for the Ch 9 bank) so the
+    capture sees the machines that window commits.
     """
     import dataclasses as _dc
     import pickle
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    net_key = _network_key(base_cfg)
+    net_key = _network_key(base_cfg, horizon_s)
     if verbose and net_key:
         print(f"[stage1] per-DSO multipliers active "
               f"(der={dict(getattr(base_cfg, 'dso_der_scale', None) or {})}, "
@@ -774,7 +796,7 @@ def load_or_build_operating_points(
             if verbose:
                 print(f"[stage1] {name}: cached ({path.name})")
             continue
-        cfg = _dc.replace(base_cfg, start_time=start, n_total_s=60.0,
+        cfg = _dc.replace(base_cfg, start_time=start, n_total_s=float(horizon_s),
                           contingencies=[], verbose=0,
                           live_plot_controller=False, live_plot_cascade=False,
                           live_plot_system=False, run_stability_analysis=False,
@@ -981,6 +1003,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "the protocol input D7 is stated on the command line.")
     p.add_argument("--rebuild", action="store_true",
                    help="Ignore the cached operating points and rebuild.")
+    p.add_argument("--op-horizon-h", type=float, default=None,
+                   help="Run length of the operating-point capture [h]; with "
+                        "unit commitment it fixes the window the commitment is "
+                        "computed over. Default: 60 s, as before 2026-10-31. "
+                        "The Ch 9 bank on the commitment base uses 12.")
     p.add_argument("--cache-dir", type=Path,
                    default=Path("results") / "stage1" / "operating_points")
     p.add_argument("--out", type=Path, default=None)
@@ -1032,9 +1059,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not rows_wanted:
             p.error(f"no condition matched {sorted(want)}")
 
+    op_horizon_s = 60.0 if args.op_horizon_h is None else 3600.0 * args.op_horizon_h
     ops = load_or_build_operating_points(
         base, [(r[0], r[1]) for r in rows_wanted], args.cache_dir,
-        rebuild=args.rebuild)
+        rebuild=args.rebuild, horizon_s=op_horizon_s)
 
     design_report: Optional[Dict[str, Any]] = None
     if args.design:
@@ -1042,6 +1070,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             ops, d_engage_ts=float(args.d_engage_ts),
             d_engage_sts=float(args.d_engage_sts),
             d_engage_shunt=args.d_engage_shunt)
+        design_report["op_horizon_s"] = op_horizon_s
         print()
         print("[stage1] analytic design point:")
         for k in sorted(weights):
@@ -1135,6 +1164,10 @@ def _write_design_paramset(name: str, weights: Dict[str, float],
             "network": str(base_cfg.scenario),
             "dso_der_scale": der,
             "dso_load_p_scale": load_p,
+            "unit_commitment": bool(getattr(base_cfg, "use_zonal_gen_dispatch", False)
+                                    and getattr(base_cfg, "unit_commitment", False)),
+            "slack_q_limit_mvar": getattr(base_cfg, "slack_q_limit_mvar", None),
+            "operating_point_horizon_s": report.get("op_horizon_s"),
             "conditions": list(conditions),
             "priorities": report.get("priorities"),
             "tau": report.get("tau"),

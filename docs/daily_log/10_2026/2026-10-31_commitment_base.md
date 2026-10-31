@@ -77,19 +77,31 @@ scenario A, 4 min against the weekend code: max |ΔV| = 0.0, max |ΔQ_DER| = 0.0
 - **Year scan** (`year_commit.py`, shared notes folder), 3-h windows as in the MC:
   - 5 machines committed in 59 % of windows, 4 in 17.5 %, 3 in 6.5 %, 2 in 14.7 %, 1 in 2.5 %;
   - G3 committed in 75 %.
-- **Convergence before the campaign** (`conv_check.py`, coarse step 180 s, full horizon, plant
-  solvability through every event): results in the next section.
+- **Convergence before the campaign:** **not met** in the renewable-dominated regime. Details,
+  diagnosis and the decisions needed are in `docs/analysis/2026-10-31_commitment_base_status.md`.
+  - At the reference period (all five machines committed over 08:00–14:00), REF A/B/D/E converge,
+    and so do their post-event states.
+  - LOC loses voltage stability without events at the W1 evening peak and in W6 (G1 at its limit;
+    W6 also at ±1000 Mvar).
+  - After N-1 events in two- and one-machine periods, the plant has no solution. On 8 Jan this is
+    plant numerics: the state is solvable with ideal TS-DER voltage control.
 - **Found and fixed on the way:**
-  - (i) zone net without a machine;
+  - (i) a zone net without a machine (boundary source as reference);
   - (ii) the post-profile PF from the build-state STATCOM Q;
-  - (iii) relay hunting.
+  - (iii) relay hunting (relays held once, also at the plant seam);
+  - (iv) G1-limit chatter (10-Mvar tolerance, 30-Mvar hysteresis, c05da69).
+  - A PV warm start for post-event solves was tried and removed (it did not help).
 
 ## Not changed / open
 
-- The weights stay c08b1d3d33ab. A declared re-validation on the new base (as on 30 Oct) gates the
-  MC; the full Ch 9 procedure stays planned.
+- The weights stay c08b1d3d33ab.
+  - The re-validation on the new base is not launched, since W1 and W6 do not converge under LOC
+    with G1 at ±500. It needs the G1 decision first.
+  - The full Ch 9 procedure stays planned.
 - STEP is not rerun.
 - The running old-base jobs (STEP on e5wimi, MC on e5power, the queued old-base E) could not be
-  stopped from the session: the action was denied in auto mode. The new runs are queued to start
-  as each old job ends.
+  stopped from the session: the action was denied in auto mode.
+- Queued on e5wimi: REF A, E (after the old E) and B, D (after the old STEP); chain
+  `results/res_logs/chain_res.py`, pid 146552.
+- Not launched: the e5power re-validation and MC.
 - An outage event on a decommitted machine (B/D/E's G3, MC gen trips) changes nothing.

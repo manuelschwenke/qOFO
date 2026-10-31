@@ -84,3 +84,29 @@ dispatch, because W1 is a re-validation window under OFO.
 - **Commitment window length** is a modelling choice with a visible effect (W1 evening). Fixed
   per window from the peak; an hourly schedule with minimum up and down times would remove it.
   That would be an architectural change and needs the author.
+
+## Results after the fix (09:00–10:00)
+
+**W1 and W6 re-test, ±1200**
+
+| window | LOC | OFO |
+|---|---|---|
+| W1 | ok, G1 max 927 | ok, G1 max 913 |
+| W6 | ok, G1 max 1087 | — |
+
+- The re-validation windows are operable without events.
+- Before the fix: W1 under OFO at ±1200 failed at 19:51. Coordination did not hold a binding
+  ±500 either (W1 OFO fails ≈17:33; W6 OFO and OFO+ fail after 75 and 87 min).
+
+**G3-offline REF period**
+- Selected: **08 Jan 2016 06:00** (G10, G9, G4, G7 committed), by the declared rule.
+- Search table: `docs/analysis/2026-10-31_ref_period_G3_offline_declaration.md`.
+- Scenarios **GA** and **GE** in `ref/scenarios.py` (be66584). Commit 01117ea carries only the
+  document; its registry edit did not apply and followed in be66584.
+
+**Launches**
+
+| what | host | when | details |
+|---|---|---|---|
+| re-validation | e5power | 09:38 | run 0010, 70 units, 20 workers; chain `chain_res2.py e5power`: MC follows if c08b is confirmed |
+| GA, GE | e5wimi | queued | `chain_res3.py`: GA when the second of A/E/B ends, GE at the third (6 workers each) |

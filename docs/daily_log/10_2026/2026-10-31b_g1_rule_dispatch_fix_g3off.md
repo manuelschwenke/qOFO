@@ -110,3 +110,40 @@ dispatch, because W1 is a re-validation window under OFO.
 |---|---|---|---|
 | re-validation | e5power | 09:38 | run 0010, 70 units, 20 workers; chain `chain_res2.py e5power`: MC follows if c08b is confirmed |
 | GA, GE | e5wimi | queued | `chain_res3.py`: GA when the second of A/E/B ends, GE at the third (6 workers each) |
+
+## Status 13:15
+
+**e5wimi REF (new base, weights c08b)**
+
+| run | scenario | state |
+|---|---|---|
+| 0004 | B | done 12:56, all six variants ok (1080 records each) |
+| 0006 | A | done 12:56, all six ok |
+| 0005 | E | five ok, SVR (S1) still running |
+| 0007 | D | started 12:56 |
+| 0008 | GA | started 12:57 |
+| — | GE | starts when E ends |
+
+**e5power re-validation, run 0010: c08b is not confirmed on the new base**
+- **Units:** all 70 units ok. 0 of 70 reproduce the stored e_v(TS) bit-exactly, which is
+  expected because the base changed.
+- **Select:** 5 of 14 feasible, ranked 301c285ee52b, 9e48320e8a01, e95cb58c9043, 34a9f0cf1444,
+  4ccfa217c2b5.
+- **Rejected:** c08b, the baseline 3cb66225e1a7 and 7 others, all for tap "hunting" (a reversal
+  within < 2 h dwell that no event explains).
+- **The rejections share one reversal.** For c08b, the baseline, 67ad, ff3f, 0efa, c9a5 and
+  7935 it is the same one:
+  - window **W6**, transformer `1[0]`;
+  - first move at the first dispatch (t = 180 s, or 360 s for the baseline), reversed at
+    t ≈ 4,700–5,600 s;
+  - dwell 1.25–1.5 h, before W6's first event at 19,440 s.
+- 57f0 and 8323 additionally reverse twice in W3 after an event.
+- **Reading (hypothesis, not tested):** this looks like an initialisation transient of the new
+  base in W6 (the window with the largest import, G1 up to 1087 Mvar under LOC), not hunting
+  caused by the weights. The frozen filter counts it nonetheless.
+- **Settle:** 301c's settling result from run 0008 is a fail, so Experiment C runs on
+  **9e48320e8a01** (8 workers): 40 / 120 cases at 13:10, ETA ≈16:30.
+- **Consequence:** DECISION.json will report `unchanged: false`, the script exits 3, and the
+  chain logs "MC NOT started". By the weekend plan §5.1, the settling winner then becomes the
+  new paramset and the campaigns rerun on it. Which path to take (§5.1 winner, the full Ch 9
+  procedure, or the author's judgement of the W6 reversal) is put to the author.

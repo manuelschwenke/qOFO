@@ -1203,6 +1203,40 @@ class MultiTSOConfig:
 
     use_zonal_gen_dispatch: bool = True
 
+    unit_commitment: bool = True
+    """Merit-order dispatch with unit commitment (author decision 2026-10-31).
+
+    Replaces the S_n-proportional zonal split, in which every machine stayed
+    synchronised at any P (down to 0 MW) with its full Q range.  Per zone the
+    machines are committed in :attr:`gen_merit_order` while the zone's peak
+    residual over the simulated window still needs at least their technical
+    minimum (:attr:`gen_min_stable_frac`); the commitment holds for the
+    window.  A decommitted machine and its machine transformer are out of
+    service from t = 0 and known to every controller (outage masks, as after a
+    trip).  The network equivalent (slack) is always committed and balances
+    the system (import / export).  ``False`` reproduces the earlier
+    construction.  See :func:`network.ieee39.zonal_balancing.compute_merit_order_dispatch`."""
+
+    gen_min_stable_frac: Dict[str, float] = field(
+        default_factory=lambda: {"Nuclear": 0.5, "Coal": 0.4, "Hydro": 0.1})
+    """Technical minimum (minimum stable generation) per fuel type, as a
+    fraction of S_n; typical values for these unit types."""
+
+    gen_merit_order: Tuple[str, ...] = ("Hydro", "Nuclear", "Coal")
+    """Commitment and dispatch order by fuel type (marginal cost); the network
+    equivalent comes last (import)."""
+
+    slack_q_limit_mvar: Optional[float] = 500.0
+    """Reactive limit of the network equivalent (G1, 10 GVA), +-Mvar (author
+    decision 2026-10-31).  pandapower never enforces the Q box of the
+    reference machine, so the plant holds it with
+    :class:`controller.slack_q_limit.SlackQLimit`: at a limit the machine
+    keeps Q at the limit and its voltage floats (PV -> PQ), as
+    ``enforce_q_lims`` does for every other machine.  500 Mvar is the Q range
+    of one 1000-MVA unit of the system: the renewable-dominated neighbour
+    supports the boundary like one large machine, not like an infinite bus.
+    ``None`` reproduces the earlier unlimited equivalent."""
+
     scenario: str = "rural_700"
     """Network scenario registered in :mod:`network.ieee39.scenarios`.
     ``"base_410"`` and ``"rural_700"`` share the transmission-side wind

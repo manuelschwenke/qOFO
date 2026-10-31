@@ -47,8 +47,48 @@ from dataclasses import dataclass, field
 from typing import Dict, Protocol, runtime_checkable
 
 import pandapower as pp
+from pandapower.control import DiscreteTapControl
+from pandapower.auxiliary import ControllerNotConverged
 
 from core.measurement_noise import measured_der_voltage
+
+#: Plant solves in which the local tap relays had to be held (see
+#: :func:`runpp_holding_taps`); reported by the runner at the end of a run.
+HELD_TAP_SOLVES = 0
+
+
+def runpp_holding_taps(net: pp.pandapowerNet, **kwargs) -> None:
+    """``pp.runpp``; if the plant-side control loop does not converge, re-solve
+    once with the local tap relays (``DiscreteTapControl``) held.
+
+    With few synchronous machines on line (unit commitment, 2026-10-31) a
+    coupler relay can hunt inside one control loop against the DER Q(V)
+    loops: a tap step moves the voltage across the band, the Q(V) loops move
+    it back.  Each loop converges alone.  A real relay acts with a time delay
+    and does not hunt within one dispatch interval, so the relays keep their
+    positions for this solve; the per-step tap-rate limiter acts as before.
+    Solves that converge are untouched (bit-identical to plain ``pp.runpp``).
+    """
+    global HELD_TAP_SOLVES
+    try:
+        pp.runpp(net, **kwargs)
+        return
+    except ControllerNotConverged:
+        if not kwargs.get("run_control") or not len(net.controller):
+            raise
+        relays = [i for i in net.controller.index
+                  if isinstance(net.controller.at[i, "object"], DiscreteTapControl)
+                  and bool(net.controller.at[i, "in_service"])]
+        if not relays:
+            raise
+    net.controller.loc[relays, "in_service"] = False
+    try:
+        pp.runpp(net, **kwargs)
+    finally:
+        net.controller.loc[relays, "in_service"] = True
+    HELD_TAP_SOLVES += 1
+    print(f"  [plant] tap relays held for one solve (hunting against the "
+          f"Q(V) loops); {HELD_TAP_SOLVES} so far")
 
 
 @dataclass(frozen=True)
@@ -285,7 +325,7 @@ class PandapowerStaticPlant:
     def advance(self, duration_s: float = 0.0) -> None:
         """One converged power flow; ``duration_s`` is ignored (the
         quasi-static plant settles instantly within a dispatch interval)."""
-        pp.runpp(
+        runpp_holding_taps(
             self.net,
             run_control=self.run_control,
             calculate_voltage_angles=self.calculate_voltage_angles,

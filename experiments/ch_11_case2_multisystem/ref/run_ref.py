@@ -80,6 +80,8 @@ def _run_variant(name: str, out: str, minutes: int, scenario: str,
     d.mkdir(parents=True, exist_ok=True)
     cfg = v.resolved(name, minutes, sc.events(scenario), noise_seed)
     cfg = dataclasses.replace(cfg, result_dir=str(d), verbose=1)
+    if sc.start_time(scenario) is not None:
+        cfg = dataclasses.replace(cfg, start_time=sc.start_time(scenario))
     (d / "config_repr.txt").write_text(repr(cfg), encoding="utf-8")
     t0 = _dt.datetime.now()
     with open(d / "console.log", "w", encoding="utf-8") as fh, \
@@ -263,6 +265,8 @@ def main() -> None:
     print("guard: every Case-2 step changes only what it is allowed to")
 
     base = v.base_config(minutes, evs, noise_seed)
+    if sc.start_time(scenario) is not None:
+        base = dataclasses.replace(base, start_time=sc.start_time(scenario))
     with start_thesis_run(
             __file__, target=TARGET, feeds=FEEDS, config=base,
             paramset=v.PARAMSET,
@@ -270,6 +274,9 @@ def main() -> None:
                 "variants": sel, "scenario": scenario,
                 "scenario_title": sc.SCENARIOS[scenario]["title"],
                 "events": sc.describe(scenario), "horizon_min": minutes,
+                "start_time": base.start_time.isoformat(),
+                "unit_commitment": bool(base.unit_commitment),
+                "slack_q_limit_mvar": base.slack_q_limit_mvar,
                 "noise": (f"{base.measurement_noise.profile}, seed {noise_seed}, "
                           "incl. SVR and droop"),
                 "noise_seed": noise_seed,

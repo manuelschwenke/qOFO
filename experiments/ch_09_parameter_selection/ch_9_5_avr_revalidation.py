@@ -235,6 +235,8 @@ def main(argv: List[str] | None = None) -> int:
             parameters={"candidates": ",".join(KEYS), "baseline": BASELINE,
                         "gen_vm_max_pu": probe.gen_vm_max_pu,
                         "tso_int_cooldown": probe.tso_int_cooldown,
+                        "unit_commitment": probe.unit_commitment,
+                        "slack_q_limit_mvar": probe.slack_q_limit_mvar,
                         "rule": "docs/analysis/2026-10-30_weekend_plan.md §5"},
             time_series=("W1-W4, W6 of tuning.scenarios_mc_v2.CONDITIONS, 12 h, one "
                          "disturbance each, evented, frozen network; T_TS 180 s, "

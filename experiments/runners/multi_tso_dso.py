@@ -104,7 +104,11 @@ from core.profiles import (
 )
 from network.ieee39.dso_overrides import apply_dso_overrides
 from network.ieee39.load_model import apply_zip_load_model
-from network.ieee39.zonal_balancing import apply_gen_dispatch, compute_zonal_gen_dispatch
+from network.ieee39.zonal_balancing import (
+    apply_gen_dispatch,
+    compute_merit_order_dispatch,
+    compute_zonal_gen_dispatch,
+)
 from network.ieee39 import (
     add_hv_networks,
     build_ieee39_net,
@@ -121,6 +125,7 @@ from network.zone_partition import (
 )
 from configs.config import MultiTSOConfig
 from experiments.helpers import (
+    ContingencyEvent,
     MultiTSOIterationRecord,
     _apply_contingency,
     _network_state,
@@ -128,6 +133,7 @@ from experiments.helpers import (
 )
 from core.plant import (
     ActuatorWrites,
+    runpp_holding_taps,
     PandapowerStaticPlant,
     Plant,
     shunt_steps_for_buses,
@@ -146,6 +152,7 @@ from sensitivity.numerical_h import (
     compute_numerical_h_tso,
 )
 from core.message import SetpointMessage, ShuntDisturbanceMessage
+from controller.slack_q_limit import install_slack_q_limit
 from controller.der_qv_local_loop import (
     CosPhiConstLoop,
     QVLocalLoop,
@@ -2015,7 +2022,49 @@ def _run_multi_tso_dso_impl(
         if verbose >= 1:
             print(f"  [T] apply_profiles: {perf_counter() - _t:.2f} s")
 
-        if config.use_zonal_gen_dispatch:
+        if config.use_zonal_gen_dispatch and config.unit_commitment:
+            # Merit-order dispatch with unit commitment over the run window
+            # (author decision 2026-10-31).  A decommitted machine leaves
+            # service with its machine transformer exactly as a trip does,
+            # before the post-Phase-2 Jacobian rebuild, so every cached
+            # controller model is built without it; the outage masks tell the
+            # controllers (an operator knows which units are off).
+            _t = perf_counter()
+            gen_dispatch, _committed = compute_merit_order_dispatch(
+                net, profiles, dispatch_zone_map,
+                min_stable_frac=config.gen_min_stable_frac,
+                merit_order=config.gen_merit_order,
+            )
+            apply_gen_dispatch(net, gen_dispatch, start_time)
+            for _g, _on in sorted(_committed.items()):
+                if not _on:
+                    _apply_contingency(
+                        net, ContingencyEvent(minute=0, element_type="gen",
+                                              element_index=int(_g),
+                                              action="trip"),
+                        verbose, gen_trafo_map=gen_trafo_map)
+            # The TS STATCOMs still carry their build-state Q here (several
+            # hundred Mvar); Phase 1 below replaces it by the voltage-holding
+            # solution.  With the machines that absorbed it decommitted, the
+            # post-profile power flow cannot converge from that point, so
+            # start it from Q = 0.
+            _ts_statcom = (net.sgen["name"].astype(str).str.contains("STATCOM")
+                           & (net.sgen["subnet"].astype(str) != "DN"))
+            net.sgen.loc[_ts_statcom, "q_mvar"] = 0.0
+            coordinator.update_outage_masks(net)
+            coordinator.invalidate_sensitivity_cache()
+            if _central and central_controller is not None:
+                central_controller.update_outage_mask(
+                    {int(g) for g in central_cfg.gen_indices
+                     if not bool(net.gen.at[g, "in_service"])},
+                    {int(t) for t in central_cfg.oltc_trafo_indices
+                     if not bool(net.trafo.at[t, "in_service"])})
+                central_controller.invalidate_sensitivity_cache()
+            print("  [9] unit commitment: off-line "
+                  f"{[str(net.gen.at[g, 'name']) for g, on in sorted(_committed.items()) if not on]}")
+            if verbose >= 1:
+                print(f"  [T] compute+apply merit-order dispatch: {perf_counter() - _t:.2f} s")
+        elif config.use_zonal_gen_dispatch:
             # Per-generator P_min: 20% of P_max (consistent with
             # GeneratorParameters.p_min_mw construction above).
             _gen_p_min_dict: Dict[int, float] = {
@@ -2267,6 +2316,13 @@ def _run_multi_tso_dso_impl(
         qv_max_step_frac=config.qv_local_max_step_frac,
         qv_tol_mvar=config.dso_qv_tol_mvar,
     )) if dso_sgens else 0
+    # Reactive limit of the network equivalent (author decision 2026-10-31):
+    # pandapower does not enforce the slack machine's Q box, so the plant
+    # holds it in the same run_control loop as the DER Q(V) loops.
+    if config.slack_q_limit_mvar is not None:
+        if install_slack_q_limit(net, float(config.slack_q_limit_mvar)) is not None:
+            print(f"[10.3] network equivalent: Q limited to "
+                  f"+-{float(config.slack_q_limit_mvar):.0f} Mvar (plant)")
     if verbose >= 1:
         print(
             f"[10.3] Phase 3 (DER): installed {n_tso + n_dso} DER q_mode loops "
@@ -3850,7 +3906,7 @@ def _run_multi_tso_dso_impl(
                     # next advance()/read_y() produces the post-contingency
                     # measurements from the simulator itself.
                     if isinstance(plant, PandapowerStaticPlant):
-                        pp.runpp(net, run_control=_run_control,
+                        runpp_holding_taps(net, run_control=_run_control,
                                  calculate_voltage_angles=True,
                                  max_iteration=50,
                                  max_iter=300,
@@ -3870,7 +3926,7 @@ def _run_multi_tso_dso_impl(
                     print("\n  *** Retrying PF with enforce_q_lims=True, "
                           "init='flat', max_iteration=100 ***\n")
                     try:
-                        pp.runpp(net, run_control=_run_control,
+                        runpp_holding_taps(net, run_control=_run_control,
                                  calculate_voltage_angles=True,
                                  max_iteration=100,
                                  max_iter=300,
@@ -5123,7 +5179,7 @@ def _run_multi_tso_dso_impl(
                         print(f"  [Step {step}] end-of-step PF with "
                               f"enforce_q_lims={config.enforce_q_lims_plant} "
                               f"diverged; retrying flat-start unclipped...")
-                    pp.runpp(net, run_control=_run_control,
+                    runpp_holding_taps(net, run_control=_run_control,
                              calculate_voltage_angles=True,
                              max_iteration=100,
                              max_iter=300,

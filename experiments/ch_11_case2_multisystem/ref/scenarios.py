@@ -28,7 +28,8 @@ Author: Manuel Schwenke / Claude Code (2026-10-27)
 
 from __future__ import annotations
 
-from typing import Dict, List
+from datetime import datetime
+from typing import Dict, List, Optional
 
 from experiments.helpers.records import ContingencyEvent
 
@@ -87,6 +88,22 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
               "600 Mvar at bus 4",
         events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
                         _load(3, 600.0, _at(210, 140))]),
+    # Renewable-dominated period under unit commitment (author decision
+    # 2026-10-31): the earliest 6-h window of the profile year, outside the
+    # excluded days, starting at a full hour between 06:00 and 12:00, in which
+    # a single synchronous machine is committed (G10, hydro; G1 equivalent
+    # aside).  A's and E's schedules on that period; an outage of a machine
+    # that is not committed changes nothing.
+    "RA": dict(
+        title="renewable-dominated (one machine committed), A's events",
+        start="2016-03-13T09:00:00",
+        events=lambda: [_gen(2, _at(30, 40)), _load(11, 250.0, _at(120, 100)),
+                        _line(25, _at(210, 140))]),
+    "RE": dict(
+        title="renewable-dominated (one machine committed), E's events",
+        start="2016-03-13T09:00:00",
+        events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
+                        _load(3, 600.0, _at(210, 140))]),
     "C": dict(
         title="G3 out (area 2), 250 Mvar at bus 12 (area 2), tie 17-27 out",
         events=lambda: [_gen(1, _at(30, 40)), _load(11, 250.0, _at(120, 100)),
@@ -113,6 +130,14 @@ def events(name: str) -> List[ContingencyEvent]:
     if name not in SCENARIOS:
         raise KeyError(f"unknown scenario {name!r}; valid: {sorted(SCENARIOS)}")
     return list(SCENARIOS[name]["events"]())
+
+
+def start_time(name: str) -> Optional[datetime]:
+    """Start of the scenario's period, or None for the reference period."""
+    if name not in SCENARIOS:
+        raise KeyError(f"unknown scenario {name!r}; valid: {sorted(SCENARIOS)}")
+    s = SCENARIOS[name].get("start")
+    return None if s is None else datetime.fromisoformat(str(s))
 
 
 def describe(name: str) -> List[str]:

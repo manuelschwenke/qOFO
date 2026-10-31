@@ -14,6 +14,11 @@
 - the driver `experiments/ch_09_parameter_selection/ch_9_6_full_procedure.py`;
 - the two flags it needs in `tuning/stage1_screen.py` and `ch_9_3_stage2_screen.py`.
 
+> **Amended 2026-10-31 ~15:20**, before the first selection of the run, by author decision.
+> The engagement bound is **θ_STS,min ≤ 0.02 pu** instead of 0.05 pu.
+> See `docs/tuning/2026-10-31_amendment2_sts_engagement_0p02.md`.
+> Everything else in this declaration stands.
+
 ## 1. What is applied
 
 **The procedure.** `docs/tuning/2026-10-28_weight_selection_procedure.md` (frozen), **unchanged**:

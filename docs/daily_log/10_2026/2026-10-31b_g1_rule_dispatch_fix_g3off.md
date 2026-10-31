@@ -234,3 +234,16 @@ e5power has 36 physical cores without hyperthreading and the campaign used 20 of
 | Stage-I point | 0.0150 |
 | c08b | 0.0195 |
 | fde2 | 0.0816 |
+
+**~15:20 amendment 2** (author: "Declare 0.02 now")
+- The engagement bound becomes θ_STS,min ≤ 0.02 pu, the "far" level of the author's intent
+  check in run 0008. It was 0.05 pu, at which a coupler commits only at the band edge.
+- Declared in `docs/tuning/2026-10-31_amendment2_sts_engagement_0p02.md`, with a pointer in the
+  campaign declaration.
+- The declaration states what was known: analytic θ values only, and c08b at 0.0195 just
+  below the bound.
+- **Driver:** a module constant `THETA_MAX = 0.02` replaces amendment 1's import; it is
+  recorded in the selection log line, the run parameters and the result provenance.
+- **Restart:** the master is restarted during Stage II-a so the bound acts from the first
+  selection. The remote shard (30 workers) keeps running, and the local shard resumes from its
+  unit files, losing its ≈14 units in progress.

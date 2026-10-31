@@ -73,6 +73,10 @@ BAND = (0.92, 1.08)
 BANK_BUDGET = 12.0
 N_INNER = 9
 C_PARALLEL = 4                           # settling checks at a time, as run 0001
+#: Engagement bound on theta_STS,min [pu]: amendment 2 (author, 2026-10-31,
+#: docs/tuning/2026-10-31_amendment2_sts_engagement_0p02.md), declared before
+#: the first selection of this run; amendment 1 had V_max,band - V_ref = 0.05.
+THETA_MAX = 0.02
 D_ENGAGE = {"ts": 0.0075, "sts": 0.015, "shunt": 0.010}
 SIM_HOURS = HOURS                        # simulated length; HOURS fixes the capture
 EXPC_EXTRA: List[str] = []
@@ -412,8 +416,7 @@ def simulate(out: Path, cands: List[Dict[str, float]], w_local: int,
 # -- selection (frozen rule + engagement bound) -------------------------------------------
 
 def select_union(dirs: List[Path], tag: str, ops) -> dict:
-    from experiments.ch_09_parameter_selection.ch_9_3_amendment1 import (
-        THETA_MAX, theta_sts_min)
+    from experiments.ch_09_parameter_selection.ch_9_3_amendment1 import theta_sts_min
     sel = RUN / "selection"
     union = sel / f"union_{tag}"
     union.mkdir(parents=True, exist_ok=True)
@@ -444,7 +447,8 @@ def select_union(dirs: List[Path], tag: str, ops) -> dict:
         raise RuntimeError(f"selection {tag}: no report (no feasible candidate?)")
     rep = json.loads(out.read_text("utf-8"))
     n_adm = sum(1 for v in thetas.values() if v <= THETA_MAX)
-    log(f"selection {tag}: {n_adm} / {len(thetas)} inside the engagement bound, "
+    log(f"selection {tag}: {n_adm} / {len(thetas)} inside the engagement bound "
+        f"{THETA_MAX:g} pu, "
         f"{rep['n_feasible']} / {rep['n_total']} feasible, ranked first "
         f"{[r['key'] for r in rep['ranked'][:4]]}")
     rep["_theta"] = thetas
@@ -603,7 +607,7 @@ def write_result(win: dict, rep: dict, c_res: dict, rounds: int, w5: dict) -> Pa
             "Stage I analytic point designed on operating points with the "
             "commitment of the 12 h window; Stage II-a 512 Sobol draws; Stage "
             "II-b local rounds; filter with the engagement bound "
-            "theta_STS,min <= 0.05 pu; ranking on the per-bus TS voltage "
+            "theta_STS,min <= 0.02 pu (amendment 2); ranking on the per-bus TS voltage "
             "deviation with a 2 % band on the STS deviation; settling "
             "requirement in rank order.",
             "Declared in docs/analysis/2026-10-31_ch9_full_procedure_uc_declaration.md.",
@@ -622,6 +626,8 @@ def write_result(win: dict, rep: dict, c_res: dict, rounds: int, w5: dict) -> Pa
             "n_candidates": rep.get("n_total"),
             "n_feasible": rep.get("n_feasible"),
             "theta_sts_min_pu": rep["_theta"].get(win["key"]),
+            "theta_sts_max_pu": THETA_MAX,
+            "amendment2": "docs/tuning/2026-10-31_amendment2_sts_engagement_0p02.md",
             "failed_settling": sorted(k for k, v in c_res.items() if not v["pass"]),
             "lambda_max_B": win.get("lambda_max_B"),
             "aggregate_ranked_windows_per_bus": win["aggregate"],
@@ -730,6 +736,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "stage1_paramset": START, "result_paramset": RESULT,
                         "sobol_seed": SEED, "stage2a_draws": N_2A,
                         "stage2b_rounds_max": MAX_ROUNDS, "op_horizon_h": HOURS,
+                        "theta_sts_max_pu": THETA_MAX,
                         "hosts": f"e5wimi {args.w_local_2a}/{args.w_local}, "
                                  f"{REMOTE} {args.w_remote} workers"},
             time_series=("W1-W4, W6 of tuning.scenarios_mc_v2.CONDITIONS (2016 "

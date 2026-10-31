@@ -53,7 +53,7 @@ from pandapower.auxiliary import ControllerNotConverged
 from core.measurement_noise import measured_der_voltage
 
 #: Plant solves in which the local tap relays had to be held (see
-#: :func:`runpp_holding_taps`); reported by the runner at the end of a run.
+#: :func:`runpp_holding_taps`).
 HELD_TAP_SOLVES = 0
 
 

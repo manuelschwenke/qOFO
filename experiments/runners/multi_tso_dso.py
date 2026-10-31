@@ -2377,7 +2377,7 @@ def _run_multi_tso_dso_impl(
     # PandapowerStaticPlant.advance already uses, so this is the same
     # iteration budget the first main-loop solve would have had.
     _t = perf_counter()
-    pp.runpp(net, run_control=True, calculate_voltage_angles=True,
+    runpp_holding_taps(net, run_control=True, calculate_voltage_angles=True,
              max_iteration=50, max_iter=300,
              distributed_slack=config.distributed_slack,
              enforce_q_lims=config.enforce_q_lims_plant)

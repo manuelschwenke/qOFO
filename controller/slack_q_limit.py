@@ -32,9 +32,10 @@ class SlackQLimit(Controller):
     """Hold the reference machine's Q inside ``[q_min, q_max]`` by its voltage.
 
     Each control step estimates ``k = dQ/dV`` at the terminal by a secant over
-    the iterations (first step: ``k0_per_sn * sn_mva``) and moves ``vm_pu`` by
-    a damped Newton step towards the violated limit, or back towards the
-    set-point when the limit is no longer binding there.
+    the iterations (nominal ``k0_per_sn * sn_mva``; measured for G1 about
+    2000-3000 Mvar/pu with the DER loops responding) and moves ``vm_pu`` by a
+    damped Newton step towards the violated limit, or back towards the
+    set-point once Q has left the hysteresis band ``band_mvar`` at the limit.
     """
 
     def __init__(
@@ -44,10 +45,11 @@ class SlackQLimit(Controller):
         q_min_mvar: float,
         q_max_mvar: float,
         *,
-        tol_mvar: float = 1.0,
-        damping: float = 0.8,
+        tol_mvar: float = 10.0,
+        band_mvar: float = 30.0,
+        damping: float = 0.5,
         max_dv_pu: float = 0.02,
-        k0_per_sn: float = 3.0,
+        k0_per_sn: float = 0.25,
         in_service: bool = True,
         order: int = 1,
         level: int = 0,
@@ -63,6 +65,7 @@ class SlackQLimit(Controller):
         self.q_max = float(q_max_mvar)
         self.v_set = float(net.gen.at[self.gen_idx, "vm_pu"])
         self.tol = float(tol_mvar)
+        self.band = float(band_mvar)
         self.damping = float(damping)
         self.max_dv = float(max_dv_pu)
         self.k0 = float(k0_per_sn) * float(net.gen.at[self.gen_idx, "sn_mva"])
@@ -75,18 +78,19 @@ class SlackQLimit(Controller):
                 float(net.res_gen.at[self.gen_idx, "q_mvar"]))
 
     def _target(self, vm: float, q: float) -> Optional[float]:
-        """Q the machine must move to, or None if it sits correctly."""
+        """Q the machine must move to; NaN = back towards the set-point; None =
+        nothing to do.  Off the set-point the machine holds while Q lies in the
+        hysteresis band next to the limit that moved it there, so the voltage
+        does not chatter against the DER Q(V) loops."""
         if q > self.q_max + self.tol:
             return self.q_max
         if q < self.q_min - self.tol:
             return self.q_min
         if abs(vm - self.v_set) < 1e-7:
             return None
-        # Off the set-point: correct only while Q is on a limit; otherwise
-        # head back to the set-point (handled in control_step).
-        if abs(q - self.q_max) <= self.tol or abs(q - self.q_min) <= self.tol:
-            return None
-        return float("nan")
+        if vm < self.v_set:            # lowered by the upper limit
+            return float("nan") if q < self.q_max - self.band else None
+        return float("nan") if q > self.q_min + self.band else None
 
     # ------------------------------------------------------------------
     def initialize_control(self, net: pp.pandapowerNet) -> None:
@@ -106,7 +110,9 @@ class SlackQLimit(Controller):
         k = self.k0
         if self._prev is not None:
             dv, dq = vm - self._prev[0], q - self._prev[1]
-            if abs(dv) > 1e-7 and dq / dv > 0.0:
+            # The other plant loops move Q too, so the secant is noisy: accept
+            # it only within a decade of the nominal slope.
+            if abs(dv) > 1e-7 and 0.1 * self.k0 < dq / dv < 10.0 * self.k0:
                 k = dq / dv
         target = self._target(vm, q)
         if target is None:
@@ -116,10 +122,12 @@ class SlackQLimit(Controller):
             # Back towards the set-point, but no further than Q allows.
             dv = self.v_set - vm
             q_pred = q + k * dv
-            if q_pred > self.q_max:
-                dv = (self.q_max - q) / k
-            elif q_pred < self.q_min:
-                dv = (self.q_min - q) / k
+            half = 0.5 * self.band
+            if q_pred > self.q_max - half:
+                dv = (self.q_max - half - q) / k
+            elif q_pred < self.q_min + half:
+                dv = (self.q_min + half - q) / k
+            dv *= self.damping
         else:
             dv = self.damping * (target - q) / k
         dv = float(np.clip(dv, -self.max_dv, self.max_dv))

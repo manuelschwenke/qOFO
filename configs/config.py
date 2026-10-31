@@ -1226,16 +1226,20 @@ class MultiTSOConfig:
     """Commitment and dispatch order by fuel type (marginal cost); the network
     equivalent comes last (import)."""
 
-    slack_q_limit_mvar: Optional[float] = 500.0
+    slack_q_limit_mvar: Optional[float] = 1200.0
     """Reactive limit of the network equivalent (G1, 10 GVA), +-Mvar (author
     decision 2026-10-31).  pandapower never enforces the Q box of the
     reference machine, so the plant holds it with
     :class:`controller.slack_q_limit.SlackQLimit`: at a limit the machine
     keeps Q at the limit and its voltage floats (PV -> PQ), as
-    ``enforce_q_lims`` does for every other machine.  500 Mvar is the Q range
-    of one 1000-MVA unit of the system: the renewable-dominated neighbour
-    supports the boundary like one large machine, not like an infinite bus.
-    ``None`` reproduces the earlier unlimited equivalent."""
+    ``enforce_q_lims`` does for every other machine.  The value follows the
+    operability rule, amendment A1
+    (``docs/analysis/2026-10-31_g1_operability_rule.md``): the smallest
+    multiple of 100 Mvar at which the limit causes no inoperability of LOC in
+    the design windows W1-W4, W6 that does not also occur with the equivalent
+    unlimited (W6 needs 1062 Mvar; W1 collapses at its evening peak even
+    unlimited, after drawing 1181 Mvar).  ``None`` reproduces the earlier
+    unlimited equivalent."""
 
     scenario: str = "rural_700"
     """Network scenario registered in :mod:`network.ieee39.scenarios`.

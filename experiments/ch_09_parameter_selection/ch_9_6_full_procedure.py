@@ -679,8 +679,10 @@ def smoke(args) -> int:
     windows of 6 min, settling on one DSO of W1, no parameter set written.
     Stage I is not repeated: the capture of ``--ops-from`` is copied."""
     global RUN, N_2A, N_LOCAL, MAX_ROUNDS, WINDOWS, SIM_HOURS, EXPC_EXTRA, C_PARALLEL, SMOKE
+    global POLL_S
     N_2A, N_LOCAL, MAX_ROUNDS, WINDOWS, SIM_HOURS = 16, 8, 1, "W1,W2", 0.1
     EXPC_EXTRA, C_PARALLEL, SMOKE = ["--windows", "W1", "--dsos", "DSO_1"], 2, True
+    POLL_S = 30.0
     RUN = ROOT / "results" / "_smoke_ch9_6" / f"{datetime.now():%Y%m%d-%H%M%S}"
     RUN.mkdir(parents=True)
     (RUN / "operating_points").mkdir()

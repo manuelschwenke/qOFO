@@ -147,3 +147,33 @@ dispatch, because W1 is a re-validation window under OFO.
   chain logs "MC NOT started". By the weekend plan §5.1, the settling winner then becomes the
   new paramset and the campaigns rerun on it. Which path to take (§5.1 winner, the full Ch 9
   procedure, or the author's judgement of the W6 reversal) is put to the author.
+
+## Complete Ch 9 procedure on the new base (author decision (b), ~13:30)
+
+**Declaration.** `docs/analysis/2026-10-31_ch9_full_procedure_uc_declaration.md`, committed
+with the code in 4d02199 before any unit ran.
+
+**Code (4d02199)**
+
+| file | change | why |
+|---|---|---|
+| `tuning/stage1_screen.py` | `load_or_build_operating_points(horizon_s=)`, CLI `--op-horizon-h`; `_network_key(cfg, horizon_s)` adds commitment, horizon and slack limit when commitment is on; paramset provenance records them | the capture ran 60 s, so with commitment it would commit from the first minute, not from the 12-h window the controller runs in; without the key change a cache captured with all machines in service would be loaded silently |
+| `experiments/ch_09_parameter_selection/ch_9_3_stage2_screen.py` | `--op-horizon-h`, `--skip-baseline` | the same capture for the λ screen; shards of a split run |
+| `experiments/ch_09_parameter_selection/ch_9_6_full_procedure.py` (new) | driver: run 0001's steps, the 2026-10-28 procedure with the engagement bound in every selection; master on e5wimi, e5power reached through PowerShell remoting (detached shard processes, done markers, zipped pull of window files); `--smoke` | run 0001's driver is not re-runnable in place, and one host alone would need ≈55 h |
+
+- **Key structure.**
+  - `simulate()` splits the explicit candidate list by worker share and runs the unchanged
+    stage-2 screen on each host.
+  - It then pulls the remote `windows/` and re-invokes the screen with the whole list, which
+    finds every unit on disk and assembles the records.
+  - `settle()` is run 0001's loop, with batch members alternating between the hosts.
+- **Checked:**
+  - `tests/tuning/test_stage1_banks.py`: 6 pass.
+  - The 12-h and 60-s keys differ: `netf8c419bf` and `neta68582a1`.
+  - Both differ from the key run 0001 loaded, `net82afed5b`.
+- **Deployed** to e5power by bundle at 13:47. The run-0010 settling was still running there.
+  Its code path is unaffected (only new flags and a new file).
+
+**Run** `results/ch_09_parameter_selection/0001_2026-10-31_135000_ch_9_6_full_procedure`
+(e5wimi)
+- 13:50: Stage I started (`--stop-after stage1`).

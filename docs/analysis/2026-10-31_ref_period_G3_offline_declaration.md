@@ -48,3 +48,26 @@ technical minima first, G1 limited to ±1200 Mvar).
   (30, 120, 210 min). The run itself may still fail later. A failure of single variants in
   the run is a result, as in the MC.
 - One period. It illustrates the condition "G3 offline"; it is not a sample of it.
+
+## Result of the search (31 Oct 09:00–09:58)
+
+- **Qualifying windows** (rules 1–2): 222.
+- **Screened** in calendar order (`g3off_screen.py`, shared notes folder), all on the fixed
+  dispatch 35b447e:
+
+| window | online (besides G1) | S1 | S2 A | S2 E | result |
+|---|---|---|---|---|---|
+| 01 Jan 07:00–11:00 (5 windows) | G10, G9, G4 or G7 | **fails**: the runner's bootstrap power flow diverges at initialisation | — | — | fail |
+| 06 Jan 06:00 | G10, G4, G7 | ok | ok | 600 Mvar: no solution | fail |
+| 06 Jan 07:00 | G10, G4, G7 | ok | ok | 600 Mvar: no solution | fail |
+| **08 Jan 06:00** | **G10, G9, G4, G7** | **ok** (V_min 1.003) | **ok** (V_TS ≥ 0.931) | **ok** (V_TS 0.936–1.034, G1 +335 Mvar) | **selected** |
+
+- **Also screened**, in the same parallel batch and recorded only:
+  - pass: 08 Jan 07:00 and 09:00, 16 Jan 06:00 and 07:00;
+  - fail on E's load step: 08 Jan 08:00, 12 Jan 06:00.
+- **Selected period: 2016-01-08 06:00–12:00**, scenarios GA and GE in
+  `experiments/ch_11_case2_multisystem/ref/scenarios.py`. E's G3 outage is void there.
+- **Observation (not part of the rule):** with only three machines and G3 offline, E's 600-Mvar
+  step has no plant solution in most of the windows screened, whenever G9 is also offline.
+  Area 2's reactive deficit in E thus lies at the edge of what the system without G3 can
+  carry.

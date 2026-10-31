@@ -42,6 +42,53 @@ The REF period (05 Jan 2016, 08:00–14:00) is the first 6 h of W1. Its commitme
 | W4 26 Nov 10:00 | 5 | +94 | ok | — | — |
 | W6 18 Jul 14:00 | 4 (G9 off) | +509 (at limit) | fails after 75 min | fails after 114 min | ok, max +1062 |
 
-## 4. Tests and result
+## 4. Result of the declared rule (tests 31 Oct 07:25–08:00)
 
-Filled in after the runs (§4 of the daily log of the day).
+LOC, no events, dt = 180 s. "Fails k/240" means the power flow diverged at step k, i.e. at
+08:00 + 3k min in W1.
+
+| window | ±1100 | ±1200 | unlimited |
+|---|---|---|---|
+| W1 05 Jan 08:00 | fails 233/240 (≈19:39), G1 max 1068 | fails 235/240 (≈19:45), G1 max 1181 | **fails 236/240 (≈19:48), G1 max 1181** |
+| W2 22 Feb 13:00 | ok, G1 max 385 | — | — |
+| W3 04 Jan 08:00 | ok, G1 max 216 | — | — |
+| W4 26 Nov 10:00 | ok, G1 max 94 | — | — |
+| W6 18 Jul 14:00 | ok, G1 max 1062 | see §5 | ok, G1 max 1062 (night run) |
+
+**The declared rule cannot be met.** W1 loses voltage stability in the last 12–21 min of its
+evening peak under LOC **even with G1 unlimited** (V_min 0.927 pu). No value of
+$\bar Q_{G1}$ makes W1 operable, so the rule as written in §1 has no solution.
+
+## 5. Amendment A1 (31 Oct ~08:05)
+
+**Status:** written after the results of §4 and before the W6 test at ±1200 and the W1
+diagnostics. Claude Code made it under the author's standing instruction to proceed
+autonomously. **It needs the author's confirmation.**
+
+**Rule A1.** $\bar Q_{G1}$ is the smallest multiple of 100 Mvar at which the limit is not the
+cause of an inoperability in any design window (configuration as in §1):
+
+- (i) every window that is operable with G1 unlimited is also operable at $\bar Q_{G1}$;
+- (ii) in a window that fails with G1 unlimited, G1's converged Q stays below $\bar Q_{G1}$
+  until that failure.
+
+**Why.** The purpose stated in §2 is that the limit of the equivalent does not decide
+operability by itself. W1's evening collapse occurs without any limit, so it is not an effect
+of the limit. A1 keeps the purpose and drops the part that no value of the limit can meet.
+
+**Application.**
+- W6 needs 1062 Mvar, so (i) requires ≥ 1100.
+- W1 needs 1181 Mvar before it collapses, so (ii) requires ≥ 1200.
+- W2–W4 stay below 400 Mvar.
+- **$\bar Q_{G1}$ = 1200 Mvar**, provided W6 passes at ±1200. W6 passes when unlimited and
+  stays below 1200, so its trajectory is the unlimited one.
+- At ±1200, W1 collapses one step (3 min) earlier than unlimited (235 vs 236 records),
+  while G1's converged Q never exceeds 1181. The limit can act transiently in the
+  iterations of the failing solve. That step lies at the collapse edge of the unlimited
+  run.
+
+**Diagnostics** (running, results in §6):
+- W1 under LOC on the old base, to see whether the evening collapse comes from the new
+  dispatch;
+- W1 under OFO (code O2) at ±1200 and unlimited, to see whether coordination holds the
+  window.

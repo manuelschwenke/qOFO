@@ -515,10 +515,19 @@ def compute_merit_order_dispatch(
         p: Dict[int, float] = {}
         deficit = 0.0
         for z in zone_map:
+            # Every committed machine runs at least at its technical minimum;
+            # only the residual above the minima is loaded in merit order.
+            # (Until 2026-10-31 ~09:00 the first machine was loaded to its cap
+            # before the later machines' minima were honoured, so a falling
+            # residual produced a zone surplus while hydro stayed at its cap.)
             rest = float(residual[z][t_i])
             for g in on.get(z, []):
-                p[g] = float(np.clip(rest, pmin[g], cap[g]))
-                rest -= p[g]
+                p[g] = pmin[g]
+                rest -= pmin[g]
+            for g in on.get(z, []):
+                add = min(max(rest, 0.0), cap[g] - p[g])
+                p[g] += add
+                rest -= add
             deficit += rest
         if deficit > 0.0:
             for g in order_all:

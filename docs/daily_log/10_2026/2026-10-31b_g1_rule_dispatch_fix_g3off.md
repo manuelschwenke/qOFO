@@ -247,3 +247,18 @@ e5power has 36 physical cores without hyperthreading and the campaign used 20 of
 - **Restart:** the master is restarted during Stage II-a so the bound acts from the first
   selection. The remote shard (30 workers) keeps running, and the local shard resumes from its
   unit files, losing its ≈14 units in progress.
+- **15:33 relaunched** on 3d98d31, identical on both hosts:
+  - remote shard found alive (pid 4332, since 15:03) and not relaunched;
+  - local shard resumed with 175 units to run;
+  - 37 remote units on disk at 15:40.
+- The first commit attempt failed on PowerShell 5.1 argument quoting: a message containing
+  double quotes was split. Committed with `git commit -F`.
+
+**Status 15:40 of the other runs**
+- **c08b REF on the new base:**
+  - E done 15:32 (SVR 397 min);
+  - D running, S1 and M left;
+  - GA running, O3, S1 and M left; O3 has taken > 2.5 h, against 27 min in A;
+  - GE started 15:33.
+- **Old base:** REF E of the main session (`F:\qOFO_scarcity`) done 15:19, all six ok.
+- **Re-validation run 0010:** settling e95c, 40 / 120 cases.

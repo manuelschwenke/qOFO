@@ -208,3 +208,29 @@ ran on both hosts:
 - Stage II-a: 115 / 512 draws pass the screen; run 0001 had 120.
 - Split: 47 candidates here (14 workers) and 68 on e5power (20 workers).
 - ETA: II-a ≈03:00 Sun, the 4 rounds ≈18:00 Sun, settling ≈Sun 23:00 – Mon 01:00.
+
+**15:00 restart with 30 workers on e5power** (author: "yes please", after the note that
+e5power has 36 physical cores without hyperthreading and the campaign used 20 of them)
+- **Stopped:** the master and both shards. When the remote shard was killed first, the master
+  relaunched it once (launch 2, 14:59); that relaunch was killed as well. No done marker was
+  written.
+- **Kept:** the 21 units finished before the restart, 6 here and 15 there, now copied to both
+  hosts.
+- **Code:** e5power synced to e83c75c. The untracked copy of the Stage-I paramset was removed so
+  the fast-forward could write the committed one.
+- **15:01 relaunched** (`--resume`, `--w-remote 30`):
+  - split 36 here (14 workers, 175 units to run) and 79 on e5power (30 workers, 384 to run);
+  - II-a ETA ≈00:00–01:00.
+- **Engagement bound, analytic, no simulation result used.** θ_STS,min of the 115 II-a
+  survivors on the 12-h captures:
+
+| statistic or threshold | value |
+|---|---|
+| median | 0.068 pu |
+| admitted at θ ≤ 0.05 | 47 |
+| admitted at θ ≤ 0.025 | 31 |
+| admitted at θ ≤ 0.02 | 26 |
+| admitted at θ ≤ 0.015 | 15 |
+| Stage-I point | 0.0150 |
+| c08b | 0.0195 |
+| fde2 | 0.0816 |

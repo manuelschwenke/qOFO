@@ -92,3 +92,40 @@ of the limit. A1 keeps the purpose and drops the part that no value of the limit
   dispatch;
 - W1 under OFO (code O2) at ±1200 and unlimited, to see whether coordination holds the
   window.
+
+## 6. Diagnostics and re-test on the fixed dispatch (31 Oct 08:00–09:35)
+
+**Before the dispatch fix** (commit 114b0ac):
+
+| case | result |
+|---|---|
+| W1, LOC, **old base** (no commitment, G1 unlimited) | ok, G1 Q ≤ +5 Mvar |
+| W1, OFO, G1 unlimited | ok, G1 max 1386 Mvar |
+| W1, OFO, ±1200 | fails 237/240 (≈19:51) |
+| W1, OFO, ±500 | fails 191/240 (≈17:33) |
+| W6, OFO, ±500 | fails after 75 min |
+| W6, OFO+, ±500 | fails after 87 min |
+
+- Coordination does not hold W1 or W6 at ±500.
+- **Cause of the W1 evening collapse** (`w1d.py`):
+  - the 12-h window commits all five machines for the midday peak;
+  - the dispatch loaded hydro to its cap before the other machines' minima;
+  - at 19:45 the equivalent therefore had to absorb a 1577 MW export.
+- The dispatch bug is fixed in 35b447e.
+
+**After the fix** (35b447e), ±1200:
+
+| window | LOC | OFO |
+|---|---|---|
+| W1 | ok, G1 max 927, V_min 0.959 | ok, G1 max 913 |
+| W6 | ok, G1 max 1087 | — |
+
+**Consequence for the value.**
+- On the fixed dispatch, W1 is operable under LOC, so the original rule of §1 has a solution
+  again. Amendment A1 is not needed for W1.
+- W6 needs 1087 Mvar, so §1 and A1 both give ≥ 1100, unless W6 also passes with the limit
+  binding at 1000 or below (not tested).
+- **The author kept ±1200 (31 Oct ~08:30) as an effectively non-binding bound.** It does not
+  bind in any operable state found, and neither would ±1100. The difference has no effect on
+  any run observed.
+- Recorded here rather than changed again.

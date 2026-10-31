@@ -176,4 +176,35 @@ with the code in 4d02199 before any unit ran.
 
 **Run** `results/ch_09_parameter_selection/0001_2026-10-31_135000_ch_9_6_full_procedure`
 (e5wimi)
-- 13:50: Stage I started (`--stop-after stage1`).
+
+**13:50–13:59 Stage I**
+- Written as `configs/paramsets/stage1_start_uc_2026_10.json`.
+- The 12-h captures commit per window. Worst λ_max(B) = 1.000 at W6, STS DSO_4 and TS area 2.
+- Against `stage1_start_10_2026_banks`, the weights change by at most 4 %:
+
+| weight | old | new |
+|---|---|---|
+| g_w_der, g_w_pcc | 0.0931 | 0.0897 |
+| g_w_tso_oltc | 21.37 | 21.31 |
+| g_w_tso_shunt | 27.21 | 26.98 |
+| g_w_dso_der | 0.5017 | 0.5038 |
+| g_w_dso_oltc | 16.64 | 16.26 |
+
+- g_v, g_q, dso_g_v and g_w_gen are unchanged.
+
+**14:00–14:18 smoke test** (`results/_smoke_ch9_6/20261031-140016`, code 1f5932e). Every path
+ran on both hosts:
+- II-a: 5 survivors, 3 here and 2 on e5power; the windows were pulled back and the assembly
+  ran 0 units with 6 records;
+- selection with the engagement bound;
+- one II-b round;
+- settling with one candidate here and one on e5power, whose result was pulled and read by
+  the criterion.
+- The toy outcome ("no candidate passes", tap counts per 12 h from 6-min windows) carries no
+  meaning.
+
+**14:19 campaign launched** (`--resume`, code 1f5932e, master pid 130452 on e5wimi, log
+`results/res_logs/20261031_ch9_6_run.log`)
+- Stage II-a: 115 / 512 draws pass the screen; run 0001 had 120.
+- Split: 47 candidates here (14 workers) and 68 on e5power (20 workers).
+- ETA: II-a ≈03:00 Sun, the 4 rounds ≈18:00 Sun, settling ≈Sun 23:00 – Mon 01:00.

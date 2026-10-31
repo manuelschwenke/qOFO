@@ -1,0 +1,77 @@
+{
+  "name": "stage1_start_uc_2026_10",
+  "title": "Stage-I analytic design point (contraction screen + tap engagement), doubled-DSO_3 network",
+  "description": [
+    "Produced by tuning/stage1_screen.py --design.",
+    "NOT a tuned point: this is the starting point for a Stage-II search.",
+    "Gauge g_v is pinned so the supervisory voltage priority pi = g*sigma^2 equals 1.",
+    "Continuous scale placed by bisection against the layer contraction targets; tap and bank step prices from the stated engagement deviations.",
+    "The per-DSO scenario multipliers are NOT part of this parameter set -- they are network, not weights -- but the curvature this point was designed against was captured on the network recorded under provenance.network. Screening these weights on a different network does not reproduce the reported lambda_max(B)."
+  ],
+  "provenance": {
+    "producer": "tuning/stage1_screen.py --design",
+    "date": "2026-10-31",
+    "network": "rural_700",
+    "dso_der_scale": {
+      "DSO_3": 2.0
+    },
+    "dso_load_p_scale": {
+      "DSO_3": 2.0
+    },
+    "unit_commitment": true,
+    "slack_q_limit_mvar": 1200.0,
+    "operating_point_horizon_s": 43200.0,
+    "conditions": [
+      "W1",
+      "W2",
+      "W3",
+      "W4",
+      "W5",
+      "W6"
+    ],
+    "priorities": {
+      "pi_v_ts": 1.0,
+      "pi_q": 1.0,
+      "pi_v_ds": 1.0
+    },
+    "tau": 1.0,
+    "d_engage_pu": {
+      "oltc": 0.0075,
+      "dso_oltc": 0.015,
+      "shunt": 0.01
+    },
+    "lambda_targets": {
+      "TS": 1.0,
+      "STS": 1.0
+    },
+    "kappa": {
+      "TS": 0.08969523650650978,
+      "STS": 0.5038160740393516
+    },
+    "integer_floors": {
+      "TS_1": 0.35521759288628274,
+      "TS_2": 0.48047156949581993,
+      "TS_3": 0.4341221662578467,
+      "STS_DSO_1": 0.33976370771675934,
+      "STS_DSO_2": 0.3650765588475622,
+      "STS_DSO_3": 0.34816807524422444,
+      "STS_DSO_4": 0.3809410615418268
+    },
+    "screen_ceiling": 1.6,
+    "select_ceiling": 1.5458937198067635,
+    "worst_lambda_max_B": 0.9999999999887808,
+    "n_area_condition_rows": 42
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.04,
+    "dso_g_v": 10000.0,
+    "g_w_der": 0.08969523650650978,
+    "g_w_pcc": 0.08969523650650978,
+    "g_w_gen": 100000000.0,
+    "g_w_tso_oltc": 21.307839984260788,
+    "g_w_tso_shunt": 26.9822520439557,
+    "g_w_dso_der": 0.5038160740393516,
+    "g_w_dso_oltc": 16.25910890500189
+  }
+}

@@ -127,9 +127,10 @@ def ps(script: str, timeout: float = 1800.0) -> str:
                            capture_output=True, text=True, timeout=timeout)
         if r.returncode == 0:
             return r.stdout
-        log(f"powershell attempt {attempt + 1} failed: {r.stderr.strip()[:400]}")
+        # The tail: stderr opens with CLIXML progress records, the error comes last.
+        log(f"powershell attempt {attempt + 1} failed: {r.stderr.strip()[-1500:]}")
         time.sleep(30.0)
-    raise RuntimeError(f"powershell failed three times: {r.stderr.strip()[:400]}")
+    raise RuntimeError(f"powershell failed three times: {r.stderr.strip()[-1500:]}")
 
 
 def _q(s: str) -> str:
@@ -258,7 +259,12 @@ def run_remote(tag: str, argv: List[str], where: Path,
     for d, overwrite in pull:
         n = pull_dir(remote_path(d), d, overwrite=overwrite)
         log(f"remote {tag}: pulled {n} file(s) into {rel(d)}")
-    pull_dir(remote_path(rdir), rdir, overwrite=True)
+    # The shard logs are a record, not a result: a failed copy must not end the
+    # run (2026-11-01 19:12, while another shard was still writing its log there).
+    try:
+        pull_dir(remote_path(rdir), rdir, overwrite=True)
+    except RuntimeError as exc:
+        log(f"remote {tag}: shard logs not pulled ({exc})")
     return int(done["rc"])
 
 

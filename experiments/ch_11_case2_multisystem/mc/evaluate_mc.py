@@ -18,11 +18,13 @@ Evaluation of one ``run_mc`` campaign for the thesis (``ch:case3:montecarlo``,
 
 Statistics, as declared (plan 2026-10-28 §5, Ch 7, Ch 10):
 
-* all paired comparisons are over the comparison window on which both variants
-  completed: the first ``N_VALID`` valid episodes in draw order, an episode on
-  which all six variants failed replaced by the next valid one (amendment of
-  2026-10-30, ``run_mc.comparison_window``; ``--no-top-up`` gives the declared
-  first ``N_VALID`` valid episodes);
+* all paired comparisons are over the comparison window: the first ``N_VALID``
+  valid episodes in draw order on which all six variants completed, an episode
+  on which any variant failed replaced by the next valid one (amendment of
+  2026-11-01, ``run_mc.comparison_window``; ``--rule`` gives the earlier rules,
+  ``--no-top-up`` the declared first ``N_VALID`` valid episodes); outcomes as
+  ``run_mc.effective_outcome`` (a voltage outside the hard band at the horizon
+  end is no failure since 2026-11-01);
 * non-inferiority on the pilot error per area, margin DELTA_MPU: decided by the
   one-sided 95 % bootstrap upper bound of the median difference; a claim over
   the areas needs all three (intersection-union, no correction);
@@ -56,7 +58,8 @@ from scipy.stats import wilcoxon
 
 from experiments.ch_11_case2_multisystem import metrics_case2 as mc2
 from experiments.ch_11_case2_multisystem.mc.run_mc import (
-    DELTA_MPU, MASTER_SEED, _boot_upper_median, _cp_upper, comparison_window,
+    DELTA_MPU, MASTER_SEED, N_VALID_MAX, WINDOW_RULE, WINDOW_RULES,
+    _boot_upper_median, _cp_upper, comparison_window, effective_outcome,
 )
 
 V = ["L2", "S1", "S2", "O2", "O3", "M"]
@@ -115,10 +118,13 @@ def _log_task(job: Tuple[str, int]) -> Dict[str, Any]:
     return out
 
 
-def episodes(runs: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def episodes(runs: Path, rule: str = WINDOW_RULE
+             ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     ep, ev, fl = [], [], []
     for p in sorted(runs.glob("*.json")):
         r = json.loads(p.read_text(encoding="utf-8"))
+        if rule == "2026-11-01" and r["outcome"] != "task_crash":
+            r["outcome"] = effective_outcome(r["outcome"], r.get("diag"))
         seed, v = int(r["seed"]), r["variant"]
         row: Dict[str, Any] = {"seed": seed, "variant": v, "outcome": r["outcome"],
                                "cls": r.get("class"), "n_records": r.get("n_records")}
@@ -310,19 +316,23 @@ def main() -> None:
     ap.add_argument("campaign")
     ap.add_argument("--n", type=int, default=100)
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--rule", choices=WINDOW_RULES, default=WINDOW_RULE)
     ap.add_argument("--no-top-up", action="store_true",
-                    help="declared rule of 2026-10-07: the first --n valid episodes")
+                    help="same as --rule 2026-10-07: the first --n valid episodes")
+    ap.add_argument("--max-valid", type=int, default=N_VALID_MAX)
     a = ap.parse_args()
+    if a.no_top_up:
+        a.rule = "2026-10-07"
     root = Path(a.campaign)
     runs = root / "runs"
     out = root / "evaluation"
     out.mkdir(exist_ok=True)
-    df, ev, fl = episodes(runs)
+    df, ev, fl = episodes(runs, a.rule)
     pre = [json.loads(p.read_text(encoding="utf-8")) for p in sorted((root / "prescreen").glob("*.json"))]
     valid = sorted(int(r["seed"]) for r in pre if r["valid"])
     outcome = {(int(s), v): o for s, v, o in zip(df.seed, df.variant, df.outcome)
                if o != "task_crash"}
-    seeds, skipped = comparison_window(valid, outcome, a.n, not a.no_top_up)
+    seeds, skipped = comparison_window(valid[:max(a.max_valid, a.n)], outcome, a.n, a.rule)
     if len(seeds) < a.n:
         print(f"WARNING: comparison window has {len(seeds)} of {a.n} episodes; "
               f"run the driver again to top it up")
@@ -340,8 +350,8 @@ def main() -> None:
     pr.to_csv(out / "paired.csv", index=False)
     res = tables(df, ev, seeds, out)
     res["first_n_seeds"] = [seeds[0], seeds[-1]]
-    res["window"] = {"top_up": not a.no_top_up, "n": len(seeds), "first": seeds[0],
-                     "last": seeds[-1], "skipped_infeasible": skipped,
+    res["window"] = {"rule": a.rule, "n": len(seeds), "first": seeds[0],
+                     "last": seeds[-1], "replaced": skipped,
                      "incomplete": sorted(s for s in seeds
                                           if sum((s, v) in outcome for v in V) < len(V))}
     res["classes_n"] = {str(k): int(v) for k, v in pd.Series([r["class"] for r in pre if int(r["seed"]) in seeds]).value_counts().items()}

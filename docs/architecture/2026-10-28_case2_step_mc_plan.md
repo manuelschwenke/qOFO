@@ -190,6 +190,8 @@ statistics.
 
 **Cost:** 100 × 6 runs + 200 extra O3 runs ≈ **353 core-h**.
 
+**Amended 2026-11-01 (author):** comparison window over the first 100 valid episodes on which all six variants complete, an episode with any failure replaced; failures and causes reported separately; a voltage outside [0.90, 1.10] pu at the horizon end is no failure. See `2026-11-01_mc_amendment_window_and_failures.md`.
+
 ## 6. Order, total cost
 
 | Step | Content | Core-h |

@@ -8,8 +8,8 @@ from experiments.ch_09_parameter_selection import ch_9_7_amendment3 as A
 
 
 def test_the_band_is_closed_at_both_ends():
-    assert A.admitted(0.02) and A.admitted(0.03) and A.admitted(0.0208)
-    assert not A.admitted(0.0199) and not A.admitted(0.0301)
+    assert A.admitted(0.02) and A.admitted(0.04) and A.admitted(0.0345)
+    assert not A.admitted(0.0199) and not A.admitted(0.0401)
 
 
 def test_hosts_alternate_so_a_short_batch_uses_both():

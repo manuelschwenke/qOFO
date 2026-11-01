@@ -178,6 +178,14 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   ranked first aa95, ffca, 5891, 55cf. This matches the offline what-if.
 - **Diagnostic 1553 (θ 0.0142, outside the band) stopped at 20:18** on e5power, to free its
   workers. Its result was no longer needed.
+- **Committed 8b02929.** Run started 20:19:
+  `results/ch_09_parameter_selection/0002_2026-11-01_201949_ch_9_7_amendment3` (driver
+  pid 115256, detached).
+  - Batch 1: aa95 and ffca on e5power.
+  - A watcher (scratchpad `slots_watch.ps1`) widens `slots.json` to 2 local once d162/e63a
+    have finished (≈22:45), and to 3 remote once the c08b probe has finished.
+  - d162 and e63a are then taken over.
+  - Expected: about 4 batches in all, result Monday ≈08:00–11:00.
 
 ## Open
 

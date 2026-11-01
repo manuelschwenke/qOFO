@@ -1,6 +1,14 @@
-# Amendment 3 to the weight-selection procedure: STS coupler engagement band 0.02–0.03 pu
+# Amendment 3 to the weight-selection procedure: STS coupler engagement band 0.02–0.04 pu
 
 **Status:** author decision 2026-11-01 ("Do the proposed revision").
+
+**Widened at 20:27 the same day** ("Please widen to 0.02 to 0.04"), from 0.02–0.03 to
+0.02–0.04 pu. This was before any settling result under the narrower band. Run
+`0002_2026-11-01_201949_ch_9_7_amendment3` was stopped after 7 min (`SUPERSEDED.txt`).
+Wherever this note says 0.03 below, it now reads 0.04, and "1.05–1.06" reads 1.05–1.07.
+Under 0.02–0.04: 50 / 244 inside, 38 feasible, 23 in the tie group. d162 is last in the tie
+group. Seven feasible candidates are new, four of them in the tie group: aa8e (rank 1,
+ratio 7.8e5), 8054 (ratio 1.12e5, borderline), d088, 17cd.
 
 **Declared AFTER the results** of run
 `results/ch_09_parameter_selection/0001_2026-10-31_135000_ch_9_6_full_procedure` (amendment 2).

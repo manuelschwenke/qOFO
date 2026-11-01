@@ -11,10 +11,12 @@ decision 2026-11-01, declared AFTER the results of run
 The amendment replaces the engagement bound of amendment 2 and changes nothing
 else::
 
-    0.02 pu <= theta_STS,min <= 0.03 pu        (amendment 2: theta_STS,min <= 0.02)
+    0.02 pu <= theta_STS,min <= 0.04 pu        (amendment 2: theta_STS,min <= 0.02)
 
 Under a uniform deviation the strongest STS coupler then commits between 1.05
-and 1.06 pu, neither earlier nor later.  The limits (hunting tolerance 0), the
+and 1.07 pu, neither earlier nor later.  (Declared as 0.02-0.03 pu; widened to
+0.04 pu by the author at 20:27 the same day, before any settling result of
+the first amendment-3 run, 0002, which was stopped.)  The limits (hunting tolerance 0), the
 ranking (e_v(TS), e_v(DS) within 2 %) and the settling requirement in rank
 order are unchanged: as in ``ch_9_6_full_procedure.settle``, a candidate that
 fails settling leaves the set before the e_v(DS) tie-break is applied again.
@@ -70,7 +72,7 @@ from experiments.ch_09_parameter_selection import ch_9_6_full_procedure as P  # 
 SOURCE = (ROOT / "results" / "ch_09_parameter_selection"
           / "0001_2026-10-31_135000_ch_9_6_full_procedure")
 RESULT = "ch9_selected_uc_2026_10_a3"
-THETA_MIN, THETA_MAX = 0.02, 0.03          # pu; amendment 3
+THETA_MIN, THETA_MAX = 0.02, 0.04          # pu; amendment 3 (widened from 0.03)
 REUSE = [SOURCE / "expC",
          ROOT / "results" / "diagnostics" / "2026-11-01_settle_ratio_candidates"]
 #: Experiment-C arguments that are not part of the test itself.
@@ -318,7 +320,7 @@ def write_result(win: dict, rep: dict, c_res: dict, w5: dict) -> Path:
             "(unit-commitment base, Stage II-a and four II-b rounds):",
             f"filter with the engagement band {THETA_MIN:g} <= theta_STS,min <= "
             f"{THETA_MAX:g} pu (amendment 3, declared after that run's results: "
-            "the strongest STS coupler commits between 1.05 and 1.06 pu); ranking "
+            "the strongest STS coupler commits between 1.05 and 1.07 pu); ranking "
             "on the per-bus TS voltage deviation with a 2 % band on the STS "
             "deviation; settling requirement in rank order.",
             "No new search: the II-b rounds were drawn around amendment-2 centres.",

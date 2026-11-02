@@ -186,6 +186,115 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     have finished (≈22:45), and to 3 remote once the c08b probe has finished.
   - d162 and e63a are then taken over.
   - Expected: about 4 batches in all, result Monday ≈08:00–11:00.
+- **20:27: band widened to 0.02–0.04 pu (author).**
+  - Run 0002 stopped (driver plus 24 processes on e5power) and marked `SUPERSEDED.txt`;
+    watcher stopped.
+  - Commit fe30478.
+  - Dry run: 50 / 244 inside, 38 feasible, 23 in the tie group, d162 last.
+  - Launch held: the author asked whether a new full campaign is the better path.
+  - Claude recommended the re-selection. A full campaign under the same rules would probably
+    repeat the failure, because the II-b centring does not see settling. A full campaign is
+    worth it only with a settling-aware search, which needs a design note first.
+- **20:38: re-selection started (author: "Yes. Run re-selection", 30 cores per host).**
+  - Run `0003_2026-11-01_203826_ch_9_7_amendment3` (driver pid 129848).
+  - Batch 1: aa8e here; aa95 and ffca on e5power.
+  - Watcher `slots_watch.ps1` (rewritten after a sed escaping error; the broken version
+    failed at parse and wrote nothing): 1 + 2 now, 3 here once d162/e63a have finished,
+    3 on e5power once the c08b probe has finished.
+  - Expected: result Monday ≈11:00–13:00.
+- **23:40: batch 1 done; first verdicts under the band.**
+  - Run 0003, batch 1: aa8e, aa95 and ffca all FAIL. e63a (diagnostic, taken over) also FAILS.
+  - Batch 2 started at 23:17: 5891 here; 55cf, efee and 77ef on e5power.
+  - The watcher switched to 3 + 3 at 23:35, so batch 3 onwards runs six checks.
+  - The `_remote` shard-log pull for aa95 failed at 23:01. The cause: `Expand-Archive`
+    found no zip, probably because ffca was still writing its log in the same folder. The
+    failure is now non-fatal (fix in 8b02929), and aa95's log arrived with ffca's pull at
+    23:06. Nothing is lost.
+  - Diagnostics (criterion of run 0001, `_criterion`):
+
+    | candidate | source | θ (pu) | dso_g_v/g_q | g_w_tso_oltc | p95 n_settle | median residual (Mvar) | verdict |
+    |:--|:--|--:|--:|--:|--:|--:|:--|
+    | c08b1d3d33ab | probe, e5power | 0.0195 | 3.4e3 | 16.7 | 21.0 | 0.27 | pass |
+    | d162c73ca1fc | diagnostic | 0.0208 | 3.1e4 | 36.9 | 26.0 | 0.71 | pass |
+    | e63aed2d04cb | diagnostic, taken over | 0.0279 | 1.09e5 | 27.1 | 30.0 | 1.46 | FAIL |
+
+  - **d162 passes, but narrowly:** p95 is 26 against a limit of 27, 2 of 120 steps lie
+    above 27, and DSO_3's own p95 is 27.55. Its residual of 0.71 Mvar is twice the 0.35
+    predicted at 19:45.
+  - **c08b settles on the new base** (residual 0.27 Mvar), but it remains inadmissible: θ
+    0.0195 is below the band, and it fails the hunting limit (g_w_tso_oltc 16.7).
+  - **Updated empirical relation, 14 checked candidates:** residual ≈ 0.0043 ·
+    (dso_g_v/g_q)^0.50, Spearman 0.98. It reaches 1 Mvar at ratio ≈ 5.4e4, not 1.1e5 as
+    estimated at 19:45 from 8 candidates.
+    - a1de (1.29e5) and 8054 (1.12e5) are therefore now predicted to FAIL (≈1.5 Mvar).
+    - In the tie group, only d162 has a ratio below 5.4e4.
+  - **Hypothesis, not a result:** every candidate ranked ahead of d162 fails, and d162 is
+    selected after about four more batches.
+    - It would be selected only after every candidate ranked above it has been checked,
+      including band-shift entrants (f34d, 1bcd, 6655 are possible).
+    - The procedure stays as declared. The prediction is not used to skip checks.
+- **2026-11-02 07:55: batches 2 and 3 done.**
+  - Batch 2 (5891, 55cf, efee, 77ef) and batch 3 (96d0, d21f, 95b8, 2028, e3bd, 794f) all
+    FAIL, with median residuals of 1.50–3.09 Mvar.
+    - All ten were predicted to FAIL by the 23:40 relation (ratio ≥ 1.1e5). They were not
+      part of the fit.
+  - d162 was taken over at 01:59: PASS (p95 26, 0.71 Mvar).
+  - Batch 4 started at 05:52: band entrants 1bcd, 6655 and f34d, plus a1de, c38b and 8054.
+    Predicted residuals are 1.4–2.2 Mvar.
+  - If batch 4 fails entirely, the rebuilt order (`rank_lexicographic`, computed offline)
+    puts e738, 6cb6, d088, 17cd and f7ce ahead of d162. After those, d162 heads the order
+    with no new entrant ahead of it.
+  - **`slots.json` set to 2 + 3 for batch 5.**
+    - A 3 + 3 batch would add 58b5, which ranks below d162. Its verdict cannot change the
+      selection.
+    - With three concurrent checks here (40 logical CPUs), a check takes 3 h 10 min to
+      3 h 55 min, against about 2 h 40 min with fewer.
+    - The selection depends only on the verdicts in rank order, so the outcome is the same.
+  - **Expected end:**
+    - batch 4 ≈09:05–09:50;
+    - if batch 5 is needed, it runs to ≈12:00–12:50;
+    - then W5 (≈30 min), so DONE ≈12:30–13:20.
+    - If a batch-4 candidate passes: DONE ≈09:40–10:20.
+- **08:39: no batch 5 (author).**
+  - The author wants to discuss the results after batch 4, revise the procedure so that it
+    can be expected to produce a winner, and then run a complete new campaign.
+  - `slots.json` set to 0 + 0. After batch 4, the driver records the verdicts:
+    - if a batch-4 candidate passes, it is selected (W5, result);
+    - otherwise the next batch is empty, `ThreadPoolExecutor(max_workers=0)` raises, and
+      the driver writes `FAILED.txt`. Nothing new is launched.
+- **Settling-predictor validation** (`tuning/settling_predictor.py`, a linear STS model on
+  cached sensitivities; script and outputs in
+  `results/diagnostics/2026-11-02_settling_predictor_uc/`):
+  - n = 28 measured checks. Spearman 0.986 for the residual, 0.945 for p95.
+  - Calibration: measured residual ≈ 1.7 · predicted^0.60; measured p95 − predicted p95
+    ∈ [−1, +5].
+- **Old search box.** In run 0001's II-a draws, only 3 of 512 meet θ band ∧ predicted
+  settling, and 1 of 512 with g_w_tso_oltc ≥ 25.
+- **Proposal written:** `docs/tuning/2026-11-02_procedure_v2_proposal.md`.
+  - Options: A, the minimal adaptation; B, the cascade design (STS first, verified once;
+    TS-only search), which is recommended.
+  - Not implemented; the author decides.
+- **08:57: run 0003 ended, by a crash rather than the zero-slot stop.**
+  - All six batch-4 checks had finished.
+  - Error: `run_remote` raised PermissionError [WinError 32] in the shard-log pull
+    (`_remote`). The three remote checks finished within one minute, so their pulls copied
+    the same log files onto the same local files at once. The guard of 8b02929 covered
+    only RuntimeError.
+  - The exception surfaced when the last local check (c38b) ended, so the driver recorded
+    no batch-4 verdict.
+  - Verdicts computed read-only with `_criterion` into
+    `expC/batch4_verdicts_readonly.json`: 1bcd (1.44 Mvar), 6655 (1.52), f34d (2.47),
+    a1de (1.07, p95 25), c38b (2.00), 8054 (1.31). All FAIL.
+  - Run note `STOPPED_BY_AUTHOR.txt`. No batch 5 was launched, and both hosts are free.
+  - On the commitment base: 29 checks, one pass (d162).
+  - **Fix** (`ch_9_6_full_procedure.run_remote`):
+    - a module lock `_PULL_LOCK` serialises the shard-log pulls;
+    - `OSError` is non-fatal as well as `RuntimeError`.
+    - Tests: `tests/experiments/test_ch9_remote_transport.py` (2 tests: a locked file
+      does not end the run; three shards finishing together pull one at a time).
+      7 passed, with the amendment-3 tests.
+  - Validation re-run with batch 4 (n = 30): Spearman 0.985 (residual), 0.952 (p95);
+    calibration unchanged (1.69 · predicted^0.60).
 
 ## Open
 

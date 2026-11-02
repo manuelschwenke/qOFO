@@ -89,6 +89,7 @@ PS = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 POLL_S = 300.0
 
 _LOG_LOCK = threading.Lock()
+_PULL_LOCK = threading.Lock()            # shard-log pulls share their destination
 RUN: Path = ROOT                         # set in main()
 
 
@@ -260,10 +261,13 @@ def run_remote(tag: str, argv: List[str], where: Path,
         n = pull_dir(remote_path(d), d, overwrite=overwrite)
         log(f"remote {tag}: pulled {n} file(s) into {rel(d)}")
     # The shard logs are a record, not a result: a failed copy must not end the
-    # run (2026-11-01 19:12, while another shard was still writing its log there).
+    # run (2026-11-01 19:12, while another shard was still writing its log there;
+    # 2026-11-02 08:57, WinError 32 when three shards that finished together copied
+    # the same files at once).  One such pull at a time.
     try:
-        pull_dir(remote_path(rdir), rdir, overwrite=True)
-    except RuntimeError as exc:
+        with _PULL_LOCK:
+            pull_dir(remote_path(rdir), rdir, overwrite=True)
+    except (RuntimeError, OSError) as exc:
         log(f"remote {tag}: shard logs not pulled ({exc})")
     return int(done["rc"])
 

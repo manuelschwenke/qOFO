@@ -32,6 +32,14 @@ def test_a_resume_keeps_the_split_of_the_earlier_invocation(tmp_path):
     assert P.kept_split(cands, tmp_path / "x.json", tmp_path / "r.json") is None
 
 
+def test_slower_local_workers_get_a_smaller_share():
+    cands = [{"g_w_der": float(i)} for i in range(54)]
+    by_workers, _ = P.split(cands, 20, 36)
+    by_speed, rest = P.split(cands, 20 * 0.75, 36)
+    assert len(by_workers) == 19 and len(by_speed) < len(by_workers)
+    assert len(by_speed) + len(rest) == 54
+
+
 def test_a_failed_shard_log_pull_does_not_end_the_run(monkeypatch, tmp_path):
     def locked():
         raise PermissionError(32, "The process cannot access the file")

@@ -395,9 +395,12 @@ def screen_argv(out: Path, cj: Path, workers: int, windows: str = WINDOWS,
 
 
 def simulate(out: Path, cands: List[Dict[str, float]], w_local: int,
-             w_remote: int) -> None:
+             w_remote: int, split_local: Optional[float] = None) -> None:
     """Simulate the Stage-I point and ``cands`` in W1-W4, W6, split over the two
-    hosts, then assemble every candidate record here."""
+    hosts, then assemble every candidate record here.
+
+    ``split_local`` is the local host's weight in the split, in remote workers
+    (default ``w_local``); a host whose workers are slower gets a smaller share."""
     out.mkdir(parents=True, exist_ok=True)
     (out / "windows").mkdir(exist_ok=True)
     cj_all, cj_loc, cj_rem = (out / "all_candidates.json", out / "shard_local.json",
@@ -407,7 +410,8 @@ def simulate(out: Path, cands: List[Dict[str, float]], w_local: int,
         loc, rem = kept
         log(f"{rel(out)}: split of the earlier invocation kept")
     else:
-        loc, rem = split(cands, w_local, w_remote) if w_remote > 0 else (cands, [])
+        w_split = float(split_local) if split_local is not None else float(w_local)
+        loc, rem = split(cands, w_split, w_remote) if w_remote > 0 else (cands, [])
     cj_all.write_text(json.dumps(cands, indent=1), "utf-8")
     cj_loc.write_text(json.dumps(loc, indent=1), "utf-8")
     cj_rem.write_text(json.dumps(rem, indent=1), "utf-8")

@@ -335,7 +335,8 @@ def stage_select(dirs: List[Path], tag: str, ops) -> dict:
     return rep
 
 
-def stage2a(centre: Dict[str, float], ops, w_local: int, w_remote: int) -> dict:
+def stage2a(centre: Dict[str, float], ops, w_local: int, w_remote: int,
+            split_local: Optional[float] = None) -> dict:
     from tuning import stage1_screen as s1
     from tuning.stage2_search import Box, sobol_candidates
     out = P.RUN / "stage2a"
@@ -355,11 +356,12 @@ def stage2a(centre: Dict[str, float], ops, w_local: int, w_remote: int) -> dict:
           f"(lambda <= {s1.select_ceiling():.4f}: "
           f"{sum(1 for l in lam if l <= s1.select_ceiling())}, theta_TS <= "
           f"{THETA_TS_MAX:g}: {sum(1 for t in tts if t <= THETA_TS_MAX)})")
-    P.simulate(out, keep, w_local, w_remote)
+    P.simulate(out, keep, w_local, w_remote, split_local)
     return stage_select([out], "2a", ops)
 
 
-def stage2b(rep: dict, ops, w_local: int, w_remote: int) -> Tuple[dict, List[Path]]:
+def stage2b(rep: dict, ops, w_local: int, w_remote: int,
+            split_local: Optional[float] = None) -> Tuple[dict, List[Path]]:
     """``P.stage2b`` with the v2 spans, screen and selection."""
     from tuning.parameters import WEIGHT_FIELDS, weight_fingerprint
     from tuning.stage2_search import Box, sobol_candidates
@@ -388,7 +390,7 @@ def stage2b(rep: dict, ops, w_local: int, w_remote: int) -> Tuple[dict, List[Pat
         # The Stage-I point's windows are the stored ones (same key, same flags).
         for f_ in (s2a / "windows").glob(f"{base['key']}__*.json"):
             shutil.copy2(f_, rd / "windows" / f_.name)
-        P.simulate(rd, keep, w_local, w_remote)
+        P.simulate(rd, keep, w_local, w_remote, split_local)
         dirs.append(rd)
         evaluated |= {p.stem[5:] for p in (rd / "candidates").glob("cand_*.json")}
         rep = stage_select(dirs, f"2b_round{r}", ops)
@@ -549,10 +551,15 @@ def procedure(args) -> int:
     P.START = variants[chosen]
     P.log(f"Stage-I point: {P.START} (pi_q {chosen:g})")
     P.push_inputs()
+    # The split weighs each host by its throughput, not only by its workers: a run
+    # keeps the split of a stage that has begun (P.kept_split), so a new factor acts
+    # from the next stage or round on (author 2026-11-02: rebalance from round 2).
+    split_local = args.local_workers * args.local_speed
     P.log("== 3. Stage II-a")
-    rep = stage2a(designs[chosen][0], ops, args.local_workers, args.remote_workers)
+    rep = stage2a(designs[chosen][0], ops, args.local_workers, args.remote_workers,
+                  split_local)
     P.log("== 4. Stage II-b")
-    rep, _ = stage2b(rep, ops, args.local_workers, args.remote_workers)
+    rep, _ = stage2b(rep, ops, args.local_workers, args.remote_workers, split_local)
     P.log("== 5. selection over all evaluated candidates, settling confirmation")
     win, c_res = confirm(rep, args.confirm_workers)
     if win is None:
@@ -579,6 +586,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help=f"workers per verification check (three at a time on {P.REMOTE})")
     p.add_argument("--confirm-workers", type=int, default=36,
                    help=f"workers for a settling confirmation on {P.REMOTE}")
+    p.add_argument("--local-speed", type=float, default=1.0,
+                   help=f"throughput of a worker here relative to one on {P.REMOTE}; "
+                        "weighs the host split (results do not depend on it)")
     p.add_argument("--dry-run", action="store_true",
                    help="Stage I and the II-a screen only, in results/_dry_ch9_8; "
                         "nothing simulated, no parameter set written")

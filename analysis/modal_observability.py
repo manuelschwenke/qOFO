@@ -36,18 +36,29 @@ AVR ``usetp`` via the IEEET1 ``xa`` row (``v_err = usetp - ut``); taps via
 ``nntapin`` of the taps-in-service run.  Outputs: TN and PCC voltage
 magnitudes from ``ur/ui``; coupler HV-side and TSO tie-line Q from the
 pandapower branch model evaluated at PF's voltages (validated against PF's own
-flows).  Shunts are not included (their admittance scale in PF's network
-equations is not established).
+flows).
+
+Shunt banks (MSC/MSR, added 2026-11-02, :func:`run_shunts`): PF's shunt has
+no RMS input signal, so a bank step enters through the admittance of its
+terminal.  PF writes each terminal's network equations as the real and
+imaginary current balance (rows ``ur``, ``ui``) with the admittances on a
+1 MVA base, i.e. ``baseMVA`` times pandapower's Ybus (established on all 12
+coupler tertiaries, ratio 100.00002, and re-checked per terminal).  A step
+``dB`` adds ``j dB`` to ``Y_kk``, i.e. ``dB (-ui_k, ur_k)`` on the two rows.
 
 Usage::
 
     python -m analysis.modal_observability results/screening/modal_campaign/W1/<stamp>
+    python -m analysis.modal_observability <window dir> --shunts --out <dir>
 
 Author: Manuel Schwenke / Claude Code (2026-09-23)
 """
 from __future__ import annotations
 
 import argparse
+import copy
+import dataclasses
+import hashlib
 import json
 import math
 import re
@@ -85,6 +96,10 @@ CLUSTER_REL = 1e-7
 #: contribution is below e^-50 by then.  A reported T_s = T_MIN means "<= T_MIN".
 T_MIN = 0.5
 T_GRID = np.concatenate([np.arange(T_MIN, 60.0, 0.02), np.arange(60.0, 600.001, 0.5)])
+#: Base of the admittances in PF's network equations (see the module doc).
+PF_ADMITTANCE_BASE_MVA = 1.0
+#: Relative tolerance of the per-terminal check of that base.
+SHUNT_SCALE_RTOL = 1e-4
 
 _VAR_RE = re.compile(r'^\s*(\d+)\s+(.+?)\s+"([^"]+)"\s*$')
 
@@ -255,6 +270,133 @@ def tapsin_system(dae_t: Dae) -> Tuple[Dae, List[dict]]:
         out.append({"name": f"TAP_{trafo}", "cls": cls, "b": b, "step": 1.0,
                     "unit": "tap", "step_label": "+1 tap"})
     return sysk, out
+
+
+def shunt_placement() -> Dict[str, dict]:
+    """Bank placement and step size of the thesis configuration
+    (``MultiTSOConfig`` defaults: MSR on the tertiary of the first coupler,
+    MSC on that of the second, two steps of 25 Mvar each, since 2026-10-15)."""
+    from configs.config import MultiTSOConfig
+    d = {f.name: f.default for f in dataclasses.fields(MultiTSOConfig)}
+    if d["tso_shunt_kind"] != "msc_msr":
+        raise ValueError(f"tso_shunt_kind {d['tso_shunt_kind']!r}: no MSC/MSR banks")
+    return {k: {"pos": int(d[f"tso_shunt_{k.lower()}_coupling_pos"]),
+                "q_step_mvar": float(d[f"tso_shunt_{k.lower()}_q_step_mvar"]),
+                "n_levels": int(d[f"tso_shunt_{k.lower()}_n_levels"]),
+                "sign": +1 if k == "MSC" else -1}
+            for k in ("MSC", "MSR")}
+
+
+def shunt_inputs(dae: Dae, op: dict, snapshot: Path) -> Tuple[List[dict], pd.DataFrame]:
+    """One step of each TSO bank at its terminal in the thesis placement.
+
+    The PF model of the modal campaign predates the placement of 2026-10-15
+    (both banks on the first tertiary).  Every bank is at step 0 in every
+    window, so the operating point does not depend on where a bank is
+    installed, and the step is applied at the thesis terminal.  Returns the
+    inputs and a parity table PF bank vs thesis bank (step size, levels,
+    rated voltage, terminal) with the measured admittance scale."""
+    net, doc, names, ppc, base, Ybus, *_, bl, _ = _pp_model(snapshot)
+    term = {t["name"]: t for t in op["terminals"]}
+    if any(float(s["ncapa"]) != 0.0 for s in op["shunts"]):
+        raise ValueError("a bank is switched in at the operating point: the "
+                         "linearisation then depends on its location")
+    J = dae.J.tocsr()
+    out, parity = [], []
+    for hv in doc["meta"]["hv_networks"]:
+        net_id = hv["net_id"]
+        for kind, p in shunt_placement().items():
+            bus = int(hv["coupling_lv_bus_indices"][p["pos"]])
+            tname = names[("bus", bus)]
+            t = term[tname]
+            iu = dae.index[(t["key"][0], t["key"][1], "ur")]
+            iv = dae.index[(t["key"][0], t["key"][1], "ui")]
+            if min(iu, iv) < dae.n:
+                raise ValueError(f"{tname}: ur/ui are not algebraic")
+            # the tertiary's only neighbour in pandapower's Ybus is the
+            # trafo3w star bus; PF eliminates it, so compare the reduced
+            # diagonal
+            kb = int(bl[bus])
+            row = Ybus.getrow(kb)
+            nb = [int(c) for c in row.indices if int(c) != kb]
+            if len(nb) != 1:
+                raise ValueError(f"{tname}: expected one neighbour (the star bus), got {nb}")
+            s = nb[0]
+            y_pp = Ybus[kb, kb] - Ybus[kb, s] * Ybus[s, kb] / Ybus[s, s]
+            y_pf = complex(J[iu, iu], J[iv, iu])
+            ratio = y_pf / y_pp
+            expect = base / PF_ADMITTANCE_BASE_MVA
+            rows_ok = (abs(J[iu, iu] - J[iv, iv]) + abs(J[iu, iv] + J[iv, iu])) / abs(y_pf)
+            if abs(ratio / expect - 1.0) > SHUNT_SCALE_RTOL or rows_ok > SHUNT_SCALE_RTOL:
+                raise ValueError(f"{tname}: PF admittance scale {ratio:.6g} (expected "
+                                 f"{expect:g}), row structure residual {rows_ok:.2e}")
+            pf = [x for x in op["shunts"] if x["name"].startswith(f"SH_{kind}_{net_id}_")]
+            if len(pf) != 1:
+                raise ValueError(f"{net_id}: {len(pf)} PF {kind} banks")
+            pf = pf[0]
+            q_pf = float(pf["qcapn"] if kind == "MSC" else pf["qrean"])
+            vn = float(net.bus.at[bus, "vn_kv"])
+            parity.append({"bank": f"{kind}_{net_id}", "terminal_thesis": tname,
+                           "terminal_pf_model": pf["bus"], "q_step_thesis": p["q_step_mvar"],
+                           "q_step_pf": q_pf, "levels_thesis": p["n_levels"],
+                           "levels_pf": int(pf["ncapx"]), "u_rated_pf_kv": float(pf["ushnm"]),
+                           "u_n_terminal_kv": vn, "admittance_scale": ratio.real,
+                           "admittance_scale_imag": ratio.imag, "row_structure_residual": rows_ok})
+            if (abs(q_pf - p["q_step_mvar"]) > 1e-9 or int(pf["ncapx"]) != p["n_levels"]
+                    or abs(float(pf["ushnm"]) - vn) > 1e-9):
+                raise ValueError(f"{kind}_{net_id}: PF bank differs from the thesis bank "
+                                 f"{parity[-1]}")
+            # per Mvar of rated bank power: dB = 1 Mvar / (1 MVA) at 1 pu
+            dB = p["sign"] / PF_ADMITTANCE_BASE_MVA
+            b = np.zeros(dae.N)
+            b[iu], b[iv] = -dB * t["ui"], dB * t["ur"]
+            out.append({"name": f"SHUNT_{kind}_{net_id}", "cls": f"SHUNT_{kind}", "b": b,
+                        "step": p["q_step_mvar"], "unit": "Mvar (rated)",
+                        "step_label": f"{'+' if p['sign'] > 0 else '-'}{p['q_step_mvar']:g} Mvar",
+                        "terminal": tname})
+    return out, pd.DataFrame(parity)
+
+
+def shunt_lf_check(df: pd.DataFrame, inputs: List[dict], snapshot: Path) -> pd.DataFrame:
+    """Plausibility of the shunt columns: final value ``y_inf`` of the
+    linearisation against pandapower load flows with the bank step in.
+    ``dy_loadflow`` is the one-step difference; ``dy_loadflow_central`` the
+    central difference over +-1 step, which removes the second-order term
+    ``dB dV`` and compares the linear parts.  Not an equality: pandapower
+    holds machine terminal voltages ideally, PF's AVRs have finite gain;
+    meaningful in the droop-inert case only (DER Q fixed in both)."""
+    import pandapower as pp
+    net0, doc, names, *_ = _pp_model(snapshot)
+    bus_of = {v: k[1] for k, v in names.items() if k[0] == "bus"}
+    tr3_of = {v: k[1] for k, v in names.items() if k[0] == "trafo3w"}
+
+    def stepped(bus: int, q_mvar: float):
+        net = copy.deepcopy(net0)
+        pp.create_shunt(net, bus=bus, q_mvar=q_mvar, p_mw=0.0,
+                        vn_kv=float(net.bus.vn_kv[bus]), step=1, max_step=1)
+        pp.runpp(net, **doc["solver_options"])
+        return net
+
+    def value(net, o: str) -> float:
+        if o.startswith("V_"):
+            return float(net.res_bus.vm_pu[bus_of[o[2:]]])
+        return float(net.res_trafo3w.q_hv_mvar[tr3_of[o[2:]]])
+
+    rows = []
+    for u in inputs:
+        kind = u["cls"].split("_")[1]
+        q = u["step"] * (-1.0 if kind == "MSC" else 1.0)     # pandapower load sign
+        bus = bus_of[u["terminal"]]
+        up, down = stepped(bus, q), stepped(bus, -q)
+        for r in df[df["input"] == u["name"]].itertuples():
+            y0 = value(net0, r.output)
+            d1 = value(up, r.output) - y0
+            dc = 0.5 * (value(up, r.output) - value(down, r.output))
+            rows.append({"input": u["name"], "output": r.output, "kind": r.kind,
+                         "dy_inf_linear": r.dy_inf, "dy_loadflow": d1,
+                         "dy_loadflow_central": dc, "diff": r.dy_inf - d1,
+                         "diff_central": r.dy_inf - dc, "band": r.band})
+    return pd.DataFrame(rows)
 
 
 def spectrum_distance(A1: np.ndarray, A2: np.ndarray) -> float:
@@ -646,6 +788,61 @@ def run(window_dir: Path, out: Optional[Path] = None, ode_check: bool = True) ->
     return out
 
 
+def run_shunts(window_dir: Path, out: Optional[Path] = None, ode_check: bool = True) -> Path:
+    """The MSC/MSR bank steps on the taps-out linearisation of a window run
+    (same matrices, outputs and bands as :func:`run`; the responses are linear
+    per input, so they extend that run's pairs without recomputing them)."""
+    window_dir = Path(window_dir)
+    state = json.loads((window_dir / "window_state.json").read_text(encoding="utf-8"))
+    op = json.loads((window_dir / "op.json").read_text(encoding="utf-8"))
+    snapshot = PROJECT_ROOT / state["snapshot"] if not Path(state["snapshot"]).is_absolute() \
+        else Path(state["snapshot"])
+    if hashlib.sha256(snapshot.read_bytes()).hexdigest() != state["sha256"]:
+        raise ValueError(f"{snapshot}: not the snapshot of the window run")
+    out = out or window_dir / "observability_shunt"
+    out.mkdir(parents=True, exist_ok=True)
+    summary, all_rows, modal = {}, [], {}
+    for case in ("db_wide", "db_zero"):
+        run_dir = Path(state["cases"][case]["run_dir"])
+        dae = load_dae(run_dir)
+        red = Reduced(dae)
+        A_pf = mp.read_amat(run_dir / "matl", dae.n)
+        check = {"A_vs_Amat_rel": float(np.abs(red.A - A_pf).max() / np.abs(A_pf).max())}
+        inputs, parity = shunt_inputs(dae, op, snapshot)
+        parity.to_csv(out / f"shunt_parity_{case}.csv", index=False)
+        expect = _pp_model(snapshot)[4] / PF_ADMITTANCE_BASE_MVA
+        check["admittance_scale_max_rel_dev"] = float(
+            (parity["admittance_scale"] / expect - 1.0).abs().max())
+        ts_n, ds_n, vinfo = controlled_voltage_names(snapshot)
+        check["measured_voltage_sets"] = vinfo
+        outputs = voltage_outputs(dae, op, ts_n, ds_n) + branch_q_outputs(dae, op, snapshot)[0]
+        df, info = analyse(red, inputs, outputs)
+        if ode_check:
+            tdc = time_domain_check(red, inputs, outputs, df, n_pairs=2)
+            tdc.to_csv(out / f"time_domain_check_{case}.csv", index=False)
+            check["time_domain_max_abs_diff_over_band"] = float(
+                (tdc["abs_diff"] / tdc["band"]).max())
+        if case == "db_wide":
+            lf = shunt_lf_check(df, inputs, snapshot)
+            lf.to_csv(out / "shunt_lf_check_db_wide.csv", index=False)
+            for kind, x in lf.groupby("kind"):
+                check[f"lf_check_max_abs_diff_{kind}"] = float(x["diff"].abs().max())
+                check[f"lf_check_max_abs_diff_central_{kind}"] = float(
+                    x["diff_central"].abs().max())
+        modal[case] = modal_settling(info.pop("modal"), run_dir)
+        modal[case].to_csv(out / f"modal_settling_{case}.csv", index=False)
+        df.insert(0, "droop_case", case)
+        all_rows.append(df)
+        summary[case] = {"checks": check, "info": info, "skipped_inputs": [],
+                         "n_outputs_by_family": pd.Series([o["family"] for o in outputs]).value_counts().to_dict()}
+        print(f"[obs/shunt] {case}: {info}; checks {check}")
+    df = pd.concat(all_rows, ignore_index=True)
+    df.to_csv(out / "pairs.csv", index=False)
+    (out / "summary.json").write_text(json.dumps(summary, indent=1, default=str), encoding="utf-8")
+    write_summary_md(df, summary, out / "summary.md", state["window"], modal)
+    return out
+
+
 def write_summary_md(df: pd.DataFrame, summary: dict, path: Path, window: str,
                      modal: Optional[Dict[str, pd.DataFrame]] = None) -> None:
     L = [f"# Residue-based settling, {window}", "",
@@ -702,8 +899,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-ode-check", action="store_true",
                     help="skip the stiff-ODE cross-check (already passed on the same "
                          "matrices; a changed step size scales responses linearly)")
+    ap.add_argument("--shunts", action="store_true",
+                    help="only the MSC/MSR bank steps (default out: <window>/observability_shunt)")
     args = ap.parse_args(argv)
-    out = run(args.window_dir, args.out, ode_check=not args.no_ode_check)
+    out = (run_shunts if args.shunts else run)(args.window_dir, args.out,
+                                               ode_check=not args.no_ode_check)
     print((out / "summary.md").read_text(encoding="utf-8"))
     return 0
 

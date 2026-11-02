@@ -198,10 +198,16 @@ def _rel(path: Path, root: Path) -> str:
 
 
 def _git(*args: str) -> str | None:
-    """``git`` in the project root; None when git is unavailable."""
+    """``git`` in the project root; None when git is unavailable.
+
+    ``safe.directory=*`` for this call only: on the UNC checkout
+    (``\\\\e5server\\...\\qOFO`` = ``Z:``) git refuses a repository owned by
+    another SID ("dubious ownership"), and every run recorded no code state
+    (run 0011 of ch_09_parameter_selection, 2026-11-02).  Read-only commands.
+    """
     try:
         out = subprocess.run(
-            ["git", *args], cwd=PROJECT_ROOT, capture_output=True,
+            ["git", "-c", "safe.directory=*", *args], cwd=PROJECT_ROOT, capture_output=True,
             text=True, encoding="utf-8", errors="replace", timeout=180)
     except (OSError, subprocess.SubprocessError):
         return None

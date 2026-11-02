@@ -311,6 +311,36 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - residual margin measured on three STS variants (≤ 0.8 Mvar, p95 ≤ 25) rather than
       predicted.
   - Awaiting the go to freeze and implement.
+- **Further author constraints:**
+  - e5wimi first 15, then 12, finally **8 workers**; e5power **36**.
+  - Hunting: "you can accept one hunting event maybe, but of course we would prefer 0".
+    Implemented as a fallback: tolerance 0; tolerance 1 (`--max-hunting 1`) only if
+    nothing is feasible at 0. That yields the same winner as ranking zero-hunting
+    candidates first.
+  - The author changed only the cores after the proposal, so the remaining v2 values are
+    taken as accepted.
+- **Procedure v2 frozen and implemented (commit f51dffc):**
+  - Frozen text: `docs/tuning/2026-11-02_weight_selection_procedure_v2.md`.
+  - Driver: `experiments/ch_09_parameter_selection/ch_9_8_procedure_v2.py`. It reuses the
+    `ch_9_6` transport, simulation units and the unchanged `ch_9_3_select.py`. New parts:
+    - Stage I with three STS variants;
+    - a settling verification with a measured margin;
+    - spans that hold the STS weights;
+    - a screen and filter θ_TS,min ≤ 0.009;
+    - the hunting fallback;
+    - a settling confirmation, one check at a time on e5power.
+  - Tests: `tests/experiments/test_ch9_procedure_v2.py`, 4 tests. 11 passed in total with
+    the transport and amendment-3 tests.
+    - The Stage-I test confirms θ_STS 0.030, θ_TS 0.0075, λ_STS 1.400, and that the TS part
+      is identical to `stage1_start_uc_2026_10`.
+  - Dry run: 288 / 512 II-a draws pass λ, 297 pass θ_TS, 159 pass both.
+- **09:19: campaign started**, run `0004_2026-11-02_091930_ch_9_8_procedure_v2` (driver pid
+  76304).
+  - e5power at 3d98d31; the 17 differing files are shard-neutral.
+  - Variant parameter sets `stage1_v2_uc_2026_11_pq10/20/30` written.
+  - Verification shards launched on e5power at 09:19:48, 3 × 12 workers.
+  - Expected: verification ≈12:00–13:00; II-a ≈14.5 h; II-b ≈9 h; confirmation and W5
+    ≈2 h. The result is expected Wednesday morning.
 
 ## Open
 

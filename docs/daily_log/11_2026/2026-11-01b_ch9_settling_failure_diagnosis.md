@@ -352,6 +352,22 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - II-b 3–4 rounds, ≈9–14 h;
     - confirmation and W5 ≈2 h.
     - Result Tuesday ≈13:00–18:00.
+- **Thesis text (author: "start to fix the tuning process description").**
+  - `Z:\latex_diss_clone\Chapters\Chapter08.tex`, method of Experiment B revised to
+    procedure v2: STS first, five steps, the new requirements of items 2 and 3, the
+    weights table restructured.
+  - Results are left as red `\todo` until run 0004 finishes.
+  - Log: `Z:\latex_diss_clone\00_daily_log\2026-11-02_ch8_procedure_v2_text.md`.
+  - Not committed: the clone holds other uncommitted edits (Ch 7, Ch 10).
+  - Ch 7 (author "Yes, do it here"):
+    - the active-power schedule now describes the unit commitment (new
+      `eq:setup:commitment`, `eq:setup:dispatch` rewritten) and the ±1200 Mvar envelope of
+      the equivalent;
+    - test build without errors;
+    - the reference-period numbers (old rule) are still to be recomputed.
+  - Commitment in the tuning windows (12 h; `compute_merit_order_dispatch` via the
+    runner's step [9]): all five machines in W1–W5; G9 off in W6; G3 committed in every
+    tuning window.
 
 ## Open
 

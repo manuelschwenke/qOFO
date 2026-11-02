@@ -369,6 +369,69 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     runner's step [9]): all five machines in W1–W5; G9 off in W6; G3 committed in every
     tuning window.
 
+- **11:06: STS verification of run 0004, all three variants PASS** (120 steps each; criterion
+  of run 0001):
+
+  | π_q | ρ | p95 n_settle | per-DSO p95 | max | steps > 27 | median residual (Mvar) | predicted (calibrated) residual / p95 bound |
+  |--:|--:|--:|:--|--:|--:|--:|:--|
+  | 10 | 2.5·10⁴ | 24.0 | 18.55 / 13.2 / 24.55 / 16.65 | 27 | 0 | 0.61 | 0.60 / ≤ 23 |
+  | 20 | 1.25·10⁴ | 23.0 | 17.55 / 13.1 / 24.1 / 16.1 | 27 | 0 | 0.41 | 0.44 / ≤ 22 |
+  | 30 | 8.3·10³ | 23.0 | 17.55 / 16.2 / 23.55 / 15.75 | 27 | 0 | 0.31 | 0.36 / ≤ 21 |
+
+  - **Choice by the declared rule:** π_q 10 (largest ρ with p95 ≤ 25 and residual ≤ 0.8);
+    Stage-I point `stage1_v2_uc_2026_11_pq10`.
+  - For comparison, the v1 candidates had 10–59 steps above 27, and d162 had 2.
+  - The calibrated predictor hit the residual within 0.05 Mvar. p95 came out 1–2
+    iterations above "predicted + 5", still inside the margin.
+- **II-a started at 11:06:** 159 candidates plus the Stage-I point; 34 here (10 workers), 125
+  on e5power (36).
+  - The first local attempt failed at start: `OSError: Could not find/load ... llvmlite.dll`
+    while 13 worker processes were starting. A DLL load race is suspected; memory was not
+    short (151 GB free).
+  - `simulate()` retried at once; attempt 2 is running. Remote shard launched at 11:06:51.
+  - For about 5 min, 13 workers ran here: 10 for the campaign plus 3 for the W6 preview
+    started at 10:44 (`results/diagnostics/2026-11-02_v2_stage1_preview_W6`).
+
+- **W6 preview of the three Stage-I variants** (12 h; 3 local workers 10:44–11:10;
+  `results/diagnostics/2026-11-02_v2_stage1_preview_W6`; compared with run 0001 records on
+  the same base and window):
+
+  | W6 | e_v(TS) | e_v(DS) | e_q | worst STS dev. p95 | TS / STS tap moves | hunting |
+  |:--|--:|--:|--:|--:|:--|:--|
+  | v2 π_q 10 / 20 / 30 | 0.01525 | 0.0183 / 0.0190 / 0.0192 | 7.7 / 7.0 / 6.8 e5 | 0.052 | 9 / 18–21 | 1 (TS 1[0]: 180 s −1, 5400 s +1) |
+  | v1 Stage I | 0.0153 | 0.0111 | 1.80e6 | 0.043 | 9 / 28 | 2 |
+  | v1 d162 | 0.0155 | 0.0097 | 2.04e5 | 0.045 | 4 / 6 | 0 |
+  | v1 068e | 0.0154 | 0.0061 | 9.64e5 | 0.020 | 7 / 12 | 0 |
+
+  - **STS side as designed:**
+    - interface-Q error 2.3–2.6× below v1's Stage-I point;
+    - STS taps active (18–21 moves in 12 h);
+    - no hard-limit violation.
+  - **Cost:** the STS voltages deviate more from 1.03 (e_v(DS) +65–73 %; worst-bus p95
+    0.052).
+    - Open: the record does not say whether this is above 1.08 (soft band) or below.
+  - **TS side:** with the v1 TS weights it is unchanged. e_v(TS) is the same, and TS taps are
+    active, but the start-up reversal of 1[0] counts as one hunting event. This is c08b's
+    failure pattern; the TS search has to avoid it, or the tolerance-1 fallback applies.
+
+- **15:05: II-a progress** 55 / 175 here, 224 / 625 on e5power. Expected end ≈23:45 (local
+  is slower); result Tuesday ≈09:00–12:00.
+- **Peek** (unit files copied read-only to the scratchpad; 51 candidates with all five
+  windows; means over W1–W4, W6 of the per-window values, NOT the selection's aggregate):
+
+  | | e_v(TS) | e_v(DS) | e_q | hunting | TS moves (windows of W1–W4) |
+  |:--|--:|--:|--:|--:|:--|
+  | v2 Stage I (π_q 10) | 0.00745 | 0.0127 | 5.0e5 | 1 (W6 start-up) | 17 (4) |
+  | v2 e8c9 (best hunting-free so far) | 0.00732 | 0.0077 | 1.5e5 | 0 | 22 (4) |
+  | v1 Stage I | 0.00753 | 0.0084 | 1.3e6 | 2 | — |
+  | v1 d162 | 0.00739 | 0.0082 | 1.8e5 | 0 | — |
+  | v1 068e / aa8e | 0.00761 / 0.00764 | 0.0047 / 0.0051 | 6.8e5 / 1.1e6 | 0 | — |
+
+  - Hunting-free (taps and banks): 4 / 51, all with TS moves in at least 2 of W1–W4.
+    Another 10 have exactly one hunting event.
+  - The other filters (wear, AVR step, e_q bound) are not yet applied, and the official
+    aggregate may rank them differently.
+
 ## Open
 
 - On the commitment base, g_q is squeezed from both sides (superseded at 19:45: hunting is

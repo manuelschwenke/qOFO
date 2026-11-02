@@ -284,6 +284,24 @@ def split(items: List[Any], w_local: int, w_remote: int) -> Tuple[List[Any], Lis
     return loc, rem
 
 
+def kept_split(cands: List[Dict[str, float]], cj_loc: Path, cj_rem: Path
+               ) -> Optional[Tuple[List[Any], List[Any]]]:
+    """The split an earlier invocation wrote, if it covers exactly ``cands``.
+
+    A resume with other worker counts must not move a candidate between the hosts
+    while a shard may still be working on it: the remote shard keeps its own list,
+    and the units it has finished are only here after its pull (2026-11-02).
+    """
+    from tuning.parameters import weight_fingerprint
+    if not (cj_loc.exists() and cj_rem.exists()):
+        return None
+    loc = json.loads(cj_loc.read_text("utf-8"))
+    rem = json.loads(cj_rem.read_text("utf-8"))
+    if sorted(map(weight_fingerprint, loc + rem)) != sorted(map(weight_fingerprint, cands)):
+        return None
+    return loc, rem
+
+
 # -- configuration and operating points ------------------------------------------------
 
 def base_config():
@@ -382,9 +400,14 @@ def simulate(out: Path, cands: List[Dict[str, float]], w_local: int,
     hosts, then assemble every candidate record here."""
     out.mkdir(parents=True, exist_ok=True)
     (out / "windows").mkdir(exist_ok=True)
-    loc, rem = split(cands, w_local, w_remote) if w_remote > 0 else (cands, [])
     cj_all, cj_loc, cj_rem = (out / "all_candidates.json", out / "shard_local.json",
                               out / "shard_remote.json")
+    kept = kept_split(cands, cj_loc, cj_rem) if w_remote > 0 else None
+    if kept is not None:
+        loc, rem = kept
+        log(f"{rel(out)}: split of the earlier invocation kept")
+    else:
+        loc, rem = split(cands, w_local, w_remote) if w_remote > 0 else (cands, [])
     cj_all.write_text(json.dumps(cands, indent=1), "utf-8")
     cj_loc.write_text(json.dumps(loc, indent=1), "utf-8")
     cj_rem.write_text(json.dumps(rem, indent=1), "utf-8")

@@ -2008,6 +2008,17 @@ class MultiTSOConfig:
     rescaled by :class:`sensitivity.sensitivity_updater.SensitivityUpdater`
     regardless.  Runs made before 2026-10-14 correspond to ``False``."""
 
+    shunt_ff_ledger: bool = True  # added 2026-11-02
+    """Release a bank level by removing exactly the interface feedforward its
+    engagement added (one stored per-coupler entry per level and bank), so
+    the offset is a function of the bank levels and is zero with all banks
+    at level 0.  ``False`` evaluates a release like an engagement, on the
+    hosting DSO's pre-switch model; that model already contains the released
+    susceptance, so its own voltage response is counted twice and a release
+    is overestimated by ~7 % (measured 2026-11-02: +15.7 Mvar residual after
+    one on/off cycle of three MSCs, against +3.0 Mvar in the plant).  Runs
+    made before 2026-11-02 correspond to ``False``."""
+
     def validate_integrator_mode(self) -> None:
         """Fail-fast consistency check for the switched-shunt dispatch mode.
 

@@ -15,7 +15,8 @@ Reactive-reserve map of a Case-2 reference run on the single-line diagram of
 which the area-2 own upward reserve under O2 reaches its minimum over the run.
 
 **Encoding.**  One ring per reactive source: ring area proportional to its
-reactive capability Q_max - Q_min; the dark arc, clockwise from 12 o'clock, is
+reactive capability Q_max - Q_min; the coloured arc (thesis yellow-green),
+clockwise from 12 o'clock, is
 the upward reserve Q_max - Q as a share of the ring.  Generator convention
 (Q > 0 injects), so this is the over-excited headroom, which raises voltage;
 the legend calls it "over-excited reserve" (author, 2026-11-02).
@@ -93,7 +94,7 @@ from network.zone_partition import _FIXED_ZONES_IEEE39 as ZONE_BUSES
 STEM = "case3_scarcity_sld"
 WIDTH = 18.5 * CM          # sidewaysfigure, like fig:ieee39_wind_replace
 
-C_RES = "#004E8A"          # upward reserve (TU blue, O3 in the Case-2 figures)
+C_RES = "#B1BD00"          # upward reserve: thesis tuyellowgreen (TUDa 5c, author 2026-11-02)
 C_TRACK = "#cfcfcf"
 C_LINE = "#a0a0a0"
 CMAP = plt.get_cmap("PuOr")   # ColorBrewer, CVD-safe; low voltage = orange
@@ -508,13 +509,13 @@ def draw_legend(ax) -> None:
 
     ring(0.8, "on")
     ax.text(1.7, y, "circle area: capability $Q_\\max-Q_\\min$\n"
-            "dark arc: over-excited reserve $Q_\\max-Q$", **tk)
-    ring(15.4, "dec")
-    ax.text(16.3, y, "machine decommitted\n(merit order)", **tk)
-    ring(24.2, "trip")
-    ax.text(25.1, y, "machine tripped\n(event)", **tk)
-    ax.plot([31.2, 32.8], [y, y], color="black", lw=1.3, solid_capstyle="butt")
-    ax.text(33.2, y, "machine terminal bus", **tk)
+            "coloured arc: over-excited reserve $Q_\\max-Q$", **tk)
+    ring(16.8, "dec")
+    ax.text(17.7, y, "machine decommitted\n(merit order)", **tk)
+    ring(25.6, "trip")
+    ax.text(26.5, y, "machine tripped\n(event)", **tk)
+    ax.plot([32.4, 34.0], [y, y], color="black", lw=1.3, solid_capstyle="butt")
+    ax.text(34.4, y, "machine terminal bus", **tk)
     x0, dy = 43.2, 0.62
     ax.add_patch(Circle((x0, y + dy), 0.13, fc="black", ec="black", lw=0.5))
     ax.text(x0 + 0.45, y + dy, "machine", **tk)

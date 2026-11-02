@@ -182,6 +182,57 @@ superseded by the producer below.
   - The README's t* rule now names "TS reserve R+". The rule itself is unchanged.
   - Re-exported; the PDF is byte-identical to the run copy.
 
+## Tie-flow labels considered, not added (~15:30)
+
+**Author's idea:** write the tie-line Q at each boundary crossing. The expectation was smaller
+tie flows in (c) than in (b).
+
+**Data says otherwise** (run 0008, GA):
+- Source: recorded `tie_q_mvar`, which is measured at each line's from-bus.
+
+| | Σ of absolute flows, 5 ties | area-2 net import |
+|---|---|---|
+| (b) OFO, t* | 60 Mvar | +11 Mvar |
+| (c) OFO+, t* | 129 Mvar | −77 Mvar (export) |
+| mean 121.7–212.3 min: LOC | 82 Mvar | +58 Mvar |
+| same window: OFO | 84 Mvar | −20 Mvar |
+| same window: OFO+ | 100 Mvar | −48 Mvar |
+
+- Per line at t*, from → to:
+  - B02→B03: +7.7 (b), −20.5 (c);
+  - B03→B18: −20.1, −13.0;
+  - B09→B39: +20.3, +36.7;
+  - B14→B15: −3.6, +33.2;
+  - B17→B27: +8.7, +25.1.
+
+**Hypotheses (not checked):**
+- In (c), the STS injection lifts area-2 voltages (median 1.036 pu) above areas 1 and 3 (1.031 and
+  1.033 pu), so area 2 exports.
+- In (b), area 2 imports only 11 Mvar although areas 1 and 3 hold 1049 and 599 Mvar of TS reserve.
+  Neighbour reserve barely reaches area 2 through the ties, which supports the case for local STS
+  support.
+- LOC imports 58 Mvar and OFO does not. The run uses `coordination_mode = sbx_h`, so the controllers
+  may hold the ties near a schedule. Whether physics or control limits the import in (b) is not
+  checked.
+
+**Measurement end matters.** One value per crossing is ambiguous: B09–B39 carries ≈ 106 Mvar of
+charging, so its two ends differ by up to that much. The logs do not record `q_to`.
+
+**Decision (author):** leave the figure as it is. The finding belongs in the text or caption.
+
+## Reserve arcs in thesis yellow-green (~17:20)
+
+**Author request:** yellow-green arcs instead of blue, closer to the TUDa palette.
+- `C_RES` is now `#B1BD00`, the thesis `tuyellowgreen` (`ClassicThesis.tex:108`, TUDa 5c; also
+  `tudaYellowGreenLocal` in the Fig 7.2 body). It was `#004E8A`.
+- The legend says "coloured arc" (was "dark arc"; the yellow-green is not darker than the grey
+  track). The docstring is updated to match.
+- The decommitted, tripped and terminal-bus legend entries moved right by 1.2–1.4 units so the
+  longer label clears them.
+- Re-exported to the thesis; the PDF is byte-identical to the run copy.
+- **Risk.** In greyscale print, `#B1BD00` (L* ≈ 74) and the track `#cfcfcf` (L* ≈ 83) are close.
+  Not changed.
+
 ## Open
 
 - **Weights.** Panels (b) and (c) use c08b, which is not final on the commitment base (Ch 9

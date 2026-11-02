@@ -452,6 +452,26 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Remote shard `stage2a_0` (pid 12456) kept running; there was no new launch.
   - At 20:01: local 138 / 175, local shard pid 78672 with 20 spawn workers; remote 523 /
     625. II-a ends ≈21:40–22:00.
+- **22:07: II-a done (local 21:27, remote 22:05); selection 2a:**
+  - 160 / 160 inside the engagement bounds; **12 feasible with hunting tolerance 0**, so the
+    fallback is not needed.
+  - Official aggregate:
+
+    | | e_v(TS) | e_v(DS) | e_q | hunting | g_w_tso_oltc |
+    |:--|--:|--:|--:|--:|--:|
+    | Stage-I point (π_q 10) | 0.00845 | 0.0130 | 5.5e5 | 1 | 21.3 |
+    | 1. e8c95a175235 | 0.00836 | 0.00826 | 1.68e5 | 0 | 17.0 |
+    | 2. 436000bda618 | 0.00835 | 0.00838 | 1.90e5 | 0 | 16.8 |
+    | 3. a7aa0bf5bd28 | 0.00846 | 0.00857 | 2.21e5 | 0 | 21.3 |
+    | 4. ead3ee4f5638 | 0.00841 | 0.01085 | 4.59e5 | 0 | 20.7 |
+
+  - For comparison, v1's leaders on the same aggregate were 0.00857–0.00860 (068e, dd14),
+    and the best of the amendment-3 band was 0.00844.
+  - II-b round 1 started at 22:07: centre e8c9, f 0.5, 54 / 64 draws pass the screen; 19
+    here (20 workers), 35 on e5power (36).
+  - Local throughput is ≈1.2 units per worker-hour against ≈1.67 remote, so the rounds are
+    local-bound, ≈4 h each. Revised result: Tuesday ≈11:00–14:00, depending on 3 or 4
+    rounds and the morning cut to 10 workers.
 
 ## Open
 

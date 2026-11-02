@@ -472,6 +472,19 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Local throughput is ≈1.2 units per worker-hour against ≈1.67 remote, so the rounds are
     local-bound, ≈4 h each. Revised result: Tuesday ≈11:00–14:00, depending on 3 or 4
     rounds and the morning cut to 10 workers.
+- **22:35: rebalance from round 2 (author: "You can rebalance from round 2 on").**
+  - Commit 0903e07: `ch_9_6.simulate(split_local=...)` and `ch_9_8 --local-speed`, i.e. a host
+    split weighted by throughput. Test added (13 pass).
+  - 0.75 = e5wimi with 20 workers at ≈1.2 units per worker-hour against e5power at ≈1.6. A
+    54-draw round goes from 19 / 35 to 16 / 38.
+  - Restart: stopped driver 72044 and the round-1 local shard (pid 125964; 5 of 95 units
+    were done, and ≈28 min of 20 workers were lost).
+  - Resumed as pid 6216 with `--local-speed 0.75`. The resume re-checked stage2a (nothing
+    re-run, 0 files pulled), produced an identical selection 2a, and kept the round-1 split
+    (19 / 35). e5power `round1_0` was not relaunched.
+  - Estimate: round 1 ends ≈02:30 (local-bound). Rounds 2–4 ≈3.3 h each, balanced; slower
+    once e5wimi is cut to 10 workers in the morning. Result Tuesday ≈11:00 with 3 rounds,
+    ≈13:00–14:00 with 4.
 
 ## Open
 

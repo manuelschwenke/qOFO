@@ -364,7 +364,11 @@ class MultiTSOIterationRecord:
     against: an isolated one-level step lowers the objective iff
     ``|g_H · q_step| > g_w_tso_shunt``."""
     shunt_commits: List[Dict[str, Any]] = field(default_factory=list)
-    """Committed bank, direction, new level and interface contribution."""
+    """Committed bank, direction, new level and interface contribution
+    (``zone='local'`` for a commit of the local bank rule, 2026-10-30)."""
+    local_tap_moves: List[Dict[str, Any]] = field(default_factory=list)
+    """Tap moves of the local TS tap relays (``trafo_idx``, ``direction``,
+    ``new_pos``; :mod:`controller.local_rules`, 2026-10-30)."""
 
     # Per-HV-group line loading stats and balance aggregates.
     dso_group_i_max_pct:    Dict[str, float] = field(default_factory=dict)
@@ -452,6 +456,38 @@ class MultiTSOIterationRecord:
     # ── Slack-Q saturation diagnostic (added 2026-05-02) ────────────────────────
     # Populated post-PF in run_multi_tso_dso() to expose slack saturation in
     # pickled logs.  Defaults keep older logs loadable.
+    # -- Case-2 metric inputs (2026-10-27) ---------------------------------
+    # Directional synchronous capability at the step's operating point (the
+    # bound the TSO-MIQP enforces, ActuatorBounds.compute_gen_q_bounds), and
+    # which machine each column is, so the reserve R+/R- and u_q can exclude
+    # the network equivalent and tripped machines.  Ordered as
+    # zone_def.gen_indices, like zone_q_gen.
+    gen_q_min_mvar: Dict[int, NDArray] = field(default_factory=dict)
+    gen_q_max_mvar: Dict[int, NDArray] = field(default_factory=dict)
+    zone_gen_idx: Dict[int, NDArray] = field(default_factory=dict)
+    zone_gen_in_service: Dict[int, NDArray] = field(default_factory=dict)
+    zone_gen_is_slack: Dict[int, NDArray] = field(default_factory=dict)
+    # Per-unit sub-transmission IBG data, every mode, with the capability of
+    # the plant's own law (der_qv_local_loop._qv_capability), so u_q,STS is
+    # computed with ONE capability function for every variant.  Keyed by
+    # HV net_id, ordered as hv.sgen_indices (dso_der_idx).
+    dso_der_idx: Dict[str, NDArray] = field(default_factory=dict)
+    dso_der_p_mw: Dict[str, NDArray] = field(default_factory=dict)
+    dso_der_q_mvar: Dict[str, NDArray] = field(default_factory=dict)
+    dso_der_q_min_mvar: Dict[str, NDArray] = field(default_factory=dict)
+    dso_der_q_max_mvar: Dict[str, NDArray] = field(default_factory=dict)
+    # The plant just after an event and BEFORE any controller of this step
+    # acts (post-contingency power flow); empty on steps without an event.
+    # The baseline e(t_e+) of eq:case3:epost and the event impact.
+    pre_control_bus_vm_pu: Dict[int, float] = field(default_factory=dict)
+    pre_control_zone_v_rms_err_pu: Dict[int, float] = field(default_factory=dict)
+    pre_control_trafo_q_mvar: Dict[str, float] = field(default_factory=dict)
+    events_fired: List[str] = field(default_factory=list)
+    # Loop gain lambda_max of each acting controller, on the first record only.
+    controller_lambda_max: Dict[str, float] = field(default_factory=dict)
+    # Factor applied to the central controller's g_w (1 = unscaled), first record.
+    central_gw_kappa: float = float("nan")
+
     slack_p_mw: float = 0.0
     slack_q_mvar: float = 0.0
     slack_q_at_limit: bool = False

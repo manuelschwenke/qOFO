@@ -73,6 +73,7 @@ Date: 2026-06-08
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
@@ -84,6 +85,8 @@ import pandapower as pp
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import pandas as pd
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +258,70 @@ def single_slack_copy(net: "pp.pandapowerNet") -> "pp.pandapowerNet":
     return work
 
 
+# Relative offset of the warm-start voltages in the fallback solve.  The
+# mismatch it causes lies far above the solver tolerance, so Newton-Raphson
+# performs at least one iteration and stores the Jacobian; that Jacobian is
+# evaluated at the offset start, so the offset is kept small (a 1e-4 offset
+# moved lambda_min(J_R) by 2.5e-5 relative in the test case).
+_WARM_START_VM_OFFSET = 1e-6
+
+
+def _converge_single_slack_copy(net: "pp.pandapowerNet") -> "pp.pandapowerNet":
+    """Single-slack copy of ``net`` (see :func:`single_slack_copy`), solved.
+
+    The copy is first solved from a flat start.  A flat start always performs
+    at least one Newton-Raphson iteration and therefore always stores the
+    Jacobian, whereas a start exactly at the solution can converge at
+    iteration 0 without forming it.
+
+    Fallback added 2026-10-30: at strongly stressed operating points the flat
+    start can fail although the plant's own solve converged (Case-2
+    Monte-Carlo mc/0003, seeds 20261149, 20261165, 20261201; the run then
+    aborted although nothing was shown about the operating point).  A fresh
+    copy is then started at the plant's solution, with its bus voltages
+    lowered by ``_WARM_START_VM_OFFSET`` so that at least one iteration is
+    performed.  It is entered only where the flat start raises, so every check
+    that passed before is unchanged.
+    """
+    q_lims = _last_enforce_q_lims(net)
+    work_net = single_slack_copy(net)
+    try:
+        pp.runpp(
+            work_net,
+            run_control=False,
+            calculate_voltage_angles=True,
+            distributed_slack=False,
+            enforce_q_lims=q_lims,
+            max_iteration=100,
+        )
+        return work_net
+    except Exception as exc_flat:  # noqa: BLE001 - retried below
+        flat_error = exc_flat
+
+    work_net = single_slack_copy(net)
+    work_net.res_bus["vm_pu"] = work_net.res_bus["vm_pu"] * (1.0 - _WARM_START_VM_OFFSET)
+    try:
+        pp.runpp(
+            work_net,
+            init="results",
+            run_control=False,
+            calculate_voltage_angles=True,
+            distributed_slack=False,
+            enforce_q_lims=q_lims,
+            max_iteration=100,
+        )
+    except Exception as exc_warm:  # noqa: BLE001 - re-raise with context
+        raise ValueError(
+            "Failed to re-converge a single-slack copy for the canonical "
+            f"power-flow Jacobian: flat start: {flat_error}; warm start at the "
+            f"plant's solution: {exc_warm}"
+        ) from exc_warm
+    _log.warning(
+        "reachability: flat start of the single-slack copy failed (%s); "
+        "solved from the plant's solution instead", flat_error)
+    return work_net
+
+
 # ---------------------------------------------------------------------------
 #  Per-step reachability check
 # ---------------------------------------------------------------------------
@@ -335,28 +402,7 @@ def check_reachability(
                 "Re-converge with distributed_slack=False, run_control=False "
                 "or call with ensure_standard_structure=True."
             )
-        work_net = single_slack_copy(net)
-        try:
-            # A flat (default) start is used deliberately rather than
-            # init="results": when Newton-Raphson is warm-started exactly at
-            # the solution it can converge at iteration 0 without ever forming
-            # the Jacobian, so net._ppc["internal"]["J"] would be absent.  A
-            # flat start always performs at least one iteration and therefore
-            # always stores J.  single_slack_copy() makes the operating point
-            # the plant's own (see there; corrected 2026-10-08).
-            pp.runpp(
-                work_net,
-                run_control=False,
-                calculate_voltage_angles=True,
-                distributed_slack=False,
-                enforce_q_lims=_last_enforce_q_lims(net),
-                max_iteration=100,
-            )
-        except Exception as exc:  # noqa: BLE001 - re-raise with context
-            raise ValueError(
-                "Failed to re-converge a single-slack copy for the canonical "
-                f"power-flow Jacobian: {exc}"
-            ) from exc
+        work_net = _converge_single_slack_copy(net)
         J = _extract_dense_jacobian(work_net)
         pq = np.asarray(work_net._ppc["internal"]["pq"], dtype=np.int64)
         pv = np.asarray(work_net._ppc["internal"]["pv"], dtype=np.int64)

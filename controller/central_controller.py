@@ -58,6 +58,26 @@ from core.network_state import NetworkState
 from sensitivity.jacobian import JacobianSensitivities
 
 
+
+class _AppendFrozenColumns:
+    """A parent ``SensitivityUpdater`` whose output gets frozen columns appended.
+
+    The parent rescales the bank columns of the BASE matrix every step; the
+    central controller's trailing 3W coupler-OLTC columns are not state
+    dependent in this model and are appended unchanged.
+    """
+
+    def __init__(self, inner, extra: NDArray[np.float64]) -> None:
+        self._inner = inner
+        self._extra = np.asarray(extra, dtype=np.float64)
+
+    def update(self, measurement, current_iteration: int) -> NDArray[np.float64]:
+        return np.hstack([self._inner.update(measurement, current_iteration),
+                          self._extra])
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
 @dataclass
 class CentralControllerConfig(TSOControllerConfig):
     """Configuration for the single centralized controller (CIGRE V5).
@@ -174,6 +194,38 @@ class CentralOFOController(TSOController):
             taps[k] = float(measurement.oltc3w_tap_positions[idx[0]])
         return np.concatenate([u_base, taps])
 
+    #: Lock (central steps) of a transmission tap or bank after a switch;
+    #: None = the global ``int_cooldown``.  Set by the runner from
+    #: ``MultiTSOConfig.central_ts_discrete_cooldown``.
+    ts_discrete_cooldown: Optional[int] = None
+
+    def ts_discrete_indices(self) -> List[int]:
+        """Control indices of the transmission taps and banks.
+
+        Layout ``[Q_DER | V_gen | s_OLTC2w | s_shunt | s_OLTC3w]``; the
+        coupler taps (STS devices) are excluded.
+        """
+        cfg = self.config
+        n_ol, n_sh = len(cfg.oltc_trafo_indices), len(cfg.shunt_bus_indices)
+        start = self.n_controls - len(cfg.oltc_trafo3w_indices) - n_sh - n_ol
+        return list(range(start, start + n_ol + n_sh))
+
+    def step(self, measurement, sim_time_s=None):
+        """One central OFO step; transmission devices keep the TS timescale.
+
+        After the parent step, a transmission tap or bank that switched is
+        locked for ``ts_discrete_cooldown`` central steps instead of the
+        global ``int_cooldown``.
+        """
+        u_prev = None if self._u_current is None else self._u_current.copy()
+        out = super().step(measurement, sim_time_s=sim_time_s)
+        n = self.ts_discrete_cooldown
+        if n is not None and u_prev is not None:
+            for idx in self.ts_discrete_indices():
+                if self._u_current[idx] != u_prev[idx]:
+                    self._int_lock_until[idx] = self.iteration + int(n)
+        return out
+
     def _compute_input_bounds(
         self,
         tso_dso_interface_q_current: NDArray[np.float64],
@@ -209,21 +261,24 @@ class CentralOFOController(TSOController):
             return self._H_cache
         # super() builds the [V | I | Q_gen] H over the parent's actuator
         # columns, caches it into self._H_cache, AND constructs a
-        # SensitivityUpdater bound to that 56-column base matrix.  We append
-        # the 3W coupler-OLTC columns and overwrite the cache with the full
-        # matrix.  Crucially, the parent's per-step shunt-V² rescaler
+        # SensitivityUpdater bound to that base matrix.  We append the 3W
+        # coupler-OLTC columns and overwrite the cache with the full matrix.
+        # The parent's per-step bank-column V^2 rescaling
         # (TSOController.step -> self._H_cache = self._sensitivity_updater.update(...))
-        # is built around the *base* matrix and would otherwise clobber the
-        # appended 3W columns every step; the centralized V5 problem has no
-        # shunts, so we disable the updater and keep the frozen full H (the
-        # same "cached sensitivities" assumption as the distributed variants).
+        # returns the BASE matrix; it is kept (the MSC/MSR banks are in the
+        # MIQP since 2026-10-22) and wrapped so that every update re-appends
+        # the frozen 3W columns.  Until 2026-10-27 the updater was disabled on
+        # the assumption "the centralized problem has no shunts", which no
+        # longer held: the runner hands M every TS bank.
         base_H = super()._build_sensitivity_matrix()
-        self._sensitivity_updater = None
         if self._n_oltc3w() == 0:
             return base_H
         extra = self._build_oltc3w_columns(n_rows=base_H.shape[0])
         full_H = np.hstack([base_H, extra])
         self._H_cache = full_H
+        if self._sensitivity_updater is not None:
+            self._sensitivity_updater = _AppendFrozenColumns(
+                self._sensitivity_updater, extra)
         return full_H
 
     def _build_oltc3w_columns(self, n_rows: int) -> NDArray[np.float64]:

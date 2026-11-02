@@ -88,8 +88,15 @@ from core.measurement import (
     measure_zone_dso,
     measure_central,
 )
-from core.measurement_noise import MeasurementNoiseModel
+from core.measurement_noise import (
+    DER_VOLTAGE_METER_KEY,
+    DerVoltageMeter,
+    MeasurementNoiseModel,
+)
 from core.reporting import load_and_apply_tuned_params
+from experiments.helpers.profile_ramps import (
+    apply_profile_ramps, hold_profile_frame, sts_bus_set,
+)
 from core.profiles import (
     DEFAULT_PROFILES_CSV,
     apply_profiles,
@@ -98,7 +105,11 @@ from core.profiles import (
 )
 from network.ieee39.dso_overrides import apply_dso_overrides
 from network.ieee39.load_model import apply_zip_load_model
-from network.ieee39.zonal_balancing import apply_gen_dispatch, compute_zonal_gen_dispatch
+from network.ieee39.zonal_balancing import (
+    apply_gen_dispatch,
+    compute_merit_order_dispatch,
+    compute_zonal_gen_dispatch,
+)
 from network.ieee39 import (
     add_hv_networks,
     build_ieee39_net,
@@ -115,6 +126,7 @@ from network.zone_partition import (
 )
 from configs.config import MultiTSOConfig
 from experiments.helpers import (
+    ContingencyEvent,
     MultiTSOIterationRecord,
     _apply_contingency,
     _network_state,
@@ -122,6 +134,7 @@ from experiments.helpers import (
 )
 from core.plant import (
     ActuatorWrites,
+    runpp_holding_taps,
     PandapowerStaticPlant,
     Plant,
     shunt_steps_for_buses,
@@ -140,9 +153,11 @@ from sensitivity.numerical_h import (
     compute_numerical_h_tso,
 )
 from core.message import SetpointMessage, ShuntDisturbanceMessage
+from controller.slack_q_limit import install_slack_q_limit
 from controller.der_qv_local_loop import (
     CosPhiConstLoop,
     QVLocalLoop,
+    _qv_capability,
     clear_seed_lu_cache,
     install_der_q_loops,
     seed_qv_equilibrium,
@@ -172,6 +187,99 @@ from experiments.runners._multi_tso_helpers import (
 # =============================================================================
 #  V5 (central) closed-loop curvature probe
 # =============================================================================
+
+def _controller_lambda_max(ctrl) -> float:
+    """lambda_max of a controller's weighted-objective curvature (stable iff < 2).
+
+    Diagnostic: NaN when the controller cannot report its curvature inputs.
+    """
+    try:
+        _vci = ctrl.objective_curvature_inputs()
+        if _vci is None:
+            return float("nan")
+        _Hv, _gv = _vci
+        _gw, _ = ctrl._get_per_variable_weights()
+        if _gw is None:
+            _gw = np.broadcast_to(
+                np.asarray(ctrl.params.g_w, dtype=np.float64), (_Hv.shape[1],))
+        return float(curvature_spectrum(
+            _Hv, _gv, np.asarray(_gw, dtype=np.float64)).lambda_max)
+    except Exception:                      # diagnostic only
+        return float("nan")
+
+
+def _central_lambda(central_controller, central_cfg, meta, rule: str,
+                    kappa_discrete: float = 1.0) -> float:
+    """``lambda_max`` of the central objective curvature under a counting rule.
+
+    ``rule``: "all" | "ch9" (MSC/MSR exclusion, as
+    ``tuning.stage1_screen.lambda_max_B``) | "continuous".  ``kappa_discrete``
+    multiplies the g_w of taps and banks (a candidate scaling, evaluated
+    without installing it).
+    """
+    H = central_controller._expand_H_to_der_level(
+        central_controller._build_sensitivity_matrix())
+    n_v = len(central_cfg.voltage_bus_indices)
+    Hv = np.asarray(H[:n_v, :], dtype=np.float64)
+    gw, _ = central_controller._get_per_variable_weights()
+    if gw is None:
+        gw = np.broadcast_to(np.asarray(central_controller.params.g_w,
+                                        dtype=np.float64), (Hv.shape[1],))
+    gw = np.asarray(gw, dtype=np.float64).copy()
+    gv = np.asarray(central_controller.g_v_per_bus, dtype=np.float64)
+    n_der = len(central_cfg.der_indices)
+    n_gen = len(central_cfg.gen_indices)
+    n_ol = len(central_cfg.oltc_trafo_indices)
+    n_sh = len(central_cfg.shunt_bus_indices)
+    if Hv.shape[1] != n_der + n_gen + n_ol + n_sh + len(central_cfg.oltc_trafo3w_indices):
+        raise ValueError("central H columns do not match the control layout")
+    disc0 = n_der + n_gen
+    gw[disc0:] *= float(kappa_discrete)
+    A = np.sqrt(gv)[:, None] * Hv / np.sqrt(gw)[None, :]
+    C = A.T @ A
+    cols = list(range(C.shape[0]))
+    if rule == "continuous":
+        cols = list(range(disc0))
+    elif rule == "ch9":
+        sts_of = {int(b): hv.net_id for hv in meta.hv_networks
+                  for b in hv.coupling_lv_bus_indices}
+        groups: Dict[str, List[int]] = {}
+        for k, b in enumerate(central_cfg.shunt_bus_indices):
+            groups.setdefault(sts_of.get(int(b), f"bus{b}"), []).append(
+                disc0 + n_ol + k)
+        drop = set()
+        for grp in groups.values():
+            if len(grp) > 1:
+                keep = max(grp, key=lambda i: C[i, i])
+                drop.update(i for i in grp if i != keep)
+        cols = [i for i in cols if i not in drop]
+    elif rule != "all":
+        raise ValueError(f"central_lambda_rule must be all|ch9|continuous, got {rule!r}")
+    Cs = C[np.ix_(cols, cols)]
+    return float(np.linalg.eigvalsh(0.5 * (Cs + Cs.T))[-1])
+
+
+def _central_curvature_spectrum(central_controller, central_cfg):
+    """Curvature spectrum of the central controller's voltage objective.
+
+    ``M = H_V G_w^{-1} H_V^T diag(g_v)`` on the expanded H and the
+    per-variable ``g_w`` the MIQP sees; the per-tick error map is
+    ``I - M``, stable iff ``eig(M)`` lies in (0, 2).  Read-only.
+    """
+    H = central_controller._expand_H_to_der_level(
+        central_controller._build_sensitivity_matrix()
+    )
+    n_v = len(central_cfg.voltage_bus_indices)
+    H_v = np.asarray(H[:n_v, :], dtype=np.float64)
+    g_w_vec, _ = central_controller._get_per_variable_weights()
+    if g_w_vec is None:
+        g_w_vec = np.broadcast_to(
+            np.asarray(central_controller.params.g_w, dtype=np.float64),
+            (H_v.shape[1],),
+        )
+    g_v_vec = np.asarray(central_controller.g_v_per_bus, dtype=np.float64)
+    return curvature_spectrum(H_v, g_v_vec, np.asarray(g_w_vec, dtype=np.float64))
+
 
 def _dump_central_curvature(central_controller, central_cfg) -> None:
     """Print the closed-loop curvature spectrum of the central V5 controller.
@@ -334,6 +442,31 @@ def _apply_gw_preconditioning(
     return res
 
 
+def _zone_voltage_error_inputs(net, zd, cfg_v, v_set: float):
+    """The buses, voltages and references of a zone's tracking error.
+
+    One definition for the end-of-step record (``zone_v_rms_err_pu``) and the
+    pre-control sample at an event step, so ``eq:case3:epost`` compares like
+    with like.
+    """
+    vm_bus_ids = [int(b) for b in zd.v_bus_indices if b in net.res_bus.index]
+    vm_zone = np.array(
+        [float(net.res_bus.at[b, "vm_pu"]) for b in vm_bus_ids],
+        dtype=np.float64,
+    )
+    if cfg_v.v_setpoints_pu is None:
+        v_ref_zone = np.full(vm_zone.shape, v_set, dtype=float)
+    else:
+        v_ref_by_bus = {
+            int(bus): float(ref)
+            for bus, ref in zip(cfg_v.voltage_bus_indices, cfg_v.v_setpoints_pu)
+        }
+        v_ref_zone = np.array(
+            [v_ref_by_bus.get(bus, v_set) for bus in vm_bus_ids], dtype=float,
+        )
+    return vm_bus_ids, vm_zone, v_ref_zone
+
+
 # =============================================================================
 #  Main simulation function
 # =============================================================================
@@ -342,6 +475,34 @@ def run_multi_tso_dso(
     config: MultiTSOConfig,
     pre_loop_hook: Optional[Callable[[Dict[str, Any]], Any]] = None,
     plant_factory: Optional[Callable[..., Plant]] = None,
+) -> List[MultiTSOIterationRecord]:
+    """Run the simulation; on ANY abort the records so far travel with it.
+
+    The exception that ends a run (power flow after an event, infeasible
+    MIQP, guard re-solve, ...) gets a ``partial_log`` attribute holding every
+    record appended before it, as :class:`ReachabilityViolation` always had.
+    A failed episode is a result, so its trajectory up to the failure must
+    not be lost (2026-10-27).  See :func:`_run_multi_tso_dso_impl`.
+    """
+    sink: List[MultiTSOIterationRecord] = []
+    try:
+        return _run_multi_tso_dso_impl(config, pre_loop_hook, plant_factory,
+                                       _log_sink=sink)
+    except BaseException as exc:
+        if getattr(exc, "partial_log", None) is None:
+            try:
+                exc.partial_log = sink
+            except Exception:       # an exception type without __dict__
+                pass
+        raise
+
+
+def _run_multi_tso_dso_impl(
+    config: MultiTSOConfig,
+    pre_loop_hook: Optional[Callable[[Dict[str, Any]], Any]] = None,
+    plant_factory: Optional[Callable[..., Plant]] = None,
+    *,
+    _log_sink: Optional[List[MultiTSOIterationRecord]] = None,
 ) -> List[MultiTSOIterationRecord]:
     """
     Execute the multi-TSO / multi-DSO OFO simulation.
@@ -489,6 +650,18 @@ def run_multi_tso_dso(
         scenario=config.scenario,
         verbose=(verbose >= 1),
     )
+
+    # The droop's own terminal-voltage reading (DAD input).  Installed on the
+    # plant net before any power flow, so initialisation and every step read
+    # through the same channel; the sample id is the plant step (set at the
+    # top of each step), so a variant without supervisory controllers draws
+    # the same sequence as the others.
+    _der_vmeter = None
+    if (config.measurement_noise.enabled
+            and config.measurement_noise.apply_to_der_voltage):
+        _der_vmeter = DerVoltageMeter(config.measurement_noise)
+        _der_vmeter.set_sample(("plant", 0))
+        net[DER_VOLTAGE_METER_KEY] = _der_vmeter
 
     # =========================================================================
     # STEP 2: Zone partitioning
@@ -1067,7 +1240,9 @@ def run_multi_tso_dso(
             g_u=np.zeros_like(gw_diag),
             alpha=1.0,  # Q_cor mode does not use command relaxation
             int_max_step=config.int_max_step,
-            int_cooldown=config.int_cooldown,
+            # The TS layer has its own lock (15 min since 2026-10-30).
+            int_cooldown=(config.int_cooldown if config.tso_int_cooldown is None
+                          else config.tso_int_cooldown),
             int_cooldown_s=config.ofo_oltc_cooldown_s,  # 0 = off since 2026-10-14
             adapt_g_w_classes=config.tso_adapt_g_w_classes(),
             g_w_adapt_meta=config.make_g_w_adapt_meta(),
@@ -1103,6 +1278,8 @@ def run_multi_tso_dso(
             non_dispatchable_gen_indices=_non_dispatchable_gens,
             gen_oltc_map=_gen_oltc_map,
             enable_saturation_mode=config.enable_avr_saturation_mode,
+            gen_vm_min_pu=config.gen_vm_min_pu,
+            gen_vm_max_pu=config.gen_vm_max_pu,
             g_q_tso=config.tso_g_q_pcc,
             pcc_capability_on_output=config.tso_pcc_capability_on_output,
             g_res_sg=_zone_scalar(config.zone_tso_g_res_sg, z, config.tso_g_res_sg),
@@ -1599,6 +1776,8 @@ def run_multi_tso_dso(
             g_v=config.g_v,
             gen_indices=c_gen_indices,
             gen_bus_indices=c_gen_buses,
+            gen_vm_min_pu=config.gen_vm_min_pu,
+            gen_vm_max_pu=config.gen_vm_max_pu,
             g_q_tso=0.0,
             qv_slope_pu=config.tso_qv_slope_pu,
             oltc_trafo3w_indices=c_oltc3w,
@@ -1817,13 +1996,68 @@ def run_multi_tso_dso(
         t_end = start_time + timedelta(seconds=config.n_total_s)
         profiles = profiles.loc[start_time:t_end]
 
+        # Held profiles and load ramps (step tests of ch:case3), on the
+        # clipped frame: exact at dt_s, applied through apply_profiles like
+        # any profile change, inert unless the config asks for them.
+        if getattr(config, "hold_profiles", False):
+            profiles = hold_profile_frame(profiles, start_time)
+        _ramps = list(getattr(config, "profile_ramps", ()) or ())
+        if _ramps:
+            _sts_buses = sts_bus_set(meta.hv_networks)
+            _ramps = [dict(r, exclude_buses=list(r.get("exclude_buses") or _sts_buses))
+                      if r.get("kind") == "ts_loads" else dict(r) for r in _ramps]
+            profiles = apply_profile_ramps(net, profiles, start_time, _ramps,
+                                           verbose=verbose)
+
         # Apply initial profiles
         _t = perf_counter()
         apply_profiles(net, profiles, start_time)
         if verbose >= 1:
             print(f"  [T] apply_profiles: {perf_counter() - _t:.2f} s")
 
-        if config.use_zonal_gen_dispatch:
+        if config.use_zonal_gen_dispatch and config.unit_commitment:
+            # Merit-order dispatch with unit commitment over the run window
+            # (author decision 2026-10-31).  A decommitted machine leaves
+            # service with its machine transformer exactly as a trip does,
+            # before the post-Phase-2 Jacobian rebuild, so every cached
+            # controller model is built without it; the outage masks tell the
+            # controllers (an operator knows which units are off).
+            _t = perf_counter()
+            gen_dispatch, _committed = compute_merit_order_dispatch(
+                net, profiles, dispatch_zone_map,
+                min_stable_frac=config.gen_min_stable_frac,
+                merit_order=config.gen_merit_order,
+            )
+            apply_gen_dispatch(net, gen_dispatch, start_time)
+            for _g, _on in sorted(_committed.items()):
+                if not _on:
+                    _apply_contingency(
+                        net, ContingencyEvent(minute=0, element_type="gen",
+                                              element_index=int(_g),
+                                              action="trip"),
+                        verbose, gen_trafo_map=gen_trafo_map)
+            # The TS STATCOMs still carry their build-state Q here (several
+            # hundred Mvar); Phase 1 below replaces it by the voltage-holding
+            # solution.  With the machines that absorbed it decommitted, the
+            # post-profile power flow cannot converge from that point, so
+            # start it from Q = 0.
+            _ts_statcom = (net.sgen["name"].astype(str).str.contains("STATCOM")
+                           & (net.sgen["subnet"].astype(str) != "DN"))
+            net.sgen.loc[_ts_statcom, "q_mvar"] = 0.0
+            coordinator.update_outage_masks(net)
+            coordinator.invalidate_sensitivity_cache()
+            if _central and central_controller is not None:
+                central_controller.update_outage_mask(
+                    {int(g) for g in central_cfg.gen_indices
+                     if not bool(net.gen.at[g, "in_service"])},
+                    {int(t) for t in central_cfg.oltc_trafo_indices
+                     if not bool(net.trafo.at[t, "in_service"])})
+                central_controller.invalidate_sensitivity_cache()
+            print("  [9] unit commitment: off-line "
+                  f"{[str(net.gen.at[g, 'name']) for g, on in sorted(_committed.items()) if not on]}")
+            if verbose >= 1:
+                print(f"  [T] compute+apply merit-order dispatch: {perf_counter() - _t:.2f} s")
+        elif config.use_zonal_gen_dispatch:
             # Per-generator P_min: 20% of P_max (consistent with
             # GeneratorParameters.p_min_mw construction above).
             _gen_p_min_dict: Dict[int, float] = {
@@ -1876,6 +2110,11 @@ def run_multi_tso_dso(
     # that it DOES command the continuous TSO actuators, through its own
     # dispatch block below.
     _svr_tso = config.tso_mode == "svr"
+    if config.svr_sts_access and not (_svr_tso and config.dso_mode == "ofo"):
+        raise ValueError(
+            "svr_sts_access (variant S2) requires tso_mode='svr' and "
+            "dso_mode='ofo': the couplers join the classical alignment law and "
+            "the STS-OFOs track the resulting references")
     _local_tso = config.tso_mode in ("local", "svr")
     # Plant-side Q(V) loops (QVLocalLoop / CosPhiConstLoop) plus any
     # DiscreteTapControl on couplers / machine trafos must be iterated
@@ -2070,6 +2309,13 @@ def run_multi_tso_dso(
         qv_max_step_frac=config.qv_local_max_step_frac,
         qv_tol_mvar=config.dso_qv_tol_mvar,
     )) if dso_sgens else 0
+    # Reactive limit of the network equivalent (author decision 2026-10-31):
+    # pandapower does not enforce the slack machine's Q box, so the plant
+    # holds it in the same run_control loop as the DER Q(V) loops.
+    if config.slack_q_limit_mvar is not None:
+        if install_slack_q_limit(net, float(config.slack_q_limit_mvar)) is not None:
+            print(f"[10.3] network equivalent: Q limited to "
+                  f"+-{float(config.slack_q_limit_mvar):.0f} Mvar (plant)")
     if verbose >= 1:
         print(
             f"[10.3] Phase 3 (DER): installed {n_tso + n_dso} DER q_mode loops "
@@ -2124,7 +2370,7 @@ def run_multi_tso_dso(
     # PandapowerStaticPlant.advance already uses, so this is the same
     # iteration budget the first main-loop solve would have had.
     _t = perf_counter()
-    pp.runpp(net, run_control=True, calculate_voltage_angles=True,
+    runpp_holding_taps(net, run_control=True, calculate_voltage_angles=True,
              max_iteration=50, max_iter=300,
              distributed_slack=config.distributed_slack,
              enforce_q_lims=config.enforce_q_lims_plant)
@@ -2364,6 +2610,8 @@ def run_multi_tso_dso(
             sample_id=("initialisation", 0),
             initialisation=True,
         ))
+    central_lambda_max = float("nan")
+    central_gw_kappa = float("nan")
     if _central and central_controller is not None:
         # The centralized controller always uses the FULL-network Jacobian
         # rebuilt at the post-Phase-2 operating point (overriding any
@@ -2378,6 +2626,75 @@ def run_multi_tso_dso(
         ))
         if getattr(config, "debug_central_curvature", False):
             _dump_central_curvature(central_controller, central_cfg)
+        # The bound must itself be a stable loop: refuse lambda_max >= 2
+        # (the per-tick error map I - M would not contract).  Printed at
+        # every verbosity -- the loop gain is part of the result.
+        _rule = config.central_lambda_rule
+        if _rule == "continuous" and config.central_ts_discrete_cooldown is None:
+            raise ValueError(
+                "central_lambda_rule='continuous' leaves the taps and banks out "
+                "of the loop gain; it requires central_ts_discrete_cooldown so "
+                "that they are rate-limited as in the cascade")
+        central_controller.ts_discrete_cooldown = config.central_ts_discrete_cooldown
+        _lam_c = _central_lambda(central_controller, central_cfg, meta, _rule)
+        central_gw_kappa = 1.0
+        if config.central_lambda_target is not None:
+            _target = float(config.central_lambda_target)
+            if not 0.0 < _target < 2.0:
+                raise ValueError(
+                    f"central_lambda_target must lie in (0, 2), got {_target}")
+            _gw0, _ = central_controller._get_per_variable_weights()
+            if _gw0 is None:
+                _gw0 = np.broadcast_to(
+                    np.asarray(central_controller.params.g_w, dtype=np.float64),
+                    (central_controller.n_controls,))
+            _gw0 = np.asarray(_gw0, dtype=np.float64).copy()
+            # kappa only ever slows M down: a loop gain below the target is
+            # left as it is (the selected weights).
+            if _lam_c > _target:
+                if config.central_kappa_scope == "all":
+                    central_gw_kappa = _lam_c / _target
+                    _gw_new = _gw0 * central_gw_kappa
+                elif config.central_kappa_scope == "discrete":
+                    if _central_lambda(central_controller, central_cfg, meta,
+                                       _rule, kappa_discrete=1e9) >= _target:
+                        raise ValueError(
+                            "central_kappa_scope='discrete': the continuous "
+                            "actuators alone exceed the target loop gain")
+                    _lo_k, _hi_k = 1.0, 2.0
+                    while _central_lambda(central_controller, central_cfg, meta,
+                                          _rule, kappa_discrete=_hi_k) > _target:
+                        _lo_k, _hi_k = _hi_k, 2.0 * _hi_k
+                    for _ in range(60):
+                        _mid = np.sqrt(_lo_k * _hi_k)
+                        if _central_lambda(central_controller, central_cfg, meta,
+                                           _rule, kappa_discrete=_mid) > _target:
+                            _lo_k = _mid
+                        else:
+                            _hi_k = _mid
+                    central_gw_kappa = _hi_k
+                    _gw_new = _gw0.copy()
+                    _n_cont = (len(central_cfg.der_indices)
+                               + len(central_cfg.gen_indices))
+                    _gw_new[_n_cont:] *= central_gw_kappa
+                else:
+                    raise ValueError("central_kappa_scope must be all|discrete")
+                central_controller.apply_preconditioned_g_w(_gw_new)
+            _lam_new = _central_lambda(central_controller, central_cfg, meta, _rule)
+            print(f"  [central] rule {_rule}, scope {config.central_kappa_scope}: "
+                  f"g_w x kappa = {central_gw_kappa:.4g} (target "
+                  f"{_target:.4g}): lambda_max {_lam_c:.4g} -> {_lam_new:.4g}",
+                  flush=True)
+            _lam_c = _lam_new
+        central_lambda_max = _lam_c
+        print(f"  [central] curvature lambda_max(M) = {_lam_c:.4g} under rule "
+              f"{_rule} (stable iff < 2); TS-device cooldown "
+              f"{config.central_ts_discrete_cooldown}", flush=True)
+        if not _lam_c < 2.0:
+            raise ValueError(
+                f"central controller loop gain lambda_max = {_lam_c:.4g} >= 2: "
+                f"the per-step error map does not contract; the bound would "
+                f"be an unstable loop. Retune its g_w before using it.")
     if verbose >= 1:
         print(f"  [T] controller .initialise() loop: {perf_counter() - _t:.2f} s")
 
@@ -2446,6 +2763,8 @@ def run_multi_tso_dso(
             print(f"  [T] g_w preconditioning: {perf_counter() - _t:.2f} s")
 
     # ── Send initial DSO capability messages to TSO controllers ──────────
+    # Latest CAIR message per DSO, for the classical scheme with access (S2).
+    _svr_cap_inbox: Dict[str, Any] = {}
     # Without this, PCC capability bounds stay at the default ±1e-6 Mvar
     # until the first DSO step inside the loop.  The first TSO step then
     # sees near-zero capability and locks q_pcc; the second TSO step
@@ -2467,6 +2786,7 @@ def run_multi_tso_dso(
             if ctrl.controller_id == tso_id
         )
         target_tso.receive_capability(cap_msg)
+        _svr_cap_inbox[dso_id] = cap_msg
     if verbose >= 1:
         print(f"  [T] DSO capability messages loop: {perf_counter() - _t:.2f} s")
         for z, ctrl in tso_controllers.items():
@@ -2610,7 +2930,8 @@ def run_multi_tso_dso(
               f"DSO/{config.dso_period_s/60:.0f}min{warmup_str})")
         print()
 
-    log: List[MultiTSOIterationRecord] = []
+    log: List[MultiTSOIterationRecord] = (
+        _log_sink if _log_sink is not None else [])
 
     # ── Voltage-stability / nose-curve reachability guard ────────────────────
     # At every step the converged plant equilibrium is checked against the
@@ -2838,6 +3159,71 @@ def run_multi_tso_dso(
     )
     _oltc_limiter_active = _oltc_local_active and _oltc_limiter.active
 
+    # ── Local rules for the discrete TS devices no MIQP dispatches ───────
+    # Author decision 2026-10-30: under LOC, SVR and SVR+ (and in Case 1
+    # wherever the TS taps or the banks stay outside the MIQP) the TS taps
+    # hold their HV side at 1.03 +/- 0.01 pu like the coupler relays, and the
+    # banks follow the local rule of ``shunt_dispatch='local'``.  Same
+    # holding times as the MIQP variants (15 min TS taps, 30 min banks).
+    # Explicit one-step rules, not DiscreteTapControl: see
+    # :mod:`controller.local_rules` for the divergence that rules out the
+    # latter on machine transformers under SVR.  The slack machine's
+    # transformer stays held, as it is excluded from the MIQP too.
+    from controller.local_rules import BankRelay, LocalDiscreteRules, TapRelay
+    _tap_relays: List[TapRelay] = []
+    if (not _central and not _install_local_taps
+            and (_local_tso or _svr_tso or _tso_oltc_local)):
+        _hold_mt = (config.oltc_cooldown_s_mt
+                    if config.oltc_cooldown_s_mt is not None
+                    else config.oltc_cooldown_s)
+        for _tidx in meta.machine_trafo_indices:
+            if int(net.trafo.at[_tidx, "lv_bus"]) in slack_gen_term_buses:
+                continue
+            _tap_relays.append(TapRelay(
+                trafo_idx=int(_tidx),
+                v_ref_pu=float(config.oltc_init_v_target_pu),
+                tol_pu=float(config.dso_oltc_init_tol_pu),
+                hold_s=float(_hold_mt),
+            ))
+    _bank_relays: List[BankRelay] = []
+    if _shunt_mode == "local":
+        for sh_idx, sb, q_step, kind, nlev in zip(
+            meta.tso_tertiary_shunt_indices,
+            meta.tso_tertiary_shunt_buses,
+            meta.tso_tertiary_shunt_q_steps_mvar,
+            meta.tso_tertiary_shunt_kinds,
+            meta.tso_tertiary_shunt_n_levels,
+        ):
+            dso_id_b = shunt_bus_to_dso_id.get(int(sb))
+            hv_b = hv_info_map.get(dso_id_b) if dso_id_b is not None else None
+            _lv_buses = ([int(b) for b in hv_b.coupling_lv_bus_indices]
+                         if hv_b is not None else [])
+            if int(sb) not in _lv_buses:
+                raise ValueError(
+                    f"Tertiary shunt at bus {sb} is not on a coupling-"
+                    f"transformer tertiary of {dso_id_b}")
+            t3w_b = int(hv_b.coupling_trafo_indices[_lv_buses.index(int(sb))])
+            _bank_relays.append(BankRelay(
+                bank=make_bank(ShuntBankConfig(
+                    shunt_idx=int(sh_idx), bus_idx=int(sb),
+                    interface_trafo3w_idx=t3w_b, dso_id=str(dso_id_b),
+                    kind=str(kind), q_step_mvar=float(q_step),
+                    n_levels=int(nlev), t_dwell_s=float(config.shunt_t_dwell_s),
+                )),
+                primary_bus=int(net.trafo3w.at[t3w_b, "hv_bus"]),
+                v_low_pu=config.shunt_local_v_ref_pu - config.shunt_local_dv_pu,
+                v_high_pu=config.shunt_local_v_ref_pu + config.shunt_local_dv_pu,
+                confirm_steps=int(config.shunt_local_confirm_steps),
+            ))
+    _local_rules = LocalDiscreteRules(
+        _tap_relays, _bank_relays,
+        mutual_exclusion=config.shunt_sts_mutual_exclusion)
+    if verbose >= 1 and _local_rules:
+        print(f"  [local rules] {len(_tap_relays)} TS tap relay(s) "
+              f"(HV side {config.oltc_init_v_target_pu:.3f} +/- "
+              f"{config.dso_oltc_init_tol_pu:.3f} pu), "
+              f"{len(_bank_relays)} bank relay(s)")
+
     # ── SVR reference construction (thesis variant S1) ────────────────────
     # Built AFTER the local tap controls are installed and the plant has been
     # brought to its initial operating point, because calibration perturbs a
@@ -2877,6 +3263,8 @@ def run_multi_tso_dso(
                     rvr_p_every_step=bool(config.svr_rvr_p_every_step),
                     deadband_pu=float(config.svr_deadband_pu),
                     rpr_voltage_priority=bool(config.svr_rpr_voltage_priority),
+                    v_set_min_pu=float(config.gen_vm_min_pu),
+                    v_set_max_pu=float(config.gen_vm_max_pu),
                     # OFO form of the two loops (variant O0, 2026-10-06).  The
                     # tracking weight, voltage limits and slack weights are the
                     # TS-OFO's own, so O0 differs from the TS-OFO only in its
@@ -2888,6 +3276,7 @@ def run_multi_tso_dso(
                     ofo_v_max_pu=float(config.v_max_pu),
                     ofo_g_z_v=float(config.g_z_voltage),
                     ofo_g_z_q=float(config.g_z_q_gen),
+                    sts_access=bool(config.svr_sts_access),
                 ),
                 # Same withholding the OFO gets (see _non_dispatchable_gens):
                 # without this the reference scheme would command the slack
@@ -3138,6 +3527,10 @@ def run_multi_tso_dso(
             # loop — call adapter.finalise() after the run for the
             # settlement plane).
             "sbxv_runtime": sbxv_runtime,
+            # The single central controller (control_scope='central'), else
+            # None -- for diagnostics of the bound M.
+            "central_controller": central_controller,
+            "central_cfg": central_cfg,
         }
         _hook_result = pre_loop_hook(_hook_state)
         if _hook_result:
@@ -3263,6 +3656,8 @@ def run_multi_tso_dso(
     for step in range(1, n_steps + 1):
         _t_step = perf_counter()
         time_s  = step * config.dt_s
+        if _der_vmeter is not None:
+            _der_vmeter.set_sample(("plant", step))
         # Seconds already advanced this interval by the RMS profile pre-settle
         # (see the profile branch); subtracted from the end-of-step advance so
         # the total stays dt_s.  0 unless profiles + a non-static plant.
@@ -3294,6 +3689,18 @@ def run_multi_tso_dso(
         rec = MultiTSOIterationRecord(
             step=step, time_s=time_s, tso_active=run_tso, dso_active=run_dso
         )
+        if step == 1:
+            # Loop gain of every controller that acts in this variant.
+            if _central:
+                rec.controller_lambda_max["central"] = central_lambda_max
+                rec.central_gw_kappa = central_gw_kappa
+            else:
+                if config.tso_mode == "ofo":
+                    for _z, _c in tso_controllers.items():
+                        rec.controller_lambda_max[f"tso_{_z}"] = (
+                            _controller_lambda_max(_c))
+                for _d, _c in dso_controllers.items():
+                    rec.controller_lambda_max[str(_d)] = _controller_lambda_max(_c)
         # Preserve the exact noisy packets presented to each controller.
         # They are recorded separately from the post-control plant truth.
         tso_plot_measurements: Dict[int, Measurement] = {}
@@ -3442,7 +3849,7 @@ def run_multi_tso_dso(
                     # next advance()/read_y() produces the post-contingency
                     # measurements from the simulator itself.
                     if isinstance(plant, PandapowerStaticPlant):
-                        pp.runpp(net, run_control=_run_control,
+                        runpp_holding_taps(net, run_control=_run_control,
                                  calculate_voltage_angles=True,
                                  max_iteration=50,
                                  max_iter=300,
@@ -3462,7 +3869,7 @@ def run_multi_tso_dso(
                     print("\n  *** Retrying PF with enforce_q_lims=True, "
                           "init='flat', max_iteration=100 ***\n")
                     try:
-                        pp.runpp(net, run_control=_run_control,
+                        runpp_holding_taps(net, run_control=_run_control,
                                  calculate_voltage_angles=True,
                                  max_iteration=100,
                                  max_iter=300,
@@ -3512,6 +3919,28 @@ def run_multi_tso_dso(
                             distributed_slack=config.distributed_slack,
                             enforce_q_lims=False,
                         )
+
+                # The plant after the event, before any controller of this
+                # step reads it: the baseline e(t_e+) of eq:case3:epost.
+                rec.pre_control_bus_vm_pu = {
+                    int(b): float(v) for b, v in net.res_bus["vm_pu"].items()
+                }
+                for _z, _zd in zone_defs.items():
+                    _ids, _vm, _vr = _zone_voltage_error_inputs(
+                        net, _zd, tso_controllers[_z].config, v_set)
+                    if _vm.size:
+                        rec.pre_control_zone_v_rms_err_pu[_z] = float(
+                            np.sqrt(np.mean((_vm - _vr) ** 2)))
+                for _hv in meta.hv_networks:
+                    for _t in _hv.coupling_trafo_indices:
+                        if int(_t) in net.res_trafo3w.index:
+                            rec.pre_control_trafo_q_mvar[f"trafo_{int(_t)}"] = float(
+                                net.res_trafo3w.at[int(_t), "q_hv_mvar"])
+                rec.events_fired = [
+                    f"{ev.element_type}:{ev.action}:"
+                    f"{ev.element_index if ev.element_index >= 0 else ev.bus}"
+                    for ev in fired
+                ]
 
                 # Notify controllers: freeze OOS actuator bounds, zero
                 # their H columns, and invalidate sensitivity caches.
@@ -3573,10 +4002,64 @@ def run_multi_tso_dso(
             # command rather than incrementing from the realised Q — producing
             # the discrete DER jumps and poor tracking otherwise observed.
             central_controller.apply_qw_reset(meas_central)
+            # ── Switched-shunt banks, exactly as in the zone path: the
+            # bounds carry the holding time, the level limits and the
+            # mutual exclusion; a committed switch is followed by the rank-1
+            # update of the cached model and the bank's own state.  The
+            # central u is [Q_DER | V_gen | s_OLTC2w | s_shunt | s_OLTC3w].
+            _c_banks: List[ShuntBank] = []
+            if zone_banks:
+                _all_banks_c = [b for bs in zone_banks.values() for b in bs]
+                _c_banks = [b for _zb in sorted(zone_defs)
+                            for b in zone_banks.get(_zb, [])]
+                if ([b.config.bus_idx for b in _c_banks]
+                        != [int(x) for x in central_cfg.shunt_bus_indices]):
+                    raise ValueError(
+                        "central bank order does not match its control vector")
+                _lo_c, _hi_c = [], []
+                for _b in _c_banks:
+                    _dirs = _b.available_directions(
+                        time_s,
+                        opposite_engaged=(config.shunt_sts_mutual_exclusion
+                                          and opposite_engaged(_b, _all_banks_c)),
+                    )
+                    _lo_c.append(_b.level + min([0] + _dirs))
+                    _hi_c.append(_b.level + max([0] + _dirs))
+                central_controller.set_shunt_bank_state(_lo_c, _hi_c)
             central_out = central_controller.step(meas_central, sim_time_s=time_s)
+            _prev_c = (shunt_steps_for_buses(
+                plant.read_y(), central_cfg.shunt_bus_indices) if _c_banks else [])
             plant.apply_u(writes_from_central(
                 plant.read_y(), central_cfg, central_out.u_new,
             ))
+            if _c_banks:
+                _off_c = (len(central_cfg.der_indices) + len(central_cfg.gen_indices)
+                          + len(central_cfg.oltc_trafo_indices))
+                _changed_c = []
+                for _k, (_b, _sp) in enumerate(zip(_c_banks, _prev_c)):
+                    _sn = int(round(float(central_out.u_new[_off_c + _k])))
+                    if _sn != int(_sp):
+                        _changed_c.append((_k, _b, int(_sp), _sn))
+                for _k, _b, _sp, _sn in _changed_c:
+                    if not central_controller.sensitivities.apply_shunt_step_change_smw(
+                            _b.config.bus_idx, _sn, shunt_idx=_b.config.shunt_idx):
+                        raise ValueError(
+                            f"Rank-1 update of the central model failed for the "
+                            f"bank at bus {_b.config.bus_idx} (step -> {_sn})")
+                if _changed_c:
+                    central_controller.invalidate_sensitivity_cache()
+                for _k, _b, _sp, _sn in _changed_c:
+                    _commit = _b.commit_selected(
+                        _sn - _sp, time_s,
+                        opposite_engaged=(config.shunt_sts_mutual_exclusion
+                                          and opposite_engaged(_b, _all_banks_c)),
+                    )
+                    rec.shunt_commits.append({
+                        "zone": "central", "shunt_idx": _commit.shunt_idx,
+                        "dso_id": _commit.dso_id, "kind": _commit.kind,
+                        "direction": _commit.direction,
+                        "new_level": _commit.new_level,
+                    })
             if verbose >= 1:
                 _n_int = len(central_out.u_integer)
                 print(f"  [central t={int(time_s/60):3d} min] "
@@ -3601,8 +4084,22 @@ def run_multi_tso_dso(
         if _svr_tso and not _central:
             if run_tso:
                 tso_step_count += 1
+            # The SVR reads the result tables directly; with
+            # ``apply_to_svr`` it reads them through the same metering
+            # errors (channels and sample id) as the OFO packets.
+            _svr_net = plant.read_y()
+            if (config.measurement_noise.enabled
+                    and config.measurement_noise.apply_to_svr):
+                _svr_net = measurement_noise_model.result_view(
+                    _svr_net, sample_id=("control", step))
+            if config.svr_sts_access:
+                _tso_zone = {c.controller_id: z for z, c in tso_controllers.items()}
+                for _cm in _svr_cap_inbox.values():
+                    svr_coordinator.controllers[
+                        _tso_zone[_cm.target_controller_id]
+                    ].receive_capability(_cm)
             svr_outputs = svr_coordinator.step(
-                plant.read_y(), float(config.dt_s),
+                _svr_net, float(config.dt_s),
                 rvr_due=bool(run_tso), dt_rvr_s=float(config.tso_period_s),
             )
             for z, svr_out in svr_outputs.items():
@@ -3640,6 +4137,35 @@ def run_multi_tso_dso(
                 rec.zone_svr_ofo_rpr_active[z] = svr_out.ofo_rpr_active.copy()
                 rec.zone_svr_ofo_rpr_box_active[z] = svr_out.ofo_rpr_box_active.copy()
                 rec.zone_contraction_lhs[z] = float("nan")
+
+            # S2: the PCC block holds the coupler references of the alignment
+            # law; at each RVR update they go to the STS-OFOs through the same
+            # path and records as the cascade's interface set-points.
+            if config.svr_sts_access and run_tso:
+                for z, svr_out in svr_outputs.items():
+                    zd_s = zone_defs[z]
+                    n_der_s = len(zd_s.tso_der_indices)
+                    q_pcc_s = {
+                        int(t): float(svr_out.u_new[n_der_s + k])
+                        for k, t in enumerate(zd_s.pcc_trafo_indices)
+                    }
+                    for dso_id_s in sorted(set(zd_s.pcc_dso_ids)):
+                        dso_c = dso_controllers[dso_id_s]
+                        itf_s = [int(t) for t in dso_c.config.interface_trafo_indices]
+                        q_vec_s = np.array([q_pcc_s[t] for t in itf_s],
+                                           dtype=np.float64)
+                        dso_c.receive_setpoint(SetpointMessage(
+                            source_controller_id=f"svr_zone_{z}",
+                            target_controller_id=dso_c.controller_id,
+                            iteration=step,
+                            interface_transformer_indices=np.array(
+                                itf_s, dtype=np.int64),
+                            q_setpoints_mvar=q_vec_s,
+                        ))
+                        rec.dso_q_set_mvar[dso_id_s] = float(q_vec_s.sum())
+                        last_dso_q_set_mvar[dso_id_s] = q_vec_s.copy()
+                    for t_s, q_s in q_pcc_s.items():
+                        last_pcc_set_per_trafo[t_s] = q_s
 
             if verbose >= 2 and run_tso:
                 _parts = " ".join(
@@ -4425,6 +4951,8 @@ def run_multi_tso_dso(
                     if ctrl.controller_id == tso_id
                 )
                 target_tso.receive_capability(cap_msg)
+                # The classical scheme with access (S2) reads the same message.
+                _svr_cap_inbox[dso_id] = cap_msg
 
                 # ── PCC capability diagnostic ───────────────────────────
                 # Print, on each TSO tick, the per-coupling-trafo bounds
@@ -4543,7 +5071,21 @@ def run_multi_tso_dso(
             or (run_dso and not _local_dso)
             or run_central
         )
-        _needs_end_pf = _miqp_acted or _contingency_fired_this_step
+        # Local tap and bank rules act on the latest power flow (the one the
+        # controllers read), then need the end-of-step PF like any command.
+        _local_acted = False
+        if _local_rules:
+            _local_actions = _local_rules.step(net, time_s)
+            for _a in _local_actions:
+                if _a["device"] == "bank":
+                    rec.shunt_commits.append(
+                        {k: v for k, v in _a.items() if k != "device"})
+                else:
+                    rec.local_tap_moves.append(
+                        {k: v for k, v in _a.items() if k != "device"})
+            _local_acted = bool(_local_actions)
+        _needs_end_pf = (_miqp_acted or _contingency_fired_this_step
+                         or _local_acted)
         if (_needs_end_pf and isinstance(plant, PandapowerStaticPlant)
                 and not config.disable_qv_seed):
             # Warm-start QVLocalLoops from the linear closed-loop
@@ -4584,7 +5126,7 @@ def run_multi_tso_dso(
                         print(f"  [Step {step}] end-of-step PF with "
                               f"enforce_q_lims={config.enforce_q_lims_plant} "
                               f"diverged; retrying flat-start unclipped...")
-                    pp.runpp(net, run_control=_run_control,
+                    runpp_holding_taps(net, run_control=_run_control,
                              calculate_voltage_angles=True,
                              max_iteration=100,
                              max_iter=300,
@@ -4738,15 +5280,36 @@ def run_multi_tso_dso(
                             last_pcc_set_per_trafo[_t]
                         )
 
+        # ── Per-unit STS IBG data (every mode; Case-2 metric inputs) ─────────
+        for hv in meta.hv_networks:
+            _ders = [int(s_) for s_ in hv.sgen_indices
+                     if s_ in net.res_sgen.index]
+            if not _ders:
+                continue
+            _p = np.array([float(net.res_sgen.at[s_, "p_mw"]) for s_ in _ders])
+            _q = np.array([float(net.res_sgen.at[s_, "q_mvar"]) for s_ in _ders])
+            _cap = [
+                _qv_capability(
+                    float(net.sgen.at[s_, "sn_mva"]),
+                    str(net.sgen.at[s_, "op_diagram"])
+                    if "op_diagram" in net.sgen.columns
+                    and isinstance(net.sgen.at[s_, "op_diagram"], str)
+                    else "VDE-AR-N-4120-v2",
+                    float(p_),
+                )
+                if bool(net.sgen.at[s_, "in_service"]) else (0.0, 0.0)
+                for s_, p_ in zip(_ders, _p)
+            ]
+            rec.dso_der_idx[hv.net_id] = np.array(_ders, dtype=np.int64)
+            rec.dso_der_p_mw[hv.net_id] = _p
+            rec.dso_der_q_mvar[hv.net_id] = _q
+            rec.dso_der_q_min_mvar[hv.net_id] = np.array([c[0] for c in _cap])
+            rec.dso_der_q_max_mvar[hv.net_id] = np.array([c[1] for c in _cap])
+
         # ── Record plant voltages per zone ────────────────────────────────────
         for z, zd in zone_defs.items():
-            vm_bus_ids = [
-                int(b) for b in zd.v_bus_indices if b in net.res_bus.index
-            ]
-            vm_zone = np.array(
-                [float(net.res_bus.at[b, "vm_pu"]) for b in vm_bus_ids],
-                dtype=np.float64,
-            )
+            vm_bus_ids, vm_zone, v_ref_zone = _zone_voltage_error_inputs(
+                net, zd, tso_controllers[z].config, v_set)
             if vm_zone.size > 0:
                 rec.zone_v_min[z]  = float(vm_zone.min())
                 rec.zone_v_max[z]  = float(vm_zone.max())
@@ -4757,20 +5320,6 @@ def run_multi_tso_dso(
                     rec.bus_vm_pu[int(b)] = float(v)
                 # Spatial RMS of the voltage error to the setpoint across the
                 # zone's observed EHV buses (CIGRE per-zone tracking figure).
-                cfg_v = tso_controllers[z].config
-                if cfg_v.v_setpoints_pu is None:
-                    v_ref_zone = np.full(vm_zone.shape, v_set, dtype=float)
-                else:
-                    v_ref_by_bus = {
-                        int(bus): float(ref)
-                        for bus, ref in zip(
-                            cfg_v.voltage_bus_indices, cfg_v.v_setpoints_pu
-                        )
-                    }
-                    v_ref_zone = np.array(
-                        [v_ref_by_bus.get(bus, v_set) for bus in vm_bus_ids],
-                        dtype=float,
-                    )
                 rec.zone_v_rms_err_pu[z] = float(
                     np.sqrt(np.mean((vm_zone - v_ref_zone) ** 2))
                 )
@@ -4803,6 +5352,14 @@ def run_multi_tso_dso(
                     rec.zone_p_gen[z], gen_vm,
                 )
                 q_act = rec.zone_q_gen[z]
+                rec.gen_q_min_mvar[z] = np.asarray(q_min_cap, dtype=np.float64)
+                rec.gen_q_max_mvar[z] = np.asarray(q_max_cap, dtype=np.float64)
+                rec.zone_gen_idx[z] = np.array(zd.gen_indices, dtype=np.int64)
+                rec.zone_gen_in_service[z] = np.array(
+                    [bool(net.gen.at[g, "in_service"]) for g in zd.gen_indices])
+                rec.zone_gen_is_slack[z] = np.array(
+                    [bool(net.gen.at[g, "slack"]) if "slack" in net.gen.columns
+                     else False for g in zd.gen_indices])
                 rec.gen_q_headroom_mvar[z] = np.minimum(
                     q_max_cap - q_act, q_act - q_min_cap,
                 )

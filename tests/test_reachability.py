@@ -238,3 +238,51 @@ def test_distributed_slack_canonicalisation_matches_single_slack() -> None:
     assert res_dist.critical_bus == res_single.critical_bus
     np.testing.assert_allclose(res_dist.lambda_min_JR, res_single.lambda_min_JR, rtol=1e-6)
     np.testing.assert_allclose(res_dist.sigma_min_J, res_single.sigma_min_J, rtol=1e-6)
+
+
+def _flat_start_fails(monkeypatch, warm_start_fails: bool = False) -> list:
+    """Make every solve without ``init`` (the flat start of the single-slack
+    copy) raise; return the list of ``init`` values the guard solved with."""
+    import analysis.reachability as reach
+    from pandapower.powerflow import LoadflowNotConverged
+
+    original = reach.pp.runpp
+    calls: list = []
+
+    def runpp(work, *args, **kwargs):
+        calls.append(kwargs.get("init"))
+        if kwargs.get("init") is None or warm_start_fails:
+            raise LoadflowNotConverged("forced failure")
+        return original(work, *args, **kwargs)
+
+    monkeypatch.setattr(reach.pp, "runpp", runpp)
+    return calls
+
+
+def test_flat_start_failure_falls_back_to_the_plant_solution(monkeypatch) -> None:
+    """When the flat start of the single-slack copy fails, the copy is solved
+    from the plant's solution instead and gives the same margin (fallback
+    added 2026-10-30)."""
+    res_ref = check_reachability(_case9_shared_slack_after_trip())
+    net = _case9_shared_slack_after_trip()
+    calls = _flat_start_fails(monkeypatch)
+    res = check_reachability(net)
+
+    assert calls == [None, "results"]
+    assert res.on_stable_branch == res_ref.on_stable_branch
+    assert res.critical_bus == res_ref.critical_bus
+    # pandapower stores the Jacobian of the last iteration, i.e. before the
+    # final update: after a flat start (3 iterations here) that point is still
+    # about 1e-4 from the solution, and lambda differs by 2.6e-5 relative from
+    # the warm starts, which agree among themselves to 3e-6.
+    np.testing.assert_allclose(res.lambda_min_JR, res_ref.lambda_min_JR, rtol=1e-4)
+    np.testing.assert_allclose(res.sigma_min_J, res_ref.sigma_min_J, rtol=1e-4)
+
+
+def test_both_starts_failing_raises(monkeypatch) -> None:
+    """If the fallback fails as well, the guard still raises, with the message
+    prefix the Monte-Carlo failure classification matches on."""
+    net = _case9_shared_slack_after_trip()
+    _flat_start_fails(monkeypatch, warm_start_fails=True)
+    with pytest.raises(ValueError, match="Failed to re-converge a single-slack copy"):
+        check_reachability(net)

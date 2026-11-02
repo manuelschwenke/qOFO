@@ -79,6 +79,8 @@ def clear_seed_lu_cache() -> None:
 import pandapower as pp
 from pandapower.control.basic_controller import Controller
 
+from core.measurement_noise import measured_der_voltage
+
 
 # ---------------------------------------------------------------------------
 #  Capability helper (shared)
@@ -279,7 +281,7 @@ class QVLocalLoop(Controller):
 
         # Read V from the bus, P from the DER (active is exogenous,
         # set by the time-series profile or the runner).
-        v_pu = float(net.res_bus.at[self.bus_idx, "vm_pu"])
+        v_pu = measured_der_voltage(net, s, self.bus_idx)
         p_mw = float(net.res_sgen.at[s, "p_mw"])
 
         # Read parameters from net.sgen.  V_anchor prefers the

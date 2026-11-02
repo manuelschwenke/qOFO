@@ -28,6 +28,7 @@ from pandapower.auxiliary import read_from_net, write_to_net
 from pandapower.control import CharacteristicControl
 from pandapower.control.util.characteristic import Characteristic
 
+from core.measurement_noise import measured_der_voltage
 from controller.base_controller import ControllerOutput
 from controller.dso_controller import DSOControllerConfig
 from controller.tso_controller import TSOControllerConfig
@@ -228,8 +229,8 @@ def apply_zone_tso_controls(
             if has_res_bus:
                 bus = int(net.sgen.at[s_idx, "bus"])
                 if bus in net.res_bus.index:
-                    net.sgen.at[s_idx, "qv_vref_anchor_pu"] = float(
-                        net.res_bus.at[bus, "vm_pu"]
+                    net.sgen.at[s_idx, "qv_vref_anchor_pu"] = measured_der_voltage(
+                        net, s_idx, bus
                     )
             net.sgen.at[s_idx, "q_set_mvar"] = float(u[off + k])
     off += n_der
@@ -335,8 +336,8 @@ def apply_dso_controls(
             if has_res_bus:
                 bus = int(net.sgen.at[s_idx, "bus"])
                 if bus in net.res_bus.index:
-                    net.sgen.at[s_idx, "qv_vref_anchor_pu"] = float(
-                        net.res_bus.at[bus, "vm_pu"]
+                    net.sgen.at[s_idx, "qv_vref_anchor_pu"] = measured_der_voltage(
+                        net, s_idx, bus
                     )
             net.sgen.at[s_idx, "q_set_mvar"] = float(u[off + k])
     off += n_der
@@ -407,8 +408,8 @@ def apply_central_controls(
             if has_res_bus:
                 bus = int(net.sgen.at[s_idx, "bus"])
                 if bus in net.res_bus.index:
-                    net.sgen.at[s_idx, "qv_vref_anchor_pu"] = float(
-                        net.res_bus.at[bus, "vm_pu"]
+                    net.sgen.at[s_idx, "qv_vref_anchor_pu"] = measured_der_voltage(
+                        net, s_idx, bus
                     )
             net.sgen.at[s_idx, "q_set_mvar"] = float(u[off + k])
     off += n_der

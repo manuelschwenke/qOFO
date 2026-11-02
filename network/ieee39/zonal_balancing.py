@@ -13,7 +13,7 @@ and a ``net.gen`` table keyed by the zone partition).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -381,6 +381,180 @@ def compute_zonal_gen_dispatch(
     print()
 
     return dispatch
+
+
+def _zone_residual_series(
+    net: pp.pandapowerNet,
+    profiles: pd.DataFrame,
+    zone_map: Dict[int, List[int]],
+) -> Dict[int, np.ndarray]:
+    """Per-zone residual load ``sum(loads) - sum(sgens)`` [MW] at every
+    timestep of *profiles* -- the same accounting as
+    :func:`compute_zonal_gen_dispatch` (``BOUND_`` sgens skipped, profile gens
+    counted as exogenous injectors)."""
+    bus_zone = {b: z for z, buses in zone_map.items() for b in buses}
+    terms: Dict[int, List[Tuple[float, Optional[str], float]]] = {z: [] for z in zone_map}
+
+    def _add(bus, base_p, prof, sign):
+        z = bus_zone.get(int(bus))
+        if z is None:
+            return
+        terms[z].append((float(base_p), None if pd.isna(prof) else str(prof), sign))
+
+    for li in net.load.index:
+        _add(net.load.at[li, "bus"], net.load.at[li, "base_p_mw"],
+             net.load.at[li, "profile_p"] if "profile_p" in net.load.columns else None, +1.0)
+    for si in net.sgen.index:
+        if str(net.sgen.at[si, "name"]).startswith("BOUND_"):
+            continue
+        _add(net.sgen.at[si, "bus"], net.sgen.at[si, "base_p_mw"],
+             net.sgen.at[si, "profile"] if "profile" in net.sgen.columns else None, -1.0)
+    if "profile" in net.gen.columns and "base_p_mw" in net.gen.columns:
+        for gi in net.gen.index:
+            if not pd.isna(net.gen.at[gi, "profile"]):
+                _add(net.gen.at[gi, "bus"], net.gen.at[gi, "base_p_mw"],
+                     net.gen.at[gi, "profile"], -1.0)
+
+    out = {z: np.zeros(len(profiles.index)) for z in zone_map}
+    for z, items in terms.items():
+        for base_p, prof, sign in items:
+            if prof and prof in profiles.columns:
+                scale = profiles[prof].to_numpy(dtype=float)
+                scale = np.where(np.isnan(scale), 1.0, scale)
+            else:
+                scale = 1.0
+            out[z] += sign * base_p * scale
+    return out
+
+
+def compute_merit_order_dispatch(
+    net: pp.pandapowerNet,
+    profiles: pd.DataFrame,
+    zone_map: Dict[int, List[int]],
+    *,
+    min_stable_frac: Mapping[str, float],
+    merit_order: Sequence[str],
+    gen_p_cap_factor: float = 0.85,
+) -> Tuple[pd.DataFrame, Dict[int, bool]]:
+    """Merit-order dispatch with unit commitment over the window of *profiles*.
+
+    Per zone, the dispatchable machines (``net.gen`` without a ``profile`` and
+    without the ``slack`` flag) are taken in *merit_order* of their ``type``.
+    A machine is committed while the zone's peak residual over the window,
+    less the caps (``gen_p_cap_factor * sn_mva``) of the machines committed
+    before it, is at least its technical minimum
+    ``min_stable_frac[type] * sn_mva``; otherwise it is skipped and the next
+    one is tried.  The commitment holds for the whole window (unit commitment
+    acts on hourly to daily time scales, longer than one episode).
+
+    At every timestep the committed machines of a zone are loaded in merit
+    order between their minimum and their cap.  A zone deficit goes to the
+    headroom of committed machines elsewhere, again in merit order; whatever
+    remains -- positive or negative -- is the import of the network
+    equivalent (the slack machine, always committed).
+
+    Returns
+    -------
+    dispatch : pd.DataFrame
+        Index = profile timestamps, columns = every ``net.gen`` index that
+        :func:`compute_zonal_gen_dispatch` would dispatch (decommitted machines
+        at 0 MW), values = P [MW].
+    committed : dict[int, bool]
+        Commitment of every dispatchable machine and of the equivalent.
+    """
+    rank = {t: i for i, t in enumerate(merit_order)}
+    bus_zone = {b: z for z, buses in zone_map.items() for b in buses}
+    ext_grid_buses = {int(net.ext_grid.at[e, "bus"]) for e in net.ext_grid.index}
+
+    slack: List[int] = []
+    units: Dict[int, List[int]] = {z: [] for z in zone_map}
+    for gi in net.gen.index:
+        bus = int(net.gen.at[gi, "bus"])
+        if bus in ext_grid_buses or bus_zone.get(bus) is None:
+            continue
+        if "profile" in net.gen.columns and not pd.isna(net.gen.at[gi, "profile"]):
+            continue
+        if bool(net.gen.at[gi, "slack"]) if "slack" in net.gen.columns else False:
+            slack.append(int(gi))
+            continue
+        gtype = str(net.gen.at[gi, "type"])
+        if gtype not in rank or gtype not in min_stable_frac:
+            raise ValueError(f"gen {gi} ({net.gen.at[gi, 'name']}) has type {gtype!r} "
+                             f"without merit rank or technical minimum")
+        units[bus_zone[bus]].append(int(gi))
+    if len(slack) != 1:
+        raise ValueError(f"expected one network-equivalent (slack) machine, found {slack}")
+    eq = slack[0]
+
+    sn = {int(g): float(net.gen.at[g, "sn_mva"]) for g in net.gen.index}
+    cap = {g: gen_p_cap_factor * sn[g] for g in sn}
+    pmin = {g: float(min_stable_frac[str(net.gen.at[g, "type"])]) * sn[g]
+            for z in units for g in units[z]}
+    for z in units:
+        units[z].sort(key=lambda g: (rank[str(net.gen.at[g, "type"])], g))
+
+    residual = _zone_residual_series(net, profiles, zone_map)
+
+    committed: Dict[int, bool] = {eq: True}
+    on: Dict[int, List[int]] = {}
+    for z, gens in units.items():
+        need = float(np.max(residual[z])) if len(residual[z]) else 0.0
+        on[z] = []
+        for g in gens:
+            ok = need >= pmin[g]
+            committed[g] = ok
+            if ok:
+                on[z].append(g)
+                need -= cap[g]
+    order_all = sorted((g for z in on for g in on[z]),
+                       key=lambda g: (rank[str(net.gen.at[g, "type"])], g))
+
+    cols = sorted([g for z in units for g in units[z]] + [eq])
+    dispatch = pd.DataFrame(0.0, index=profiles.index, columns=cols, dtype=np.float64)
+    for t_i, idx in enumerate(profiles.index):
+        p: Dict[int, float] = {}
+        deficit = 0.0
+        for z in zone_map:
+            # Every committed machine runs at least at its technical minimum;
+            # only the residual above the minima is loaded in merit order.
+            # (Until 2026-10-31 ~09:00 the first machine was loaded to its cap
+            # before the later machines' minima were honoured, so a falling
+            # residual produced a zone surplus while hydro stayed at its cap.)
+            rest = float(residual[z][t_i])
+            for g in on.get(z, []):
+                p[g] = pmin[g]
+                rest -= pmin[g]
+            for g in on.get(z, []):
+                add = min(max(rest, 0.0), cap[g] - p[g])
+                p[g] += add
+                rest -= add
+            deficit += rest
+        if deficit > 0.0:
+            for g in order_all:
+                add = min(deficit, cap[g] - p[g])
+                if add > 0.0:
+                    p[g] += add
+                    deficit -= add
+        p[eq] = deficit
+        for g, val in p.items():
+            dispatch.at[idx, g] = val
+
+    print()
+    print("=" * 72)
+    print("  Merit-order dispatch with unit commitment (window of the run)")
+    print(f"  order {list(merit_order)} -> equivalent; P cap {gen_p_cap_factor:.2f} S_n")
+    for z in sorted(zone_map):
+        if not units[z]:
+            continue
+        desc = ", ".join(
+            f"{net.gen.at[g, 'name']} ({net.gen.at[g, 'type']}, "
+            f"{'ON' if committed[g] else 'off'})" for g in units[z])
+        print(f"  Zone {z}: peak residual {np.max(residual[z]):7.1f} MW | {desc}")
+    imp = dispatch[eq]
+    print(f"  Equivalent {net.gen.at[eq, 'name']}: import [{imp.min():.1f}, {imp.max():.1f}] MW")
+    print("=" * 72)
+    print()
+    return dispatch, committed
 
 
 def apply_gen_dispatch(

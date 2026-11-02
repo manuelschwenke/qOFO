@@ -87,6 +87,21 @@ class MeasurementNoiseConfig:
     apply_during_initialisation: bool = True
     clip_nonnegative_magnitudes: bool = True
 
+    # Coverage beyond the OFO packets (both default off, so earlier runs are
+    # reproduced unchanged; Case 2 switches both on, author decision
+    # 2026-10-27: the same accuracy class for every controller and the droop).
+    apply_to_svr: bool = False
+    """Give the classical SVR (``tso_mode='svr'``) a noisy view of the result
+    tables, drawn on the same channel keys and sample id as the OFO packets, so
+    a shared VT or meter carries the same error in every variant."""
+
+    apply_to_der_voltage: bool = False
+    """Let each converter's dispatch-anchored droop read its terminal voltage
+    through its own VT/meter channel.  The anchor written at a dispatch comes
+    from the same channel, so a persistent bias cancels in V - V_anchor; a
+    droop that is never re-anchored (local q(v) about the nominal reference)
+    sees the bias in full."""
+
     def profile_components(self) -> Dict[str, float]:
         """Return the selected component half-widths with overrides."""
         key = str(self.profile).strip().lower()
@@ -479,9 +494,19 @@ class MultiTSOConfig:
     int_max_step:   int = 1
     int_cooldown:   int = 5  # 6 -> 5 on 2026-10-14 (author decision, thesis Ch 3)
     """Iterations an OFO integer actuator (OLTC, in-MIQP shunt) is locked
-    after switching, counted in the owning controller's iterations:
-    100 s at T_STS = 20 s, 15 min at T_TS = 180 s.  Since 2026-10-14 this
-    is the only tap lock of the OFO MIQP path (see ``ofo_oltc_cooldown_s``)."""
+    after switching, counted in the owning controller's iterations.  A
+    device that switched at iteration k may switch again at k + 1 +
+    int_cooldown, i.e. (1 + 5) x 20 s = 120 s between two taps of one STS
+    coupler.  The TS layer uses ``tso_int_cooldown`` instead (2026-10-30).
+    Since 2026-10-14 this is the only tap lock of the OFO MIQP path (see
+    ``ofo_oltc_cooldown_s``)."""
+
+    tso_int_cooldown: Optional[int] = 4  # added 2026-10-30
+    """``int_cooldown`` of the TS-OFO zone controllers (``None`` = the
+    global ``int_cooldown``).  4 gives (1 + 4) x 180 s = 15 min between two
+    taps of one TS OLTC, the minimum holding time every variant now shares
+    with the local TS tap relays (``oltc_cooldown_s_mt``); author decision
+    2026-10-30.  Until then the TS layer used the global 5 (18 min)."""
 
     ofo_oltc_cooldown_s: float = 0.0
     """Wall-clock OLTC lock [s] of the OFO MIQP path, passed to
@@ -520,17 +545,28 @@ class MultiTSOConfig:
     entirely (the iteration-based ``int_cooldown`` and per-step
     ``local_oltc_max_step_per_dt`` clamp remain active)."""
 
-    oltc_cooldown_s_mt: Optional[float] = 180.0  # runner default (2026-08-21)
-    """Per-type override of ``oltc_cooldown_s`` for local-mode **machine
-    2-winding (MT) gen-transformer OLTCs** (``net.trafo``).  ``None`` falls
-    back to ``oltc_cooldown_s``.  Wall-clock seconds, so it is independent of
-    ``dt_s`` (e.g. 180 -> at most one MT tap per 3 min)."""
+    oltc_cooldown_s_mt: Optional[float] = 900.0  # 180 -> 900 on 2026-10-30
+    """Minimum holding time [s] of the local **TS tap relays** (machine
+    2-winding transformers and the two network OLTCs at IEEE 12,
+    ``net.trafo``; :class:`controller.local_rules.TapRelay`).  ``None``
+    falls back to ``oltc_cooldown_s``.  900 s = 15 min, equal to the TS-OFO
+    lock (1 + ``tso_int_cooldown``) x T_TS (author decision 2026-10-30)."""
 
-    oltc_cooldown_s_nc: Optional[float] = 60.0  # runner default (2026-08-21)
+    oltc_cooldown_s_nc: Optional[float] = 120.0  # 60 -> 120 on 2026-10-30
     """Per-type override of ``oltc_cooldown_s`` for local-mode **coupler
     3-winding (NC) OLTCs** (``net.trafo3w``) at the TS--STS interface.
-    ``None`` falls back to ``oltc_cooldown_s`` (e.g. 60 -> at most one NC tap
-    per minute)."""
+    ``None`` falls back to ``oltc_cooldown_s``.  120 s equals the STS-OFO
+    lock (1 + ``int_cooldown``) x T_STS, so every variant shares one minimum
+    holding time per coupler (author decision 2026-10-30; was 60 s)."""
+
+    # -- AVR set-point range ----------------------------------------------------
+    gen_vm_min_pu: float = 0.95  # added 2026-10-30
+    gen_vm_max_pu: float = 1.05  # added 2026-10-30
+    """AVR set-point range of every scheme that moves AVR references: the
+    TS-OFO zones, the central controller and the classical SVR.  [0.95,
+    1.05] pu is the continuous range of IEC 60034-1 zone A; harmonised on
+    2026-10-30 (author decision).  Until then the TS-OFO and the central
+    controller used [0.95, 1.07] (class default) and SVR [0.95, 1.05]."""
 
     # -- AVR saturation handling (Feature B) -----------------------------------
     enable_avr_saturation_mode: bool = False
@@ -1148,7 +1184,58 @@ class MultiTSOConfig:
     ``Plant.apply_exogenous`` (EvtLod) with no new plumbing.
     """
 
+    hold_profiles: bool = False
+    """Hold every profile at its value at ``start_time`` (step tests of
+    ch:case3): loads, infeed and the zonal generator dispatch stay at the
+    operating point, so the test disturbance is the only exogenous change.
+    See :mod:`experiments.helpers.profile_ramps`."""
+
+    profile_ramps: Tuple[Dict[str, Any], ...] = ()
+    """Load ramps on the interpolated profile frame (exact at ``dt_s``), each a
+    dict of :func:`experiments.helpers.profile_ramps.apply_profile_ramps`:
+    ``kind="bus"`` adds a load at one bus that ramps to (P, Q);
+    ``kind="ts_loads"`` scales every transmission load by ``1 + rel*shape``
+    (the sub-transmission buses are excluded by the runner)."""
+
     use_zonal_gen_dispatch: bool = True
+
+    unit_commitment: bool = True
+    """Merit-order dispatch with unit commitment (author decision 2026-10-31).
+
+    Replaces the S_n-proportional zonal split, in which every machine stayed
+    synchronised at any P (down to 0 MW) with its full Q range.  Per zone the
+    machines are committed in :attr:`gen_merit_order` while the zone's peak
+    residual over the simulated window still needs at least their technical
+    minimum (:attr:`gen_min_stable_frac`); the commitment holds for the
+    window.  A decommitted machine and its machine transformer are out of
+    service from t = 0 and known to every controller (outage masks, as after a
+    trip).  The network equivalent (slack) is always committed and balances
+    the system (import / export).  ``False`` reproduces the earlier
+    construction.  See :func:`network.ieee39.zonal_balancing.compute_merit_order_dispatch`."""
+
+    gen_min_stable_frac: Dict[str, float] = field(
+        default_factory=lambda: {"Nuclear": 0.5, "Coal": 0.4, "Hydro": 0.1})
+    """Technical minimum (minimum stable generation) per fuel type, as a
+    fraction of S_n; typical values for these unit types."""
+
+    gen_merit_order: Tuple[str, ...] = ("Hydro", "Nuclear", "Coal")
+    """Commitment and dispatch order by fuel type (marginal cost); the network
+    equivalent comes last (import)."""
+
+    slack_q_limit_mvar: Optional[float] = 1200.0
+    """Reactive limit of the network equivalent (G1, 10 GVA), +-Mvar (author
+    decision 2026-10-31).  pandapower never enforces the Q box of the
+    reference machine, so the plant holds it with
+    :class:`controller.slack_q_limit.SlackQLimit`: at a limit the machine
+    keeps Q at the limit and its voltage floats (PV -> PQ), as
+    ``enforce_q_lims`` does for every other machine.  The value follows the
+    operability rule, amendment A1
+    (``docs/analysis/2026-10-31_g1_operability_rule.md``): the smallest
+    multiple of 100 Mvar at which the limit causes no inoperability of LOC in
+    the design windows W1-W4, W6 that does not also occur with the equivalent
+    unlimited (W6 needs 1062 Mvar; W1 collapses at its evening peak even
+    unlimited, after drawing 1181 Mvar).  ``None`` reproduces the earlier
+    unlimited equivalent."""
 
     scenario: str = "rural_700"
     """Network scenario registered in :mod:`network.ieee39.scenarios`.
@@ -1346,6 +1433,34 @@ class MultiTSOConfig:
         ``central_dso_g_v`` for HV buses (no interface-Q / tie-Q tracking)."""
 
     central_period_s: Optional[float] = None
+    central_lambda_rule: str = "all"
+    """Which columns count in the central loop gain ``lambda_max(M)``:
+    ``"all"`` every column; ``"ch9"`` the Ch 9 rule of
+    ``tuning.stage1_screen.lambda_max_B`` (of the MSC and MSR of one STS only
+    the stronger column, since they never move in one direction together);
+    ``"continuous"`` the continuous actuators only (AVR, TS-IBG, STS-IBG) --
+    admissible only with ``central_ts_discrete_cooldown`` set, so that the
+    discrete devices are rate-limited as in the cascade."""
+
+    central_kappa_scope: str = "all"
+    """Which actuator classes the factor kappa scales: ``"all"`` the whole
+    ``g_w`` block; ``"discrete"`` only taps and banks (the continuous
+    actuators keep the selected weights)."""
+
+    central_ts_discrete_cooldown: Optional[int] = None
+    """Lock, in central steps, of a transmission tap or bank after it moved
+    (default: the global ``int_cooldown``).  ``int_cooldown x N_inner`` gives
+    the cascade's timescale: the TS-OFO steps every 180 s, so its 5-iteration
+    lock is 15 min, which is 45 central steps of 20 s."""
+
+    central_lambda_target: Optional[float] = None
+    """When set, scale the central controller's whole ``g_w`` block by one
+    factor kappa so that its loop gain ``lambda_max(M)`` equals this value.
+    Case 2 sets it to the selected design's ``lambda_max_B`` (paramset
+    provenance): at the selected weights the single central loop has
+    lambda_max ~5 (2026-10-27, not contracting).  Keeps the relative weights;
+    kappa is printed and recorded.  Ignored unless
+    ``control_scope == 'central'``."""
     """Control period [s] of the single centralized controller
     (``control_scope='central'``, CIGRE V5).  ``None`` (default) fires the
     controller every simulation step (``dt_s``) — the correct best-case
@@ -1571,6 +1686,14 @@ class MultiTSOConfig:
                  ``svr_k_p_rpr == 0`` and ``svr_rpr_voltage_priority == False``.
     Added 2026-10-06 (Case 1 of the thesis)."""
 
+    svr_sts_access: bool = False
+    """Classical reference WITH sub-transmission access (thesis variant S2,
+    ``eq:svr-alignment-sts``): with ``tso_mode='svr'`` and ``dso_mode='ofo'``
+    the couplers of each area's child STS join the RVR alignment law, between
+    the neutral point and the edges of their CAIR interval, and the STS-OFOs
+    track the resulting reference.  Design note
+    ``docs/architecture/2026-10-27_S2_design_note.md``; added 2026-10-27."""
+
     # -- Discrete-actuator ownership at the TSO layer -------------------------
     tso_oltc_mode: str = "ofo"
     """Who dispatches the TSO-layer OLTCs.
@@ -1792,6 +1915,19 @@ class MultiTSOConfig:
                       constraints stay soft, as for every other actuator.
                       (Until 2026-10-22 at most one bank stepped per zone and
                       iteration and the voltage rows were hard.)
+      * ``'local'`` — the classical local rule of every variant whose TS does
+                      not dispatch banks in an MIQP (LOC, SVR, SVR+; author
+                      decision 2026-10-30): a bank reads the voltage on the
+                      primary (EHV) side of its own coupler; the MSC engages
+                      a level below ``shunt_local_v_ref_pu -
+                      shunt_local_dv_pu`` (1.01 pu) and is released above
+                      the upper threshold, the MSR engages above
+                      ``shunt_local_v_ref_pu + shunt_local_dv_pu`` (1.05 pu)
+                      and is released below the lower one, each only after
+                      ``shunt_local_confirm_steps`` (3) consecutive steps
+                      beyond the threshold.  Same holding
+                      time and MSC/MSR exclusion as the MIQP
+                      (:class:`controller.local_rules.BankRelay`).
 
     The supervisory variants of October 2026 — an integrating dispatcher
     outside the MIQP, separate memories for subordinate tracking and
@@ -1841,6 +1977,16 @@ class MultiTSOConfig:
     engagement is kept and interface-Q RMSE improves 1.5%, at 900 s an
     engage-release cycle costs 5.6%."""
 
+    shunt_local_v_ref_pu: float = 1.03  # added 2026-10-30
+    shunt_local_dv_pu: float = 0.02  # added 2026-10-30
+    shunt_local_confirm_steps: int = 3  # added 2026-10-30
+    """Thresholds of the local bank rule (``shunt_dispatch='local'``):
+    engage the MSC below ``v_ref - dv`` and the MSR above ``v_ref + dv`` on
+    the primary side of the hosting coupler; release each at the other
+    threshold; act only after the condition has held for
+    ``shunt_local_confirm_steps`` consecutive steps of ``dt_s`` (3 x 20 s)
+    (author decision 2026-10-30)."""
+
     shunt_sts_mutual_exclusion: bool = True  # added 2026-10-22
     """Forbid engaging a bank while the opposite device (MSC vs MSR) of the
     same STS is engaged; releasing stays allowed.  Enforced as a bound on the
@@ -1864,12 +2010,12 @@ class MultiTSOConfig:
         Raises ``ValueError`` on any inconsistent or out-of-range setting; the
         per-bank numeric guards are additionally enforced by
         :class:`controller.shunt_banks.ShuntBankConfig`."""
-        if self.shunt_dispatch not in ("off", "miqp"):
+        if self.shunt_dispatch not in ("off", "miqp", "local"):
             raise ValueError(
-                f"shunt_dispatch must be 'off' or 'miqp', "
+                f"shunt_dispatch must be 'off', 'miqp' or 'local', "
                 f"got {self.shunt_dispatch!r}"
             )
-        if self.shunt_dispatch != "miqp":
+        if self.shunt_dispatch == "off":
             return
         if not self.install_tso_tertiary_shunts:
             raise ValueError(

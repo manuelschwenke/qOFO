@@ -1,0 +1,253 @@
+# 2026-10-28: Case 2 reference run of record (0009) with the adopted M
+
+Branch `case2/ref` (worktree `.claude/worktrees/case2-ref`). Continues
+`2026-10-27e_case2_reference_run_infrastructure.md` (M adoption section).
+
+## Run
+
+- **Run:** `results/ch_11_case2_multisystem/ref/0009_2026-10-28_093739_run_ref`.
+- **Setup:**
+  - code 06d403b, clean; paramset `ch9_selected_band_2026_10`;
+  - scenario A, 360 min, noise "minimum", seed 20261027;
+  - e5power, one process per variant, started 09:37, finished 13:19.
+- **Outcome:** all six variants `ok`, 1080 records each.
+- **Copy:** pulled to the share at the same relative path. All 32 files were checked by SHA-256
+  against e5power.
+- **Figures:** `figures_ref.py` wrote vtrack, qtrack and tieflow (PDF, PNG and CSV) to
+  `figures/`.
+- **Archived:** `0006_2026-10-27_181840_run_ref` (old M, κ 2.42) moved to
+  `_local_archive/results/...` with status `superseded`, `superseded_by` 0009.
+- **Kept:** 0007 (`m_tuning`, the four M candidates) stays on the share as diagnostic evidence.
+  0008 (`m_check`) stays on e5power only.
+
+## Reproducibility (fact)
+
+L2, S1, S2, O2 and O3 are unchanged from 0006 (code 20873f4 → 06d403b):
+
+- every metric in `report.md` is identical apart from the M rows;
+- L2's `log.pkl` is byte-identical;
+- the other logs differ only in `zone_tso_solve_s`, the MIQP wall time, which is not a model
+  quantity.
+
+So the M changes leave the other variants untouched.
+
+## Results (mpu; aggregate = RMS over the three areas)
+
+| | L2 | S1 | S2 | O2 | O3 | M (0009) | M (0006, old) |
+|---|---|---|---|---|---|---|---|
+| e_v | 22.01 | 12.73 | 11.37 | 8.07 | 6.83 | **6.25** | 7.79 |
+| e_vp | 17.92 | 4.27 | 2.98 | 4.58 | 3.46 | **2.98** | 3.66 |
+
+M against O3 is −8.5 % in e_v and −13.9 % in e_vp. Per area (e_v / e_vp):
+
+| Area | M | O3 |
+|---|---|---|
+| 1 | 4.15 / 4.81 | 4.64 / 4.62 |
+| 2 | 9.26 / 1.55 | 9.84 / 2.84 |
+| 3 | 3.77 / 1.06 | 4.64 / 2.55 |
+
+Effort, M against O3:
+
+| | M | O3 |
+|---|---|---|
+| TS tap moves | 11 | 3 |
+| Bank switchings | 8 | 5 |
+| AVR travel (pu) | 0.32 | 0.09 |
+| Coupler tap moves | 1 | 2 |
+
+STS voltage band: in O3, DSO_4 leaves 0.92–1.08 by 4.9 mpu (as in 0006). M keeps every STS inside
+the band; its smallest margin is DSO_2 at 3.4 mpu.
+
+## Observations
+
+**Facts:**
+- M reacts to the generator trip and the load step at the event step: its taps and banks move at
+  30:40 and 121:40. O3 moves them at the next dispatch (33:00, 123:00).
+- The 18-min lock never binds in scenario A: the shortest gap between two moves of one device is
+  30 min.
+- After the load step (121:40), M's area-1 error rises by 6.2 mpu within the window to the next
+  180-s grid instant, while area 2 improves by 9.5 mpu. It decays in about 10 min (vtrack).
+  O3's area 1 rises by 0.3 mpu only.
+- O3 after the load step: area 2 +2.8 mpu, W = 55 Mvar·min. This is the inter-dispatch withdrawal
+  (H-NMP), unchanged from 0006.
+
+**Hypothesis:** M trades area 1 against area 2 because its objective is one weighted sum over all
+areas. The zone controllers cannot do this, since each controls its own area. To be checked in
+the step tests (load step in one area, error of the other areas).
+
+## Analysis of O3 and of the ripples (afternoon; scratchpad scripts, no code change)
+
+**1. Withdrawal after the load step (O3; S2 the same, larger).**
+- At the event step (121:40) the STS flows move toward more support with no controller acting:
+  DSO_2 −61→−74 Mvar, DSO_3 −29→−48 Mvar.
+- Over the next three steps the STS-OFOs pull the flows back toward the set-points of the
+  120:00 dispatch (DSO_3 to −33, DSO_2 to −67). Area 2's error rises from 24.2 (pre-control)
+  to 27.0 mpu.
+- The re-dispatch at 123:00 brings it to 17.2 mpu.
+- In O2 the error stays flat over the same window (28.4–28.5 mpu).
+- Δe_post in area 2: O3 +2.8 mpu, S2 +7.1 mpu.
+
+**2. DSO_4 above 1.08 pu (O3).**
+- 309 of 1080 samples are above 1.08, but 299 of them by ≤ 0.5 mpu. This is chatter at the
+  STS-OFO's active upper limit: its measured maximum is ≥ 1.0795 in 73 % of the records.
+- All 10 samples above 0.5 mpu fall on TS dispatch instants (84–90, 123, 273–285 min). The worst,
+  4.9 mpu at 123:00 (a single 20-s step), coincides with the first re-dispatch after the load
+  step; the STS-OFO brings it back within about 1.5 min.
+- Measurement error is not the cause: true and measured values agree to < 0.3 mpu once the step
+  timing is taken into account.
+
+**3. Tracking gap (O3, DSO_4 from ~35 min, DSO_2 after the load step; about 10–17 Mvar).**
+- CAIR (`DSOController.generate_capability_message`) maps only the DER Q rails through the
+  open-loop sensitivities. It contains no STS voltage limit and no coupler taps.
+- A voltage-limited STS therefore reports more capability than it can deliver. The TS-OFO
+  dispatches into that part, and the STS-OFO stops at v_max. This leaves no voltage margin for
+  the TS dispatch steps, hence the excursions in point 2.
+
+**4. Ripples in S1/O2.**
+- In O2 and S1 the STS flows drift with the profile ramps between dispatches (over 60–90 min:
+  coupler Q changes 293 Mvar between dispatches in O2, against 38 in O3).
+- The TS layer compensates only at the 180-s dispatches: TS-IBG Q moves only at dispatch
+  instants, with 0 reversals.
+- Outside the event windows: peak-to-peak up to 1.9 mpu (O2, area 2), RMS 0.04–0.17 mpu; O3 stays
+  ≤ 0.55 mpu peak-to-peak.
+- e_v of the raw trace equals e_v of the 180-s period means to 0.01 mpu, so the ripple does not
+  affect the metric.
+
+## Code changes after the run (wording only; no behaviour change)
+
+- `variants.py`: M is a "centralised reference at equal weights and equal device rate limits",
+  not a "bound" (author 2026-10-28). The docstring of `selected_lambda_max` now describes the
+  ceiling rule.
+- `figures_ref.py`: docstring wording.
+- Tests: `tests/experiments/test_case2_variants.py` and `tests/test_central_updater_wrapper.py`,
+  12 passed.
+
+## Open
+
+- Thesis: paste `latex_header.tex` under `ch:case3:nominal`. Copy `figures/data/*.csv` to
+  `graphics/Ch11/data/2026-10-28_case3_ref/`. Render the label numbers on e5wimi
+  (`QOFO_THESIS_DIR`) and run `thesis_runs check`.
+- O3 (author decision 2026-10-28): report as is in REF. Remedies are decided after the step
+  tests have measured them: a voltage-aware CAIR, and a dispatch-anchored interface droop
+  against the withdrawal. The S1/O2 ripples are reported as they are.
+- Plan the step tests (incl. load ramps) and the Monte-Carlo.
+
+## ~15:30: thesis figures and text for ch:case3:nominal; STEP/MC plan
+
+**Figures** (`ref/figures_ref.py`, rewritten in the thesis style of the Case-1 figures: 12 cm,
+Palatino, 7–8 pt):
+
+| File | Content |
+|---|---|
+| `case3_vtrack` | three areas plus the aggregate (RMS over the areas) |
+| `case3_stsv` (new) | f_V,STS(t) per STS |
+| `case3_qtrack` | interface flow vs. reference per STS |
+| `case3_event` (new) | the load step at 20 s resolution, with the pre-control samples: area-2 error and the change of the area-2 interface flow (the withdrawal) |
+| `case3_summary` (new) | bars of ē_v and ē_vp per area plus the aggregate; duration curve of the aggregate error |
+| `case3_tieflow` | flows on the three corridors |
+
+- **Labels:** STS panels are labelled "STS m (area a)". STS_AREA was read from `hv.zone`:
+  DSO_1–3 belong to area 2, DSO_4 to area 3.
+- **Thesis export:** `--thesis` copies the PDFs to `graphics/Ch11/` and the CSVs to
+  `graphics/Ch11/data/2026-10-28_case3_ref/` (with a README), and records the exports in the
+  run manifest.
+- **Feeds:** `run_ref.FEEDS` extended by fig:case3:summary/event/stsv and tab:case3:ref. The
+  manifest of 0009 was updated to match, and its header re-rendered.
+
+**Thesis** (`Z:\latex_diss_clone`, Chapters/Chapter11.tex, NOT committed; the Ch 9 files there
+belong to another session):
+- provenance block of 0009 under `ch:case3:nominal`;
+- scenario A described, with a todo to align Ch 7 / Case 1;
+- results text for voltage tracking, interface tracking and the inter-dispatch interval,
+  sub-transmission voltages (new subsection `ch:case3:nominal:sts`) and tie flows;
+- new `tab:case3:ref`, `fig:case3:summary`, `fig:case3:event`, `fig:case3:stsv`;
+- M is called a "centralised reference" (author decision), with a todo for Ch 7;
+- the aggregate is declared as the RMS over the areas.
+
+`thesis_runs check`: 6 blocks, 0 failing, run from the main tree; the worktree resolves results
+in itself. A LuaLaTeX test build into the scratchpad compiled without errors.
+
+**Plan:** `docs/architecture/2026-10-28_case2_step_mc_plan.md`, a proposal for STEP-R (ramps),
+STEP-E (event battery), STEP-P (phase sweep) and the MC changes, with the open author decisions.
+
+## ~16:00: STEP and MC implemented (author: "implement the plan", recommended options)
+
+**Runner** (`experiments/helpers/profile_ramps.py`, wired in `multi_tso_dso.py` right after
+the profile frame is clipped; config fields `hold_profiles`, `profile_ramps`, inert by default):
+- `hold_profile_frame`: every row equals the `start_time` row. The zonal dispatch, computed
+  from the frame, is held with it.
+- `apply_profile_ramps`:
+  - `kind="bus"` adds a load row whose base is (P, Q) and whose profile column is the ramp
+    shape;
+  - `kind="ts_loads"` gives every TS load its own copy of its profile columns times
+    (1 + rel·shape); the STS buses are excluded by the runner from `meta.hv_networks`.
+- Exact at dt_s; reaches the plant through `apply_profiles`.
+- Tests: `tests/test_profile_ramps.py` (4).
+
+**OP picker** (`step/pick_ops.py` → `step/ops.json`):
+- yearly exogenous table from the Ch 7 characterisation (`crp.build`, `exogenous_year`);
+- the W1–W6 days excluded;
+- one candidate per day;
+- each candidate checked with L2, held profiles, 10 min.
+- **Finding:** every one of the 15 largest-export days with TS load ≤ P25 fails while the
+  runner initialises (power flow does not converge), under L2 and O3, held or not. These are
+  operating points without a solution in this model.
+  - OP-L is therefore the largest export that passes, found by bisection over the days with
+    export ≥ P75; the plan said P90.
+  - OP-H: 2016-04-13 09:30 (TS load 4866 MW, P100; STS net +616 MW).
+  - OP-M: 2016-11-01 19:30 (3877 MW, P50; STS +222 MW, P50).
+  - OP-L: 2016-12-29 00:00 (3617 MW, P25; STS export 1410 MW, P97), index 20 of 152 days.
+    Feasibility is not monotone in the export (04 Apr and 11 Dec fail between feasible
+    days), so OP-L is the boundary found by the bisection, not provably the largest.
+- **Ramp buses:** area 2 uses bus 11 (IEEE 12); areas 1 and 3 use the load bus with the
+  largest RMS ΔV of the area per +10 Mvar at OP-M: bus 27 (0.86 mpu/10 Mvar) and bus 22
+  (1.05). Bus 11 is also the most sensitive in area 2 (1.19).
+
+**STEP producer** (`step/run_step.py`, window metrics in `step/metrics_step.py`, 3 tests):
+- the parts R, P, E as in the plan;
+- phase 100 s of P comes from E;
+- one noise seed for all cases (20261028);
+- log.pkl, status.json and metrics.json per run;
+- a resumable 30-worker pool (max_tasks_per_child = 4, restart on a broken pool), with the
+  parts in the order R → P → E and the slowest variant first.
+
+| Part | Cases | Runs |
+|---|---|---|
+| R | 21 | 126 |
+| P | 60 | 180 |
+| E | 174 | 1044 |
+
+Estimate: ≈ 355 core-h at the 0009 rate.
+
+**MC** (`mc/run_mc.py`):
+- Case-2 registry;
+- all six variants, O3 on 300 episodes;
+- event phase per event on {20, …, 160} s from `default_rng([seed, 1])`. The declared start
+  times and event lists are unchanged: `tests/experiments/test_mc_draw.py` covers 40 seeds;
+- noise seed = episode seed;
+- `metrics_case2` metrics;
+- full log kept.
+
+Smoke on e5power (`0001_*_run_mc_smoke`): 13 runs, all ok.
+
+**Figure** `case3_qerr` (`fig:case3:qerr`): realised minus reference per STS, O3 and S2.
+Added to Ch 11 and to the feeds of 0009.
+
+**Smoke tests on e5power (code 11023f6):**
+- `step/0001_*_run_step_smoke`: one short case per part on OP-H, 21 runs, all ok. It covers
+  the ramp windows, timed events with reversal, event rows and recovery; the sawtooth is
+  empty because the windows are shorter than one period.
+- `mc/0001_*_run_mc_smoke`: 13 runs, ok.
+
+**Launched 19:32 on e5power** as one detached queue
+(`launch_logs/20261028_193248_step_then_mc.cmd`):
+1. `run_step --jobs 30`: parts R → P → E, 1350 runs.
+2. then `run_mc --new --jobs 30`: 100 episodes × 6 variants plus 200 more for O3.
+
+At the 0009 rate this is ≈ 355 + 353 core-h. With 30 workers on 18 physical cores the wall time
+is unmeasured; expect the step tests to finish in the course of 29 Oct and the MC about a day
+later.
+
+**Thesis:** new section `ch:case3:step` in Chapter11.tex with the design, the OP table
+`tab:case3:step:ops` and [TBD] results; `fig:case3:qerr` added. Not committed: the thesis repo
+also holds another session's uncommitted Ch 9 files.

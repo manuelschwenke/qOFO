@@ -242,6 +242,15 @@ def main(argv: List[str] | None = None) -> int:
                         "SIMULATE (default: all). The analytic screen always "
                         "uses every condition. Added 2026-10-25 to drop W5, "
                         "which enters neither the filter nor the ranking.")
+    p.add_argument("--op-horizon-h", type=float, default=None,
+                   help="Run length of the operating-point capture [h], i.e. "
+                        "the window the unit commitment is computed over "
+                        "(tuning.stage1_screen.load_or_build_operating_points). "
+                        "Default: 60 s, as before 2026-10-31.")
+    p.add_argument("--skip-baseline", action="store_true",
+                   help="Do not prepend the Stage-I point. For a shard of a "
+                        "campaign split over hosts, whose baseline another "
+                        "shard evaluates (added 2026-10-31).")
     p.add_argument("--span", action="append", default=[], metavar="NAME=DECADES",
                    help="Override one log-span of the search box (repeatable), "
                         "e.g. --span g_w_pcc=1.5. Unlisted coordinates keep "
@@ -297,7 +306,8 @@ def main(argv: List[str] | None = None) -> int:
             dso_der_scale=dict(FROZEN_DSO_DER_SCALE),
             dso_load_p_scale=dict(FROZEN_DSO_LOAD_P_SCALE))
     ops = load_or_build_operating_points(
-        _base, [(r[0], r[1]) for r in CONDITIONS], Path(args.ops_dir))
+        _base, [(r[0], r[1]) for r in CONDITIONS], Path(args.ops_dir),
+        horizon_s=60.0 if args.op_horizon_h is None else 3600.0 * args.op_horizon_h)
     if not ops:
         raise SystemExit(f"no cached operating points in {args.ops_dir}")
     print(f"[stage2] {len(ops)} operating points on the "
@@ -333,11 +343,12 @@ def main(argv: List[str] | None = None) -> int:
     # improvement has to be quoted against a NAMED baseline, and the relative
     # interface-Q bound needs a reference that is a stated design point rather
     # than whichever candidate happened to score best.
-    centre_lambda = worst(screen_weights(ops, centre)).lambda_max
-    kept.insert(0, {"weights": dict(centre), "lambda_max_B": centre_lambda,
-                    "is_baseline": True})
-    print(f"[stage2a] baseline (Stage-I point) prepended, "
-          f"lambda_max(B) = {centre_lambda:.4f}")
+    if not args.skip_baseline:
+        centre_lambda = worst(screen_weights(ops, centre)).lambda_max
+        kept.insert(0, {"weights": dict(centre), "lambda_max_B": centre_lambda,
+                        "is_baseline": True})
+        print(f"[stage2a] baseline (Stage-I point) prepended, "
+              f"lambda_max(B) = {centre_lambda:.4f}")
     if args.max_candidates:
         kept = kept[: args.max_candidates]
         print(f"[stage2a] capped to {len(kept)} candidates")
@@ -358,6 +369,8 @@ def main(argv: List[str] | None = None) -> int:
         "searched": list(SEARCHED_FIELDS),
         "conditions": [o.condition for o in ops],
         "simulated_windows": args.windows or "all",
+        "op_horizon_h": args.op_horizon_h,
+        "skip_baseline": bool(args.skip_baseline),
         "lambda_max_all": lam_all,
         "estimated_wall_h": est_h,
         "argv": sys.argv,

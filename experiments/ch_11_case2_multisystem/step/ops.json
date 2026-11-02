@@ -1,0 +1,198 @@
+{
+  "criteria": "from the 2016 profile year at 15-min resolution, without the\ncalendar days of the design windows W1--W6 (``run_mc.EXCLUDED_DAYS``):\n\n========  ================================================  =================\nOP-H      TS load >= P90 and renewable infeed (TS + STS)    the largest TS load\n          <= P25\nOP-L      TS load <= P25 and STS export >= P75              the largest export\n                                                            with a solution\nOP-M      TS load and STS net exchange within P45--P55      closest to (P50, P50)\n========  ================================================  =================\n\nEach candidate (one per calendar day, the best timestamp of the day) must pass\na base-case check -- ``L2``, held profiles, 10 min, no events, every step with\na converged power flow; the MC's discard rule.  OP-H and OP-M take the first\ncandidate that passes.  The largest STS exports have no power-flow solution in\nthis model at all (2026-10-28: every one of the 15 largest export days with\nTS load <= P25 fails while the runner initialises, under L2 and O3 alike, held\nor not), so OP-L is searched by bisection over the export ranking of the days\nwith export >= P75 and is the largest export found to pass (P90 was the plan).",
+  "excluded_days": [
+    "2016-01-04",
+    "2016-01-05",
+    "2016-02-03",
+    "2016-02-22",
+    "2016-07-18",
+    "2016-11-26"
+  ],
+  "ops": {
+    "OP-H": {
+      "start_time": "2016-04-13T09:30:00",
+      "load_P_TS_mw": 4866.2,
+      "load_Q_TS_mvar": 973.8,
+      "res_P_mw": 325.1,
+      "net_P_STS_mw": 615.7,
+      "rank_load_P_TS": 100.0,
+      "rank_res_P": 22.4,
+      "rank_export_P_STS": 20.9,
+      "tried": [
+        {
+          "start_time": "2016-04-13T09:30:00",
+          "ok": true,
+          "reason": null
+        }
+      ]
+    },
+    "OP-M": {
+      "start_time": "2016-11-01T19:30:00",
+      "load_P_TS_mw": 3876.6,
+      "load_Q_TS_mvar": 810.2,
+      "res_P_mw": 1456.5,
+      "net_P_STS_mw": 221.5,
+      "rank_load_P_TS": 50.1,
+      "rank_res_P": 61.2,
+      "rank_export_P_STS": 49.7,
+      "tried": [
+        {
+          "start_time": "2016-11-01T19:30:00",
+          "ok": true,
+          "reason": null
+        }
+      ]
+    },
+    "OP-L": {
+      "start_time": "2016-12-29T00:00:00",
+      "load_P_TS_mw": 3617.1,
+      "load_Q_TS_mvar": 762.2,
+      "res_P_mw": 4138.4,
+      "net_P_STS_mw": -1409.7,
+      "rank_load_P_TS": 24.7,
+      "rank_res_P": 96.0,
+      "rank_export_P_STS": 97.2,
+      "tried": [
+        {
+          "start_time": "2016-11-11T01:00:00",
+          "ok": true,
+          "reason": null
+        },
+        {
+          "start_time": "2016-03-19T05:00:00",
+          "ok": true,
+          "reason": null
+        },
+        {
+          "start_time": "2016-01-25T04:15:00",
+          "ok": true,
+          "reason": null
+        },
+        {
+          "start_time": "2016-04-04T02:00:00",
+          "ok": false,
+          "reason": "LoadflowNotConverged: Power Flow nr did not converge after 200 iterations!"
+        },
+        {
+          "start_time": "2016-12-07T00:30:00",
+          "ok": true,
+          "reason": null
+        },
+        {
+          "start_time": "2016-10-21T05:00:00",
+          "ok": true,
+          "reason": null
+        },
+        {
+          "start_time": "2016-12-29T00:00:00",
+          "ok": true,
+          "reason": null
+        },
+        {
+          "start_time": "2016-12-11T21:30:00",
+          "ok": false,
+          "reason": "LoadflowNotConverged: Power Flow nr did not converge after 200 iterations!"
+        }
+      ],
+      "bisection": {
+        "n_days": 152,
+        "index": 20
+      }
+    }
+  },
+  "ramp_bus": {
+    "1": 27,
+    "2": 11,
+    "3": 22
+  },
+  "ramp_screen_at_OP-M": {
+    "1": [
+      {
+        "bus": 27,
+        "dv_rms_mpu_per_10mvar": 0.864
+      },
+      {
+        "bus": 25,
+        "dv_rms_mpu_per_10mvar": 0.847
+      },
+      {
+        "bus": 26,
+        "dv_rms_mpu_per_10mvar": 0.784
+      },
+      {
+        "bus": 42,
+        "dv_rms_mpu_per_10mvar": 0.659
+      },
+      {
+        "bus": 0,
+        "dv_rms_mpu_per_10mvar": 0.618
+      },
+      {
+        "bus": 28,
+        "dv_rms_mpu_per_10mvar": 0.56
+      },
+      {
+        "bus": 38,
+        "dv_rms_mpu_per_10mvar": 0.035
+      }
+    ],
+    "2": [
+      {
+        "bus": 11,
+        "dv_rms_mpu_per_10mvar": 1.193
+      },
+      {
+        "bus": 6,
+        "dv_rms_mpu_per_10mvar": 1.017
+      },
+      {
+        "bus": 7,
+        "dv_rms_mpu_per_10mvar": 0.919
+      },
+      {
+        "bus": 8,
+        "dv_rms_mpu_per_10mvar": 0.781
+      },
+      {
+        "bus": 3,
+        "dv_rms_mpu_per_10mvar": 0.772
+      },
+      {
+        "bus": 2,
+        "dv_rms_mpu_per_10mvar": 0.547
+      }
+    ],
+    "3": [
+      {
+        "bus": 22,
+        "dv_rms_mpu_per_10mvar": 1.048
+      },
+      {
+        "bus": 20,
+        "dv_rms_mpu_per_10mvar": 1.038
+      },
+      {
+        "bus": 23,
+        "dv_rms_mpu_per_10mvar": 1.002
+      },
+      {
+        "bus": 15,
+        "dv_rms_mpu_per_10mvar": 0.835
+      },
+      {
+        "bus": 14,
+        "dv_rms_mpu_per_10mvar": 0.796
+      },
+      {
+        "bus": 17,
+        "dv_rms_mpu_per_10mvar": 0.745
+      },
+      {
+        "bus": 41,
+        "dv_rms_mpu_per_10mvar": 0.436
+      }
+    ]
+  },
+  "made": "2026-10-28T16:17:22",
+  "by": "experiments/ch_11_case2_multisystem/step/pick_ops.py"
+}

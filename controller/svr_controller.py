@@ -90,7 +90,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandapower as pp
@@ -247,6 +247,10 @@ class SVRZoneConfig:
     #: Slack weights; the runner passes the TS-OFO's g_z_voltage / g_z_q_gen.
     ofo_g_z_v: float = 1e9
     ofo_g_z_q: float = 1e2
+    # -- access to the child STS (variant S2, 2026-10-27) --------------------
+    #: The couplers of the area's child STS join the alignment law
+    #: (``eq:svr-alignment-sts``); the STS-OFOs track the PCC block of ``u``.
+    sts_access: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +342,23 @@ class SVRZoneController:
         #: (n_vbus, n_gen + n_der).  Calibrated with s_p,a and frozen with it.
         self.dv_bus_dq: Optional[NDArray[np.float64]] = None
 
+        # -- S2: the couplers of the area's child STS -------------------------
+        #: Coupler (trafo3w) indices in the order of the PCC block of ``u``.
+        self.pcc_trafo_indices: List[int] = [
+            int(t) for t in zone_def.pcc_trafo_indices]
+        #: dV_pilot / dQ_inj at each coupler's TS-side bus [pu / Mvar].
+        self.dv_pilot_dq_coupler: Optional[NDArray[np.float64]] = None
+        #: Latest CAIR message per coupler: (dq_min, dq_max, q_neutral) [Mvar].
+        self._cap: Dict[int, Tuple[float, float, float]] = {}
+        #: The coupler term of s_p,a is added once, with the headroom of the
+        #: first CAIR message, and then held (participation is fixed).
+        self.pilot_sensitivity_couplers: float = 0.0
+        self._coupler_term_added = False
+        #: Interface references [Mvar, load convention], held between updates.
+        self.q_ref_pcc: NDArray[np.float64] = np.full(self.n_pcc, np.nan)
+        #: How often a neutral point outside its interval had to be clipped.
+        self.n_neutral_clipped = 0
+
     # -- calibration -------------------------------------------------------
 
     def calibrate(self, net: pp.pandapowerNet, runpp_kwargs: Dict) -> None:
@@ -415,6 +436,26 @@ class SVRZoneController:
                     readings[+1.0][1] - readings[-1.0][1]
                 ) / (2 * self.cfg.calib_dq_mvar)
 
+        # -- couplers of the child STS (S2): a reactive injection at the
+        # coupler's TS-side bus, through a temporary generator on the copy.
+        if self.cfg.sts_access and self.n_pcc:
+            dv_c = np.zeros(self.n_pcc, dtype=float)
+            for j, t in enumerate(self.pcc_trafo_indices):
+                hv_bus = int(probe.trafo3w.at[t, "hv_bus"])
+                sid = pp.create_sgen(probe, bus=hv_bus, p_mw=0.0, q_mvar=0.0,
+                                     name="_svr_coupler_calibration")
+                readings = {}
+                for sign in (+1.0, -1.0):
+                    probe.sgen.at[sid, "q_mvar"] = sign * self.cfg.calib_dq_mvar
+                    _solve()
+                    readings[sign] = float(probe.res_bus.at[p, "vm_pu"])
+                probe.sgen.at[sid, "q_mvar"] = 0.0
+                probe.sgen.at[sid, "in_service"] = False
+                _solve()
+                dv_c[j] = (readings[+1.0] - readings[-1.0]) / (
+                    2 * self.cfg.calib_dq_mvar)
+            self.dv_pilot_dq_coupler = dv_c
+
         self.dv_pilot_dq = dv_pilot_dq
         self.dq_dvset = dq_dvset
         self.dv_bus_dq = dv_bus_dq
@@ -433,6 +474,71 @@ class SVRZoneController:
                 f"zone {self.zone_def.zone_id}: pilot bus {p} is insensitive to "
                 "the area's reactive resources -- the pilot bus is a poor choice."
             )
+
+    # -- S2: capability of the child STS ----------------------------------
+
+    def receive_capability(self, message) -> None:
+        """Store the CAIR interval and neutral point of this area's couplers.
+
+        The same message the TS-OFO receives; the SVR reads only the couplers
+        it parents.  Intervals are changes from the current flow, in load
+        convention at the HV port (``core.message.CapabilityMessage``).
+        """
+        qn = getattr(message, "q_neutral_mvar", None)
+        for i, t in enumerate(message.interface_transformer_indices):
+            t = int(t)
+            if t in self.pcc_trafo_indices:
+                self._cap[t] = (
+                    float(message.q_min_mvar[i]), float(message.q_max_mvar[i]),
+                    float(qn[i]) if qn is not None else float("nan"),
+                )
+
+    def _coupler_interval(self, net, t: int) -> Tuple[float, float, float]:
+        """Absolute (Q_lo, Q_0, Q_hi) of coupler ``t`` [Mvar, load convention]."""
+        if t not in self._cap:
+            raise RuntimeError(
+                f"zone {self.zone_def.zone_id}: S2 has no capability message "
+                f"for coupler {t}")
+        dmin, dmax, qn = self._cap[t]
+        q_now = float(net.res_trafo3w.at[t, "q_hv_mvar"])
+        lo, hi = q_now + dmin, q_now + dmax
+        q0 = qn if np.isfinite(qn) else q_now
+        if q0 < lo or q0 > hi:
+            self.n_neutral_clipped += 1
+            q0 = min(max(q0, lo), hi)
+        return lo, q0, hi
+
+    def _add_coupler_term(self, net) -> None:
+        """Add the couplers to s_p,a once, with the first CAIR headroom.
+
+        Supporting the voltage means lowering the load-convention flow, so the
+        headroom in the raising direction is ``Q_0 - Q_lo``.
+        """
+        term = 0.0
+        for j, t in enumerate(self.pcc_trafo_indices):
+            lo, q0, _hi = self._coupler_interval(net, t)
+            term += float(self.dv_pilot_dq_coupler[j]) * (q0 - lo)
+        self.pilot_sensitivity_couplers = term
+        self.pilot_sensitivity += term
+        self._coupler_term_added = True
+        if self.verbose >= 1:
+            print(f"  [SVR z{self.zone_def.zone_id}] S2: {self.n_pcc} couplers "
+                  f"join the alignment, s_p += {term:+.5f} -> "
+                  f"{self.pilot_sensitivity:+.5f} pu/level")
+
+    def coupler_references(self, net, level: float) -> NDArray[np.float64]:
+        """``eq:svr-alignment-sts`` in load convention.
+
+        ``level >= 0`` (raise the voltage) moves the reference from the
+        neutral point toward ``Q_lo`` (more injection into the TS);
+        ``level < 0`` toward ``Q_hi``.
+        """
+        out = np.empty(self.n_pcc, dtype=float)
+        for j, t in enumerate(self.pcc_trafo_indices):
+            lo, q0, hi = self._coupler_interval(net, t)
+            out[j] = (q0 - level * (q0 - lo) if level >= 0.0
+                      else q0 + (-level) * (hi - q0))
+        return out
 
     # -- bounds ------------------------------------------------------------
 
@@ -645,6 +751,9 @@ class SVRZoneController:
         if not self._initialised:
             self._initialise_level(net)
             self._initialised = True
+        if (cfg.sts_access and self.n_pcc and not self._coupler_term_added
+                and self.dv_pilot_dq_coupler is not None):
+            self._add_coupler_term(net)
 
         v_pilot = float(net.res_bus.at[int(cfg.pilot_bus), "vm_pu"])
         err = self._deadband(cfg.v_ref_pu - v_pilot)
@@ -715,8 +824,15 @@ class SVRZoneController:
         for k, _s in enumerate(self.der_indices):
             u[k] = float(q_ref[n_gen + k])
 
-        # PCC block stays zero -- the classical scheme dispatches no interface
-        # setpoint.  See the module docstring.
+        # PCC block: zero for the classical scheme, which dispatches no
+        # interface set-point (module docstring).  With access (S2) it holds
+        # the coupler references of the alignment law, recomputed at each RVR
+        # update and held in between, like the level they follow.
+        if cfg.sts_access and self.n_pcc:
+            if rvr_due or not np.all(np.isfinite(self.q_ref_pcc)):
+                self.q_ref_pcc = self.coupler_references(net, trial)
+            u[len(self.der_indices):len(self.der_indices) + self.n_pcc] = (
+                self.q_ref_pcc)
         off = len(self.der_indices) + self.n_pcc
 
         # Machine block: PI RPR moves the AVR setpoint toward the Q target.

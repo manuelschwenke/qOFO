@@ -941,6 +941,23 @@ def build_tso_local_net(
                 sub.gen["slack"] = False
                 sub.gen.at[slack_gen_idx, "slack"] = True
                 slack_promoted = True
+        else:
+            # No machine of the zone is in service (decommitted under unit
+            # commitment, 2026-10-31): the zone's angle reference comes from
+            # the neighbouring system, i.e. the first boundary source.  No
+            # machine OLTC sits on it, so nothing is flagged.
+            boundary = [
+                int(g) for g in sub.gen.index
+                if str(sub.gen.at[g, "name"]).startswith(("WARD_TIE_TH", "WARD_TIE_PV"))
+                and bool(sub.gen.at[g, "in_service"])
+            ]
+            if not boundary:
+                raise ValueError(
+                    f"[build_tso_local_net] no machine of the zone in service "
+                    f"and no boundary source (tie_boundary={tie_boundary!r}) "
+                    f"to take the angle reference")
+            sub.gen["slack"] = False
+            sub.gen.at[boundary[0], "slack"] = True
 
     # Machine OLTC(s) attached to the promoted slack gen's terminal bus
     # — these need to be flagged OOS on the controller's mask.  Look up

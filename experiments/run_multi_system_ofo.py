@@ -23,6 +23,10 @@ JSON overlays in ``configs/paramsets/``, applied with
 separate coordinated-vs-uncoordinated study with its own paired config; call
 it directly.
 
+A Case-2 scenario (a period plus an event schedule, e.g. ``"GA"``) is
+selected with the module constants :data:`SCENARIO` and :data:`VARIANT`;
+:func:`main` then runs :func:`scenario_config` instead of :func:`make_config`.
+
 Architecture (matches the multi-TSO theory in Schwenke / CIGRE 2026)
 ---------------------------------------------------------------------
 
@@ -54,7 +58,7 @@ import os
 import pickle
 import sys
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -320,6 +324,51 @@ def make_config() -> MultiTSOConfig:
     )
 
 
+# =============================================================================
+#  Case-2 scenarios (period + events)
+# =============================================================================
+
+#: Case-2 scenario to run instead of make_config's period and events: a key of
+#: ``experiments/ch_11_case2_multisystem/ref/scenarios.py``, e.g. ``"GA"``
+#: (08 Jan 2016 06:00, G3 decommitted by the merit order, A's events).
+#: ``None`` runs :func:`make_config`.
+SCENARIO: Optional[str] = None
+#: Case-2 variant for :data:`SCENARIO`, a key of
+#: ``experiments/ch_11_case2_multisystem/variants.py``: "O3" (OFO+, STS
+#: access), "O2" (OFO, no STS access), "L2", "S1", "S2", "M".
+VARIANT: str = "O3"
+#: Horizon and noise seed of the REF runs (``ref/run_ref.py`` HORIZON_MIN and
+#: NOISE_SEED; not imported, because run_ref sets the Agg backend on import).
+SCENARIO_MINUTES: int = 360
+SCENARIO_NOISE_SEED: int = 20261027
+
+
+def scenario_config(name: str, variant: str = "O3",
+                    minutes: int = SCENARIO_MINUTES,
+                    noise_seed: int = SCENARIO_NOISE_SEED) -> MultiTSOConfig:
+    """The config ``run_ref`` gives ``variant`` in Case-2 scenario ``name``.
+
+    A scenario is a period plus an event schedule: ``scenarios.start_time``
+    (``None`` keeps the reference period of :func:`make_config`) and
+    ``scenarios.events``.  The unit commitment follows from the period
+    (``MultiTSOConfig.unit_commitment``), so GA's G3 outage is not an event
+    but the merit order over the window.  Everything else is the Case-2 base
+    of ``variants.base_config``: DSO_3 x2, minimum-class metering, the
+    paramset of record.  Only the live plots differ from the REF run: they
+    are those of :func:`make_config` (no effect on the control path).
+    """
+    from experiments.ch_11_case2_multisystem import variants as v
+    from experiments.ch_11_case2_multisystem.ref import scenarios as sc
+
+    cfg = v.resolved(variant, minutes, sc.events(name), noise_seed)
+    if sc.start_time(name) is not None:
+        cfg = dataclasses.replace(cfg, start_time=sc.start_time(name))
+    base = make_config()
+    live = {f.name: getattr(base, f.name) for f in dataclasses.fields(base)
+            if f.name.startswith("live_plot_")}
+    return dataclasses.replace(cfg, verbose=1, **live)
+
+
 def main() -> None:
     """Run the multi-TSO / multi-DSO simulation and record the trace.
 
@@ -336,6 +385,9 @@ def main() -> None:
 
     :func:`main_comparison` is the coordinated-vs-uncoordinated study and
     builds its own paired config; call it directly.
+
+    With :data:`SCENARIO` set (e.g. ``"GA"``) the config is
+    :func:`scenario_config` for :data:`VARIANT` instead.
     """
     # The chapter's controller identity: SELECTED_PARAMSET, since 2026-10-28
     # ch9_selected_band_2026_10_a1 = c08b1d3d33ab (weight-selection procedure
@@ -344,8 +396,14 @@ def main() -> None:
     from experiments.ch_09_parameter_selection._ch9_selected_design import (
         SELECTED_PARAMSET,
     )
-    cfg = apply_paramset(make_config(), SELECTED_PARAMSET)
-    cfg = dataclasses.replace(cfg, dso_gamma_oltc_q=1.0)  # TEST: couplers also track interface Q
+    if SCENARIO is not None:
+        cfg = scenario_config(SCENARIO, VARIANT)
+        print(f"Case-2 scenario {SCENARIO}, variant {VARIANT}: start "
+              f"{cfg.start_time:%Y-%m-%d %H:%M}, {cfg.n_total_s / 60:.0f} min, "
+              f"{len(cfg.contingencies)} events")
+    else:
+        cfg = apply_paramset(make_config(), SELECTED_PARAMSET)
+        cfg = dataclasses.replace(cfg, dso_gamma_oltc_q=1.0)  # TEST: couplers also track interface Q
     print(f"Controller weights: {SELECTED_PARAMSET}")
     run_dir = new_run_dir("run_multi_system_ofo", cfg)
     log = run_multi_tso_dso(cfg)

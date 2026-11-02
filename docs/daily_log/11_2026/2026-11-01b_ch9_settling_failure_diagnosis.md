@@ -295,6 +295,22 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
       7 passed, with the amendment-3 tests.
   - Validation re-run with batch 4 (n = 30): Spearman 0.985 (residual), 0.952 (p95);
     calibration unchanged (1.69 · predicted^0.60).
+- **Author decisions on v2:** option B; DSO band lower edge stays 0.92; 12 workers on
+  e5wimi (first 15) and 36 on e5power; the TS tap engagement is left to Claude, but the "OLTCs should
+  not be just inert".
+- **TS-tap analysis** (run 0001, 248 candidates; TS machine transformers only):
+  - Hunting-free operation needs a tap price of about 25 or more. Above that, TS taps move
+    almost only in W6 (952 of 964 moves) and are inert in W1–W4.
+  - 14 hunting-free candidates have θ_TS,min ≤ 0.009; 8 of them act in at least 2 of W1–W4.
+  - Proposal (§ 6a of the v2 note):
+    - Δv_eng,TS unchanged at 0.0075;
+    - new bound θ_TS,min ≤ 0.009 pu ("not inert"), applied analytically to the draws and
+      in the filter;
+    - hunting tolerance 0;
+    - N_2A 512;
+    - residual margin measured on three STS variants (≤ 0.8 Mvar, p95 ≤ 25) rather than
+      predicted.
+  - Awaiting the go to freeze and implement.
 
 ## Open
 

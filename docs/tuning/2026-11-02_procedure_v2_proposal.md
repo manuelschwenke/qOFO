@@ -171,7 +171,57 @@ check batch per round, and the same exhaustion risk.
    hunting-free side.
 7. Hosts: 30 workers on e5wimi and 30 on e5power for about 1.5 days.
 
+## 6a. Author decisions of 2026-11-02 and the resulting revisions (proposal state)
+
+- **Decided by the author:**
+  - option B;
+  - DSO band lower edge 0.92, as coded;
+  - hosts: 12 workers on e5wimi and 36 on e5power (first 15, then reduced to 12);
+  - TS tap engagement left to Claude, with the condition that the "OLTCs should not be
+    just inert".
+- **Residual target (revised).** The acceptance criterion stays at median residual ≤ 1 Mvar
+  and p95 ≤ 27.
+  - The 0.5 Mvar of § 5 was a prediction target with a safety factor of 2. Its purpose was
+    to cover the predictor's calibration at the passing end, where it underestimates by
+    2.7–8× and has only two points.
+  - Revised rule, so that the margin is measured rather than predicted: verify π_q 10, 20
+    and 30, and take the largest ρ with **measured** residual ≤ 0.8 Mvar and p95 ≤ 25.
+  - This margin protects the binding confirmation check of the winner.
+- **TS taps: the conflict found in run 0001's 248 evaluated candidates** (TS machine
+  transformers 1[0], 1[1] and 3[1]; STS coupler moves excluded):
+
+  | g_w_tso_oltc | θ_TS,min (pu) | hunting-free | windows of W1–W4 with a TS move (mean) | TS moves per transformer per 12 h, outside start-up |
+  |:--|--:|--:|--:|--:|
+  | ≤ 15 | 0.004 | 0 % | 4.0 | 3.9 |
+  | 15–20 | 0.006 | 6 % | 4.0 | 1.7 |
+  | 20–25 | 0.008 | 50 % | 2.65 | 0.95 |
+  | 25–30 | 0.010 | 92 % | 0.30 | 0.53 |
+  | 30–35 | 0.011 | 95 % | 0.05 | 0.43 |
+  | 43–70 | 0.016–0.025 | 90 % | 0.00 | 0.21 |
+
+  - Above a tap price of about 25 (θ_TS,min ≈ 0.009 pu), the TS taps are hunting-free but
+    move almost only in W6, the large-disturbance window: 952 of 964 moves.
+  - Below it they act in every window but mostly hunt.
+  - Hunting-free and active points do exist:
+    - 14 of the 172 hunting-free candidates have θ_TS,min ≤ 0.009;
+    - 8 of them move TS taps in at least 2 of W1–W4 (tap prices 16.8–27.2).
+- **TS tap design (proposed):**
+  - Δv_eng,TS stays at 0.0075 pu: Stage-I tap price 21.3, inside the active band.
+  - New requirement "TS taps not inert": θ_TS,min ≤ 0.009 pu, which is tap price ≲ 25.6
+    on these operating points.
+    - It is applied analytically to the draws before simulation, like the λ screen, and
+      again in the filter.
+    - Hunting tolerance stays 0.
+    - TS tap activity per window is reported as a diagnostic.
+- **N_2A 512 (revised from 256).** With the λ screen and the θ_TS bound, about 163
+  candidates are simulated. The TS-feasible band is narrow, so the denser sample is
+  preferred.
+
 ## 7. Expected cost (option B; 60 workers; run-0001 throughput of 1.2 units per worker-hour)
+
+*Superseded by the 6a revisions: with 12 + 36 workers, split 1 : 3, and N_2A 512, the
+estimate is verification ≈3 h, II-a ≈14.5 h (≈163 candidates), II-b ≈9 h, confirmation
+and W5 ≈2 h, plus 2–3 h of implementation: ≈31 h in all.*
 
 | step | units | time |
 |:--|:--|:--|

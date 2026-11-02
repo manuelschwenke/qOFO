@@ -485,6 +485,13 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Estimate: round 1 ends ≈02:30 (local-bound). Rounds 2–4 ≈3.3 h each, balanced; slower
     once e5wimi is cut to 10 workers in the morning. Result Tuesday ≈11:00 with 3 rounds,
     ≈13:00–14:00 with 4.
+- **22:46: e5power check** (author: "E5power has 36 workers max"). Our processes there are
+  36 spawn workers of the round-1 screen, the screen parent and the shard launcher. The
+  other 39 python processes on e5power are not ours.
+- **22:50, author: "No restart anymore, keep like this."** No further restarts, so the
+  planned morning cut of e5wimi to 10 workers is dropped: 20 here and 36 on e5power until
+  the end. Revised estimate without that cut: result Tuesday ≈10:00 with 3 rounds,
+  ≈13:00 with 4.
 
 ## Open
 

@@ -150,6 +150,38 @@ superseded by the producer below.
   the run copy, the README says IBG, and the CSV has 90 bus rows (30 × 3). The manifest still
   holds two export entries (no duplicates).
 
+## Simplified, STS couplings orthogonal (~15:00, after commit 8bdd884)
+
+**Author request** (annotated screenshot): the figure is "a little crowded".
+- **Panel text.** The first line reads "TS reserve $R^+$" (was "own reserve"). The median-V line
+  is removed; the medians stay in the CSV and the area fill.
+- **STS couplings.** Dashed as before, but routed orthogonally as in the author's hand sketch:
+  - from the STS, a vertical stub up or down to a fork;
+  - from the fork, horizontal and then vertical to each coupling bus.
+  - New geometry `STS_ROUTE` (STS → bus → polyline). Attach points avoid the line ends already
+    on the bars (B05 at x = 2.7, B14 at 8.3, B21 at 13.65; otherwise near the bus centre).
+  - Forks lie outside the STS rings (ring radii 0.47, and 0.66 for STS 3).
+  - New check `_check_routes`: the route set equals the coupling buses of `STS`, and every route
+    ends on its bar.
+  - Fig 7.2 itself keeps its diagonal couplings.
+- **Legend.** "machine terminal bus" (without "(voltage not logged)").
+- **Layout.** The panel-text band shrinks from 1.4 to 1.1 cm.
+- **Exported** to the thesis at 15:10; the PDF is byte-identical to the run copy.
+
+**Author question: what is "upward reserve"?**
+- It is Q_max − Q in generator convention, i.e. the remaining **over-excited (Q-injecting)**
+  headroom. Using it raises voltage.
+- `core/actuator_bounds.py:224`: Q_max is "over-excited / injecting".
+- VDE box: +0.41·S_n over-excited, −0.33·S_n under-excited. The STS IBG sums show the same ratio
+  (+188.6 / −151.8 Mvar).
+- This matches the scarcity case: the 250-Mvar load step at bus 12 pulls voltage down, and only
+  the over-excited reserve counters it.
+- **15:14, author: "Yes, rename it".**
+  - The legend reads "dark arc: over-excited reserve $Q_\max-Q$"; it fits the legend row.
+  - The docstring and the thesis README state the generator convention.
+  - The README's t* rule now names "TS reserve R+". The rule itself is unchanged.
+  - Re-exported; the PDF is byte-identical to the run copy.
+
 ## Open
 
 - **Weights.** Panels (b) and (c) use c08b, which is not final on the commitment base (Ch 9

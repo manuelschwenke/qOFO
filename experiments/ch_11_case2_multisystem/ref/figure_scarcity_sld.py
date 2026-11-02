@@ -16,7 +16,9 @@ which the area-2 own upward reserve under O2 reaches its minimum over the run.
 
 **Encoding.**  One ring per reactive source: ring area proportional to its
 reactive capability Q_max - Q_min; the dark arc, clockwise from 12 o'clock, is
-the upward reserve Q_max - Q as a share of the ring.
+the upward reserve Q_max - Q as a share of the ring.  Generator convention
+(Q > 0 injects), so this is the over-excited headroom, which raises voltage;
+the legend calls it "over-excited reserve" (author, 2026-11-02).
 
 * Synchronous machines: Q, Q_min, Q_max as recorded.  A machine out of service
   at the first record is drawn dashed (decommitted by the merit order); one
@@ -42,14 +44,16 @@ voltage set point V_set of the run (1.03 pu), half range 0.06 pu:
   area min/mean/max of the logged buses are checked against the recorded
   ``zone_v_min/mean/max``.
 
-The own upward reserve R+_z (machines without G1, plus wind parks) is printed
-below each panel.
+The TS reserve R+_z (the area's own upward reserve: machines without G1, plus
+wind parks) is printed below each panel.
 
-**Layout.**  Bus coordinates, line routing, STS couplings and labels are
-those of ``graphics/Ch7/ieee39_wind_replace_body.tex`` (thesis) as corrected
-on 2026-11-02 to the code's network: the machine at IEEE bus 30 is the
+**Layout.**  Bus coordinates, line routing and labels are those of
+``graphics/Ch7/ieee39_wind_replace_body.tex`` (thesis) as corrected on
+2026-11-02 to the code's network: the machine at IEEE bus 30 is the
 synchronous hydro unit G10, there are four wind parks W1-W4, and W2 (ex-G2,
-IEEE bus 31) is coupled at bus 6.
+IEEE bus 31) is coupled at bus 6.  The STS couplings are routed orthogonally
+after the author's sketch of 2026-11-02 (Fig 7.2 draws them diagonally); each
+route must end on its coupling bus.
 
 Each output is written as PDF and PNG to ``<run>/figures/`` and its data as
 CSV to ``<run>/figures/data/``.  With ``--thesis <latex dir>`` the PDF is also
@@ -180,6 +184,23 @@ STS = {
     "DSO_3": ("STS 3", (7.25, 2.9), ("B11", "B13", "B10"), "l"),
     "DSO_4": ("STS 4", (15.0, 3.4), ("B24", "B21", "B23"), "l"),
 }
+#: STS -> coupling bus -> orthogonal route (author's sketch, 2026-11-02).  A
+#: route starts at the STS or at the fork of an earlier route; the attach
+#: points avoid the line ends already on the bar.
+STS_ROUTE = {
+    "DSO_1": {"B05": [(3.6, 3.0), (3.6, 3.7), (2.7, 3.7), (2.7, 5.0)],
+              "B08": [(3.6, 3.0), (3.6, 2.15), (2.8, 2.15), (2.8, 1.5)],
+              "B07": [(3.6, 2.15), (5.0, 2.15), (5.0, 1.5)]},
+    "DSO_2": {"B04": [(7.4, 6.75), (7.4, 7.45), (6.0, 7.45), (6.0, 8.0)],
+              "B14": [(7.4, 7.45), (8.3, 7.45), (8.3, 8.0)],
+              "B06": [(7.4, 6.75), (7.4, 6.05), (5.1, 6.05), (5.1, 5.0)]},
+    "DSO_3": {"B11": [(7.25, 2.9), (7.25, 3.8), (6.4, 3.8), (6.4, 4.2)],
+              "B13": [(7.25, 3.8), (8.4, 3.8), (8.4, 4.2)],
+              "B10": [(7.25, 2.9), (7.25, 1.5)]},
+    "DSO_4": {"B24": [(15.0, 3.4), (15.0, 4.7), (16.0, 4.7), (16.0, 6.0)],
+              "B21": [(15.0, 3.4), (15.0, 2.2), (13.65, 2.2), (13.65, 1.5)],
+              "B23": [(15.0, 2.2), (16.0, 2.2), (16.0, 1.5)]},
+}
 STS_AREA = {"DSO_1": 2, "DSO_2": 2, "DSO_3": 2, "DSO_4": 3}
 #: drawn bus -> pandapower index (IEEE number - 1)
 BUS_IDX = {name: int(name[1:]) - 1 for name in BUS}
@@ -254,6 +275,18 @@ def _bus_voltages(r) -> Dict[str, float]:
                 raise ValueError(f"area {z}: {stat.__name__} of logged buses "
                                  f"{stat(v):.6f} != recorded {rec[z]:.6f}")
     return {name: logged[i] for name, i in BUS_IDX.items() if i in logged}
+
+
+def _check_routes() -> None:
+    """Each STS route set covers its coupling buses and ends on the bars."""
+    for net, (lab, _xy, buses, _side) in STS.items():
+        if set(STS_ROUTE[net]) != set(buses):
+            raise ValueError(f"{lab}: routes {sorted(STS_ROUTE[net])} != couplings "
+                             f"{sorted(buses)}")
+        for b, route in STS_ROUTE[net].items():
+            (x, y), (xb, yb, w) = route[-1], BUS[b]
+            if abs(y - yb) > 1e-9 or abs(x - xb) > w:
+                raise ValueError(f"{lab}: route to {b} ends off the bar at {(x, y)}")
 
 
 def _bus_area(name: str) -> int:
@@ -419,11 +452,10 @@ def draw_panel(ax, st: Dict, title: str, norm: Normalize) -> None:
             r = _ring(ax, xy, row)
             ax.add_patch(Circle(xy, 0.13, fc="white", ec="black", lw=0.6, zorder=6))
             _label(ax, xy, r, lab, side)
-    for net, (lab, xy, buses, side) in STS.items():
+    for net, (lab, xy, _buses, side) in STS.items():
         row = rows[("sts", net)]
-        for b in buses:
-            ax.plot([xy[0], BUS[b][0]], [xy[1], BUS[b][1]], color=C_LINE, lw=0.45,
-                    ls=(0, (2, 1.4)), zorder=2)
+        for route in STS_ROUTE[net].values():
+            ax.plot(*zip(*route), color=C_LINE, lw=0.45, ls=(0, (2, 1.4)), zorder=2)
         r = _ring(ax, xy, row)
         ax.add_patch(Rectangle((xy[0] - .17, xy[1] - .17), .34, .34, fc="white",
                                ec="black", lw=0.6, zorder=6))
@@ -437,12 +469,9 @@ def draw_panel(ax, st: Dict, title: str, norm: Normalize) -> None:
               if row["kind"] == "sts" and row["area"] == 2)
     ax.set_title(title, fontsize=7.5, pad=2)
     ax.text(0.5, -0.02,
-            "own reserve $R^+$: "
+            "TS reserve $R^+$: "
             + ", ".join(f"A{z} {a[z]['own_reserve']:.0f}" for z in (1, 2, 3))
             + " Mvar\n"
-            + "median $V$: "
-            + ", ".join(f"A{z} {a[z]['v_median']:.3f}" for z in (1, 2, 3))
-            + " pu\n"
             + f"area 2: $V_\\min$ {a[2]['v_min']:.3f} pu ({a[2]['v_min_bus']}), "
             + f"STS 1–3 inject {inj:.0f} Mvar",
             transform=ax.transAxes, ha="center", va="top", fontsize=6.5,
@@ -479,13 +508,13 @@ def draw_legend(ax) -> None:
 
     ring(0.8, "on")
     ax.text(1.7, y, "circle area: capability $Q_\\max-Q_\\min$\n"
-            "dark arc: upward reserve $Q_\\max-Q$", **tk)
+            "dark arc: over-excited reserve $Q_\\max-Q$", **tk)
     ring(15.4, "dec")
     ax.text(16.3, y, "machine decommitted\n(merit order)", **tk)
     ring(24.2, "trip")
     ax.text(25.1, y, "machine tripped\n(event)", **tk)
     ax.plot([31.2, 32.8], [y, y], color="black", lw=1.3, solid_capstyle="butt")
-    ax.text(33.2, y, "machine terminal bus\n(voltage not logged)", **tk)
+    ax.text(33.2, y, "machine terminal bus", **tk)
     x0, dy = 43.2, 0.62
     ax.add_patch(Circle((x0, y + dy), 0.13, fc="black", ec="black", lw=0.5))
     ax.text(x0 + 0.45, y + dy, "machine", **tk)
@@ -526,6 +555,7 @@ def _v_set(run: Path) -> float:
 
 def make_figure(run: Path, thesis: Path | None = None) -> Path:
     _setup()
+    _check_routes()
     panels, t_star = build_panels(run)
     v_set = _v_set(run)
     norm = Normalize(v_set - V_HALF, v_set + V_HALF)
@@ -540,7 +570,7 @@ def make_figure(run: Path, thesis: Path | None = None) -> Path:
     # panels | titles; panel gaps 0.04 panel widths
     pw = WIDTH / 3.08
     h_panel = pw * (YLIM[1] - YLIM[0]) / (XLIM[1] - XLIM[0])
-    h_leg, h_ticks, h_cb, h_txt, h_top = 1.0 * CM, 0.5 * CM, 0.22 * CM, 1.4 * CM, 0.45 * CM
+    h_leg, h_ticks, h_cb, h_txt, h_top = 1.0 * CM, 0.5 * CM, 0.22 * CM, 1.1 * CM, 0.45 * CM
     height = h_leg + h_ticks + h_cb + h_txt + h_panel + h_top
     fig = plt.figure(figsize=(WIDTH, height))
 
@@ -604,8 +634,10 @@ def _to_thesis(run: Path, out: Path, thesis: Path, t_star: float) -> None:
         f"- Figure: `graphics/Ch10/{STEM}.pdf`, made by "
         f"`experiments/ch_11_case2_multisystem/ref/figure_scarcity_sld.py`\n"
         f"- Panels: (a) L2 first record, (b) O2 and (c) O3 at t* = "
-        f"{t_star:.2f} min, the first record of the minimum area-2 own "
-        f"upward reserve under O2 (rule declared 2026-11-02).\n"
+        f"{t_star:.2f} min, the first record of the minimum area-2 TS "
+        f"reserve R+ under O2 (rule declared 2026-11-02).\n"
+        f"- Reserve: Q_max - Q in generator convention (Q > 0 injects), i.e. "
+        f"the over-excited headroom, which raises voltage.\n"
         f"- File: one row per source (machine, wind park, STS IBG), per logged "
         f"TS bus (kind `bus`, key = pandapower index = IEEE number - 1) and "
         f"per area and panel; Q in Mvar (generator convention; STS interface "

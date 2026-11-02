@@ -432,6 +432,27 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - The other filters (wear, AVR step, e_q bound) are not yet applied, and the official
     aggregate may rank them differently.
 
+- **Author: 20 workers on e5wimi for anything started after 18:30, until tomorrow morning.**
+  - Problem: a resume recomputed the host split from the worker counts. Candidates could
+    move between hosts while the remote shard still holds its old list, so units would be
+    simulated twice.
+  - Fix: `ch_9_6.kept_split` (commit ef594bd) reuses `shard_local/shard_remote.json` when
+    they cover the same candidates. Test added; run 0004's stage2a split (34 / 125) is
+    reused.
+  - Plan for 18:30 (timer set):
+    1. stop driver 97020 and the local stage2a shard tree (in-flight local units are lost);
+    2. resume with `--local-workers 20`. The remote shard `stage2a_0` keeps running and is
+       waited for; II-b rounds then use 20 here.
+    3. If a local shard is still running in the morning, restart with 10 (safe now).
+- **18:31: restart done.**
+  - Stopped driver 97020 and the local stage2a shard tree (pid 121196). At that time 106 /
+    175 local units were done.
+  - Resumed as pid 72044 with `--local-workers 20`. The log shows "split of the earlier
+    invocation kept", 34 here (20 workers) and 125 on e5power (36).
+  - Remote shard `stage2a_0` (pid 12456) kept running; there was no new launch.
+  - At 20:01: local 138 / 175, local shard pid 78672 with 20 spawn workers; remote 523 /
+    625. II-a ends ≈21:40–22:00.
+
 ## Open
 
 - On the commitment base, g_q is squeezed from both sides (superseded at 19:45: hunting is

@@ -141,7 +141,7 @@ FIXED_OVERRIDES: dict[str, Any] = {
     "verbose":                 0,
     "live_plot_controller":    False,
     "live_plot_cascade":       False,
-    "live_plot_system":        False,
+    "live_plot_overview":      False,
     "run_stability_analysis":  False,
     # The runtime curvature preconditioner REGENERATES g_w at controller
     # construction, overwriting whatever a parameter set supplied.  It must be

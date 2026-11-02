@@ -1544,6 +1544,103 @@ class TSOController(BaseOFOController):
 
         return np.concatenate([grad_v, grad_pcc, grad_i, grad_gen])
 
+    def objective_terms(
+        self,
+        measurement: Measurement,
+    ) -> Dict[str, float]:
+        """TS-zone objective Φ_TS(y^k, u^k), one entry per term.
+
+        The value whose gradient :meth:`_compute_output_gradient` (output
+        terms) and :meth:`_compute_objective_gradient` (DER reserve) build,
+        with the same activation conditions:
+
+        * ``v``       : ``Σ_i g_v,i · (V_i − V_set,i)²``
+        * ``q_pcc``   : ``g_q_tso · Σ (Q_PCC − Q_PCC,set)²``
+        * ``loss``    : ``g_loss · Σ_ℓ c_ℓ · |I_ℓ|²``
+        * ``res_sg``  : ``g_res_sg · Σ ((Q_gen − Q_mid)/Q_half)²``
+        * ``res_der`` : ``g_res_der · Σ ((Q_DER − Q_mid)/Q_half)²``
+        * ``u_reg``   : ``Σ g_u · u²``
+
+        Inactive terms are 0.  Pinned against the gradient by
+        ``tests/test_objective_terms.py``.
+        """
+        n_v = len(self.config.voltage_bus_indices)
+        n_pcc = len(self.config.pcc_trafo_indices)
+        n_i = len(self.config.current_line_indices)
+        n_gen = len(self.config.gen_indices)
+        _RES_HALF_EPS = 1e-6
+        mapping = self.config.der_mapping
+        n_der_for_u = mapping.n_der if mapping is not None else len(self.config.der_indices)
+        terms = dict.fromkeys(
+            ("v", "q_pcc", "loss", "res_sg", "res_der", "u_reg"), 0.0,
+        )
+
+        if self.config.v_setpoints_pu is not None:
+            v_current = np.zeros(n_v)
+            for j, bus_idx in enumerate(self.config.voltage_bus_indices):
+                meas_idx = np.where(measurement.bus_indices == bus_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(f"Bus {bus_idx} not found in measurement")
+                v_current[j] = measurement.voltage_magnitudes_pu[meas_idx[0]]
+            terms["v"] = float(np.sum(
+                self._g_v_vector() * (v_current - self.config.v_setpoints_pu) ** 2
+            ))
+
+        if n_pcc > 0 and self.config.g_q_tso != 0.0 and self._u_current is not None:
+            q_pcc_meas = self._extract_trafo_reactive_power(measurement)
+            q_pcc_set = self._u_current[n_der_for_u:n_der_for_u + n_pcc]
+            terms["q_pcc"] = float(
+                self.config.g_q_tso * np.sum((q_pcc_meas - q_pcc_set) ** 2)
+            )
+
+        if n_i > 0 and self.config.g_loss != 0.0:
+            c = self._loss_line_coeffs()
+            i_meas = np.zeros(n_i, dtype=np.float64)
+            for k, li in enumerate(self.config.current_line_indices):
+                m = np.where(measurement.branch_indices == li)[0]
+                if len(m) == 0:
+                    raise ValueError(
+                        f"Line {li} not found in measurement.branch_indices "
+                        f"(needed for the transmission-loss term)"
+                    )
+                i_meas[k] = float(measurement.current_magnitudes_ka[m[0]])
+            terms["loss"] = float(self.config.g_loss * np.sum(c * i_meas ** 2))
+
+        if (
+            n_gen > 0
+            and self.config.g_res_sg != 0.0
+            and self.actuator_bounds.gen_params is not None
+            and len(measurement.gen_p_mw) == n_gen
+            and len(measurement.gen_vm_pu) == n_gen
+            and len(measurement.gen_q_mvar) == n_gen
+        ):
+            q_min_g, q_max_g = self.actuator_bounds.compute_gen_q_bounds(
+                measurement.gen_p_mw, measurement.gen_vm_pu,
+            )
+            q_mid_g = 0.5 * (q_max_g + q_min_g)
+            q_half_g = 0.5 * (q_max_g - q_min_g)
+            q_gen = np.asarray(measurement.gen_q_mvar, dtype=np.float64)
+            ok_g = (q_half_g > _RES_HALF_EPS) & ~np.asarray(self._oos_gen_mask, dtype=bool)
+            terms["res_sg"] = float(self.config.g_res_sg * np.sum(
+                ((q_gen[ok_g] - q_mid_g[ok_g]) / q_half_g[ok_g]) ** 2
+            ))
+
+        if self.config.g_res_der != 0.0 and self._u_current is not None:
+            der_p = self._extract_der_active_power(measurement)
+            if n_der_for_u > 0 and len(der_p) == n_der_for_u:
+                q_min_d, q_max_d = self.actuator_bounds.compute_der_q_bounds(der_p)
+                q_mid_d = 0.5 * (q_max_d + q_min_d)
+                q_half_d = 0.5 * (q_max_d - q_min_d)
+                q_der = self._u_current[:n_der_for_u]
+                ok_d = q_half_d > _RES_HALF_EPS
+                terms["res_der"] = float(self.config.g_res_der * np.sum(
+                    ((q_der[ok_d] - q_mid_d[ok_d]) / q_half_d[ok_d]) ** 2
+                ))
+
+        if self._u_current is not None:
+            terms["u_reg"] = self._usage_cost()
+        return terms
+
     def _compute_objective_gradient(
         self,
         measurement: Measurement,

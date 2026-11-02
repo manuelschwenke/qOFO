@@ -777,7 +777,7 @@ def load_or_build_operating_points(
         cfg = _dc.replace(base_cfg, start_time=start, n_total_s=60.0,
                           contingencies=[], verbose=0,
                           live_plot_controller=False, live_plot_cascade=False,
-                          live_plot_system=False, run_stability_analysis=False,
+                          live_plot_overview=False, run_stability_analysis=False,
                           precondition_g_w=False)
         if verbose:
             print(f"[stage1] {name}: building controllers at {start} ...",
@@ -828,7 +828,7 @@ def _self_test(base_cfg, weights: Dict[str, float]) -> int:
 
     cfg = _dc.replace(base_cfg, n_total_s=60.0, contingencies=[], verbose=0,
                       live_plot_controller=False, live_plot_cascade=False,
-                      live_plot_system=False, run_stability_analysis=False,
+                      live_plot_overview=False, run_stability_analysis=False,
                       precondition_g_w=False)
     captured: Dict[str, Any] = {}
 

@@ -45,7 +45,7 @@ def test_band_reaches_every_dso_controller() -> None:
         apply_paramset(make_config(), "stage1_start_10_2026_banks", verbose=False),
         dso_v_min_pu=0.93, dso_v_max_pu=1.07, n_total_s=60.0, contingencies=[],
         verbose=0, live_plot_controller=False, live_plot_cascade=False,
-        live_plot_system=False)
+        live_plot_overview=False)
     got = {}
 
     def hook(state):

@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from time import perf_counter
@@ -152,6 +153,7 @@ from controller.gw_precondition import curvature_spectrum, precondition_g_w
 # ``tuning.ceilings``) can monkey-patch them on this module's namespace.
 from experiments.runners._multi_tso_helpers import (
     _OLTCRateLimiter,
+    _build_gen_mix_groups,
     _clamp_oltc_taps,
     _collect_contingency_watch_buses,
     _dump_contingency_diagnostics,
@@ -160,6 +162,7 @@ from experiments.runners._multi_tso_helpers import (
     _record_tso_measurement_snapshot,
     _record_hv_group_observables,
     _record_local_dso_trafo_data,
+    _record_overview_observables,
     _record_zone_live_plot_observables,
     _run_delayed_stability_analysis,
     _snapshot_oltc_taps,
@@ -984,16 +987,6 @@ def run_multi_tso_dso(
             )
             if ties:
                 tie_line_map[(z_i, z_j)] = list(ties)
-
-    gen_limits_static: Dict[int, Dict[str, float]] = {} # ToDo: what are these limits? we want to use op-diagram!
-    for g_idx in net.gen.index:
-        limits: Dict[str, float] = {}
-        for key in ("min_p_mw", "max_p_mw", "min_q_mvar", "max_q_mvar"):
-            limits[key] = (
-                float(net.gen.at[g_idx, key])
-                if key in net.gen.columns else float("nan")
-            )
-        gen_limits_static[int(g_idx)] = limits
 
     # =========================================================================
     # STEP 6: Initialise TSOControllers (one per zone)
@@ -2639,120 +2632,70 @@ def run_multi_tso_dso(
               f"(tau_sigma={config.reach_tau_sigma:.1e}, "
               f"tau_eig={config.reach_tau_eig:.1e})")
 
-    # ── Optionally create live plot windows (three figures, 1/3 screen each) ─
-    _plotter_tso = None
-    _plotter_dso = None
-    _plotter_sys = None
-    _plotter_track = None
+    # ── Overview recorder inputs (plant view; recorded every step) ───────────
+    # Generation types are classified once; the TSO tertiary banks and the
+    # DSO -> zone map feed the reactive-source and reserve aggregates.
+    _gen_mix_groups = _build_gen_mix_groups(net, meta)
+    _tso_shunts = [
+        (int(sh), int(z), str(kind), int(n_lev), float(q_step))
+        for sh, z, kind, n_lev, q_step in zip(
+            meta.tso_tertiary_shunt_indices, meta.tso_tertiary_shunt_zones,
+            meta.tso_tertiary_shunt_kinds, meta.tso_tertiary_shunt_n_levels,
+            meta.tso_tertiary_shunt_q_steps_mvar,
+        )
+    ]
+    _dso_zone: Dict[str, int] = {hv.net_id: _hv_zone(hv) for hv in meta.hv_networks}
 
+    # ── Optionally create the live windows (TS · STS · overview) ───────────
+    # They only read the records; see visualisation/live_base.py.
+    _live_windows: List[Any] = []
+    _live_kw = dict(
+        layout=config.live_plot_layout, use_tex=config.live_plot_use_tex,
+        refresh_s=config.live_plot_refresh_s, events=contingencies or (),
+    )
     if config.live_plot_controller:
-        from visualisation.plot_tso_controller import TSOControllerLivePlotter
-        _plotter_tso = TSOControllerLivePlotter(
-            zone_ids=zone_ids_sorted,
+        from visualisation.live_ts import TSLiveWindow
+
+        def _oltc_label(z: int, t: int) -> str:
+            # Machine transformer -> its generator's short name ("G7_bus35" -> "G7").
+            lv = int(net.trafo.at[t, "lv_bus"])
+            names = net.gen.loc[net.gen["bus"] == lv, "name"].astype(str).tolist()
+            return f"Z{z} {re.split(r'[ _(|]', names[0])[0]}" if names else f"Z{z} T{t}"
+
+        _live_windows.append(TSLiveWindow(
+            zone_ids_sorted,
             tie_line_pairs=sorted(tie_line_map.keys()),
-            n_oltc_per_zone={z: len(zd.oltc_trafo_indices) for z, zd in zone_defs.items()},
-            n_shunt_per_zone={
-                z: len(getattr(zd, "shunt_bus_indices", []) or [])
-                for z, zd in zone_defs.items()
-            },
-            v_setpoint_pu=config.v_setpoint_pu,
-            v_min_pu=0.9, v_max_pu=1.1,
-            sub_minute=False, update_every=1, slot_idx=0,
-            layout=config.live_plot_layout,
+            n_gen_per_zone={z: len(zd.gen_indices) for z, zd in zone_defs.items()},
+            n_der_per_zone={z: len(zd.tso_der_indices) for z, zd in zone_defs.items()},
+            oltc_lanes=[(z, _oltc_label(z, int(t))) for z in zone_ids_sorted
+                        for t in zone_defs[z].oltc_trafo_indices],
+            shunt_lanes=[
+                (sh, z, kind, f"Z{z} {str(net.shunt.at[sh, 'name']).split('|')[0]} {kind}")
+                for sh, z, kind, _n, _q in sorted(_tso_shunts, key=lambda s: (s[1], s[0]))
+            ],
+            dso_zone=_dso_zone,
+            v_setpoint_pu={z: (config.zone_v_setpoints_pu or {}).get(z, config.v_setpoint_pu)
+                           for z in zone_ids_sorted},
+            v_min_pu=config.v_min_pu, v_max_pu=config.v_max_pu,
             show_line_currents=config.live_plot_show_line_currents,
             show_reserves=config.live_plot_show_reserves,
             show_tie_flows=config.live_plot_show_tie_flows,
-            use_tex=config.live_plot_use_tex,
-        )
-
+            slot_idx=0, **_live_kw,
+        ))
     if config.live_plot_cascade and dso_ids:
-        from visualisation.plot_cascade_dso import CascadeDSOLivePlotter
-        _plotter_dso = CascadeDSOLivePlotter(
-            dso_ids=dso_ids,
+        from visualisation.live_sts import STSLiveWindow
+        _live_windows.append(STSLiveWindow(
+            dso_ids, dso_zone=_dso_zone,
             v_setpoint_pu=config.v_setpoint_pu,
             v_min_pu=config.dso_v_min_pu, v_max_pu=config.dso_v_max_pu,
-            sub_minute=False, update_every=1, slot_idx=1,
-            layout=config.live_plot_layout,
-            show_line_currents=config.live_plot_show_line_currents,
-            use_tex=config.live_plot_use_tex,
-        )
-
-    if config.live_plot_system:
-        from visualisation.plot_system_power_flow import SystemPowerFlowLivePlotter
-        # Interface trafo IDs mirror the record's trafo_key convention.
-        # In OFO mode keys are "{dso_id}|trafo_{idx}"; in local mode they fall
-        # back to "{group_id}|trafo_{idx}".  Build the OFO form when DSO
-        # controllers are present, else the local form.
-        if dso_controllers:
-            _interface_trafo_ids = [
-                f"{did}|trafo_{t}"
-                for did, ctrl in dso_controllers.items()
-                for t in ctrl.config.interface_trafo_indices
-            ]
-        else:
-            _interface_trafo_ids = [
-                f"{hv.net_id}|trafo_{t}"
-                for hv in meta.hv_networks
-                for t in hv.coupling_trafo_indices
-            ]
-        _plotter_sys = SystemPowerFlowLivePlotter(
-            zone_ids=zone_ids_sorted,
-            dso_ids=dso_ids,
-            interface_trafo_ids=_interface_trafo_ids,
-            zone_gen_indices={z: list(zd.gen_indices) for z, zd in zone_defs.items()},
-            gen_limits_static=gen_limits_static,
-            sub_minute=False, update_every=1, slot_idx=2,
-            layout=config.live_plot_layout,
-            use_tex=config.live_plot_use_tex,
-        )
-
-    if config.live_plot_tracking:
-        from visualisation.plot_tracking import TrackingLivePlotter
-        # Per-DSO interface-trafo key map, matching the record's trafo_key
-        # convention "{dso_id}|trafo_{idx}" (OFO controllers when present,
-        # else the local-DSO HV-network fallback — see SystemPowerFlow above).
-        if dso_controllers:
-            _track_trafo_keys = {
-                did: [f"{did}|trafo_{t}" for t in ctrl.config.interface_trafo_indices]
-                for did, ctrl in dso_controllers.items()
-            }
-        else:
-            _track_trafo_keys = {
-                hv.net_id: [f"{hv.net_id}|trafo_{t}" for t in hv.coupling_trafo_indices]
-                for hv in meta.hv_networks
-            }
-        # Tie-Q monitoring per zone-pair: the tracking plot shows the measured
-        # inter-zone tie flow against a fixed 0 Mvar reference — tie-Q is
-        # observed, not controlled (no commanded tie-flow setpoint exists).
-        _plotter_track = TrackingLivePlotter(
-            zone_ids=zone_ids_sorted,
-            n_v_bus_per_zone={z: len(zd.v_bus_indices) for z, zd in zone_defs.items()},
-            dso_ids=dso_ids,
-            dso_trafo_keys=_track_trafo_keys,
-            tie_line_pairs=sorted(tie_line_map.keys()),
-            sub_minute=False, update_every=1, slot_idx=2,
-            layout=config.live_plot_layout,
-            use_tex=config.live_plot_use_tex,
-        )
-
-    # Figure 6 — SBX MECHANISM (gated; None when off).  Corridor keys are
-    # discovered from the first record; the adapter handle is passed per
-    # step (None until the contract-freeze tick).
-    _plotter_sbx = None
-    if config.live_plot_sbx:
-        if config.coordination_mode != "sbx":
-            raise ValueError(
-                "live_plot_sbx=True requires coordination_mode='sbx_h' — "
-                "the figure draws scheduled-voltage hold/sag support state."
-            )
-        from visualisation.plot_sbx import SBXMechanismLivePlotter
-        _plotter_sbx = SBXMechanismLivePlotter(
-            layout=config.live_plot_layout,
-            use_tex=config.live_plot_use_tex,
-        )
-        # Handle for experiments (e.g. saving the final figure) — read
-        # from the pre_loop_hook state alongside the adapter.
-        sbx_runtime["live_plotter"] = _plotter_sbx
+            slot_idx=1, **_live_kw,
+        ))
+    if config.live_plot_overview:
+        from visualisation.live_overview import OverviewLiveWindow
+        _live_windows.append(OverviewLiveWindow(
+            zone_ids_sorted, dso_ids if dso_controllers else [],
+            slot_idx=2, **_live_kw,
+        ))
 
     # Figure 7 — SBX-V MECHANISM (gated; None when off).  The plotter
     # reads only adapter-side market/metering state and recorded plant
@@ -4010,6 +3953,8 @@ def run_multi_tso_dso(
                 rec.zone_v_gen[z]         = u[off:off+n_gen].copy(); off += n_gen
                 rec.zone_oltc_taps[z]     = u[off:off+n_oltc].copy(); off += n_oltc
                 rec.zone_tso_objective[z] = tso_out.objective_value
+                if getattr(tso_out, "objective_terms", None):
+                    rec.zone_tso_cost_terms[z] = dict(tso_out.objective_terms)
                 rec.zone_tso_status[z]    = tso_out.solver_status
                 rec.zone_tso_solve_s[z]   = tso_out.solve_time_s
 
@@ -4568,6 +4513,8 @@ def run_multi_tso_dso(
                     float(dso_out.objective_value)
                     if dso_out.objective_value is not None else None
                 )
+                if dso_out.objective_terms:
+                    rec.dso_cost_terms[dso_id] = dict(dso_out.objective_terms)
                 rec.dso_status[dso_id] = str(dso_out.solver_status)
                 rec.dso_sigma_norm[dso_id] = float(
                     np.linalg.norm(np.asarray(dso_out.sigma, dtype=float))
@@ -4968,6 +4915,12 @@ def run_multi_tso_dso(
             zone_defs=zone_defs, tn_zone_map=tn_zone_map,
             tie_line_map=tie_line_map,
         )
+        _record_overview_observables(
+            rec, net,
+            zone_defs=zone_defs, tso_controllers=tso_controllers,
+            mix_groups=_gen_mix_groups, tso_shunts=_tso_shunts,
+            dso_zone=_dso_zone,
+        )
 
         # Controller-facing analogue snapshots: these are the same noisy
         # pre-control packets consumed by the OFO controllers.  Exact plant
@@ -5037,37 +4990,8 @@ def run_multi_tso_dso(
         rec.total_gen_q_mvar   = float(net.res_gen["q_mvar"].sum()) + float(net.res_ext_grid["q_mvar"].sum())
         rec.residual_load_p_mw = rec.total_load_p_mw - rec.total_sgen_p_mw
 
-        if _plotter_tso is not None:
-            _plotter_tso.update(rec)
-        if _plotter_dso is not None:
-            _plotter_dso.update(rec)
-        if _plotter_sys is not None:
-            _plotter_sys.update(rec)
-        if _plotter_track is not None:
-            _plotter_track.update(rec)
-        if _plotter_sbx is not None:
-            # True reference-end corridor flow: q measured AT each tie's
-            # bus_a endpoint (q_from or q_to per line orientation).
-            # rec.zone_tie_q_mvar is NOT usable here: it negates q_from
-            # for lines oriented from the higher zone, which misstates
-            # heavily charged ties (line 14: ~107 Mvar of charging)
-            # relative to the SBX schedule convention.
-            _sbx_ad = sbx_runtime["adapter"]
-            _sbx_q = None
-            if _sbx_ad is not None:
-                _sbx_q = {}
-                for _ck, _corr in _sbx_ad.registry.items():
-                    _tot = 0.0
-                    for _ln in _corr.lines:
-                        if int(net.line.at[_ln.line_idx, "from_bus"]) \
-                                == _ln.bus_a:
-                            _tot += float(net.res_line.at[
-                                _ln.line_idx, "q_from_mvar"])
-                        else:
-                            _tot += float(net.res_line.at[
-                                _ln.line_idx, "q_to_mvar"])
-                    _sbx_q[_ck] = _tot
-            _plotter_sbx.update(rec, _sbx_ad, _sbx_q)
+        for _win in _live_windows:
+            _win.update(rec)
 
         # ── SBX-V four-quadrant metering: record the elapsed plant
         # interval [t − dt, t) with this step's post-power-flow boundary
@@ -5137,6 +5061,9 @@ def run_multi_tso_dso(
                 except Exception as _exc:
                     if verbose >= 1:
                         print(f"  WARNING: delayed stability analysis failed: {_exc}")
+
+    for _win in _live_windows:
+        _win.finalize()
 
     # =========================================================================
     # STEP 14: Print final summary

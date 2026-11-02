@@ -43,7 +43,7 @@ def baseline_cfg() -> MultiTSOConfig:
         verbose=0,
         live_plot_controller=False,
         live_plot_cascade=False,
-        live_plot_system=False,
+        live_plot_overview=False,
         use_profiles=True,
         start_time=datetime(2016, 4, 15, 12, 0),
         contingencies=[],

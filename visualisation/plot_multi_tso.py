@@ -4,11 +4,8 @@ Multi-TSO/DSO post-run comparison plotting
 
 Post-run comparison between two simulation logs (``log_a`` vs. ``log_b``),
 typically "coordinated TSO-DSO OFO" vs. "local DSO control".  The live
-plotters for MULTI-TSO CONTROLLER, CASCADE-DSO CONTROLLER and SYSTEM
-POWER FLOW have moved to dedicated modules
-:mod:`visualisation.plot_tso_controller`,
-:mod:`visualisation.plot_cascade_dso`, and
-:mod:`visualisation.plot_system_power_flow`.
+windows are :mod:`visualisation.live_ts`, :mod:`visualisation.live_sts`
+and :mod:`visualisation.live_overview`.
 
 This module keeps only the post-run comparison tooling
 (``plot_coordination_comparison``) because that is the only public symbol

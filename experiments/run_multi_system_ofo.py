@@ -103,7 +103,6 @@ def main_comparison() -> None:
         run_stability_analysis=False,
         sensitivity_update_interval=1E6,  # refresh H_ij every N TSO steps
         verbose=1,
-        live_plot_system=False,
         # ── Profile & contingency settings ───────────────────────────────
         start_time=datetime(2016, 4, 15, 12, 0),
         use_profiles=True,
@@ -300,9 +299,7 @@ def make_config() -> MultiTSOConfig:
         # -- Diagnostics -----------------------------------------------------
         live_plot_controller=True,
         live_plot_cascade=True,
-        live_plot_system=False,
-        live_plot_tracking=False,
-        live_plot_sbx=False,
+        live_plot_overview=True,
         local_sensitivities_tso=True,
         local_sensitivities_dso=True,
         # -- Boundary equivalent for neighbouring TS areas -------------------

@@ -37,7 +37,7 @@ base = dc.replace(base, dso_der_scale=dict(FROZEN_DSO_DER_SCALE),
 start = dict((c[0], c[1]) for c in CONDITIONS)["W1"]
 cfg = dc.replace(base, start_time=start, n_total_s=60.0, contingencies=[], verbose=0,
                  live_plot_controller=False, live_plot_cascade=False,
-                 live_plot_system=False, run_stability_analysis=False,
+                 live_plot_overview=False, run_stability_analysis=False,
                  precondition_g_w=False)
 cap = {}
 get_run_multi_tso_dso()(cfg, pre_loop_hook=lambda s: cap.update(s) or True)

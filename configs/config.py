@@ -987,22 +987,25 @@ class MultiTSOConfig:
 
     # -- Live plot -------------------------------------------------------------
     live_plot_controller: bool = False
-    """Enable Figure 1 — MULTI-TSO CONTROLLER live plot."""
+    """Enable live window 1 — TS (Layer 1): controlled outputs and actuators
+    of every zone, metered view.  See :class:`visualisation.live_ts.TSLiveWindow`."""
 
     live_plot_cascade:    bool = False
-    """Enable Figure 2 — CASCADE-DSO CONTROLLER live plot."""
+    """Enable live window 2 — STS (Layer 2): one row per DSO with interface-Q
+    tracking, HV voltages, DER Q and coupler taps, metered view.  See
+    :class:`visualisation.live_sts.STSLiveWindow`."""
 
-    live_plot_system:     bool = False
-    """Enable Figure 3 — SYSTEM POWER FLOW live plot."""
+    live_plot_overview:   bool = False
+    """Enable live window 3 — system overview (plant view): generation infeed
+    by type in merit order, per-zone Q injection by source, per-zone up/down
+    Q reserve by source (STS share from the reported capability), and the
+    plant-level objective Φ against the step-QP optimum |J*| per controller.
+    See :class:`visualisation.live_overview.OverviewLiveWindow`."""
 
-    live_plot_tracking:   bool = False
-    """Enable Figure 4 — TRACKING ERRORS & RESERVES live plot.
-
-    Six tiles: per-zone and system-wide TS voltage tracking RMS error,
-    per-DSO TSO-DSO interface-Q tracking RMS error, system-wide tie-line-Q
-    tracking RMS error, plus synchronous-generator and TSO-DER reactive-power
-    reserve r_Q(P) (one line per machine / DER).  See
-    :class:`visualisation.plot_tracking.TrackingLivePlotter`."""
+    live_plot_refresh_s:  float = 2.0
+    """Minimum wall-clock time between two redraws of a live window [s].
+    Every step is still recorded into the window's buffers; only drawing is
+    throttled, and the final state is drawn when the run ends."""
 
     live_plot_use_tex:    bool = False
     """When True, live plots enable ``text.usetex`` with a classicthesis-
@@ -1011,19 +1014,16 @@ class MultiTSOConfig:
     Palatino-family serif font without any LaTeX dependency."""
 
     live_plot_show_line_currents: bool = False
-    """When False, hide the TSO-line-currents tile on Figure 1 and the
-    DSO-line-currents tile on Figure 2.  Useful to make more vertical
-    room for the remaining tiles."""
+    """When True, add the TS line-loading tile to live window 1."""
 
     live_plot_show_reserves: bool = True
-    """When True, show the TSO reactive-reserve tile on Figure 1 (per-zone
-    mean normalised reserve of synchronous machines (solid) and TSO DER
-    (dashed), 0 = at a capability limit, 0.5 = mid-band)."""
+    """When True, show the normalised Q-reserve tile on live window 1
+    (per zone: SG mean (solid) and minimum (dotted), TS-DER mean (dashed);
+    0 = at a capability limit, 0.5 = mid-band)."""
 
     live_plot_show_tie_flows: bool = True
-    """When True, show the TSO inter-zone tie-line reactive-flow tile on
-    Figure 1.  Set False to free vertical room when tie lines are not of
-    interest (e.g. single-zone studies)."""
+    """When True, show the inter-zone tie-line Q tile on live window 1.  Set
+    False for single-zone studies."""
 
 
     sbx_v_std_schedule_path: Optional[str] = None
@@ -1035,25 +1035,21 @@ class MultiTSOConfig:
     the default schedule assembled from each TSO controller's intended
     terminal-voltage setpoints."""
 
-    live_plot_sbx: bool = False
-    """Enable the SBX-H live thesis figure (requires
-    ``coordination_mode="sbx_h"`` or its internal alias ``"sbx"``).
-    Per corridor it shows measured Q, the scheduled-voltage baseline Q_0,
-    the Q deadband, paid Q_sup, measured/scheduled terminal voltages,
-    hold/sag state strips, and cumulative bilateral payments. See
-    :class:`visualisation.plot_sbx.SBXMechanismLivePlotter`."""
-
     live_plot_sbxv: bool = False
     """Enable the SBX-V live figure (requires ``coordination_mode="sbx_v"``
     or ``"sbxv"``), showing Normalbereich bands, requests, grants, metering,
     and cumulative remuneration."""
 
     live_plot_layout: str = "dual_screen"
-    """Window layout for the three live figures.
-    ``"thirds"``      -- three figures side-by-side, 1/3 primary screen each.
-    ``"dual_screen"`` -- Figures 1 and 2 half/half on the primary screen;
-                         Figure 3 full-screen on the secondary screen
+    """Window layout for the three live windows.
+    ``"thirds"``      -- side by side, 1/3 of the primary screen each.
+    ``"dual_screen"`` -- TS and STS half/half on the primary screen; the
+                         overview full-screen on the secondary screen
                          (falls back to ``"thirds"`` if no secondary).
+    ``"dual_screen_half"`` -- as ``"dual_screen"``, the overview on the
+                         left half of the secondary screen.
+    The overview arranges its tiles for the slot it gets: landscape on a
+    full screen, one row per zone on a half screen or a third.
     """
 
     # -- Time-series profiles --------------------------------------------------

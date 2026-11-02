@@ -113,7 +113,7 @@ def load_or_capture(base_cfg, conditions: Sequence[tuple], cache_dir: Path,
         cfg = dataclasses.replace(
             base_cfg, start_time=start, n_total_s=60.0, contingencies=[],
             verbose=0, live_plot_controller=False, live_plot_cascade=False,
-            live_plot_system=False, run_stability_analysis=False,
+            live_plot_overview=False, run_stability_analysis=False,
             precondition_g_w=False)
         if verbose:
             print(f"[settle-pred] {name}: capturing STS sensitivities ...",

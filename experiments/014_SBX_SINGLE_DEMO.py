@@ -7,14 +7,13 @@ ex-post remuneration mechanism. It runs one three-area TS/DS simulation
 with a constant 1.03 pu planning reference and SBX-H enabled from the
 converged initial operating point:
 
-- minute 0: SBX-H contracts and the live mechanism plot start;
+- minute 0: SBX-H contracts start;
 - minute 60: a 500 Mvar reactive sink is connected in area 3;
 - minute 240: the sink is removed;
 - minute 300: experiment ends after a recovery interval.
 
-The live figure shows, for every corridor, Q_meas, the measured-P
-baseline Q_0, the deadband, paid Q_sup, both terminal-voltage pairs,
-scheduled voltage references, hold/violation states, and cumulative payments.
+The SBX-H mechanism live figure was removed on 2026-11-02; the settlement
+ledger and the reports below carry the per-corridor outcome.
 
 Default run:
     python experiments/014_SBX_SINGLE_DEMO.py
@@ -23,7 +22,7 @@ Planning assumption:
     every area uses 1.03 pu for the full experiment; no schedule change
     or real-time support request is issued.
 
-Headless verification with the same final figure:
+Headless verification:
     python experiments/014_SBX_SINGLE_DEMO.py --no-live
 
 A shorter horizon may be used for smoke tests; events outside that
@@ -171,13 +170,11 @@ def make_config(
     #         ContingencyEvent(minute=720, element_type="load", bus=7, p_mw=300, q_mvar=100, action="connect"),
     #         ContingencyEvent(minute=900, element_type="load", bus=7, p_mw=300, q_mvar=100, action="trip"),
     #     ]
-    # One live figure only. In headless mode the same plotter runs on
-    # the Agg backend so the saved thesis figure follows the live path.
+    # The SBX-H mechanism figure (live_plot_sbx) was removed on 2026-11-02;
+    # the run keeps the TS / STS live windows and writes the settlement
+    # outputs below.
     cfg.live_plot_controller = True
     cfg.live_plot_cascade = True
-    cfg.live_plot_system = False
-    cfg.live_plot_tracking = False
-    cfg.live_plot_sbx = True
     return cfg
 
 
@@ -351,7 +348,7 @@ def main() -> int:
     parser.add_argument(
         "--no-live",
         action="store_true",
-        help="use a headless backend; the final figure is still saved",
+        help="use a headless backend (no live windows)",
     )
     parser.add_argument(
         "--output-dir",
@@ -408,15 +405,12 @@ def main() -> int:
 
     runtime = captured.get("sbx_runtime") or {}
     adapter = runtime.get("adapter")
-    plotter = runtime.get("live_plotter")
     if adapter is None:
         rep1(
             "run completed without an SBX-H adapter",
             sbx_start_s=cfg.sbx_warmup_s,
             horizon_s=cfg.n_total_s,
         )
-    if plotter is None:
-        rep1("SBX-H live plotter was not constructed")
 
     from sbx_h.settlement import write_settlement_outputs
 
@@ -429,8 +423,6 @@ def main() -> int:
     settlement_md = output_dir / "sbx_h_settlement_summary.md"
     os.replace(generated_csv, csv_path)
     os.replace(generated_md, settlement_md)
-    figure_path = output_dir / "sbx_h_mechanism.png"
-    plotter.save(figure_path)
     summary_path = output_dir / "experiment_summary.md"
     write_experiment_summary(
         summary_path,
@@ -450,7 +442,6 @@ def main() -> int:
     )
     print(f"  completed {len(records)} plant steps in {wall_s:.1f} s")
     print(f"  paid support windows: {paid_windows}")
-    print(f"  figure:             {figure_path}")
     print(f"  settlement ledger: {csv_path}")
     print(f"  settlement report: {settlement_md}")
     print(f"  experiment report: {summary_path}")

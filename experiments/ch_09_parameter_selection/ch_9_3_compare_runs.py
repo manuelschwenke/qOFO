@@ -84,7 +84,7 @@ def _run_one(job: Dict[str, Any]) -> Dict[str, Any]:
         # Headless: the live plots are interactive windows and would either
         # block or be discarded.  The figures come from the records instead.
         live_plot_controller=False, live_plot_cascade=False,
-        live_plot_system=False, live_plot_tracking=False, live_plot_sbx=False,
+        live_plot_overview=False,
         verbose=0,
     )
     t0 = time.perf_counter()

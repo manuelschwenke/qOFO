@@ -149,8 +149,8 @@ FROZEN_DSO_LOAD_P_SCALE: Dict[str, float] = {"DSO_3": 2.0}
 #: ``live_plot_show_tie_flows`` default to True and are display options of a
 #: window that will not exist, so they are left alone.
 _LIVE_PLOT_FIELDS: Tuple[str, ...] = (
-    "live_plot_controller", "live_plot_cascade", "live_plot_system",
-    "live_plot_tracking", "live_plot_sbx", "live_plot_sbxv",
+    "live_plot_controller", "live_plot_cascade", "live_plot_overview",
+    "live_plot_sbxv",
 )
 
 

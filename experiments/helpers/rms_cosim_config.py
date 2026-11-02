@@ -117,9 +117,7 @@ def make_cosim_config(duration_s: float, *, verbose: int,
     cfg.enable_reachability_guard = False
     cfg.live_plot_controller = False
     cfg.live_plot_cascade = False
-    cfg.live_plot_system = False
-    cfg.live_plot_tracking = False
-    cfg.live_plot_sbx = False
+    cfg.live_plot_overview = False
     cfg.verbose = int(verbose)
     return cfg
 

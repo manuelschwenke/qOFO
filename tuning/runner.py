@@ -158,8 +158,8 @@ def run_scenario_with_records(
     # building on the INTERACTIVE ``make_config()`` would otherwise inherit
     # silently (measured 2026-09-15, after the Chapter-9 lineage moved onto it).
     _no_plots = {name: False for name in (
-        "live_plot_controller", "live_plot_cascade", "live_plot_system",
-        "live_plot_tracking", "live_plot_sbx", "live_plot_sbxv",
+        "live_plot_controller", "live_plot_cascade", "live_plot_overview",
+        "live_plot_sbxv",
     ) if getattr(cfg_sc, name, False)}
     if _no_plots:
         cfg_sc = dataclasses.replace(cfg_sc, **_no_plots)

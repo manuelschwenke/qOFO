@@ -183,9 +183,7 @@ def base_config(minutes: int = HORIZON_MIN) -> MultiTSOConfig:
         # control path, identical for every variant.
         live_plot_controller=False,
         live_plot_cascade=False,
-        live_plot_system=False,
-        live_plot_tracking=False,
-        live_plot_sbx=False,
+        live_plot_overview=False,
         live_plot_sbxv=False,
     )
     return apply_paramset(cfg, PARAMSET, verbose=False)

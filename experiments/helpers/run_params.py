@@ -51,8 +51,11 @@ __all__ = ["config_fingerprint", "dump_params", "sanitise"]
 #: Fields excluded from the fingerprint: they change what is written or shown,
 #: not what is computed, so including them would defeat caching for no gain.
 _FINGERPRINT_IGNORE = frozenset({
-    "verbose", "live_plot_controller", "live_plot_cascade", "live_plot_system",
-    "live_plot_tracking", "live_plot_sbx", "live_plot_show_reserves",
+    "verbose", "live_plot_controller", "live_plot_cascade", "live_plot_overview",
+    "live_plot_refresh_s", "live_plot_show_reserves",
+    # Removed 2026-11-02; kept so configs unpickled from older runs
+    # fingerprint as they did.
+    "live_plot_system", "live_plot_tracking", "live_plot_sbx",
     "live_plot_show_tie_flows", "run_stability_analysis", "results_dir",
     "run_name", "save_records",
 })

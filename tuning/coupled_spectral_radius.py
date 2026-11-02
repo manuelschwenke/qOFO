@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     overlay: Dict[str, Any] = dict(
         n_total_s=60.0, contingencies=[], verbose=0,
         live_plot_controller=False, live_plot_cascade=False,
-        live_plot_system=False, run_stability_analysis=False,
+        live_plot_overview=False, run_stability_analysis=False,
         precondition_g_w=False,
     )
     if args.condition:

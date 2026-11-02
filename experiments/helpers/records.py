@@ -395,13 +395,59 @@ class MultiTSOIterationRecord:
     ``min(q_max - q, q - q_min) / (q_max - q_min)`` from the Milano §12.2.1
     capability band at the current P / terminal V.  Ranges 0 (at a limit)
     to 0.5 (mid-band); NaN where the band has zero width.  Feeds the
-    TRACKING ERRORS & RESERVES live plot (``live_plot_tracking``)."""
+    post-run reserve analyses."""
 
     tso_der_q_reserve: Dict[int, NDArray] = field(default_factory=dict)
     """Per-zone array, parallel to ``zone_q_der``: normalised reactive-power
     reserve of each TSO-connected DER, same definition as
     ``gen_q_reserve`` but using the VDE-AR-N-4120 / STATCOM capability band
     from ``ActuatorBounds.compute_der_q_bounds`` at the current P."""
+
+    # ── Overview observables (added 2026-11-02, live-plot rework) ──────────────
+    # Defaulted so older pickles load; an empty dict means "not recorded".
+    zone_tso_cost_terms: Dict[int, Dict[str, float]] = field(default_factory=dict)
+    """Per-zone plant-level TS objective Φ_TS(y^k, u^k) split by term
+    (``TSOController.objective_terms``), on the measurement and linearisation
+    point of the TSO step; written on TSO ticks only.  Unlike
+    ``zone_tso_objective`` (the step-QP optimum, a predicted change), Φ is the
+    cost the steps descend, so its trajectory shows actual improvement."""
+    dso_cost_terms: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    """Per-DSO Φ_STS split by term (``DSOController.objective_terms``);
+    written on DSO ticks only."""
+
+    gen_mix_p_mw: Dict[str, float] = field(default_factory=dict)
+    """System active-power infeed by generation type [MW], plant truth.
+    Synchronous machines by ``net.gen.type``; the network equivalent (G1 and
+    any ext_grid) as ``"Equivalent"``; wind / PV split into TS-connected and
+    STS-connected units.  Insertion order is the merit order (renewables,
+    Hydro, Nuclear, Coal, Equivalent) and is the live plot's stacking order;
+    absent types have no key."""
+    total_load_res_p_mw: float = float("nan")
+    """Σ ``net.res_load.p_mw`` after the power flow (voltage-dependent load
+    included, unlike ``total_load_p_mw`` which sums the set values)."""
+
+    zone_q_source_mvar: Dict[int, Dict[str, float]] = field(default_factory=dict)
+    """Per-zone reactive injection into the TS by source [Mvar, generator
+    convention, plant truth]: ``"SG"``, ``"TS-DER"``, ``"MSC/MSR"`` (TSO
+    tertiary banks), ``"STS"`` (−Σ Q_PCC at the EHV side minus the tertiary
+    banks, i.e. the sub-transmission exchange including coupler losses),
+    ``"Ties"`` (net import over inter-zone tie lines) and ``"Equivalent"``
+    (machines typed ``Equivalent``, i.e. the G1 network anchor, kept out of
+    ``"SG"``)."""
+    zone_q_reserve_up_mvar: Dict[int, Dict[str, float]] = field(default_factory=dict)
+    """Per-zone remaining capability to INCREASE reactive injection into the
+    TS [Mvar], by source: ``"SG"`` (Milano capability at current P, V_set),
+    ``"TS-DER"`` (grid-code capability at current P), ``"MSC/MSR"``
+    (switchable nameplate steps), ``"STS"`` (from the capability interval
+    the DSOs last reported, NaN when none is reported) and ``"Equivalent"``
+    (the network anchor, separate because it dwarfs the zone's own units)."""
+    zone_q_reserve_dn_mvar: Dict[int, Dict[str, float]] = field(default_factory=dict)
+    """Same as ``zone_q_reserve_up_mvar`` for DECREASING injection
+    (absorbing more)."""
+    tso_shunt_step: Dict[int, int] = field(default_factory=dict)
+    """``{net.shunt index: step}`` for every TSO tertiary bank, read from the
+    plant in every shunt dispatch mode (``zone_tso_shunt_states`` is empty
+    unless the banks are MIQP-dispatched)."""
 
     # ── Slack-Q saturation diagnostic (added 2026-05-02) ────────────────────────
     # Populated post-PF in run_multi_tso_dso() to expose slack saturation in

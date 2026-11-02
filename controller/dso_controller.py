@@ -1286,6 +1286,49 @@ class DSOController(BaseOFOController):
 
         return grad_f
 
+    def objective_terms(
+        self,
+        measurement: Measurement,
+    ) -> Dict[str, float]:
+        """STS objective Φ_STS(y^k, u^k), one entry per term.
+
+        The value whose gradient :meth:`_compute_objective_gradient` builds:
+
+        * ``q_iface`` : ``g_q · Σ (Q_interface − Q_set)²``
+        * ``v``       : ``g_v · Σ (V − V_set)²``  (when ``v_setpoints_pu`` is set)
+        * ``u_reg``   : ``Σ g_u · u²``
+
+        The OLTC attenuation ``gamma_oltc_q`` scales the gradient's OLTC
+        columns, not Φ, so for ``gamma_oltc_q != 1`` the step direction on
+        the taps is not the exact gradient of this value.
+        """
+        n_v = len(self.config.voltage_bus_indices)
+        q_interface = np.zeros(len(self.config.interface_trafo_indices))
+        for i, trafo_idx in enumerate(self.config.interface_trafo_indices):
+            meas_idx = np.where(
+                measurement.interface_transformer_indices == trafo_idx
+            )[0]
+            if len(meas_idx) > 0:
+                q_interface[i] = measurement.interface_q_hv_side_mvar[meas_idx[0]]
+        terms = {
+            "q_iface": float(self.config.g_q * np.sum(
+                (q_interface - self.q_setpoint_mvar) ** 2
+            )),
+            "v": 0.0,
+            "u_reg": self._usage_cost() if self._u_current is not None else 0.0,
+        }
+        if self.config.v_setpoints_pu is not None:
+            v_current = np.zeros(n_v)
+            for j, bus_idx in enumerate(self.config.voltage_bus_indices):
+                meas_idx = np.where(measurement.bus_indices == bus_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(f"Bus {bus_idx} not found in measurement")
+                v_current[j] = measurement.voltage_magnitudes_pu[meas_idx[0]]
+            terms["v"] = float(self.config.g_v * np.sum(
+                (v_current - self.config.v_setpoints_pu) ** 2
+            ))
+        return terms
+
     def _build_sensitivity_matrix(self) -> NDArray[np.float64]:
         """Build the input-output sensitivity matrix H."""
         if self._H_cache is not None:

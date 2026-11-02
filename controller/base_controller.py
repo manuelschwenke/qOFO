@@ -186,6 +186,13 @@ class ControllerOutput:
         Status string from the MIQP solver.
     solve_time_s : float
         Solver computation time in seconds.
+    objective_terms : dict[str, float], optional
+        Plant-level objective Φ(y^k, u^k) split by term, evaluated on the
+        same measurement and at the same linearisation point as the
+        gradient of this step (see :meth:`BaseOFOController.objective_terms`).
+        ``objective_value`` is the optimum of the step QP (the predicted
+        change of the local model); this is the cost the steps descend.
+        ``None`` for controllers that do not define Φ.
     """
     iteration: int
     u_new: NDArray[np.float64]
@@ -197,7 +204,8 @@ class ControllerOutput:
     objective_value: float
     solver_status: str
     solve_time_s: float
-    
+    objective_terms: Optional[Dict[str, float]] = None
+
     @property
     def is_optimal(self) -> bool:
         """Check if the solver found an optimal solution."""
@@ -544,7 +552,10 @@ class BaseOFOController(ABC):
         
         # Step 5: Compute objective gradient
         grad_f = self._compute_objective_gradient(measurement)
-        
+        # Step 5b: The objective itself at the same point (diagnostic only;
+        # reads state, writes none, so the step is unchanged).
+        objective_terms = self.objective_terms(measurement)
+
         # Step 6: Build sensitivity matrix H
         #   _build_sensitivity_matrix returns the bus-level H (full rank).
         #   If a DER mapping is active, expand to per-DER via H_bus @ E.
@@ -663,6 +674,7 @@ class BaseOFOController(ABC):
             objective_value=result.objective_value,
             solver_status=result.status,
             solve_time_s=result.solve_time_s,
+            objective_terms=objective_terms,
         )
     
     def reset(self) -> None:
@@ -833,7 +845,40 @@ class BaseOFOController(ABC):
             Objective gradient vector.
         """
         pass
-    
+
+    def objective_terms(
+        self,
+        measurement: Measurement,
+    ) -> Optional[Dict[str, float]]:
+        """Plant-level objective Φ(y^k, u^k), one entry per term.
+
+        Diagnostic counterpart of :meth:`_compute_objective_gradient`:
+        the same terms, weights and measurement, evaluated as values.  The
+        step QP optimum (``ControllerOutput.objective_value``) is the
+        predicted change of the local model; whether the closed loop
+        actually lowers the cost is read from Φ.  Must not modify state.
+
+        The base controller defines no Φ and returns ``None``.
+        """
+        return None
+
+    def _usage_cost(self) -> float:
+        """Regularisation term ``Σ_i g_u,i · u_i²`` of Φ.
+
+        Its gradient ``2·g_u·u`` is the term :func:`build_miqp_problem`
+        adds to ``grad_f``; same weight vector as the MIQP build.
+        """
+        _, g_u_vector = self._get_per_variable_weights()
+        g_u = (
+            np.asarray(g_u_vector, dtype=np.float64)
+            if g_u_vector is not None
+            else np.broadcast_to(
+                np.asarray(self.params.g_u, dtype=np.float64),
+                self._u_current.shape,
+            )
+        )
+        return float(np.sum(g_u * self._u_current ** 2))
+
     @abstractmethod
     def _build_sensitivity_matrix(self) -> NDArray[np.float64]:
         """

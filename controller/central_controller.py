@@ -45,7 +45,7 @@ Author: Manuel Schwenke / Claude Code
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -344,3 +344,22 @@ class CentralOFOController(TSOController):
         dV_du = H[:n_v, :]
         grad_f += 2.0 * ((self.g_v_per_bus * v_error) @ dV_du)
         return grad_f
+
+    def objective_terms(self, measurement: Measurement) -> Dict[str, float]:
+        """Φ of the monolithic objective: ``Σ w_i (V_i − V_set,i)²`` and
+        ``Σ g_u u²`` (the TS-zone terms of the parent do not apply)."""
+        terms = {"v": 0.0, "u_reg": 0.0}
+        n_v = len(self.config.voltage_bus_indices)
+        if self.config.v_setpoints_pu is not None and n_v > 0:
+            v_current = np.zeros(n_v, dtype=np.float64)
+            for j, bus_idx in enumerate(self.config.voltage_bus_indices):
+                meas_idx = np.where(measurement.bus_indices == bus_idx)[0]
+                if len(meas_idx) == 0:
+                    raise ValueError(f"Bus {bus_idx} not found in measurement")
+                v_current[j] = measurement.voltage_magnitudes_pu[meas_idx[0]]
+            terms["v"] = float(np.sum(
+                self.g_v_per_bus * (v_current - self.config.v_setpoints_pu) ** 2
+            ))
+        if self._u_current is not None:
+            terms["u_reg"] = self._usage_cost()
+        return terms

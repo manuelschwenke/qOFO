@@ -1,9 +1,8 @@
 """
 Shared visualisation styling (classicthesis look).
 
-Used by all live-plotter modules in ``visualisation/`` to give the
-MULTI-TSO CONTROLLER, CASCADE-DSO CONTROLLER, and SYSTEM POWER FLOW
-figures a consistent appearance:
+Used by the live windows in ``visualisation/`` (TS, STS, system
+overview, SBX-V) and the post-run figures for a consistent appearance:
 
 * Palatino-family serif fonts via rcParams (no LaTeX required).
 * Optional ``text.usetex=True`` with a mathpazo + eulervm preamble
@@ -14,12 +13,13 @@ figures a consistent appearance:
 * Left-aligned UPPERCASE subplot titles (``tile_title``).
 * Coloured figure header (``draw_figure_header``) and section
   bands (``draw_section_band``).
-* Three-pane side-by-side window tiling on Qt5Agg
-  (``position_figure_in_slot``).
+* Window tiling on Qt5Agg across one or two screens
+  (``slot_geometry`` / ``position_figure_in_slot``).
 """
 from __future__ import annotations
 
 import os
+from typing import Optional, Tuple
 
 import matplotlib as mpl
 
@@ -201,6 +201,56 @@ def apply_x_fmt(ax: plt.Axes, sub_minute: bool = False) -> None:
 # ─── Window placement (three-pane side-by-side tiling) ──────────────────────
 
 
+def slot_geometry(
+    slot_idx: int,
+    *,
+    layout: str = "dual_screen",
+    n_slots: int = 3,
+) -> Optional[Tuple[int, int, int, int]]:
+    """Screen rectangle ``(x, y, w, h)`` of a slot, or ``None``.
+
+    Layouts:
+
+    * ``"thirds"`` — slots side by side on the primary screen, each
+      ``1/n_slots`` of its width and the full height.
+    * ``"dual_screen"`` — slots 0 and 1 share the primary screen half and
+      half; slot 2 takes the full secondary screen.
+    * ``"dual_screen_half"`` — as ``"dual_screen"``, but slot 2 takes the
+      left half of the secondary screen.
+
+    Both dual layouts fall back to ``"thirds"`` with a single screen.
+    ``None`` on non-Qt backends, without PyQt5, or before a Qt application
+    exists (e.g. on the headless ``Agg`` backend).
+    """
+    if "Qt" not in mpl.get_backend():
+        return None
+    try:
+        from PyQt5.QtWidgets import QApplication
+    except (ImportError, ModuleNotFoundError):
+        return None
+    try:
+        app = QApplication.instance()
+        if app is None:
+            return None
+        screens = app.screens()
+        primary = app.primaryScreen()
+        pg = primary.availableGeometry()
+        if layout in ("dual_screen", "dual_screen_half") and len(screens) >= 2:
+            if slot_idx in (0, 1):
+                half_w = pg.width() // 2
+                x = pg.x() + slot_idx * half_w
+                w = half_w if slot_idx == 0 else pg.width() - half_w
+                return x, pg.y(), w, pg.height()
+            secondary = next((s for s in screens if s is not primary), primary)
+            sg = secondary.availableGeometry()
+            w = sg.width() // 2 if layout == "dual_screen_half" else sg.width()
+            return sg.x(), sg.y(), w, sg.height()
+        w_slot = pg.width() // n_slots
+        return pg.x() + slot_idx * w_slot, pg.y(), w_slot, pg.height()
+    except Exception:
+        return None
+
+
 def position_figure_in_slot(
     fig: Figure,
     slot_idx: int,
@@ -210,76 +260,15 @@ def position_figure_in_slot(
 ) -> None:
     """Place ``fig`` in the requested slot of the chosen layout.
 
-    Parameters
-    ----------
-    fig : Figure
-        The matplotlib figure whose window will be moved.
-    slot_idx : int
-        Which slot: 0, 1 or 2 for the three live plotters in order
-        (TSO controller · Cascade-DSO controller · System power flow).
-    layout : {"thirds", "dual_screen"}
-        * ``"thirds"`` — three panes side-by-side across the primary
-          screen, each spanning ``1/n_slots`` of the screen width and
-          the full available height.
-        * ``"dual_screen"`` — slots 0 and 1 share the primary screen
-          half-and-half; slot 2 takes the full secondary screen.  If
-          only one screen is available, silently falls back to
-          ``"thirds"``.
-    n_slots : int
-        Only used by the ``"thirds"`` layout.
-
-    Silently no-ops on non-Qt backends or when ``PyQt5`` is unavailable
-    (e.g. on the ``Agg`` headless backend).
+    ``slot_idx`` 0, 1, 2 are the TS, STS and overview windows; see
+    :func:`slot_geometry` for the layouts.  Silently no-ops on non-Qt
+    backends or when ``PyQt5`` is unavailable.
     """
-    backend = mpl.get_backend()
-    if "Qt" not in backend:
+    geom = slot_geometry(slot_idx, layout=layout, n_slots=n_slots)
+    if geom is None:
         return
     try:
-        from PyQt5.QtWidgets import QApplication
-    except (ImportError, ModuleNotFoundError):
-        return
-    try:
-        app = QApplication.instance()
-        if app is None:
-            return
-        screens = app.screens()
-        primary = app.primaryScreen()
-        primary_geom = primary.availableGeometry()
-
-        if layout == "dual_screen" and len(screens) >= 2:
-            # Find a secondary screen that differs from the primary.
-            secondary = next(
-                (s for s in screens if s is not primary), primary
-            )
-            sec_geom = secondary.availableGeometry()
-            if slot_idx == 0:
-                # Primary screen, left half
-                x = primary_geom.x()
-                y = primary_geom.y()
-                w = primary_geom.width() // 2
-                h = primary_geom.height()
-            elif slot_idx == 1:
-                # Primary screen, right half
-                half_w = primary_geom.width() // 2
-                x = primary_geom.x() + half_w
-                y = primary_geom.y()
-                w = primary_geom.width() - half_w
-                h = primary_geom.height()
-            else:
-                # Secondary screen, full
-                x = sec_geom.x()
-                y = sec_geom.y()
-                w = sec_geom.width()
-                h = sec_geom.height()
-            fig.canvas.manager.window.setGeometry(x, y, w, h)
-            return
-
-        # Default "thirds" layout on primary screen
-        x0, y0 = primary_geom.x(), primary_geom.y()
-        w_slot = primary_geom.width() // n_slots
-        h_slot = primary_geom.height()
-        x_slot = x0 + slot_idx * w_slot
-        fig.canvas.manager.window.setGeometry(x_slot, y0, w_slot, h_slot)
+        fig.canvas.manager.window.setGeometry(*geom)
     except Exception:
         return
 

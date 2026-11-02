@@ -880,6 +880,183 @@ def _record_zone_live_plot_observables(
             rec.zone_tie_q_mvar[(zi, zj)] = total
 
 
+#: Stacking (merit) order of :attr:`MultiTSOIterationRecord.gen_mix_p_mw`:
+#: zero-marginal-cost renewables first, then the commitment order by fuel,
+#: the network equivalent last.  Unknown machine types go to "Other".
+_GEN_MIX_ORDER: Tuple[str, ...] = (
+    "Wind STS", "PV STS", "Wind TS", "PV TS",
+    "Hydro", "Nuclear", "Coal", "Other", "Equivalent",
+)
+
+
+def _build_gen_mix_groups(
+    net: pp.pandapowerNet, meta,
+) -> Dict[str, Tuple[Tuple[str, NDArray], ...]]:
+    """Classify every generating element once, before the main loop.
+
+    Returns ``{category: ((res_table, element indices), ...)}`` in
+    :data:`_GEN_MIX_ORDER`, omitting empty categories.  Machines are typed by
+    ``net.gen.type``; seed generators (``_TEMP``) and boundary equivalents
+    (``BOUND_``) are skipped.  An sgen is TS-connected if it is a TSO DER (or
+    not in subnet ``DN``), STS-connected if it is a DSO DER (or in ``DN``).
+    """
+    groups: Dict[str, List[Tuple[str, int]]] = {c: [] for c in _GEN_MIX_ORDER}
+    fuel = {"hydro": "Hydro", "nuclear": "Nuclear", "coal": "Coal",
+            "equivalent": "Equivalent"}
+    for g in net.gen.index:
+        if str(net.gen.at[g, "name"]).startswith("_TEMP"):
+            continue
+        typ = str(net.gen.at[g, "type"]) if "type" in net.gen.columns else ""
+        groups[fuel.get(typ.strip().lower(), "Other")].append(("res_gen", int(g)))
+    for e in net.ext_grid.index:
+        groups["Equivalent"].append(("res_ext_grid", int(e)))
+    tso_der = set(int(s) for s in getattr(meta, "tso_der_indices", ()))
+    dso_der = set(int(s) for s in getattr(meta, "dso_der_indices", ()))
+    has_subnet = "subnet" in net.sgen.columns
+    for s in net.sgen.index:
+        name = str(net.sgen.at[s, "name"])
+        if name.startswith("BOUND_"):
+            continue
+        if s in tso_der:
+            level = "TS"
+        elif s in dso_der:
+            level = "STS"
+        else:
+            level = "STS" if has_subnet and str(net.sgen.at[s, "subnet"]) == "DN" else "TS"
+        tag = f"{net.sgen.at[s, 'type']} {name}".upper()
+        kind = "Wind" if ("WP" in tag or "WIND" in tag) else ("PV" if "PV" in tag else None)
+        groups[f"{kind} {level}" if kind else "Other"].append(("res_sgen", int(s)))
+    out: Dict[str, Tuple[Tuple[str, NDArray], ...]] = {}
+    for cat in _GEN_MIX_ORDER:
+        parts = tuple(
+            (table, np.array([i for t, i in groups[cat] if t == table], dtype=np.int64))
+            for table in ("res_gen", "res_ext_grid", "res_sgen")
+            if any(t == table for t, _ in groups[cat])
+        )
+        if parts:
+            out[cat] = parts
+    return out
+
+
+def _sum_res(net: pp.pandapowerNet, table: str, idx, col: str) -> float:
+    """NaN-safe sum of a result column (out-of-service rows count as 0)."""
+    if len(idx) == 0:
+        return 0.0
+    return float(np.nansum(getattr(net, table).loc[idx, col].to_numpy(dtype=float)))
+
+
+def _record_overview_observables(
+    rec: MultiTSOIterationRecord,
+    net: pp.pandapowerNet,
+    *,
+    zone_defs: Dict[int, ZoneDefinition],
+    tso_controllers: Dict[int, TSOController],
+    mix_groups: Dict[str, Tuple],
+    tso_shunts: List[Tuple[int, int, str, int, float]],
+    dso_zone: Dict[str, int],
+) -> None:
+    """Write the overview-window observables (plant truth) into ``rec``.
+
+    Generation mix, per-zone reactive injection by source and per-zone
+    up/down reactive reserve by source; see the field docstrings on
+    :class:`MultiTSOIterationRecord`.  ``tso_shunts`` holds
+    ``(shunt_idx, zone, kind, n_levels, q_step_mvar)`` per TSO tertiary bank.
+    Must run after the DSO capability and tie-line recorders.
+    """
+    for cat, parts in mix_groups.items():
+        rec.gen_mix_p_mw[cat] = sum(_sum_res(net, t, idx, "p_mw") for t, idx in parts)
+    rec.total_load_res_p_mw = float(np.nansum(net.res_load["p_mw"].to_numpy(dtype=float)))
+
+    shunt_inj: Dict[int, float] = {z: 0.0 for z in zone_defs}
+    shunt_up: Dict[int, float] = {z: 0.0 for z in zone_defs}
+    shunt_dn: Dict[int, float] = {z: 0.0 for z in zone_defs}
+    for sh, z, kind, n_lev, q_step in tso_shunts:
+        step = int(net.shunt.at[sh, "step"])
+        rec.tso_shunt_step[sh] = step
+        if z not in shunt_inj:
+            continue
+        shunt_inj[z] -= float(np.nan_to_num(net.res_shunt.at[sh, "q_mvar"]))
+        # Injection reserve at nameplate (V = 1 pu): a capacitor adds Q when
+        # stepped up, a reactor when stepped down.
+        if kind == "MSC":
+            shunt_up[z] += (n_lev - step) * q_step
+            shunt_dn[z] += step * q_step
+        elif kind == "MSR":
+            shunt_up[z] += step * q_step
+            shunt_dn[z] += (n_lev - step) * q_step
+
+    sts_up: Dict[int, float] = {}
+    sts_dn: Dict[int, float] = {}
+    for key, cap_min in rec.dso_trafo_q_cap_min_mvar.items():
+        z = dso_zone.get(key.split("|", 1)[0])
+        q_now = rec.dso_trafo_q_actual_mvar.get(key)
+        if z is None or q_now is None:
+            continue
+        # Q_PCC is the flow into the coupler (TS -> STS); lowering it is
+        # additional injection into the TS.
+        sts_up[z] = sts_up.get(z, 0.0) + max(q_now - cap_min, 0.0)
+        sts_dn[z] = sts_dn.get(z, 0.0) + max(
+            rec.dso_trafo_q_cap_max_mvar[key] - q_now, 0.0)
+
+    has_type = "type" in net.gen.columns
+    for z, zd in zone_defs.items():
+        bounds = tso_controllers[z].actuator_bounds
+        # Synchronous machines, with the network equivalent (G1, a 10 GVA
+        # anchor) kept apart so it does not mask the zone's own reserve.
+        sg = {"SG": [0.0, 0.0, 0.0], "Equivalent": [0.0, 0.0, 0.0]}  # q, up, dn
+        if zd.gen_indices:
+            gens = list(zd.gen_indices)
+            on = net.gen.loc[gens, "in_service"].to_numpy(dtype=bool)
+            q = np.nan_to_num(net.res_gen.loc[gens, "q_mvar"].to_numpy(dtype=float))
+            p = np.nan_to_num(net.res_gen.loc[gens, "p_mw"].to_numpy(dtype=float))
+            vm = net.gen.loc[gens, "vm_pu"].to_numpy(dtype=float)
+            q_lo, q_hi = bounds.compute_gen_q_bounds(p, vm)
+            eq = (
+                net.gen.loc[gens, "type"].astype(str).str.lower().to_numpy() == "equivalent"
+                if has_type else np.zeros(len(gens), dtype=bool)
+            )
+            for key, mask in (("SG", on & ~eq), ("Equivalent", on & eq)):
+                sg[key] = [float(np.sum(q[mask])),
+                           float(np.sum(np.maximum(q_hi - q, 0.0)[mask])),
+                           float(np.sum(np.maximum(q - q_lo, 0.0)[mask]))]
+        der_q = der_up = der_dn = 0.0
+        if zd.tso_der_indices:
+            ders = list(zd.tso_der_indices)
+            on = net.sgen.loc[ders, "in_service"].to_numpy(dtype=bool)
+            q = np.nan_to_num(net.res_sgen.loc[ders, "q_mvar"].to_numpy(dtype=float))
+            p = np.nan_to_num(net.res_sgen.loc[ders, "p_mw"].to_numpy(dtype=float))
+            q_lo, q_hi = bounds.compute_der_q_bounds(p)
+            der_q = float(np.sum(q[on]))
+            der_up = float(np.sum(np.maximum(q_hi - q, 0.0)[on]))
+            der_dn = float(np.sum(np.maximum(q - q_lo, 0.0)[on]))
+        q_pcc = (
+            _sum_res(net, "res_trafo3w", list(zd.pcc_trafo_indices), "q_hv_mvar")
+            if zd.pcc_trafo_indices else 0.0
+        )
+        ties = 0.0
+        for (zi, zj), q_tie in rec.zone_tie_q_mvar.items():
+            if zi == z:
+                ties -= q_tie
+            elif zj == z:
+                ties += q_tie
+        rec.zone_q_source_mvar[z] = {
+            "SG": sg["SG"][0], "TS-DER": der_q, "MSC/MSR": shunt_inj[z],
+            "STS": -q_pcc - shunt_inj[z] if zd.pcc_trafo_indices else 0.0,
+            "Ties": ties, "Equivalent": sg["Equivalent"][0],
+        }
+        has_sts = bool(zd.pcc_trafo_indices)
+        rec.zone_q_reserve_up_mvar[z] = {
+            "SG": sg["SG"][1], "TS-DER": der_up, "MSC/MSR": shunt_up[z],
+            "STS": sts_up.get(z, float("nan")) if has_sts else 0.0,
+            "Equivalent": sg["Equivalent"][1],
+        }
+        rec.zone_q_reserve_dn_mvar[z] = {
+            "SG": sg["SG"][2], "TS-DER": der_dn, "MSC/MSR": shunt_dn[z],
+            "STS": sts_dn.get(z, float("nan")) if has_sts else 0.0,
+            "Equivalent": sg["Equivalent"][2],
+        }
+
+
 # =============================================================================
 #  Delayed stability analysis helpers
 # =============================================================================

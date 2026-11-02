@@ -187,8 +187,7 @@ def make_cigre_config() -> MultiTSOConfig:
         # Live plots OFF for the batch sweep (see module docstring).
         live_plot_controller=False,
         live_plot_cascade=False,
-        live_plot_system=False,
-        live_plot_tracking=False,
+        live_plot_overview=False,
         live_plot_show_reserves=True,
         live_plot_show_tie_flows=False,
         local_sensitivities_tso=True,

@@ -163,9 +163,7 @@ def test_cosim_config_only_overrides_reference_envelope():
     expected.enable_reachability_guard = False
     expected.live_plot_controller = False
     expected.live_plot_cascade = False
-    expected.live_plot_system = False
-    expected.live_plot_tracking = False
-    expected.live_plot_sbx = False
+    expected.live_plot_overview = False
     expected.verbose = 0
 
     assert cfg == expected

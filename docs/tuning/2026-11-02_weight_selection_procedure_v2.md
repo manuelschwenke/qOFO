@@ -120,3 +120,12 @@ report.
 - **Verification batch:** the three variants in parallel on e5power, 12 workers each.
 - **Confirmation:** on e5power, 36 workers.
 - **Stage II** units are split over the hosts in proportion to the workers (8 : 36).
+
+## Execution record (results only; the procedure above is unchanged)
+
+- **2026-11-02 09:19:** run `0004_2026-11-02_091930_ch_9_8_procedure_v2` started
+  (commit f51dffc).
+- **09:47:** resumed with 10 workers on e5wimi (author). The driver was stopped while it
+  waited for the verification shards, which kept running and were not relaunched.
+  - Worker counts do not enter the results: the units are deterministic and resume from
+    disk.

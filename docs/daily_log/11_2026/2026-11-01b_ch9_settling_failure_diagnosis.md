@@ -340,7 +340,18 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Variant parameter sets `stage1_v2_uc_2026_11_pq10/20/30` written.
   - Verification shards launched on e5power at 09:19:48, 3 × 12 workers.
   - Expected: verification ≈12:00–13:00; II-a ≈14.5 h; II-b ≈9 h; confirmation and W5
-    ≈2 h. The result is expected Wednesday morning.
+    ≈2 h. The result is expected Tuesday afternoon or evening (corrected; "Wednesday morning" was an addition error).
+- **09:47: author raised e5wimi to 10 workers.**
+  - Driver 76304 stopped during the verification wait; it had no local work. The three
+    shards on e5power (24900, 12036, 14420) kept running.
+  - Resumed with `--resume ... --local-workers 10` (pid 97020). `run_remote` finds the
+    shards ALIVE and waits; nothing was relaunched, and the paramsets were reused.
+  - Revised estimate:
+    - verification ≈11:30–12:00;
+    - II-a ≈14 h (10 + 36 workers);
+    - II-b 3–4 rounds, ≈9–14 h;
+    - confirmation and W5 ≈2 h.
+    - Result Tuesday ≈13:00–18:00.
 
 ## Open
 

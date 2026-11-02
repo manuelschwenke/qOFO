@@ -880,6 +880,42 @@ def _record_zone_live_plot_observables(
             rec.zone_tie_q_mvar[(zi, zj)] = total
 
 
+def _ledger_feedforward(
+    ledger: Dict[int, List[Dict[int, float]]],
+    shunt_idx: int,
+    old_level: int,
+    direction: int,
+    interface_ids: List[int],
+    dq_model: List[float],
+) -> List[float]:
+    """Per-coupler interface feedforward of one committed bank step.
+
+    ``ledger[shunt_idx]`` holds one ``{coupler: dQ}`` entry per engaged level.
+    An engagement (``direction = +1``) stores and returns ``dq_model``, the
+    step as the hosting DSO's pre-switch model evaluates it.  A release
+    (``-1``) returns the negated top entry and drops it, so the summed
+    offset of a bank is zero again at level 0.  Fails fast if the ledger
+    and the bank's level disagree or the coupler set has changed.
+    """
+    stack = ledger.setdefault(int(shunt_idx), [])
+    if len(stack) != int(old_level):
+        raise ValueError(
+            f"Feedforward ledger of shunt {shunt_idx} holds {len(stack)} "
+            f"level(s), the bank was at level {old_level}")
+    if direction == 1:
+        stack.append(dict(zip((int(t) for t in interface_ids),
+                              (float(dq) for dq in dq_model))))
+        return [float(dq) for dq in dq_model]
+    if direction != -1:
+        raise ValueError(f"Bank step direction must be +1 or -1, got {direction}")
+    top = stack.pop()
+    if set(top) != {int(t) for t in interface_ids}:
+        raise ValueError(
+            f"Couplers of shunt {shunt_idx} changed between engagement "
+            f"({sorted(top)}) and release ({sorted(interface_ids)})")
+    return [-top[int(t)] for t in interface_ids]
+
+
 #: Stacking (merit) order of :attr:`MultiTSOIterationRecord.gen_mix_p_mw`:
 #: zero-marginal-cost renewables first, then the commitment order by fuel,
 #: the network equivalent last.  Unknown machine types go to "Other".

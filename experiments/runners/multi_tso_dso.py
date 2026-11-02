@@ -172,6 +172,7 @@ from experiments.runners._multi_tso_helpers import (
     _clamp_oltc_taps,
     _collect_contingency_watch_buses,
     _dump_contingency_diagnostics,
+    _ledger_feedforward,
     _record_dso_group_and_transformer_data,
     _record_dso_measurement_snapshot,
     _record_tso_measurement_snapshot,
@@ -3547,6 +3548,10 @@ def _run_multi_tso_dso_impl(
     # rejects only the residual).
     zone_banks: Dict[int, List[ShuntBank]] = {}
     q_itf_sh_offset: Dict[int, float] = {}
+    # Per bank (shunt index), one entry per engaged level: the per-coupler
+    # feedforward that level's engagement added.  Under
+    # ``config.shunt_ff_ledger`` a release removes the top entry.
+    sh_ff_ledger: Dict[int, List[Dict[int, float]]] = {}
     if _shunt_mode == "miqp":
         _banks_by_zone: Dict[int, List[ShuntBankConfig]] = {z: [] for z in zone_defs}
         for sh_idx, sb, q_step, sz, kind, nlev in zip(
@@ -4709,6 +4714,17 @@ def _run_multi_tso_dso_impl(
                                     f"commit at bus {commit.bus_idx} "
                                     f"(couplers {itf_ids_c}: {dq_itf_c})"
                                 )
+                            # A release evaluated on the pre-switch model counts
+                            # the released susceptance's own voltage response a
+                            # second time (~7 % too large, 2026-11-02); the
+                            # ledger removes what the engagement added instead.
+                            dq_model_c = list(dq_itf_c)
+                            if config.shunt_ff_ledger:
+                                dq_itf_c = _ledger_feedforward(
+                                    sh_ff_ledger, commit.shunt_idx,
+                                    commit.old_level, commit.direction,
+                                    itf_ids_c, dq_model_c,
+                                )
                             for t_c, dq_c in zip(itf_ids_c, dq_itf_c):
                                 q_itf_sh_offset[t_c] = (
                                     q_itf_sh_offset.get(t_c, 0.0) + dq_c
@@ -4741,6 +4757,7 @@ def _run_multi_tso_dso_impl(
                                 "host_interface_index": key_c,
                                 "interface_indices": list(itf_ids_c),
                                 "delta_q_mvar": list(dq_itf_c),
+                                "delta_q_mvar_dso_model": dq_model_c,
                                 "delta_q_mvar_ts_model": list(dq_itf_ts_c),
                             })
                             if verbose >= 1:

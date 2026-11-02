@@ -285,8 +285,12 @@ class TSLiveWindow(LiveWindow):
                     meas[z] += q
                     seen.add(z)
             for z in self._pcc:
+                # Plot what the STS is sent: u_pcc plus the switched-shunt
+                # feedforward, which is what the metered flow is tracking.
                 q_set = rec.zone_q_pcc_set.get(z)
-                self._pcc[z].append(t, (float(np.sum(q_set)) if q_set is not None and len(q_set) else nan,
+                q_sent = (float(np.sum(q_set)) + float(np.sum(rec.zone_q_pcc_sh_offset.get(z, 0.0)))
+                          if q_set is not None and len(q_set) else nan)
+                self._pcc[z].append(t, (q_sent,
                                         meas[z] if z in seen else nan))
         if self._taps is not None:
             self._taps.append(t, np.concatenate(

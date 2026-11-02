@@ -171,6 +171,9 @@ class MultiTSOIterationRecord:
     # Per-zone TSO outputs: zone_id -> array
     zone_q_der:         Dict[int, NDArray] = field(default_factory=dict)
     zone_q_pcc_set:     Dict[int, NDArray] = field(default_factory=dict)
+    # Switched-shunt feedforward added to ``zone_q_pcc_set`` on dispatch,
+    # parallel to it.  The STS is sent ``zone_q_pcc_set + zone_q_pcc_sh_offset``.
+    zone_q_pcc_sh_offset: Dict[int, NDArray] = field(default_factory=dict)
     zone_v_gen:         Dict[int, NDArray] = field(default_factory=dict)
     zone_q_gen:         Dict[int, Any] = field(default_factory=dict)
     zone_p_gen:         Dict[int, NDArray] = field(default_factory=dict)

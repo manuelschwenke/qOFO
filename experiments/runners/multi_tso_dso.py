@@ -4789,6 +4789,13 @@ def _run_multi_tso_dso_impl(
                             )
                             dso_ctrl_aff.receive_disturbance_message(msg)
 
+            # The offset as it stands at dispatch, after this step's commits:
+            # the setpoint the STS receives is u_pcc plus this.
+            for z in rec.zone_q_pcc_set:
+                rec.zone_q_pcc_sh_offset[z] = np.array([
+                    q_itf_sh_offset.get(int(_t), 0.0)
+                    for _t in zone_defs[z].pcc_trafo_indices
+                ], dtype=np.float64)
             # TSO sends Q setpoints to DSOs via grouped setpoint messages
             for z, ctrl in tso_controllers.items():
                 for msg in ctrl.generate_setpoint_messages():

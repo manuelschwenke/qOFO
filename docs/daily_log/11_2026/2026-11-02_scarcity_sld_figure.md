@@ -94,9 +94,70 @@ superseded by the producer below.
   - the docstring is updated.
 - The producer was re-run with `--thesis`, refreshing the PDF, the CSV and the export records.
 
+## Voltage colouring and IBG wording (~11:00–11:40, after commit 44eafd4)
+
+**Author request:**
+- the area tint shows the median voltage instead of the own reserve;
+- the busbars use the same colour code;
+- a colour bar goes below the panels;
+- "IBG", not "DER".
+
+**What changed in `figure_scarcity_sld.py`:**
+- **Colour scale.**
+  - Diverging ColorBrewer PuOr, with low voltage in orange.
+  - It is centred on the run's TS voltage set point V_set. `_v_set` reads it from `config.json`
+    and checks that every zone set point equals `v_setpoint_pu` (1.03 pu).
+  - The half range is V_HALF = 0.06 pu, so the scale runs from 0.97 to 1.09. It is symmetric
+    and covers the extremes of the three GA panels (0.976 to 1.054).
+- **Busbars.**
+  - Each bar is a rectangle filled with the logged voltage `bus_vm_pu` (pandapower index = IEEE
+    number − 1, `BUS_IDX`).
+  - The machine terminal buses B32, B33 and B38 are not logged. They stay as black bars and have
+    a legend entry.
+  - B36 is logged; in the model it is a 345-kV bus, with G7's terminal behind it.
+- **Areas.**
+  - Each area is filled with the median over its logged buses, at 50 % opacity.
+  - Area membership comes from `network.zone_partition._FIXED_ZONES_IEEE39`.
+  - New check `_bus_voltages`: every logged TS bus must be drawn, and per area the min, mean and
+    max of the logged buses must equal the recorded `zone_v_min/mean/max` to 1e-9. Passes on all
+    three panels.
+- **Panel text.** Three lines: R⁺ per area, median V per area, and area-2 V_min with its bus and
+  the STS 1–3 injection.
+- **Colour bar.** Under panel (b), with side labels. The legend's tint entry is replaced by the
+  terminal-bus entry.
+- **Layout.** Explicit placement with `fig.add_axes`; the figure is now 8.6 cm high (was 7.5 cm).
+- **CSV.** New rows of kind `bus` (logged voltage per bus and panel). Area rows gain `v_median`
+  and `v_min_bus`.
+- **IBG wording.** "STS (IBG inside)" in the legend, plus the docstring and the README text.
+  Record field names (`dso_der_*`) are unchanged.
+
+**GA values at t* = 138 min.** Median V per area:
+
+| panel | A1 | A2 | A3 |
+|---|---|---|---|
+| (a) start of the period | 1.040 | 1.036 | 1.032 |
+| (b) OFO | 1.032 | 1.022 | 1.028 |
+| (c) OFO+ | 1.031 | 1.036 | 1.033 |
+
+- The bus with the area-2 V_min is B12 in all panels: 1.032, 0.976 and 1.001 pu.
+- In (b), B10, B11, B13 and B14 are at 1.013–1.019 pu. In (c) they are at 1.031–1.036 pu.
+
+**Outputs:**
+- Run 0008 `figures/` was re-rendered.
+- The first thesis export failed because `graphics/Ch10/case3_scarcity_sld.pdf` was open in
+  Acrobat (WinError 32).
+- Re-run with `--thesis` at 11:44, after the author closed it. The thesis PDF is byte-identical to
+  the run copy, the README says IBG, and the CSV has 90 bus rows (30 × 3). The manifest still
+  holds two export entries (no duplicates).
+
 ## Open
 
 - **Weights.** Panels (b) and (c) use c08b, which is not final on the commitment base (Ch 9
   rerun). Redraw after the switch: rerun the producer on the new GA run.
-- **Not committed.** The producer is untracked. The worktree also holds the Ch 9 session's
-  untracked `stage1_v2_uc_2026_11_pq*.json`, which were left alone.
+- **Commits.** The first version is commit 44eafd4. The voltage-colouring change is not committed
+  yet. The worktree also holds the Ch 9 session's untracked `stage1_v2_uc_2026_11_pq*.json`,
+  which were left alone.
+- **Median tint is weak.** The area medians lie within ±0.014 pu of V_set, so the area fills are
+  faint; the information sits in the busbars (B12 and its neighbours). The area min, or the share
+  of buses below a threshold, would separate (b) and (c) more strongly. Left as is, because the
+  author asked for the median.

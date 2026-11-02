@@ -25,12 +25,25 @@ the upward reserve Q_max - Q as a share of the ring.
 * TS wind parks: VDE-AR-N 4120 v2 box at the recorded P, S_n = P_n of the
   replaced machine (``network/ieee39/scenarios/wind_replace.py``).  The sizes
   are checked against the recorded normalised reserve ``tso_der_q_reserve``.
-* STS: the DER inside the STS, sum of their Q, Q_min, Q_max -- the reactive
+* STS: the IBG inside the STS, sum of their Q, Q_min, Q_max -- the reactive
   resource of the STS, not the interface capability (the coupler and the STS
   voltage band transfer less).  The interface injection and, for O3, the
   capability interval reported by layer 2 are written to the CSV.
-* Areas: tint by the own upward reserve R+_z (machines without G1, plus wind
-  parks), alpha = 0.4 * max(0, 1 - R+_z / 500 Mvar).
+
+**Voltage colour** (author, 2026-11-02, replaces the reserve tint of the
+first version).  One diverging scale (PuOr, low = orange) centred on the TS
+voltage set point V_set of the run (1.03 pu), half range 0.06 pu:
+
+* busbars: the logged voltage of the bus (``bus_vm_pu``, pandapower index =
+  IEEE number - 1).  The machine terminal buses B32, B33, B38 are not logged
+  and are drawn black, as in Fig 7.2;
+* areas: fill with the median over the area's logged buses, at 50 % opacity.
+  The area membership is ``network.zone_partition._FIXED_ZONES_IEEE39``; the
+  area min/mean/max of the logged buses are checked against the recorded
+  ``zone_v_min/mean/max``.
+
+The own upward reserve R+_z (machines without G1, plus wind parks) is printed
+below each panel.
 
 **Layout.**  Bus coordinates, line routing, STS couplings and labels are
 those of ``graphics/Ch7/ieee39_wind_replace_body.tex`` (thesis) as corrected
@@ -66,9 +79,12 @@ from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
 from matplotlib.patches import Circle, Polygon, Rectangle, Wedge
 
 from experiments.ch_11_case2_multisystem.ref.figures_ref import CM, _setup
+from network.zone_partition import _FIXED_ZONES_IEEE39 as ZONE_BUSES
 
 STEM = "case3_scarcity_sld"
 WIDTH = 18.5 * CM          # sidewaysfigure, like fig:ieee39_wind_replace
@@ -76,8 +92,10 @@ WIDTH = 18.5 * CM          # sidewaysfigure, like fig:ieee39_wind_replace
 C_RES = "#004E8A"          # upward reserve (TU blue, O3 in the Case-2 figures)
 C_TRACK = "#cfcfcf"
 C_LINE = "#a0a0a0"
-C_TINT = "#CC4C03"         # area tint, the orange of Fig 7.2
-R_TINT = 500.0             # Mvar: no tint at or above this own reserve
+CMAP = plt.get_cmap("PuOr")   # ColorBrewer, CVD-safe; low voltage = orange
+V_HALF = 0.06              # pu: colour scale V_set +- V_HALF (covers GA's panels)
+A_FILL = 0.5               # opacity of the area fill
+BAR_H = 0.26               # busbar height [diagram units]
 R0 = 0.80                  # ring radius [diagram units] at 1000 Mvar capability
 RING_W = 0.17
 
@@ -163,6 +181,8 @@ STS = {
     "DSO_4": ("STS 4", (15.0, 3.4), ("B24", "B21", "B23"), "l"),
 }
 STS_AREA = {"DSO_1": 2, "DSO_2": 2, "DSO_3": 2, "DSO_4": 3}
+#: drawn bus -> pandapower index (IEEE number - 1)
+BUS_IDX = {name: int(name[1:]) - 1 for name in BUS}
 XLIM, YLIM = (-0.9, 17.7), (-2.1, 13.6)
 
 
@@ -215,9 +235,35 @@ def _check(r) -> None:
                                      f"recorded {obs:.6f}")
 
 
+def _bus_voltages(r) -> Dict[str, float]:
+    """Logged TS bus voltages by drawn bus name, checked against the record.
+
+    Every logged TS bus must be drawn, and per area the min/mean/max of the
+    logged buses must equal the recorded ``zone_v_min/mean/max``.
+    """
+    ts = set().union(*ZONE_BUSES.values())
+    logged = {int(b): float(v) for b, v in r.bus_vm_pu.items() if int(b) in ts}
+    undrawn = set(logged) - set(BUS_IDX.values())
+    if undrawn:
+        raise ValueError(f"logged TS buses not in the diagram: {sorted(undrawn)}")
+    for z, buses in ZONE_BUSES.items():
+        v = [logged[b] for b in buses if b in logged]
+        for stat, rec in ((min, r.zone_v_min), (np.mean, r.zone_v_mean),
+                          (max, r.zone_v_max)):
+            if abs(stat(v) - rec[z]) > 1e-9:
+                raise ValueError(f"area {z}: {stat.__name__} of logged buses "
+                                 f"{stat(v):.6f} != recorded {rec[z]:.6f}")
+    return {name: logged[i] for name, i in BUS_IDX.items() if i in logged}
+
+
+def _bus_area(name: str) -> int:
+    return next(z for z, buses in ZONE_BUSES.items() if BUS_IDX[name] in buses)
+
+
 def panel_state(r, out_at_start: Dict[int, bool]) -> Dict:
-    """Per-source and per-area values of one record."""
+    """Per-source, per-bus and per-area values of one record."""
     _check(r)
+    bus_v = _bus_voltages(r)
     rows = []
     for z, idx in ZONE_GEN.items():
         ins = np.asarray(r.zone_gen_in_service[z], bool)
@@ -256,9 +302,13 @@ def panel_state(r, out_at_start: Dict[int, bool]) -> Dict:
             row["iface_inj_max_reported"] = -float(np.sum(cap_lo))
             row["iface_inj_min_reported"] = -float(np.sum(cap_hi))
         rows.append(row)
-    areas = {z: dict(own_reserve=_own_reserve(r, z), v_min=float(r.zone_v_min[z]))
-             for z in (1, 2, 3)}
-    return dict(t_min=r.time_s / 60.0, rows=rows, areas=areas)
+    areas = {}
+    for z in (1, 2, 3):
+        vz = {b: v for b, v in bus_v.items() if _bus_area(b) == z}
+        areas[z] = dict(own_reserve=_own_reserve(r, z),
+                        v_median=float(np.median(list(vz.values()))),
+                        v_min=float(r.zone_v_min[z]), v_min_bus=min(vz, key=vz.get))
+    return dict(t_min=r.time_s / 60.0, rows=rows, areas=areas, bus_v=bus_v)
 
 
 def build_panels(run: Path) -> Tuple[List[Dict], float]:
@@ -320,16 +370,15 @@ def _label(ax, xy, r, text, side, **kw):
             fontsize=6, zorder=7, **kw)
 
 
-def draw_panel(ax, st: Dict, title: str) -> None:
+def draw_panel(ax, st: Dict, title: str, norm: Normalize) -> None:
     ax.set_xlim(*XLIM)
     ax.set_ylim(*YLIM)
     ax.set_aspect("equal")
     ax.axis("off")
     for z, poly in ZONE.items():
-        res = st["areas"][z]["own_reserve"]
-        alpha = 0.4 * max(0.0, 1.0 - res / R_TINT)
-        ax.add_patch(Polygon(poly, closed=True, fc=C_TINT, alpha=alpha, ec="none",
-                             zorder=0))
+        ax.add_patch(Polygon(poly, closed=True,
+                             fc=CMAP(norm(st["areas"][z]["v_median"])),
+                             alpha=A_FILL, ec="none", zorder=0))
         ax.add_patch(Polygon(poly, closed=True, fill=False, ec="#8a8a8a", lw=0.5,
                              ls=(0, (0.8, 1.6)), zorder=1))
     kw = dict(color=C_LINE, lw=0.45, zorder=2, solid_capstyle="butt")
@@ -340,8 +389,13 @@ def draw_panel(ax, st: Dict, title: str) -> None:
     for pl in POLY:
         ax.plot(*zip(*pl), **kw)
     for name, (x, y, w) in BUS.items():
-        ax.plot([x - w, x + w], [y, y], color="black", lw=1.3, zorder=3,
-                solid_capstyle="butt")
+        v = st["bus_v"].get(name)
+        if v is None:                      # machine terminal bus, not logged
+            ax.plot([x - w, x + w], [y, y], color="black", lw=1.3, zorder=3,
+                    solid_capstyle="butt")
+        else:
+            ax.add_patch(Rectangle((x - w, y - BAR_H / 2), 2 * w, BAR_H,
+                                   fc=CMAP(norm(v)), ec="black", lw=0.4, zorder=3))
     rows = {(row["kind"], row["key"]): row for row in st["rows"]}
     for g, (lab, xy, conn, side) in GEN.items():
         row = rows[("machine", g)]
@@ -386,7 +440,10 @@ def draw_panel(ax, st: Dict, title: str) -> None:
             "own reserve $R^+$: "
             + ", ".join(f"A{z} {a[z]['own_reserve']:.0f}" for z in (1, 2, 3))
             + " Mvar\n"
-            + f"area 2: $V_\\min$ {a[2]['v_min']:.3f} pu, "
+            + "median $V$: "
+            + ", ".join(f"A{z} {a[z]['v_median']:.3f}" for z in (1, 2, 3))
+            + " pu\n"
+            + f"area 2: $V_\\min$ {a[2]['v_min']:.3f} pu ({a[2]['v_min_bus']}), "
             + f"STS 1–3 inject {inj:.0f} Mvar",
             transform=ax.transAxes, ha="center", va="top", fontsize=6.5,
             linespacing=1.3)
@@ -427,10 +484,8 @@ def draw_legend(ax) -> None:
     ax.text(16.3, y, "machine decommitted\n(merit order)", **tk)
     ring(24.2, "trip")
     ax.text(25.1, y, "machine tripped\n(event)", **tk)
-    ax.add_patch(Rectangle((31.4, y - 0.55), 1.3, 1.1, fc=C_TINT, alpha=0.4,
-                           ec="none"))
-    ax.text(33.1, y, f"area tint: own reserve $R^+$\n(none at $\\geq${R_TINT:.0f} Mvar)",
-            **tk)
+    ax.plot([31.2, 32.8], [y, y], color="black", lw=1.3, solid_capstyle="butt")
+    ax.text(33.2, y, "machine terminal bus\n(voltage not logged)", **tk)
     x0, dy = 43.2, 0.62
     ax.add_patch(Circle((x0, y + dy), 0.13, fc="black", ec="black", lw=0.5))
     ax.text(x0 + 0.45, y + dy, "machine", **tk)
@@ -439,15 +494,41 @@ def draw_legend(ax) -> None:
     x1 = x0 + 4.8
     ax.add_patch(Rectangle((x1 - .17, y + dy - .17), .34, .34, fc="white", ec="black",
                            lw=0.6))
-    ax.text(x1 + 0.45, y + dy, "STS (DER inside)", **tk)
+    ax.text(x1 + 0.45, y + dy, "STS (IBG inside)", **tk)
     ax.add_patch(Rectangle((x1 - .22, y - dy - .22), .44, .44, fc="white", ec="black",
                            lw=0.6))
     ax.text(x1 + 0.45, y - dy, "G1, equivalent", **tk)
 
 
+def draw_colorbar(cax, norm: Normalize, v_set: float) -> None:
+    ticks = v_set + V_HALF * np.array([-1.0, -0.5, 0.0, 0.5, 1.0])
+    cb = cax.figure.colorbar(ScalarMappable(norm=norm, cmap=CMAP), cax=cax,
+                             orientation="horizontal", ticks=ticks)
+    cb.ax.set_xticklabels([f"{t:.2f}" if abs(t - v_set) > 1e-9
+                           else f"{t:.2f} = $V_\\mathrm{{set}}$" for t in ticks])
+    cb.ax.tick_params(labelsize=6, length=2, width=0.4, pad=1.5)
+    cb.outline.set_linewidth(0.4)
+    tk = dict(transform=cax.transAxes, va="center", fontsize=6.5, linespacing=1.3)
+    cax.text(-0.04, 0.5, "busbar: bus voltage $V$ in pu\n"
+             "area fill: median $V$ of the area", ha="right", **tk)
+    cax.text(1.04, 0.5, f"area fill at {A_FILL:.0%} opacity;\n"
+             "$V_\\mathrm{set}$: TS voltage set point", ha="left", **tk)
+
+
+def _v_set(run: Path) -> float:
+    cfg = json.loads((run / "config.json").read_text(encoding="utf-8"))
+    vs = {float(v) for v in (cfg.get("zone_v_setpoints_pu") or {}).values()}
+    vs.add(float(cfg["v_setpoint_pu"]))
+    if len(vs) != 1:
+        raise ValueError(f"voltage set points differ between areas: {sorted(vs)}")
+    return vs.pop()
+
+
 def make_figure(run: Path, thesis: Path | None = None) -> Path:
     _setup()
     panels, t_star = build_panels(run)
+    v_set = _v_set(run)
+    norm = Normalize(v_set - V_HALF, v_set + V_HALF)
     man = json.loads((run / "run_manifest.json").read_text(encoding="utf-8"))
     scen = man["parameters"]["scenario"]
     titles = {
@@ -455,14 +536,24 @@ def make_figure(run: Path, thesis: Path | None = None) -> Path:
         "b": f"(b) OFO, no STS access, $t^*$ = {t_star:.0f} min",
         "c": f"(c) OFO+, STS access, $t^*$ = {t_star:.0f} min",
     }
-    h_panel = (WIDTH / 3) * (YLIM[1] - YLIM[0]) / (XLIM[1] - XLIM[0])
-    fig = plt.figure(figsize=(WIDTH, h_panel + 2.3 * CM))
-    gs = fig.add_gridspec(2, 3, height_ratios=[h_panel, 1.0 * CM],
-                          wspace=0.04, hspace=0.38,
-                          left=0.0, right=1.0, top=0.95, bottom=0.02)
+    # vertical stack in inches: legend | colour bar + tick labels | panel text |
+    # panels | titles; panel gaps 0.04 panel widths
+    pw = WIDTH / 3.08
+    h_panel = pw * (YLIM[1] - YLIM[0]) / (XLIM[1] - XLIM[0])
+    h_leg, h_ticks, h_cb, h_txt, h_top = 1.0 * CM, 0.5 * CM, 0.22 * CM, 1.4 * CM, 0.45 * CM
+    height = h_leg + h_ticks + h_cb + h_txt + h_panel + h_top
+    fig = plt.figure(figsize=(WIDTH, height))
+
+    def axes(x, y, w, h):
+        return fig.add_axes((x / WIDTH, y / height, w / WIDTH, h / height))
+
+    y_cb = h_leg + h_ticks
+    y_pan = y_cb + h_cb + h_txt
     for k, st in enumerate(panels):
-        draw_panel(fig.add_subplot(gs[0, k]), st, titles[st["tag"]])
-    draw_legend(fig.add_subplot(gs[1, :]))
+        draw_panel(axes(k * 1.04 * pw, y_pan, pw, h_panel), st, titles[st["tag"]],
+                   norm)
+    draw_colorbar(axes(1.04 * pw, y_cb, pw, h_cb), norm, v_set)
+    draw_legend(axes(0.0, 0.0, WIDTH, h_leg))
 
     out = run / "figures"
     (out / "data").mkdir(parents=True, exist_ok=True)
@@ -475,11 +566,16 @@ def make_figure(run: Path, thesis: Path | None = None) -> Path:
         for row in st["rows"]:
             recs.append(dict(panel=st["tag"], variant=st["variant"],
                              t_min=st["t_min"], **row))
+        for name, v in st["bus_v"].items():
+            recs.append(dict(panel=st["tag"], variant=st["variant"],
+                             t_min=st["t_min"], kind="bus", key=BUS_IDX[name],
+                             label=name, area=_bus_area(name), v=v))
         for z, a in st["areas"].items():
             recs.append(dict(panel=st["tag"], variant=st["variant"],
                              t_min=st["t_min"], kind="area", key=z,
                              label=f"Area {z}", area=z,
-                             reserve=a["own_reserve"], v_min=a["v_min"]))
+                             reserve=a["own_reserve"], v_median=a["v_median"],
+                             v_min=a["v_min"], v_min_bus=a["v_min_bus"]))
     pd.DataFrame(recs).to_csv(out / "data" / f"{STEM}.csv", index=False,
                               float_format="%.4f")
     print(f"scenario {scen}: t* = {t_star:.2f} min; written {out / STEM}.pdf")
@@ -510,9 +606,12 @@ def _to_thesis(run: Path, out: Path, thesis: Path, t_star: float) -> None:
         f"- Panels: (a) L2 first record, (b) O2 and (c) O3 at t* = "
         f"{t_star:.2f} min, the first record of the minimum area-2 own "
         f"upward reserve under O2 (rule declared 2026-11-02).\n"
-        f"- File: one row per source (machine, wind park, STS DER) and per "
-        f"area and panel; Q in Mvar (generator convention; STS interface "
-        f"injection into the TS), voltages in pu.\n",
+        f"- File: one row per source (machine, wind park, STS IBG), per logged "
+        f"TS bus (kind `bus`, key = pandapower index = IEEE number - 1) and "
+        f"per area and panel; Q in Mvar (generator convention; STS interface "
+        f"injection into the TS), voltages in pu.  Colour scale of the figure: "
+        f"V_set {_v_set(run):.2f} pu +- {V_HALF:.2f} pu; area fill = median "
+        f"of the area's logged buses.\n",
         encoding="utf-8")
     try:
         from experiments.thesis_runs import ThesisRun

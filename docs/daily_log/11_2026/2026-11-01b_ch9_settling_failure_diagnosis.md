@@ -675,6 +675,31 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
       (a) the measurement packet lacks the highest bus (NaN entries are dropped), or (b) a
       systematic measurement offset. Not checked yet: the records keep no per-bus DS
       voltages.
+- **14:57: winner variants done (e5power, 0.99 h).** Judged with the frozen filter
+  (`stage2_search.aggregate` / `check_limits`, the limits of run 0004, e_q reference = the
+  Stage-I point; λ_max(B) taken as 1.40, since only integer prices changed):
+
+  | Variant | Filter | e_v,TS | e_v,DS | e_q | STS tap moves W1/W2/W3/W4/W6 | bank commits | max DS V (W4) |
+  |---|---|---|---|---|---|---|---|
+  | 1b94 (winner) | pass | 0.008265 | 0.00828 | 1.87·10⁵ | 0/0/0/0/4 | 0 | 1.0821 |
+  | shunt27 | **fail**: 1 hunting reversal (W6, TS trafo 1[0], 87 min) | 0.008219 | 0.00912 | 1.60·10⁵ | 0/0/0/0/0 | 4 (W1 1, W6 3) | 1.0822 |
+  | sts020 (θ_STS 0.02) | pass | 0.008270 | **0.00780** | 1.92·10⁵ | 0/0/0/2/6 | 0 | 1.0796 |
+  | sts010 (θ_STS 0.01) | pass (θ_STS outside [0.02, 0.04]) | 0.008281 | **0.00632** | **1.57·10⁵** | 6/4/4/12/18 | 0 | **1.0673** |
+  | shunt27 + sts020 | **fail**: same reversal | 0.008219 | 0.00753 | 1.61·10⁵ | 0/0/0/2/5 | 4 | 1.0738 |
+
+  - All five lie inside the 2 % band (≤ 0.008284). On e_v,DS both STS variants would rank
+    above 1b94.
+  - sts010: STS taps at most 8 operations per transformer and day, no hunting, no DS voltage
+    above 1.0673 pu in any window. sts020 removes the W4 exceedance (1.0796) and leaves W6 at
+    1.0801 for 0.1 % of the time.
+  - Cheaper banks: banks commit (4 in 60 h), but one unexplained TS-tap reversal on
+    trafo 1[0] in W6 rejects the variant. Consistent with the 337-candidate pattern above.
+- **15:00: settling tests of sts020 and sts010 launched on e5power** (18 workers each, shard
+  pids 23272 and 26628, `results/diagnostics/2026-11-03_winner_variants_0004/expC`). Same
+  argv as the run-0004 confirmation apart from the worker count.
+- **These are diagnostics, not a selection.** Adopting sts010 changes the frozen STS design
+  (θ_STS bounds); adopting sts020 changes a weight fixed in Stage I. Either is an amendment
+  declared after the results are known; the author decides.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

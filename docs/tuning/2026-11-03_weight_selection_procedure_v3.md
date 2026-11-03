@@ -33,6 +33,20 @@ is in `docs/daily_log/11_2026/2026-11-01b_ch9_settling_failure_diagnosis.md` (en
 - **Hosts:** 36 workers on e5power and 30 on e5wimi.
 - **Go criteria** for the follow-ups below.
 
+## Amendment 1 (2026-11-03 17:30, before the Stage-I verification result)
+
+Declared while run 0005's first verification was running. The diagnostic sts010
+(θ 0.01 at the v2 winner's TS weights) had reached p95 25.1, against the verification
+margin of 25.
+
+- **Settling budget: 4 supervisory periods** (author: "we could use 4 periods instead of
+  3"). Acceptance is p95 ≤ 4 N_inner = 36 and median residual ≤ 1 Mvar; the verification
+  margin is p95 ≤ 34 (v2's 2 iterations) and residual ≤ 0.8 Mvar.
+- **Coupler engagement ladder** (author: "we could do that"). θ_STS = 0.01, then 0.015,
+  then 0.02 pu. The first rung whose Stage-I point passes the verification is the
+  Stage-I point; the θ_STS check band is that target ± 0.005 pu.
+- Everything else is unchanged.
+
 ## Configuration
 
 As v2, and additionally `shunt_ff_ledger = True`: the bank-release feedforward fix,

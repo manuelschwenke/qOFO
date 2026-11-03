@@ -73,11 +73,40 @@ AFTER_EVENT_S = 7200.0                         # a bank commit "after an event"
 BANK_WINDOWS = 2
 V2_E_V_TS, GO_FACTOR = 0.00827, 1.10           # go criterion on e_v_ts
 STAGE = {"now": "search"}
+#: Settling budget in supervisory periods (author 2026-11-03: 4 instead of 3), so
+#: acceptance p95 <= 4 N_inner = 36; the verification keeps v2's 2-iteration margin.
+N_PERIODS = 4
+#: Coupler engagement ladder (author 2026-11-03): the first target whose Stage-I point
+#: passes the verification is used.
+THETA_LADDER = (0.01, 0.015, 0.02)
 
 # v2's design and verification code, with the v3 constants.
 V2.PROCEDURE, V2.RESULT, V2.VARIANT_NAME = PROCEDURE, RESULT, VARIANT_NAME
 V2.PI_Q_VARIANTS, V2.D_ENGAGE, V2.THETA_STS = (PI_Q,), D_ENGAGE, THETA_STS
 P.WINDOWS = ALL
+
+from experiments.ch_09_parameter_selection import ch_9_3_amendment1 as _A1  # noqa: E402
+
+_criterion_v1 = _A1._criterion
+
+
+def criterion(expc: Path, label: str) -> Dict[str, Any]:
+    """Run 0001's criterion with the budget N_PERIODS x N_inner (v2: 3 x 9 = 27)."""
+    o = _criterion_v1(expc, label)
+    if "p95" not in o:
+        return o
+    import pandas as pd
+    lim = N_PERIODS * _A1.N_INNER
+    rd = expc / label / (expc / label / "_latest.txt").read_text("utf-8").strip()
+    n = pd.read_csv(rd / "steps.csv").n_settle_final_1mvar
+    o["n_over"] = int((n > lim).sum())
+    o["limit_p95"] = lim
+    o["pass"] = bool(o["p95"] <= lim and o["median_residual_mvar"] <= 1.0)
+    return o
+
+
+_A1._criterion = criterion                     # V2.verify / V2.confirm import it at call time
+V2.VERIFY_P95 = N_PERIODS * _A1.N_INNER - 2.0  # 34: v2's margin of 2 iterations
 
 _screen_argv = P.screen_argv
 
@@ -104,7 +133,51 @@ P.screen_argv = screen_argv
 V2_STAGE1 = "stage1_v2_uc_2026_11_pq10"
 
 
-def design(ops) -> Tuple[Dict[str, float], Dict[str, Any]]:
+def variant_name(theta: float) -> str:
+    """The first rung keeps the name it was launched with (run 0005)."""
+    base = VARIANT_NAME.format(PI_Q)
+    return base if abs(theta - THETA_LADDER[0]) < 1e-12 else f"{base}_th{round(theta * 1000):03d}"
+
+
+def verify_label(theta: float) -> str:
+    """The first rung's label is the one v2's verify gave it (its shard is running)."""
+    return "v2_pq10" if abs(theta - THETA_LADDER[0]) < 1e-12 else f"v3_th{round(theta * 1000):03d}"
+
+
+def verify(theta: float, name: str, w: Dict[str, float], workers: int) -> Dict[str, Any]:
+    """v2's verification of one Stage-I point, keyed by the engagement target."""
+    from configs.paramsets import PARAMSET_DIR
+    from tuning.parameters import WEIGHT_FIELDS
+    vdir = P.RUN / "stage1" / "verification"
+    vdir.mkdir(parents=True, exist_ok=True)
+    path = vdir / "verification_v3.json"
+    stored = json.loads(path.read_text("utf-8")) if path.exists() else {}
+    if f"{theta:g}" in stored:
+        return stored[f"{theta:g}"]
+    label = verify_label(theta)
+    wf = vdir / f"{label}_weights.json"
+    wf.write_text(json.dumps({k: float(w[k]) for k in WEIGHT_FIELDS}, indent=1), "utf-8")
+    P.push(PARAMSET_DIR / f"{name}.json", P.REMOTE_ROOT + rf"\configs\paramsets\{name}.json")
+    P.push(wf, P.remote_path(wf))
+    P.log(f"verification of theta_STS {theta:g} ({name}) on {P.REMOTE} ({workers} workers)")
+    P.run_remote(label, V2.settle_argv(label, wf, name, vdir, workers), vdir,
+                 [(vdir / label, True)])
+    o = criterion(vdir, label)
+    o["label"], o["paramset"] = label, name
+    stored[f"{theta:g}"] = o
+    path.write_text(json.dumps(stored, indent=1), encoding="utf-8")
+    ok = (o.get("p95", 1e9) <= V2.VERIFY_P95
+          and o.get("median_residual_mvar", 1e9) <= V2.VERIFY_RESIDUAL)
+    P.log(f"  theta_STS {theta:g}: {'PASS' if ok else 'FAIL'} p95 {o.get('p95')} (margin "
+          f"{V2.VERIFY_P95:g}), median residual {o.get('median_residual_mvar')} "
+          f"{o.get('error', '')}")
+    o["verified"] = ok
+    stored[f"{theta:g}"] = o
+    path.write_text(json.dumps(stored, indent=1), encoding="utf-8")
+    return o
+
+
+def design(ops, theta: float = THETA_LADDER[0]) -> Tuple[Dict[str, float], Dict[str, Any]]:
     """The STS weights and the bank price from the v3 engagement targets; g_v,
     g_w_der, g_w_pcc and g_w_tso_oltc from v2's Stage I; g_w_gen 5e6.
 
@@ -116,7 +189,7 @@ def design(ops) -> Tuple[Dict[str, float], Dict[str, Any]]:
     from tuning import stage1_screen as s1
     wd, rep = s1.design_stage1(
         ops, pi_q=PI_Q, pi_v_ds=V2.PI_V_DS, tau=V2.TAU, g_w_gen=V2.G_W_GEN,
-        d_engage_ts=D_ENGAGE["ts"], d_engage_sts=D_ENGAGE["sts"],
+        d_engage_ts=D_ENGAGE["ts"], d_engage_sts=theta,
         d_engage_shunt=D_ENGAGE["shunt"], lambda_target_ts=V2.LAMBDA_TARGET["ts"],
         lambda_target_sts=V2.LAMBDA_TARGET["sts"])
     w = {k: float(v) for k, v in load_paramset(V2_STAGE1)["fields"].items()}
@@ -130,11 +203,12 @@ def design(ops) -> Tuple[Dict[str, float], Dict[str, Any]]:
     return w, rep
 
 
-def write_variant(w: Dict[str, float], rep: Dict[str, Any], ops) -> str:
+def write_variant(w: Dict[str, float], rep: Dict[str, Any], ops,
+                  theta: float = THETA_LADDER[0]) -> str:
     from configs.paramsets import PARAMSET_DIR
     from tuning import stage1_screen as s1
     from tuning.parameters import WEIGHT_FIELDS
-    name = VARIANT_NAME.format(PI_Q)
+    name = variant_name(theta)
     path = PARAMSET_DIR / f"{name}.json"
     fields = {k: float(w[k]) for k in WEIGHT_FIELDS}
     if path.exists():
@@ -144,7 +218,7 @@ def write_variant(w: Dict[str, float], rep: Dict[str, Any], ops) -> str:
         return name
     doc = {
         "name": name,
-        "title": f"Procedure v3 Stage-I point (pi_q {PI_Q:g}, theta_STS 0.01 pu)",
+        "title": f"Procedure v3 Stage-I point (pi_q {PI_Q:g}, theta_STS {theta:g} pu)",
         "description": [f"Designed by {P.rel(Path(__file__))} under {PROCEDURE}.",
                         "NOT a tuned point: the starting point of the v3 Stage-II search."],
         "provenance": {"producer": P.rel(Path(__file__)), "procedure": PROCEDURE,
@@ -284,10 +358,11 @@ def write_result(win: dict, rep: dict, c_res: dict, w5: dict, ver: Dict[float, A
     doc = {
         "name": RESULT,
         "title": "Controller weights selected by procedure v3 on the unit-commitment base",
-        "description": [f"Selected by {PROCEDURE}: v2 with coupler engagement 0.01 pu, "
-                        "bank engagement 0.005 pu, g_w_gen box 5e5..5e7, search on W1, "
-                        "W3, W4, W6 with an early stop, hunting tolerance 1, measured "
-                        "engagement filters, the band completed on W2."],
+        "description": [f"Selected by {PROCEDURE}: v2 with coupler engagement "
+                        f"{sum(THETA_STS) / 2:g} pu (ladder {THETA_LADDER}), bank engagement "
+                        "0.005 pu, g_w_gen box 5e5..5e7, search on W1, W3, W4, W6 with an "
+                        "early stop, hunting tolerance 1, measured engagement filters, the "
+                        f"band completed on W2, settling budget {N_PERIODS} periods."],
         "provenance": {
             "producer": P.rel(Path(__file__)), "run_dir": P.rel(P.RUN),
             "procedure": PROCEDURE, "starting_paramset": P.START,
@@ -345,27 +420,47 @@ def procedure(args) -> int:
     cfg = P.check_config()
     if not P.base_config().shunt_ff_ledger:
         raise RuntimeError("v3 runs with shunt_ff_ledger = True")
-    P.log("== 1. Stage I (v3): one STS variant, theta_STS 0.01, banks 0.005, g_w_gen 5e6")
+    global THETA_STS
+    P.log(f"== 1./2. Stage I (v3) and its verification: theta_STS ladder {THETA_LADDER}, "
+          f"banks 0.005, g_w_gen 5e6; settling budget {N_PERIODS} periods "
+          f"(acceptance p95 <= {N_PERIODS * _A1.N_INNER}, verification <= {V2.VERIFY_P95:g})")
     ops = V2.load_ops()
-    w, rep1 = design(ops)
-    d = V2.describe(w, ops)
-    P.log(f"  {', '.join(f'{k} {v:.6g}' for k, v in w.items())}")
-    P.log(f"  rho {d['rho']:.4g}, kappa {d['kappa']:.4g}, theta_STS {d['theta_sts_min']:.4f}, "
-          f"theta_TS {d['theta_ts_min']:.4f}, lambda_max(B) {d['lambda_max_B']:.4f}")
     if args.dry_run:
         from tuning.stage2_search import Box, sobol_candidates
-        draws = sobol_candidates(Box(centre=w, spans=V2.spans_v2()), V2.N_2A, seed=P.SEED)
-        n = sum(1 for x in draws if V2.passes_screen(x, ops))
-        P.log(f"dry run: {n} / {V2.N_2A} II-a draws pass the screen; nothing simulated")
+        for theta in THETA_LADDER:
+            w, _ = design(ops, theta)
+            d = V2.describe(w, ops)
+            draws = sobol_candidates(Box(centre=w, spans=V2.spans_v2()), V2.N_2A, seed=P.SEED)
+            n = sum(1 for x in draws if V2.passes_screen(x, ops))
+            P.log(f"dry run theta {theta:g}: g_w_dso_oltc {w['g_w_dso_oltc']:.4g}, "
+                  f"theta_STS {d['theta_sts_min']:.4f}, lambda_max(B) {d['lambda_max_B']:.4f}; "
+                  f"{n} / {V2.N_2A} II-a draws pass the screen")
         return 0
     sync_remote_code()
-    name = write_variant(w, rep1, ops)
-    P.log("== 2. settling verification of the Stage-I point")
-    ver = V2.verify({PI_Q: name}, {PI_Q: w}, args.verify_workers)
-    if V2.choose_variant(ver) is None:
-        P.log("the Stage-I point fails the verification; the campaign stops")
-        (P.RUN / "FAILED.txt").write_text("Stage-I verification failed\n", "utf-8")
+    ver: Dict[float, Any] = {}
+    chosen = None
+    for theta in THETA_LADDER:
+        w, rep1 = design(ops, theta)
+        d = V2.describe(w, ops)
+        P.log(f"  theta {theta:g}: {', '.join(f'{k} {v:.6g}' for k, v in w.items())}")
+        P.log(f"  rho {d['rho']:.4g}, kappa {d['kappa']:.4g}, theta_STS "
+              f"{d['theta_sts_min']:.4f}, theta_TS {d['theta_ts_min']:.4f}, "
+              f"lambda_max(B) {d['lambda_max_B']:.4f}")
+        name = write_variant(w, rep1, ops, theta)
+        ver[theta] = verify(theta, name, w, args.verify_workers)
+        if ver[theta].get("verified"):
+            chosen = (theta, name, w)
+            break
+    if chosen is None:
+        P.log("no rung of the theta ladder passes the verification; the campaign stops")
+        (P.RUN / "FAILED.txt").write_text("Stage-I verification failed at every rung\n", "utf-8")
         return 2
+    theta, name, w = chosen
+    THETA_STS = (theta - 0.005, theta + 0.005)
+    (P.RUN / "stage1" / "chosen.json").write_text(json.dumps(
+        {"theta_sts": theta, "paramset": name, "label": verify_label(theta),
+         "theta_sts_band_pu": list(THETA_STS)}, indent=1), "utf-8")
+    P.log(f"Stage-I point: {name} (theta_STS {theta:g})")
     P.START = name
     P.push_inputs()
     split_local = args.local_workers * args.local_speed
@@ -417,6 +512,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "d_engage_pu": D_ENGAGE, "theta_sts_band_pu": list(THETA_STS),
                         "theta_ts_max_pu": V2.THETA_TS_MAX, "search_windows": list(SEARCH),
                         "hunting_tolerance": TOLERANCE, "n_2a": V2.N_2A,
+                        "theta_ladder": list(THETA_LADDER), "settling_periods": N_PERIODS,
                         "rounds_max": P.MAX_ROUNDS, "result_paramset": RESULT,
                         "workers": f"{args.local_workers} here + {args.remote_workers} on "
                                    f"{P.REMOTE}"},

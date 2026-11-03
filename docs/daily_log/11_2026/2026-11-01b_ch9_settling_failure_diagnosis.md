@@ -935,6 +935,31 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - every compared field (e_v,TS, e_v,DS, e_q, v_worst_ds, tap rates, hunting, bank
     commits) equals the stored run-0004 rows exactly (difference 0).
   - So the new code changes nothing for a bank-free trajectory.
+- **17:15–17:30: v3 amendment 1, author: "we could do that" (the θ ladder) and "use 4 periods
+  instead of 3 for the settling".**
+  - `ch_9_11_procedure_v3.py`:
+    - `criterion()` wraps `ch_9_3_amendment1._criterion` with the budget
+      `N_PERIODS × N_inner` = 36 and is patched into that module, so V2's verify and
+      confirm use it;
+    - `V2.VERIFY_P95` = 34;
+    - `THETA_LADDER` = (0.01, 0.015, 0.02), each rung with its own parameter set
+      (`stage1_v3_uc_2026_11_pq10`, `_th015`, `_th020`) and verification label (`v2_pq10`,
+      the label of the shard already running, then `v3_th015`, `v3_th020`);
+    - results go to `stage1/verification/verification_v3.json`, and the choice to
+      `stage1/chosen.json`.
+  - `ch_9_12_followups_v3.py`:
+    - the figure's start data comes from `chosen.json`;
+    - the generator's `n.max() <= 36` check is dropped, because with coupler moves a step
+      can exceed the axis (sts010: max 46).
+  - Checks:
+    - sts010 under the new criterion: p95 25.1 ≤ 36, 1 step over 36, pass;
+    - dry run: the three rungs give g_w_dso_oltc 10.84, 16.26 and 21.68, λ_max(B) 1.447,
+      100 / 512 II-a draws each;
+    - tests: 2 passed.
+  - Procedure text: amendment 1 added before the verification result.
+  - Run 0005 is restarted by `--resume`; its running verification shard (`v2_pq10`) is
+    kept.
+  - The follow-up launcher is re-armed with the new code, still figure only.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

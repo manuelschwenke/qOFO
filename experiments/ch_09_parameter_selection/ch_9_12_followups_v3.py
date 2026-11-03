@@ -108,16 +108,19 @@ def settling_figure(run: Path, key: str) -> None:
     spec = importlib.util.spec_from_file_location("make_settling_cdf", script)
     gen = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gen)
-    paths = {"start": latest(run / "stage1" / "verification" / "v2_pq10"),
+    chosen = json.loads((run / "stage1" / "chosen.json").read_text("utf-8"))
+    paths = {"start": latest(run / "stage1" / "verification" / chosen["label"]),
              "final": latest(run / "expC" / f"cand_{key}")}
     gen.BUNDLE = str(run)
 
     def load():
+        # The generator's own check n.max() <= N_MAX is dropped: with coupler moves a
+        # few steps exceed the 36-iteration axis (sts010: max 46); the CDF over
+        # 0..N_MAX is unaffected, it simply ends below 1.
         out = {}
         for k, p in paths.items():
             n = gen.pd.read_csv(p / "steps.csv").n_settle_final_1mvar.to_numpy()
             assert len(n) == 120 and not gen.np.isnan(n).any(), p
-            assert n.max() <= gen.N_MAX, (p, n.max())
             out[k] = (str(p), n)
         return out
 

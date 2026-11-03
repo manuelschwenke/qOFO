@@ -916,6 +916,20 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
       start, 22 final; .dat and .tex written there);
     - the SELECTED_PARAMSET line pattern matches;
     - `variants.NOT_READY` is empty.
+- **17:00: settling tests of the winner variants (diagnostic, e5power 2 × 18 workers),
+  scored with `ch_9_3_amendment1._criterion`:**
+
+  | Variant | p95 | median residual | max | over 27 / censored | per-DSO p95 (worst) | steps with a coupler move |
+  |---|---|---|---|---|---|---|
+  | sts020 (θ 0.02) | 22.0 | 0.42 Mvar | 27 | 0 / 0 | DSO_3 24.55 | 0 of 120 |
+  | sts010 (θ 0.01) | **25.1** | 0.34 Mvar | **46** | **5 / 1** | **DSO_3 29.1** | 8 of 120 |
+
+  - Both pass the confirmation criterion (p95 ≤ 27, residual ≤ 1 Mvar).
+  - sts020 equals the winner exactly: no coupler moves during the steps.
+  - sts010 misses v3's Stage-I verification margin (p95 ≤ 25) by 0.1 at the winner's
+    TS weights. Coupler moves lengthen some steps: max 46, one step does not settle.
+  - Run 0005's Stage-I verification at θ 0.01 (with other TS weights) may therefore fail
+    its margin, and under the frozen text the campaign would then stop.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

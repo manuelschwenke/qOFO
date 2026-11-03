@@ -734,6 +734,34 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Files pushed to e5power (`results/diagnostics/2026-11-03_winner_ggen_0004`).
   - Launch as soon as the two settling tests have freed e5power, which is at its 36-worker
     limit now.
+- **Author decisions 15:5x (for the procedure-v3 proposal Claude drafts once the settling,
+  g_w_gen and ledger results are in):**
+  - g_w_gen not too low: about 5·10⁵ is the low end. The queued run gained a fourth variant,
+    g_w_gen 5·10⁵ (20 units, 20 workers).
+  - **No reserve term** in the objective for the standard case study. Banks should still
+    commit, e.g. after load steps and outages; their weights may need to be lower. A
+    reserve term may be investigated later, outside the standard case.
+  - STS taps unused at the winner is not the intended behaviour; the design rules are to be
+    corrected.
+- **Speed-up analysis (run 0004, 336 candidates, 1040 worker-h):**
+  - **Early abort at the first unexplained reversal** is exact under hunting tolerance 0.
+    - Stopping all of a candidate's windows at its first reversal would have saved 67 %;
+      stopping each window at its own first reversal, 30 %.
+    - The median first reversal comes at 11 % of the window.
+  - **Window subset first:** W1 + W6 cost 44 % of the compute and catch 99 % of the
+    rejections. No feasible candidate is lost, all 10 band members and the winner are kept,
+    and Spearman of e_v,TS among feasible candidates is 0.97. Completing W2–W4 for survivors
+    only saves ≈ 42 %, but it is approximate, based on one campaign.
+  - Reversals by window: W6 574, W4 524, W3 421, W1 167, W2 93. Share of the compute:
+    W6 30 %, W3 22 %, W4 18 %, W2 16 %, W1 13 %.
+- **Hunting forensics (first pass):**
+  - Of 1780 unexplained reversals in the 251 candidates rejected for tap hunting, 235 (13 %)
+    begin with a move in the first 15 min, i.e. the start-up dispatch from the captured
+    operating point; 118 (7 %) bracket a bank move.
+  - 30 candidates were rejected only for reversals that start in the first 15 min.
+  - The shunt27 variant's single reversal is of this kind: trafo 1[0] −1 at 180 s, bank
+    z2[0] commits at 5040 s, trafo 1[0] +1 at 5400 s.
+  - Median start of a reversal 302 min, near the events at 40–45 % of the window.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

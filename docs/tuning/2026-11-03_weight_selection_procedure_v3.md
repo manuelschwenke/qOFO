@@ -50,6 +50,52 @@ margin of 25.
   The report states, besides the 4-period check, whether the selected set also meets the
   3-period limit of v2 (p95 ≤ 27).
 
+## Amendment 2 (2026-11-03 ≈ 20:45, after run 0005's II-a; run 0006)
+
+Declared after the II-a result of run 0005 and before any II-b result. The author
+approved it with "Yes. Rerun with a and b". Evidence, from the II-a records of run 0005:
+
+- 71 of 101 candidates reverse TSO transformer `1[0]` in W6:
+  - the first move comes at the first dispatch (t = 3 min);
+  - the reversal follows 1.2–1.5 h later.
+- It is the only start-up reversal type, and it uses up the hunting tolerance:
+  - 55 of the 94 stopped candidates would have had at most 1 counted reversal at the
+    time of their stop;
+  - this includes most candidates with bank prices of 10–22.
+- **The early stop hides the bank behaviour.** Only 2 of the 188 W1/W3 records of stopped
+  candidates reach the outage + 2 h. The bank-engagement filter was therefore judged on
+  7 records.
+
+Changes:
+
+- **(a) Start-up exemption.** A reversal formed by a device's first two moves in a window,
+  the first before 900 s, is reported (`startup_detail`) and not counted.
+  - This applies to taps and banks, in the filter and in the early stop.
+  - It exempts at most one reversal per device and window. A limit cycle is still caught
+    from its next reversal on.
+  - Re-scored on the stored II-a moves of run 0005: 185 → 113 counted tap reversals
+    (72 exempt).
+- **(b) Stage II-c, the bank price tuned on its own.**
+  - After II-b, the leader's other weights are kept. g_w_tso_shunt runs on 8 log-spaced
+    values, from the lower edge of the II-a box (13.49 × 10^−0.5 ≈ 4.27) up to the
+    leader's own value.
+  - Windows: W1, W3, W4 and W6, without the early stop.
+  - The pick is the lowest price that is feasible (θ bounds, tolerance 1, no bank
+    reversal) with e_v,TS within 2 % of the leader's on the same records.
+  - The pick joins the completion band, where the engagement levels decide.
+  - Rationale: the commit threshold scales with the price, Δv_eng = 0.005 pu ×
+    g_w_tso_shunt / 13.49. e_v,TS hardly depends on the price, so the joint search does
+    not encode the engagement goal.
+- **Clarification.** If every candidate of the applied engagement level fails the settling
+  confirmation, the next level applies.
+- **Stage I is unchanged.** Its verification is taken over from run 0005
+  (`--reuse-stage1`).
+- **Go criteria unchanged.**
+
+Considered and not changed: a coupler move at an event and its reversal minutes later
+counts as hunting. This is deliberate in `hunting_reversals`: exempting reversals by their
+proximity to an event hid limit cycles in an earlier run (2026-09-11).
+
 ## Configuration
 
 As v2, and additionally `shunt_ff_ledger = True`: the bank-release feedforward fix,

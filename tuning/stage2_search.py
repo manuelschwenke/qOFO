@@ -552,12 +552,47 @@ def merge_events(events_s: Sequence[float],
     return out
 
 
+def _split_reversals(
+    moves: Sequence[Tuple[float, str, int]],
+    events_s: Sequence[float],
+    dwell_s: float,
+    tol_s: float,
+    startup_s: float,
+) -> Tuple[List[dict], List[dict], List[dict]]:
+    """``(hunting, event_explained, startup)``; see :func:`hunting_reversals`."""
+    events_s = merge_events(events_s)
+
+    per: Dict[str, List[Tuple[float, int]]] = {}
+    for t, key, s in moves:
+        per.setdefault(key, []).append((float(t), int(s)))
+
+    hunt: List[dict] = []
+    legit: List[dict] = []
+    startup: List[dict] = []
+    for key, seq in per.items():
+        seq.sort()
+        for i, ((t0, s0), (t1, s1)) in enumerate(zip(seq, seq[1:])):
+            if s1 == s0 or (t1 - t0) > dwell_s:
+                continue
+            new_event = any(t0 + tol_s < te <= t1 + tol_s for te in events_s)
+            row = {"transformer": key, "t0_s": t0, "t1_s": t1,
+                   "dwell_s": t1 - t0}
+            if new_event:
+                legit.append(row)
+            elif i == 0 and t0 < startup_s:
+                startup.append(row)
+            else:
+                hunt.append(row)
+    return hunt, legit, startup
+
+
 def hunting_reversals(
     moves: Sequence[Tuple[float, str, int]],
     events_s: Sequence[float] = (),
     *,
     dwell_s: float = HUNT_DWELL_S,
     tol_s: float = 1.0,
+    startup_s: float = 0.0,
 ) -> Tuple[List[dict], List[dict]]:
     """Split short reversals into ``(hunting, event_explained)``.
 
@@ -576,37 +611,32 @@ def hunting_reversals(
 
     Slow reversals are not counted at any dwell: a tap that moves once in the
     morning and back in the evening is following load, not hunting.
+
+    ``startup_s`` > 0 (procedure v3, amendment 2, 2026-11-03) leaves out the
+    reversal formed by a device's FIRST two moves in the window when the first
+    lies before ``startup_s``: the window's initial tap position, not closed-loop
+    hunting.  At most one per device and window; a limit cycle is still caught
+    from its next reversal on.  Run 0005 II-a: 71 of 101 candidates reversed TSO
+    transformer 1[0] in W6 after a move at the first dispatch (t = 3 min).
+    Those reversals are returned by :func:`hunting_summary` as ``startup_detail``.
     """
-    events_s = merge_events(events_s)
-
-    per: Dict[str, List[Tuple[float, int]]] = {}
-    for t, key, s in moves:
-        per.setdefault(key, []).append((float(t), int(s)))
-
-    hunt: List[dict] = []
-    legit: List[dict] = []
-    for key, seq in per.items():
-        seq.sort()
-        for (t0, s0), (t1, s1) in zip(seq, seq[1:]):
-            if s1 == s0 or (t1 - t0) > dwell_s:
-                continue
-            new_event = any(t0 + tol_s < te <= t1 + tol_s for te in events_s)
-            row = {"transformer": key, "t0_s": t0, "t1_s": t1,
-                   "dwell_s": t1 - t0}
-            (legit if new_event else hunt).append(row)
+    hunt, legit, _ = _split_reversals(moves, events_s, dwell_s, tol_s, startup_s)
     return hunt, legit
 
 
 def hunting_summary(records: Sequence[Any], events_s: Sequence[float] = (),
-                    *, dwell_s: float = HUNT_DWELL_S) -> Dict[str, Any]:
+                    *, dwell_s: float = HUNT_DWELL_S,
+                    startup_s: float = 0.0) -> Dict[str, Any]:
     """Hunting counts plus the raw move list, for one window."""
     moves = tap_moves(records)
-    hunt, legit = hunting_reversals(moves, events_s, dwell_s=dwell_s)
-    hunt_1h, _ = hunting_reversals(moves, events_s, dwell_s=3600.0)
+    hunt, legit, startup = _split_reversals(moves, events_s, dwell_s, 1.0, startup_s)
+    hunt_1h, _, _ = _split_reversals(moves, events_s, 3600.0, 1.0, startup_s)
     return {
         "n_hunting": len(hunt),
         "n_hunting_1h": len(hunt_1h),
         "n_event_explained": len(legit),
+        "n_startup_exempt": len(startup),
+        "startup_detail": startup,
         "n_moves": len(moves),
         "hunting_detail": hunt,
         # Persisted so a revised wear definition can be applied without
@@ -617,7 +647,8 @@ def hunting_summary(records: Sequence[Any], events_s: Sequence[float] = (),
 
 
 def shunt_summary(records: Sequence[Any],
-                  events_s: Sequence[float] = ()) -> Dict[str, Any]:
+                  events_s: Sequence[float] = (),
+                  *, startup_s: float = 0.0) -> Dict[str, Any]:
     """Switched-shunt commits: counts, short reversals, and bank hunting.
 
     Since 2026-10-22 a bulk MSC/MSR bank is an integer input of the TS-MIQP,
@@ -628,7 +659,8 @@ def shunt_summary(records: Sequence[Any],
       window, the quantity a per-bank daily budget bounds;
     * ``n_shunt_hunting`` -- opposite-direction commit pairs on one bank within
       :data:`HUNT_DWELL_S` with no new disturbance in between, by the same
-      event attribution as the taps (:func:`hunting_reversals`).
+      event attribution as the taps (:func:`hunting_reversals`), including
+      its ``startup_s`` exemption.
 
     ``shunt_reversals`` is the raw count of the earlier definition (2 h dwell,
     NOT event-attributed), from when the banks were dispatched by an integrator
@@ -668,12 +700,15 @@ def shunt_summary(records: Sequence[Any],
     per_bank: Dict[str, int] = {}
     for _t, key, _s in moves:
         per_bank[key] = per_bank.get(key, 0) + 1
-    hunt, legit = hunting_reversals(
-        [(float(t), str(k), int(s)) for t, k, s in moves], events_s)
+    hunt, legit, startup = _split_reversals(
+        [(float(t), str(k), int(s)) for t, k, s in moves], events_s,
+        HUNT_DWELL_S, 1.0, startup_s)
     return {"shunt_commits": n_up + n_dn, "shunt_up": n_up, "shunt_down": n_dn,
             "shunt_reversals": n_rev, "shunt_max_level": max_level,
             "shunt_ops_max_bank": max(per_bank.values(), default=0),
             "n_shunt_hunting": len(hunt),
             "n_shunt_event_explained": len(legit),
+            "n_shunt_startup_exempt": len(startup),
             "shunt_hunting_detail": hunt,
+            "shunt_startup_detail": startup,
             "shunt_moves": moves}

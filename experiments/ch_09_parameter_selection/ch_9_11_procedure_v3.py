@@ -28,6 +28,15 @@ otherwise the same code path:
 * **Go criteria** for the follow-ups (author 2026-11-03), written to GO.json or
   NOGO.json: e_v_ts <= 1.10 x 0.00827; couplers in every search window; banks
   after events in >= 2 windows; all limits met.
+* **Amendment 2** (author 2026-11-03, after run 0005's II-a; run 0006):
+  (a) a reversal formed by a device's first two moves in a window, the first
+  before 15 min, is reported and not counted (filter and early stop);
+  (b) Stage II-c tunes the bank price on its own: the II-b leader's other weights
+  fixed, g_w_tso_shunt on N_2C log-spaced values from the II-a box edge up to the
+  leader's, no early stop; the lowest feasible price within the 2 % e_v_ts band of
+  the leader joins the completion band, where the engagement levels decide.
+  A level whose candidates all fail the settling test passes to the next level.
+  ``--reuse-stage1 <run>`` takes the Stage-I verification of run 0005 (unchanged).
 
 Usage (from the repository root, on e5wimi)::
 
@@ -79,6 +88,12 @@ N_PERIODS = 4
 #: Coupler engagement ladder (author 2026-11-03): the first target whose Stage-I point
 #: passes the verification is used.
 THETA_LADDER = (0.01, 0.015, 0.02)
+#: Amendment 2 (a): start-up exemption of the reversal count [s] (the first TSO
+#: dispatch of a window is at 3 min; run 0005 II-a, W6, device 1[0]).
+STARTUP_EXEMPT_S = 900.0
+#: Amendment 2 (b): bank prices on the II-c grid, the leader's own included.
+N_2C = 8
+STAGE2C: Dict[str, Any] = {}
 
 # v2's design and verification code, with the v3 constants.
 V2.PROCEDURE, V2.RESULT, V2.VARIANT_NAME = PROCEDURE, RESULT, VARIANT_NAME
@@ -114,15 +129,20 @@ _screen_argv = P.screen_argv
 def screen_argv(out: Path, cj: Path, workers: int, windows: Optional[str] = None,
                 skip_baseline: bool = False) -> List[str]:
     """Search units: the four search windows with the early stop.  Completion:
-    all five windows (only W2 is missing).  An explicit window list (W5 report)
-    is passed through unchanged."""
+    all five windows (only W2 is missing).  Bank stage (II-c): the search windows
+    without the early stop.  An explicit window list (W5 report) is passed
+    through unchanged.  Every unit counts reversals with the start-up exemption
+    of amendment 2."""
+    su = ["--startup-exempt-s", f"{STARTUP_EXEMPT_S:g}"]
     if windows is not None:
-        return _screen_argv(out, cj, workers, windows=windows, skip_baseline=skip_baseline)
+        return _screen_argv(out, cj, workers, windows=windows, skip_baseline=skip_baseline) + su
     if STAGE["now"] == "complete":
-        return _screen_argv(out, cj, workers, windows=ALL, skip_baseline=skip_baseline)
-    return _screen_argv(out, cj, workers, windows=",".join(SEARCH),
-                        skip_baseline=skip_baseline) + [
-        "--abort-tap-reversals", str(TOLERANCE + 1), "--abort-bank-reversals", "1"]
+        return _screen_argv(out, cj, workers, windows=ALL, skip_baseline=skip_baseline) + su
+    a = _screen_argv(out, cj, workers, windows=",".join(SEARCH),
+                     skip_baseline=skip_baseline) + su
+    if STAGE["now"] == "bank":
+        return a
+    return a + ["--abort-tap-reversals", str(TOLERANCE + 1), "--abort-bank-reversals", "1"]
 
 
 P.screen_argv = screen_argv
@@ -256,9 +276,9 @@ LEVELS = (("sts+bank", lambda e: e["sts_all"] and e["bank"]),
           ("none", lambda e: True))
 
 
-def stage_select(dirs: List[Path], tag: str, ops) -> dict:
-    """theta bounds, engagement level (strictest that leaves a ranked candidate),
-    then the unchanged ch_9_3_select.py at hunting tolerance 1."""
+def stage_select(dirs: List[Path], tag: str, ops, levels=LEVELS) -> dict:
+    """theta bounds, engagement level (strictest of ``levels`` that leaves a ranked
+    candidate), then the unchanged ch_9_3_select.py at hunting tolerance 1."""
     from experiments.ch_09_parameter_selection.ch_9_3_amendment1 import theta_sts_min
     sel = P.RUN / "selection"
     sel.mkdir(parents=True, exist_ok=True)
@@ -279,7 +299,7 @@ def stage_select(dirs: List[Path], tag: str, ops) -> dict:
         {"theta_sts_band_pu": list(THETA_STS), "theta_ts_max_pu": V2.THETA_TS_MAX,
          "theta_sts_min_pu": th_sts, "theta_ts_min_pu": th_ts, "engagement": eng,
          "admitted": sorted(adm)}, indent=1), "utf-8")
-    for level, ok in LEVELS:
+    for level, ok in levels:
         union = sel / f"union_{tag}_{level}"
         if union.exists():
             shutil.rmtree(union)
@@ -313,10 +333,12 @@ V2.stage_select = stage_select
 
 
 def complete_band(rep: dict, dirs: List[Path], ops, w_local: int, w_remote: int,
-                  split_local: float) -> dict:
-    """The final search band (and the Stage-I point) on W2; ranked on all windows."""
+                  split_local: float, extra: Tuple[dict, ...] = ()) -> dict:
+    """The final search band (and the Stage-I point) on W2; ranked on all windows.
+    ``extra``: the II-c pick (amendment 2), added to the band."""
     best = min(r["aggregate"]["e_v_ts"] for r in rep["ranked"])
     band = [r for r in rep["ranked"] if r["aggregate"]["e_v_ts"] <= 1.02 * best]
+    band += [r for r in extra if r["key"] not in {b["key"] for b in band}]
     keys = {r["key"] for r in band} | {rep["baseline"]["key"]}
     out = P.RUN / "complete"
     (out / "windows").mkdir(parents=True, exist_ok=True)
@@ -332,6 +354,99 @@ def complete_band(rep: dict, dirs: List[Path], ops, w_local: int, w_remote: int,
     finally:
         STAGE["now"] = "search"
     return stage_select([out], "complete", ops)
+
+
+def bank_grid(lo: float, hi: float) -> List[float]:
+    """N_2C log-spaced bank prices from ``lo`` to ``hi``, without ``hi`` itself
+    (the leader's own price, already simulated); empty if the leader sits at the
+    lower edge."""
+    import numpy as np
+    return [float(x) for x in np.geomspace(lo, hi, N_2C)[:-1]] if hi > 1.05 * lo else []
+
+
+def pick_lowest_price(ranked: List[dict], e_ref: float) -> dict:
+    """The lowest bank price among the feasible records within 2 % of ``e_ref``."""
+    ok = [r for r in ranked if r["aggregate"]["e_v_ts"] <= 1.02 * e_ref]
+    return min(ok, key=lambda r: float(r["weights"]["g_w_tso_shunt"]))
+
+
+def stage2c(rep: dict, dirs: List[Path], ops, w_local: int, w_remote: int,
+            split_local: float) -> Tuple[dict, Path]:
+    """Amendment 2 (b): the bank price on its own.
+
+    The II-b leader's other weights are kept; g_w_tso_shunt runs on N_2C
+    log-spaced values from the lower edge of the II-a box up to the leader's own,
+    on the search windows without the early stop, so the response to every event
+    is recorded.  The pick is the lowest price that is feasible (theta bounds,
+    ch_9_3_select at hunting tolerance 1, no bank reversal) with e_v_ts within
+    the 2 % band of the leader on the same records.  It joins the completion
+    band, where the engagement levels decide."""
+    from configs.paramsets import load_paramset
+    from tuning.parameters import WEIGHT_FIELDS
+    lead = rep["ranked"][0]
+    base = rep["baseline"]
+    rc = P.RUN / "stage2c"
+    (rc / "windows").mkdir(parents=True, exist_ok=True)
+    lo = (float(load_paramset(P.START)["fields"]["g_w_tso_shunt"])
+          * 10.0 ** -V2.spans_v2()["g_w_tso_shunt"])
+    hi = float(lead["weights"]["g_w_tso_shunt"])
+    grid = bank_grid(lo, hi)
+    centre = {k: float(lead["weights"][k]) for k in WEIGHT_FIELDS}
+    cands = [{**centre, "g_w_tso_shunt": x} for x in grid]
+    keep = [w for w in cands if V2.passes_screen(w, ops)]
+    P.log(f"stage II-c: leader {lead['key']} (g_w_tso_shunt {hi:.4g}); grid "
+          f"{[round(x, 3) for x in grid]}; {len(keep)} / {len(cands)} pass the screen")
+    # The Stage-I point's and the leader's windows are the stored ones: neither was
+    # stopped early, so their records equal runs without the stop.
+    for d in dirs:
+        for k in (base["key"], lead["key"]):
+            for f in (d / "windows").glob(f"{k}__*.json"):
+                if not (rc / "windows" / f.name).exists():
+                    shutil.copy2(f, rc / "windows" / f.name)
+    STAGE["now"] = "bank"
+    try:
+        if keep:
+            P.simulate(rc, keep, w_local, w_remote, split_local)
+        cj = rc / "with_leader.json"
+        cj.write_text(json.dumps(keep + [centre], indent=1), "utf-8")
+        if P.run(screen_argv(rc, cj, max(w_local, 1)), rc / "assemble_leader.log") != 0:
+            raise RuntimeError("stage II-c: assembly with the leader did not complete")
+    finally:
+        STAGE["now"] = "search"
+    rep_c = stage_select([rc], "2c", ops, levels=LEVELS[-1:])
+    ranked = {r["key"]: r for r in rep_c["ranked"]}
+    if lead["key"] not in ranked:
+        raise RuntimeError(f"stage II-c: the leader {lead['key']} is not feasible on its "
+                           "own records")
+    e_ref = ranked[lead["key"]]["aggregate"]["e_v_ts"]
+    pick = pick_lowest_price(list(ranked.values()), e_ref)
+    rows = []
+    for f in sorted((rc / "candidates").glob("cand_*.json")):
+        c = json.loads(f.read_text("utf-8"))
+        if c.get("is_baseline"):
+            continue
+        e = rep_c["_engagement"][c["key"]]
+        a = c["aggregate"]
+        rows.append({"key": c["key"], "g_w_tso_shunt": float(c["weights"]["g_w_tso_shunt"]),
+                     "feasible": c["key"] in ranked, "e_v_ts": a.get("e_v_ts"),
+                     "e_v_ds": a.get("e_v_ds"), "n_hunting": a.get("n_hunting"),
+                     "n_shunt_hunting": a.get("n_shunt_hunting"),
+                     "bank_after_windows": e["bank_after_windows"], "sts_all": e["sts_all"]})
+    rows.sort(key=lambda r: r["g_w_tso_shunt"])
+    for r in rows:
+        P.log(f"  II-c {r['key']} price {r['g_w_tso_shunt']:7.3f}: "
+              f"{'feasible' if r['feasible'] else 'rejected'}, e_v_ts {r['e_v_ts']:.5f}, "
+              f"hunting {r['n_hunting']:g}, bank hunting {r['n_shunt_hunting']:g}, "
+              f"bank after events in {r['bank_after_windows']} window(s)")
+    STAGE2C.update({"leader": lead["key"], "grid": grid, "e_v_ts_leader": e_ref,
+                    "rows": rows, "pick": pick["key"],
+                    "pick_g_w_tso_shunt": float(pick["weights"]["g_w_tso_shunt"])})
+    (rc / "stage2c_summary.json").write_text(json.dumps(STAGE2C, indent=1, default=float),
+                                             "utf-8")
+    same = " (the leader itself)" if pick["key"] == lead["key"] else ""
+    P.log(f"stage II-c: pick {pick['key']} (g_w_tso_shunt "
+          f"{float(pick['weights']['g_w_tso_shunt']):.4g}){same}")
+    return pick, rc
 
 
 # -- go criteria and result -------------------------------------------------------------------
@@ -362,7 +477,9 @@ def write_result(win: dict, rep: dict, c_res: dict, w5: dict, ver: Dict[float, A
                         f"{sum(THETA_STS) / 2:g} pu (ladder {THETA_LADDER}), bank engagement "
                         "0.005 pu, g_w_gen box 5e5..5e7, search on W1, W3, W4, W6 with an "
                         "early stop, hunting tolerance 1, measured engagement filters, the "
-                        f"band completed on W2, settling budget {N_PERIODS} periods."],
+                        f"band completed on W2, settling budget {N_PERIODS} periods; "
+                        f"amendment 2: start-up exemption {STARTUP_EXEMPT_S:g} s, bank price "
+                        "tuned on its own (Stage II-c)."],
         "provenance": {
             "producer": P.rel(Path(__file__)), "run_dir": P.rel(P.RUN),
             "procedure": PROCEDURE, "starting_paramset": P.START,
@@ -378,6 +495,7 @@ def write_result(win: dict, rep: dict, c_res: dict, w5: dict, ver: Dict[float, A
             "aggregate_all_windows": win["aggregate"],
             "baseline_aggregate": rep.get("baseline", {}).get("aggregate"),
             "settling": c_res.get(win["key"]), "go_criteria": go,
+            "amendment2": {"startup_exempt_s": STARTUP_EXEMPT_S, "stage2c": STAGE2C},
             "weight_fingerprint": weight_fingerprint(fields),
             **{f"design_{k}": v for k, v in V2.describe(fields, ops).items()},
         },
@@ -421,6 +539,8 @@ def procedure(args) -> int:
     if not P.base_config().shunt_ff_ledger:
         raise RuntimeError("v3 runs with shunt_ff_ledger = True")
     global THETA_STS
+    P.log(f"amendment 2: start-up exemption {STARTUP_EXEMPT_S:g} s; Stage II-c with "
+          f"{N_2C} bank prices")
     P.log(f"== 1./2. Stage I (v3) and its verification: theta_STS ladder {THETA_LADDER}, "
           f"banks 0.005, g_w_gen 5e6; settling budget {N_PERIODS} periods "
           f"(acceptance p95 <= {N_PERIODS * _A1.N_INNER}, verification <= {V2.VERIFY_P95:g})")
@@ -437,6 +557,12 @@ def procedure(args) -> int:
                   f"{n} / {V2.N_2A} II-a draws pass the screen")
         return 0
     sync_remote_code()
+    if args.reuse_stage1 is not None:
+        src = (ROOT / args.reuse_stage1).resolve() / "stage1" / "verification"
+        dst = P.RUN / "stage1" / "verification"
+        if not dst.exists():
+            shutil.copytree(src, dst)
+        P.log(f"Stage-I verification reused from {P.rel(src)} (amendment 2: Stage I unchanged)")
     ver: Dict[float, Any] = {}
     chosen = None
     for theta in THETA_LADDER:
@@ -468,10 +594,21 @@ def procedure(args) -> int:
     rep = V2.stage2a(w, ops, args.local_workers, args.remote_workers, split_local)
     P.log("== 4. Stage II-b")
     rep, dirs = V2.stage2b(rep, ops, args.local_workers, args.remote_workers, split_local)
+    P.log("== 4c. Stage II-c (bank price on its own; W1, W3, W4, W6 without the early stop)")
+    pick, rc = stage2c(rep, dirs, ops, args.local_workers, args.remote_workers, split_local)
     P.log("== 5. completion of the band on W2, ranking on all windows")
-    rep = complete_band(rep, dirs, ops, args.local_workers, args.remote_workers, split_local)
+    rep = complete_band(rep, dirs + [rc], ops, args.local_workers, args.remote_workers,
+                        split_local, extra=(pick,))
     P.log("== 6. settling confirmation")
     win, c_res = V2.confirm(rep, args.confirm_workers)
+    names = [lv for lv, _ in LEVELS]
+    i = names.index(rep["_level"])
+    while win is None and i + 1 < len(LEVELS):
+        P.log(f"settling: no candidate at engagement level '{names[i]}' passes; "
+              f"next level '{names[i + 1]}'")
+        i += 1
+        rep = stage_select([P.RUN / "complete"], f"complete_l{i}", ops, levels=LEVELS[i:])
+        win, c_res = V2.confirm(rep, args.confirm_workers)
     if win is None:
         (P.RUN / "FAILED.txt").write_text("no candidate passes the settling test\n", "utf-8")
         return 2
@@ -497,6 +634,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--local-speed", type=float, default=0.7)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--resume", type=Path, default=None)
+    p.add_argument("--reuse-stage1", type=Path, default=None,
+                   help="Run folder whose stage1/verification is taken over (amendment 2).")
     add_run_arguments(p)
     args = p.parse_args(argv)
     os.environ.setdefault("PYTHONUTF8", "1")
@@ -514,6 +653,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "hunting_tolerance": TOLERANCE, "n_2a": V2.N_2A,
                         "theta_ladder": list(THETA_LADDER), "settling_periods": N_PERIODS,
                         "rounds_max": P.MAX_ROUNDS, "result_paramset": RESULT,
+                        "amendment2": {"startup_exempt_s": STARTUP_EXEMPT_S, "n_2c": N_2C,
+                                       "reuse_stage1": str(args.reuse_stage1)},
                         "workers": f"{args.local_workers} here + {args.remote_workers} on "
                                    f"{P.REMOTE}"},
             time_series=("Stage-I verification and settling confirmation: 120 isolated "
@@ -533,6 +674,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             rc = 1
         trun.describe_output("driver.log", "every stage with times")
         trun.describe_output("selection/", "theta, engagement, unions, ch_9_3_select reports")
+        trun.describe_output("stage2c/", "bank price on its own (amendment 2)")
         trun.describe_output("complete/", "the band completed on W2")
         trun.describe_output("expC/", "settling confirmation in rank order")
         P.log(f"driver finished rc={rc} after {(time.time() - t0) / 3600:.2f} h")

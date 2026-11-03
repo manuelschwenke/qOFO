@@ -1012,6 +1012,55 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   ≥ 2 search windows) is unlikely to be met by the final band. A NOGO starts none of the
   follow-ups. Whether the follow-ups should still run when only the bank criterion fails
   is put to the author; nothing changed.
+- **≈ 20:15: diagnosis of the bank result** (II-a records of run 0005).
+  - **Start-up reversal.** 71 of 101 candidates reverse TSO transformer `1[0]` in W6:
+    first move at the first dispatch (t = 3 min), back 1.2–1.5 h later.
+    - It is the only start-up reversal type.
+    - Without it, 55 of the 94 stopped candidates would have had ≤ 1 counted reversal at
+      their stop.
+  - **Censoring by the early stop.** Of the 188 W1/W3 records of stopped candidates, only 2
+    reach the outage + 2 h. The bank criterion was therefore judged on 7 records.
+    This is a design error of v3: the early stop and the engagement measure share the
+    windows.
+  - **Remaining interaction.** In W6, cheap banks commit 2–3 zone-2 banks within ≈ 0.5 h.
+    The coupler `DSO_3|trafo_8` reverses 0.7–1.5 h later.
+    - Hypothesis: the bank's voltage step is not fed forward, while its Q step is
+      (`q_itf_sh_offset`).
+    - Tolerance 1 allows one such reversal.
+  - **Checked and kept:** a coupler move at an event that reverses 2 min later counts as
+    hunting. This is deliberate (`hunting_reversals` docstring, 2026-09-11).
+- **20:43, author: "Yes. Rerun with a and b"** (Amendment 2 in the v3 document).
+  - Run 0005 stopped at 20:43: driver 152520, local shard, e5power shard 13376 (tree) and
+    follow-up launcher 34232.
+  - **Code:**
+    - `tuning/stage2_search.py`:
+      - new `_split_reversals(moves, events, dwell, tol, startup_s)` → (hunting,
+        event-explained, start-up);
+      - `hunting_reversals(..., startup_s=0.0)` keeps its signature;
+      - `hunting_summary` / `shunt_summary` take `startup_s` and report
+        `n_startup_exempt` / `startup_detail` (banks: `n_shunt_startup_exempt`,
+        `shunt_startup_detail`).
+      - Only the pair formed by a device's first two moves can be exempt, and only if
+        the first lies before `startup_s`; an event-explained pair stays event-explained.
+    - `ch_9_3_stage2_screen.py`: option `--startup-exempt-s S` (default 0), carried in
+      the job and passed to the early-stop hook and to the window row.
+    - `ch_9_11_procedure_v3.py`:
+      - `STARTUP_EXEMPT_S = 900`, added by `screen_argv` to every unit;
+      - stage `bank` = search windows without the early stop;
+      - `stage_select(..., levels=)`;
+      - `bank_grid`, `pick_lowest_price` and `stage2c` (grid 4.27 → leader's price,
+        8 values, the leader's own records reused; the pick joins the completion band
+        through `complete_band(..., extra=)`);
+      - level fallback after a failed settling confirmation;
+      - `--reuse-stage1 <run>` copies `stage1/verification` (Stage I is unchanged);
+      - provenance `amendment2` in the result.
+  - **Tests** `tests/test_procedure_v3.py`, three new: screen arguments per stage,
+    start-up exemption, II-c grid and pick. 24 pass with the bank tests.
+  - **Validation on run 0005's stored moves:**
+    - with the exemption off, the recomputed counts equal the stored ones in every
+      window (0 mismatches);
+    - with it on, counted tap reversals go from 185 to 113 (72 exempt).
+  - Dry run: same 100 / 512 II-a draws.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

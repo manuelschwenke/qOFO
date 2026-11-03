@@ -90,8 +90,9 @@ def _abort_hook(job: Dict[str, Any], events_s) -> Any:
     def hook(step: int, log: list) -> None:
         if step % 9:                      # once per TS iteration (T_TS / T_STS)
             return
-        n = (int(hunting_summary(log, events_s)["n_hunting"]),
-             int(shunt_summary(log, events_s)["n_shunt_hunting"]))
+        su = float(job.get("startup_s", 0.0))
+        n = (int(hunting_summary(log, events_s, startup_s=su)["n_hunting"]),
+             int(shunt_summary(log, events_s, startup_s=su)["n_shunt_hunting"]))
         if n != last["n"]:
             mine.write_text(json.dumps({"tap": n[0], "bank": n[1]}), encoding="utf-8")
             last["n"] = n
@@ -218,8 +219,9 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
         # moves is what lets a revised wear definition be applied without
         # re-simulating; the first Stage II-b dropped its records and could
         # not be re-scored when the definition changed.
-        row.update(hunting_summary(records, sc.event_times_s))
-        row.update(shunt_summary(records, sc.event_times_s))
+        su = float(job.get("startup_s", 0.0))
+        row.update(hunting_summary(records, sc.event_times_s, startup_s=su))
+        row.update(shunt_summary(records, sc.event_times_s, startup_s=su))
         # Per hour, like the tap rates, so aggregate() and check_limits()
         # treat bank wear exactly as they treat tap wear (2026-10-22).
         row["shunt_ops_per_h_bank"] = (float(row["shunt_ops_max_bank"])
@@ -312,6 +314,11 @@ def main(argv: List[str] | None = None) -> int:
                         "Procedure v3, 2026-11-03.")
     p.add_argument("--abort-bank-reversals", type=int, default=0, metavar="N",
                    help="As --abort-tap-reversals, for bank hunting reversals.")
+    p.add_argument("--startup-exempt-s", type=float, default=0.0, metavar="S",
+                   help="Do not count the reversal formed by a device's first two "
+                        "moves in a window when the first lies before S seconds "
+                        "(filter and early stop alike; reported as startup_detail). "
+                        "0 = off (default). Procedure v3 amendment 2, 2026-11-03.")
     p.add_argument("--span", action="append", default=[], metavar="NAME=DECADES",
                    help="Override one log-span of the search box (repeatable), "
                         "e.g. --span g_w_pcc=1.5. Unlisted coordinates keep "
@@ -479,6 +486,7 @@ def main(argv: List[str] | None = None) -> int:
                 "abort_tap": int(args.abort_tap_reversals),
                 "abort_bank": int(args.abort_bank_reversals),
                 "abort_dir": str(win_dir.parent / "_abort"),
+                "startup_s": float(args.startup_exempt_s),
             })
     todo = [j for j in jobs if args.force or not Path(j["out"]).exists()]
     print(f"[stage2] {len(seen_keys)} candidates x {len(window_names)} windows "

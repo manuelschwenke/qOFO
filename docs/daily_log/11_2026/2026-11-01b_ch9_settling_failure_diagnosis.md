@@ -842,6 +842,20 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   | W5 report, v3 result | Wed ≈ 10:30–16:30 |
   | Settling figure, D1+D2 (if go) | Wed ≈ 12:00–18:00 |
   | Ch 10 REF (if go) | Wed ≈ 15:00–21:00 |
+- **16:33: bank-release fix brought into this branch (author: "Yes, bring it in").**
+  - Cherry-pick of ac69918 (minimal/thesis-core) as a8d5e23; adds config flag
+    `shunt_ff_ledger` (default True), so v3 runs with the ledger on.
+  - Conflicts resolved by hand:
+    - `experiments/runners/_multi_tso_helpers.py` keeps this branch's file and adds the
+      new helper `_ledger_feedforward`, unchanged;
+    - the daily log `2026-11-02d_ts_pcc_setpoint_offset.md`, deleted on this branch,
+      stays deleted. Its account of the fix is on minimal/thesis-core.
+  - The added and removed lines are identical to ac69918 (91 lines).
+    `tests/test_shunt_ff_ledger.py` and `tests/test_shunt_banks.py`: 19 passed.
+  - Not synced to e5power yet; the queued g_w_gen diagnostic keeps the run-0004 code.
+  - Reproduction check launched: the winner (no bank commit, so the ledger cannot act) on
+    W1 and W2 with the new code, e5wimi, 2 workers, pid 83544,
+    `results/diagnostics/2026-11-03_ledger_repro`. Expected: identical rows.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

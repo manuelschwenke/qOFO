@@ -150,9 +150,12 @@ def _run_unit(job: Dict[str, Any]) -> Dict[str, Any]:
         "e_q": float(getattr(m, "itae_q_pcc", float("nan"))),
         "v_worst_ts": float(getattr(m, "v_worst_ts", 0.0) or 0.0),
         "v_worst_ds": float(getattr(m, "v_worst_ds", 0.0) or 0.0),
+        "n_viol_v_ts": float(getattr(m, "n_viol_v_ts", 0) or 0),
         "n_viol_v_ds": float(getattr(m, "n_viol_v_ds", 0) or 0),
         "tap_ops_per_h_tso": float(getattr(m, "tap_ops_per_h_tso", 0.0) or 0.0),
         "tap_ops_per_h_dso": float(getattr(m, "tap_ops_per_h_dso", 0.0) or 0.0),
+        "tap_rev_per_h_tso": float(getattr(m, "tap_reversals_per_h_tso", 0.0) or 0.0),
+        "tap_rev_per_h_dso": float(getattr(m, "tap_reversals_per_h_dso", 0.0) or 0.0),
         "pf_failures": float(getattr(m, "pf_failures", 0) or 0),
         "failure_reason": result.failure_reason or "",
     }
@@ -188,10 +191,12 @@ def main(argv: List[str] | None = None) -> int:
 
     cands = json.loads(a.candidates_json.read_text("utf-8"))
     windows = [w.strip() for w in a.windows.split(",") if w.strip()]
+    # Window-major, in the order given: list the long windows first (W6, W3) and a
+    # small pool does not end on a lone W6.  The order does not change a result.
     jobs = [{"key": c["key"], "weights": c["weights"], "window": w,
              "paramset": a.paramset, "hours": a.hours, "out": str(a.out_dir),
              "frozen_network": a.frozen_network, "evented": a.evented}
-            for c in cands for w in windows]
+            for w in windows for c in cands]
     print(f"[records] {len(cands)} candidate(s) x {len(windows)} window(s) = "
           f"{len(jobs)} units, {a.workers} workers -> {a.out_dir}", flush=True)
     t0 = time.perf_counter()

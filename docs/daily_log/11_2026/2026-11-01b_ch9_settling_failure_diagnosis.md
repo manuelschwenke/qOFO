@@ -629,6 +629,24 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - Even the filter's lower bound θ 0.02 is about twice the largest window RMS; engaging
       the taps in W1–W4 would need θ ≈ 0.005–0.01, outside the frozen bounds [0.02, 0.04].
   - Any change of these weights now is an amendment declared after the results are known.
+- **13:52: four diagnostic variants of the winner launched on e5wimi, 4 workers (author:
+  "you can run the diagnostic runs also here").**
+  - They vary the winner only; they are not a re-selection.
+    - `1b94_shunt27`: g_w_tso_shunt at the Stage-I value 26.98.
+    - `1b94_sts020`: g_w_dso_oltc 21.68 (θ_STS,min 0.02 pu).
+    - `1b94_sts010`: g_w_dso_oltc 10.84 (θ_STS,min 0.01 pu, outside the frozen bounds).
+    - `1b94_shunt27_sts020`: both changes.
+  - Windows W1–W4 and W6 only. W5 is left out so that the held-out window does not inform
+    a possible amendment.
+  - 20 units, pid 151840, output `results/diagnostics/2026-11-03_winner_variants_0004/out`;
+    ≈3.5–4 h at 4 workers.
+  - Settling tests only for variants that pass the frozen filter, on e5power.
+  - `ch_9_10` change for this run:
+    - jobs are window-major in the order given (`--windows W6,W3,W4,W2,W1`), so the pool
+      does not end on a lone W6;
+    - the row also carries n_viol_v_ts and the tap reversal rates.
+    - The e5power record run (launched 13:42) uses the earlier file; its rows lack these
+      three fields.
 
 ## Open
 

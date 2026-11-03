@@ -113,6 +113,11 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
             base,
             dso_der_scale=dict(FROZEN_DSO_DER_SCALE),
             dso_load_p_scale=dict(FROZEN_DSO_LOAD_P_SCALE))
+    if job.get("config_set"):
+        # --config-set (2026-11-03): explicit config fields, applied last, e.g.
+        # shunt_ff_ledger=false to reproduce runs made before that flag existed.
+        import dataclasses as _dc
+        base = _dc.replace(base, **job["config_set"])
     bank = (condition_set_evented if job.get("evented") else condition_set)
     sc = next(s for s in bank(hours=job["hours"]) if s.name == job["window"])
 
@@ -182,7 +187,8 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
     out_path.write_text(json.dumps(
         {"key": job["key"], "window": job["window"], "hours": job["hours"],
          "weights": job["weights"], "lambda_max_B": job["lambda_max_B"],
-         "is_baseline": bool(job.get("is_baseline")), "row": row},
+         "is_baseline": bool(job.get("is_baseline")),
+         "config_set": job.get("config_set") or {}, "row": row},
         indent=1, default=float), encoding="utf-8")
     return {"key": job["key"], "window": job["window"],
             "status": "error" if row.get("failed") else "ok",
@@ -256,7 +262,25 @@ def main(argv: List[str] | None = None) -> int:
                         "e.g. --span g_w_pcc=1.5. Unlisted coordinates keep "
                         "tuning.stage2_search.DEFAULT_SPANS. The resolved spans "
                         "are written to run_meta.json.")
+    p.add_argument("--config-set", action="append", default=[], metavar="FIELD=VALUE",
+                   help="Set one MultiTSOConfig field in every simulated window "
+                        "(repeatable), applied after the paramset, the weights and "
+                        "--frozen-network. VALUE is read as JSON (true, 1.5, "
+                        "\"text\"), else taken as a string; e.g. "
+                        "--config-set shunt_ff_ledger=false (added 2026-11-03).")
     args = p.parse_args(argv)
+
+    from configs.config import MultiTSOConfig
+    config_set: Dict[str, Any] = {}
+    for item in args.config_set:
+        name, sep, raw = item.partition("=")
+        if not sep or name not in {f.name for f in dataclasses.fields(MultiTSOConfig)}:
+            raise SystemExit(f"--config-set {item!r}: expected FIELD=VALUE with FIELD "
+                             f"a field of MultiTSOConfig")
+        try:
+            config_set[name] = json.loads(raw)
+        except json.JSONDecodeError:
+            config_set[name] = raw
 
     from configs.paramsets import load_paramset
     from tuning.parameters import SEARCHED_FIELDS, weight_fingerprint
@@ -371,6 +395,7 @@ def main(argv: List[str] | None = None) -> int:
         "simulated_windows": args.windows or "all",
         "op_horizon_h": args.op_horizon_h,
         "skip_baseline": bool(args.skip_baseline),
+        "config_set": config_set,
         "lambda_max_all": lam_all,
         "estimated_wall_h": est_h,
         "argv": sys.argv,
@@ -413,6 +438,7 @@ def main(argv: List[str] | None = None) -> int:
                 "evented": bool(args.evented),
                 "frozen_network": bool(args.frozen_network),
                 "v_metric": args.v_metric,
+                "config_set": config_set,
                 "out": str(win_dir / f"{key}__{wname}.json"),
                 "force": args.force,
             })

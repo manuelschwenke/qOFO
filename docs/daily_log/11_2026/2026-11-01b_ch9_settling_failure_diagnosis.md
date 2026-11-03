@@ -803,6 +803,26 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - Early abort at the second unexplained tap reversal or the first bank reversal.
     - The subset's 2 % band is completed on W2 and ranked on all five windows.
     - Settling test and W5 report as in v2.
+- **Author decisions 16:2x for the v3 campaign:**
+  - II-a 512 draws; II-b rounds under discussion (at least 3; Claude recommends 4, as v2).
+  - Hosts: 30 workers on e5power and 30 on e5wimi; simulations from 17:00 on.
+  - **Go criteria for the follow-ups** (settling figure regeneration, D1+D2, Ch 10 REF):
+    - e_v,TS ≤ 1.10 × v2 (0.00827, i.e. ≤ 0.00910);
+    - STS couplers act in every search window;
+    - banks commit after the events in at least two windows;
+    - all wear limits met.
+- **Feasibility check of the bank criterion on run 0004** (search windows W1, W3, W4, W6;
+  "after an event" = a commit within 2 h of an event time):
+  - 54 of 337 candidates have such a commit in ≥ 2 windows; their g_w_tso_shunt is ≈ 9–21.
+  - Only 1 of these 54 is feasible at hunting tolerance 1; the others have 3–45
+    unexplained TS-tap reversals. Their e_v,TS is 0.00797–0.00812, better than the winner.
+  - None of them moves STS couplers in every window, since the STS price was fixed at
+    θ 0.03.
+  - shunt27 commits in 2 windows but never within 2 h after an event (W1 at 11.75 h, W6 at
+    1.4 h and 1.85 h).
+  - **So on the v2 code (ledger off), event-responsive banks and hunting tolerance 1 are
+    nearly incompatible.** The ledger verdict (≈ 19–20 h) is the gate for the bank part of
+    v3.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

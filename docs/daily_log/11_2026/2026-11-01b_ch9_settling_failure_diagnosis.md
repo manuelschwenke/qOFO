@@ -960,6 +960,13 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Run 0005 is restarted by `--resume`; its running verification shard (`v2_pq10`) is
     kept.
   - The follow-up launcher is re-armed with the new code, still figure only.
+- **17:30: run 0005 resumed** (driver pid 152520, code 00978eb); the `v2_pq10` shard
+  is still running on e5power. Follow-up launcher re-armed (pid 151716).
+- **Author 17:31 on the 4 periods:** "only that we do not filter too hard; hopefully the best
+  candidate nonetheless settles faster, and maybe fulfils the 3 periods limit". So the
+  result report also states the 3-period check (p95 ≤ 27) of the selected set. It is
+  computed from the confirmation's steps.csv when the run ends; the running driver is not
+  changed for it.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

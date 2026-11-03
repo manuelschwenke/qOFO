@@ -46,6 +46,9 @@ margin of 25.
   then 0.02 pu. The first rung whose Stage-I point passes the verification is the
   Stage-I point; the θ_STS check band is that target ± 0.005 pu.
 - Everything else is unchanged.
+- **Intent of the 4-period budget (author, 17:31):** "only that we do not filter too hard".
+  The report states, besides the 4-period check, whether the selected set also meets the
+  3-period limit of v2 (p95 ≤ 27).
 
 ## Configuration
 

@@ -772,6 +772,23 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     best e_v,TS 0.00811; 27 in the band instead of 10, 3 of them bank users. The leader
     stays 1b945ad40b42, because the bank users in the band have e_v,DS 0.0088–0.0143 and
     lose the tie-break.
+- **Author decision: hunting tolerance 1 for v3.** Author proposal: search on W1, W4 and W6
+  only, all windows later (settling test, final checks).
+- **Replay of run 0004 at tolerance 1** (search on a subset, then the subset's band confirmed
+  on all five windows; `scratchpad/subset_tol1.py`):
+
+  | Search windows | Compute (all-window = 100 %) | with abort at 2nd reversal | Subset-feasible / of these infeasible on all | All-window leader at subset rank | All-window band (27) inside subset band | Confirming the subset band on all windows gives |
+  |---|---|---|---|---|---|---|
+  | W1+W4+W6 | 62 % | 44 % | 163 / 47 | 57 | 17 | 70937b3e3417 (different) |
+  | **W1+W3+W6** | 66 % | **41 %** | **116 / 0** | **4** | **27** | **1b945ad40b42 (same)** |
+  | W1+W6 | 44 % | 31 % | 163 / 47 | 63 | 25 | a531b32f7109 (different) |
+  | W3+W4+W6 | 70 % | 43 % | 116 / 0 | 8 | 27 | 1b945ad40b42 (same) |
+
+  - Under tolerance 1 a candidate's second reversal often comes from W3: 189 candidates
+    reverse there, against 52 in W4.
+  - Without W3 the search admits 47 candidates that fail on all windows, and its band
+    misses the all-window leader.
+  - All windows with abort: 63 %.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

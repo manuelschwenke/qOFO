@@ -589,7 +589,8 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   not strictly comparable.
 - **Actuator engagement of the winner, per window:**
   - TS taps: 1–2 moves in each of W1–W4, 9 in W6 (12 h each).
-  - STS taps: 0 in W1–W4, 2 in W6. Banks: 0 commits in every window, W5 included.
+  - STS taps: 0 in W1–W4, 4 in W6 (at most 2 per transformer). Banks: 0 commits in every
+    window, W5 included.
 - **DS voltage against 1.08 pu: not answerable from the stored rows.**
   - The screen stores no time series; `v_worst_ds` is the p95 over time of the worst-bus
     |v − 1.03|. The winner's worst window W4 has 0.0517, i.e. the worst bus lies outside
@@ -597,6 +598,37 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - The Stage-I point sits at 0.0518–0.0519 in four windows. The repeated value suggests a
     bus held at the soft DSO band edge with ≈0.002 pu excess (a hypothesis).
   - A record-saving simulation of the winner is needed to settle it.
+- **13:42: record-keeping re-run launched on e5power (author: "yes, you can run it").**
+  - New script `experiments/ch_09_parameter_selection/ch_9_10_winner_records.py`: sets up
+    each (candidate, window) exactly as `ch_9_3_stage2_screen._run_one_window`, recomputes
+    the screen's row (to check the re-run against the stored window), and keeps a DSO-band
+    summary per HV group, the voltage envelopes (npz) and the record list (gzip pickle).
+  - Candidates: the winner 1b94 and the Stage-I point b46b, W1–W6, 12 workers; launched
+    through the `ch_9_6` shard mechanism (pid 25400). Output
+    `results/diagnostics/2026-11-03_winner_records_0004/out`.
+- **Author question: why no bank commits and almost no STS taps; can the weights be lowered
+  with every filter still met?** Analysis of all 337 evaluated candidates (read-only):
+  - **Banks.**
+    - g_w_tso_shunt < 25: 62 candidates, all commit banks (median 11–32 commits in 60 h),
+      none feasible.
+    - 184 candidates commit banks, 30 of them feasible. Rejection counts among the others:
+      unexplained tap hunting 148, bank hunting 51, tap operations 15 (several per
+      candidate).
+    - All 10 feasible candidates inside the 2 % band commit no bank. The best feasible bank
+      user, 1528ece0d32a (1 commit), has e_v,TS 0.00831, 0.4 % outside the band (0.00828).
+      Feasible bank users commit 1–4 banks in 60 h.
+    - The bank users with the lowest e_v,TS (0.00797–0.00806, below the winner) are
+      rejected for tap hunting. 307 of their 1310 unexplained reversals start within 30 min
+      of a bank move (median distance 66 min), so a causal link is not established.
+    - The ledger check of the shunt feedforward on release (other session, running since
+      12:01) tests exactly the candidates in the band with bank releases.
+  - **STS taps.**
+    - g_w_dso_oltc is fixed in Stage I at θ_STS,min = 0.03 pu.
+    - The winner's per-bus RMS DS deviation is 0.0043–0.0114 pu per window, so the tap
+      commit condition (an h-weighted mean deviation ≥ θ) is rarely met.
+    - Even the filter's lower bound θ 0.02 is about twice the largest window RMS; engaging
+      the taps in W1–W4 would need θ ≈ 0.005–0.01, outside the frozen bounds [0.02, 0.04].
+  - Any change of these weights now is an amendment declared after the results are known.
 
 ## Open
 

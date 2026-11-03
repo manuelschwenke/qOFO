@@ -971,6 +971,16 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   `--switch-selected` (pid 34232). On GO it sets SELECTED_PARAMSET =
   `ch9_selected_uc_2026_11_v3` in `_ch9_selected_design.py`, commits it, and then starts
   the settling figure, D1+D2 and the Ch 10 REF runs. On NOGO nothing is switched.
+- **17:51: Stage-I verification at θ_STS 0.01 PASSES** (first rung of the ladder):
+  - p95 24.0, which meets the 3-period limit 27 as well as the margin 34;
+  - median residual 0.37 Mvar; max 35; 0 steps over 36; 0 censored;
+  - per-DSO p95: DSO_1 25.65, DSO_2 21.1, DSO_3 24.55, DSO_4 19.1;
+  - couplers move in 7 of 120 steps.
+  - The v3 Stage-I TS weights settle better than the winner's at the same θ (sts010:
+    p95 25.1, max 46).
+- **17:51: II-a launched:** 100 candidates + Stage-I point; 37 on e5wimi (30 workers),
+  63 on e5power (36); windows W1, W3, W4, W6 with the early stop at 2 tap and 1 bank
+  reversals.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

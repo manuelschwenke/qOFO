@@ -823,6 +823,25 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - **So on the v2 code (ledger off), event-responsive banks and hunting tolerance 1 are
     nearly incompatible.** The ledger verdict (≈ 19–20 h) is the gate for the bank part of
     v3.
+- **Author 16:3x:** launch v3 only after the ledger verdict, with **36 workers on e5power and
+  30 on e5wimi**.
+- **Expected schedule (estimates from run-0004 timings):**
+
+  | Step | Expected done |
+  |---|---|
+  | Settling tests sts020 / sts010 | Tue ≈ 17:00 |
+  | g_w_gen variants (e5power, 20 workers) | Tue ≈ 18:05 |
+  | v3 document and driver changes (with tests) | Tue ≈ 19:30 |
+  | Ledger verdict (other session) | Tue ≈ 19:00–19:30 |
+  | Decisions, freeze, code sync, launch | Tue ≈ 20:15 |
+  | Stage I verification | Tue ≈ 21:20 |
+  | II-a (512 draws) | Wed ≈ 02:00–04:30 |
+  | II-b, 4 rounds | Wed ≈ 08:30–14:30 |
+  | Completion of the band on W2 | Wed ≈ 09:00–15:00 |
+  | Settling confirmation (+1.1 h per failed check) | Wed ≈ 10:00–16:00 |
+  | W5 report, v3 result | Wed ≈ 10:30–16:30 |
+  | Settling figure, D1+D2 (if go) | Wed ≈ 12:00–18:00 |
+  | Ch 10 REF (if go) | Wed ≈ 15:00–21:00 |
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

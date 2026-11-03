@@ -893,6 +893,29 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Dry run: Stage-I point λ_max(B) 1.447, θ_STS 0.0100, θ_TS 0.0075; 100 of 512 II-a
     draws pass the screen (v2: 159).
   - Procedure text: `docs/tuning/2026-11-03_weight_selection_procedure_v3.md`.
+- **16:47: v3 campaign launched**, run `0005_2026-11-03_164755_ch_9_11_procedure_v3`, driver
+  pid 154356, code 065c3e9.
+  - e5power: 13 Python files copied over 3d98d31, hashes equal.
+  - Stage-I verification started on 36 workers.
+- **Follow-up launcher (author: "Yes, automate")**: `ch_9_12_followups_v3.py`.
+  - It waits for DONE/FAILED of run 0005 and acts only on GO.json.
+  - On GO:
+    1. SELECTED_PARAMSET → `ch9_selected_uc_2026_11_v3`, committed. This happens only with
+       `--switch-selected`, the author's decision; D1/D2 and REF read it.
+    2. Code and the v3 parameter set to e5power.
+    3. Settling figure: the thesis generator `graphics/Ch8/data/2026-10-28_settling/
+       make_settling_cdf.py`, unchanged, copied to `<date>_settling` and pointed at
+       run 0005 (start: Stage-I verification; final: the confirmation). It rewrites
+       `graphics/Ch8/settling_cdf.tex` in `Z:\latex_diss_clone`, with no commit there.
+    4. D1 + D2 (`ch_9_4_deadband --workers 30`) on e5wimi.
+    5. Ch 10 REF on e5power: scenarios A, B, D, E, GA, GE × L2, S1, S2, O2, O3, M,
+       360 min, 6 jobs each, launched 90 s apart; pulled back to
+       `results/ch_11_case2_multisystem/ref/`.
+  - Tests:
+    - the figure step on run 0004's data in a scratch copy of the thesis tree (p95 24
+      start, 22 final; .dat and .tex written there);
+    - the SELECTED_PARAMSET line pattern matches;
+    - `variants.NOT_READY` is empty.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

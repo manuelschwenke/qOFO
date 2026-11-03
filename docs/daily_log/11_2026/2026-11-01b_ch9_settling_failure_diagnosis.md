@@ -525,6 +525,22 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - round 4 is split with weight 10.8 against 36, i.e. ≈23 % of the draws here.
   - Estimate: round 3 ends ≈09:00 (e5power-bound), round 4 ≈3.2 h, confirmation and W5
     report ≈1.5 h. Result ≈13:45–14:45 if the first settling check passes.
+- **08:22: resumed as planned.**
+  - The round-3 local shard exited at 08:22:38; the watcher started driver 136736 at
+    08:22:40.
+  - The resume re-checked II-a and rounds 1–2 (nothing re-run, 0 files pulled, identical
+    selections) and kept round 3's split; e5power's `round3_0` was not relaunched.
+- **08:51: round 3 done.**
+  - 65 / 300 feasible at hunting 0.
+  - New best 1b945ad40b42: e_v,TS 0.00827, e_v,DS 0.00828; TS taps 18 per day, STS taps 4
+    per day; g_w_tso_oltc 17.7.
+  - It leads by the e_v,DS tie-break inside the 2 % band (the lowest feasible e_v,TS is
+    0.00812, so the band reaches 0.00828). The leader's e_v,TS has not improved since
+    round 1.
+  - Round 4: centre 1b94, f 0.5, 37 / 64 draws pass the screen; 8 here with 12 workers
+    (verified: 12 pool processes), 29 on e5power with 36.
+  - Estimate: round 4 ends ≈11:50 (e5power-bound, 145 units). Result ≈13:15–13:45 if the
+    first settling check passes.
 
 ## Open
 

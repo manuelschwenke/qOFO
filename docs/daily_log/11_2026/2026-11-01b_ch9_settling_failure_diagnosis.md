@@ -930,6 +930,11 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     TS weights. Coupler moves lengthen some steps: max 46, one step does not settle.
   - Run 0005's Stage-I verification at θ 0.01 (with other TS weights) may therefore fail
     its margin, and under the frozen text the campaign would then stop.
+- **17:07: reproduction check passed.** The winner on W1 and W2 with the current code:
+  - code = ledger fix a8d5e23 plus the v3 hook changes, as present at 16:34;
+  - every compared field (e_v,TS, e_v,DS, e_q, v_worst_ds, tap rates, hunting, bank
+    commits) equals the stored run-0004 rows exactly (difference 0).
+  - So the new code changes nothing for a bank-free trajectory.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

@@ -129,3 +129,10 @@ report.
   waited for the verification shards, which kept running and were not relaunched.
   - Worker counts do not enter the results: the units are deterministic and resume from
     disk.
+- **18:31:** resumed with 20 workers on e5wimi (author: 20 for anything started after
+  18:30); the existing host split was kept.
+- **22:35:** resumed with the host split weighted by throughput from round 2 on
+  (`--local-speed 0.75`, commit 0903e07; author: rebalance from round 2).
+- **2026-11-03 07:59:** driver stopped, with the round-3 local shard left running (author:
+  at most 12 workers on e5wimi for round 4). A watcher resumes the driver once that shard
+  has exited, with `--local-workers 12 --local-speed 0.9`; no unit is lost or re-run.

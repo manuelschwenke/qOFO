@@ -492,6 +492,39 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   planned morning cut of e5wimi to 10 workers is dropped: 20 here and 36 on e5power until
   the end. Revised estimate without that cut: result Tuesday ≈10:00 with 3 rounds,
   ≈13:00 with 4.
+- **2026-11-03 07:34, status:** II-b round 3 of 4 running.
+  - Rounds 1 and 2 each gave a new best:
+
+    | Round | Leader | e_v,TS | e_v,DS | Feasible (hunting 0) |
+    |---|---|---|---|---|
+    | 1 | d15a97b38160 | 0.00824 | 0.00865 | 31 / 214 |
+    | 2 | 5b98cb042d56 | 0.00824 | 0.00836 | 45 / 254 |
+
+  - Round 2 changed the leader only through the e_v,DS tie-break inside the 2 % band; e_v,TS
+    has stayed at 0.00824 since round 1.
+  - The leaders at g_w_tso_oltc ≈ 17 have no hunting with the pq10 STS design. The < 20
+    threshold of 2026-11-01 19:45 was found with v1 STS weights.
+  - The STS taps of the leaders move little: worst window 0–4 operations per day (5b98: 2;
+    TS taps 22 per day). Raise this with the author when the result is reported.
+  - `v_worst_ds` (0.052) is the p95 over time of the worst-bus deviation from v_set, not an
+    absolute voltage. `n_viol_v_ds` counts against `cfg.v_min_pu`/`v_max_pu` (default
+    0.90/1.10), so the 1.08 question stays open; check it on the winner's records.
+- **07:59, author: "For round 4, you should use 12 workers max on e5wimi."**
+  - The worker count is fixed per invocation, so this needs a resume. It is timed so that
+    nothing is lost:
+    - driver 6216 stopped at 07:59:22;
+    - the round-3 local shard (pid 71456, 60 / 70 units done) left running with its 20
+      workers.
+  - A detached watcher (scratchpad `resume_r4_12w.ps1`, pid 32824) waits for that shard to
+    exit, then resumes with `--local-workers 12 --local-speed 0.9`.
+    - 0.9 is the per-worker throughput expected at 12 workers, estimated from the 10-worker
+      phase.
+  - Expected behaviour of the resume:
+    - it re-checks the finished stages and keeps round 3's split (13 / 33);
+    - it waits for e5power's `round3_0` without relaunching it;
+    - round 4 is split with weight 10.8 against 36, i.e. ≈23 % of the draws here.
+  - Estimate: round 3 ends ≈09:00 (e5power-bound), round 4 ≈3.2 h, confirmation and W5
+    report ≈1.5 h. Result ≈13:45–14:45 if the first settling check passes.
 
 ## Open
 

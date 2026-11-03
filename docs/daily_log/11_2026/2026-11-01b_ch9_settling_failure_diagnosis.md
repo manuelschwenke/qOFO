@@ -799,6 +799,10 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - W4 is the window built to exhaust the continuous reactive range and hand authority to
       the tap changers (`scenarios_mc_v2._condition_events`): where v3's engagement rules
       act.
+  - **Author decision: v3 searches on W1+W3+W4+W6** ("Yes, fix it").
+    - Early abort at the second unexplained tap reversal or the first bank reversal.
+    - The subset's 2 % band is completed on W2 and ranked on all five windows.
+    - Settling test and W5 report as in v2.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

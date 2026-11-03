@@ -700,6 +700,40 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
 - **These are diagnostics, not a selection.** Adopting sts010 changes the frozen STS design
   (θ_STS bounds); adopting sts020 changes a weight fixed in Stage I. Either is an amendment
   declared after the results are known; the author decides.
+- **Correction (15:28): λ_max(B) does depend on the STS coupler price.** The filter table
+  above assumed 1.40 for all variants. With the run-0004 screen (`stage1_screen.screen_weights`,
+  worst of the six operating points):
+  - winner and shunt27 1.4000;
+  - sts020 and shunt27 + sts020 1.4095;
+  - sts010 1.4487.
+  - All stay below the screen limit 1.546 and the filter limit 1.6, so no verdict changes.
+- **Author question: why are the AVRs so inert; earlier tunings moved them more.**
+  - g_w_gen (the AVR setpoint step weight) is 3.67·10⁷ at the winner. The AVRs move
+    0.0025–0.0087 pu per 12 h window, with steps of at most 1·10⁻⁴ pu per TS iteration.
+  - They are not held by a limit. In W4 the setpoints stay at 1.028–1.033 pu, far from
+    V_max 1.05, and generator Q reserves are 0.30–0.50. The weight alone makes them slow.
+  - Earlier selections:
+    - October sets (`ch9_selected_final_2026_10`, `_band_2026_10`, `_band_2026_10_a1` = c08b)
+      had g_w_gen 7.3·10⁵–1.0·10⁶, about 40× lower;
+    - September sets (`ch9_selected*`) had 1.55·10⁷.
+    - On the commitment base, v1 (runs 0001, 0003) ranked leaders at 1.4–2.4·10⁸.
+  - In run 0004 the II-a box was one decade around the Stage-I value 10⁸, i.e.
+    1.0·10⁷–9.5·10⁸, and no candidate below 1.04·10⁷ was simulated. The II-b centres had
+    3.3–4.2·10⁷.
+  - Lower g_w_gen did not cost feasibility (about 30 % feasible in each band down to 10⁷).
+    Among feasible candidates, lower g_w_gen goes with lower e_v,TS (correlation +0.33)
+    and lower e_v,DS (+0.18).
+  - The best feasible e_v,TS of the campaign, 2ef56ba78008, has g_w_gen 1.07·10⁷, at the
+    box edge.
+  - Hypothesis: the optimum lies below the explored range; the box, not the plant, keeps
+    the AVRs inert.
+  - Screen for sts010 with lower g_w_gen: λ_max(B) stays 1.4487 down to 3·10⁵ and jumps to
+    1.84 (> 1.546) at 10⁵.
+- **15:30: g_w_gen variants prepared (author: "you can test them").**
+  - sts010 with g_w_gen 10⁷, 3·10⁶ and 10⁶; 15 units, W1–W4 and W6, 15 workers.
+  - Files pushed to e5power (`results/diagnostics/2026-11-03_winner_ggen_0004`).
+  - Launch as soon as the two settling tests have freed e5power, which is at its 36-worker
+    limit now.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

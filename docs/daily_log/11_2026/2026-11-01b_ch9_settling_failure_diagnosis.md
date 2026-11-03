@@ -1061,6 +1061,12 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
       window (0 mismatches);
     - with it on, counted tap reversals go from 185 to 113 (72 exempt).
   - Dry run: same 100 / 512 II-a draws.
+- **21:20: run 0006 launched** (`0006_2026-11-03_211954_ch_9_11_procedure_v3`, commit
+  932b4a9).
+  - Driver pid 29448; e5power shard 23364.
+  - Stage-I verification taken over from 0005; II-a on 37 + 63 candidates with
+    `--startup-exempt-s 900`.
+  - Follow-up launcher re-armed for 0006 with `--switch-selected` (pid 34968).
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

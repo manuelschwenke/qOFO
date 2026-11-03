@@ -967,6 +967,10 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   result report also states the 3-period check (p95 ≤ 27) of the selected set. It is
   computed from the confirmation's steps.csv when the run ends; the running driver is not
   changed for it.
+- **17:33, author: "Yes, switch on GO".** The follow-up launcher is re-armed with
+  `--switch-selected` (pid 34232). On GO it sets SELECTED_PARAMSET =
+  `ch9_selected_uc_2026_11_v3` in `_ch9_selected_design.py`, commits it, and then starts
+  the settling figure, D1+D2 and the Ch 10 REF runs. On NOGO nothing is switched.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

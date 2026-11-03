@@ -646,6 +646,37 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - Relaunched on e5power at 13:58 with 20 workers (shard pid 15196), alongside the
       record run's 12 (32 of 36). The script hash matches the committed version.
     - All 20 units run at once, so the run ends with the slowest W6, ≈15:00–15:10.
+- **14:39: record run done (0.94 h); JSON and npz pulled, W4 record pickles pulled.**
+  - **Reproduction:** every recomputed row equals the stored run-0004 window to ≤ 3.4·10⁻¹²
+    relative (e_v,TS); tap, hunting and bank counts identical. The re-run is the same
+    simulation.
+  - **DSO band 0.92–1.08 pu, true HV-group voltages (20 s steps):**
+
+    | Window | 1b94: max V, share > 1.08, longest | Stage-I point: max V, share > 1.08, longest |
+    |---|---|---|
+    | W1 | 1.0700, 0, – | 1.0846, 27.9 %, 159 min |
+    | W2 | 1.0517, 0, – | 1.0783, 0, – |
+    | W3 | 1.0533, 0, – | 1.0821, 23.0 %, 105 min |
+    | W4 | **1.0821, 8.1 % (DSO_4), 58 min** | 1.0821, 18.3 %, 88 min |
+    | W5 | 1.0715, 0, – | 1.0758, 0, – |
+    | W6 | **1.0805, 0.7 % (DSO_1), 0.7 min** | 1.0909, 27.8 %, 105 min |
+
+    - The lower edge is never approached: the lowest DS voltage of the winner is 0.992 pu (W5).
+  - **W4, DSO_4 (winner), during the 174 steps above 1.08:**
+    - the controller's measured group maximum is 1.0798 pu (median), the true one 1.0821;
+    - its band slack stays 0 (max 7·10⁻⁷);
+    - DSO_4's IBG Q is not saturated (median +16.7 Mvar within [−49.5, 61.5]);
+    - the three couplers do not move; the interface Q setpoints ask for −15, −41 and
+      −36 Mvar.
+    - So the DSO controller holds the band on what it measures. Both maxima are taken over the
+      configured `voltage_bus_indices` (`_multi_tso_helpers.py:540` and `:679`), so the
+      0.0023 pu offset is not a different bus set by construction.
+    - Zero-mean noise would bias a measured maximum upward, not downward. Open hypotheses:
+      (a) the measurement packet lacks the highest bus (NaN entries are dropped), or (b) a
+      systematic measurement offset. Not checked yet: the records keep no per-bus DS
+      voltages.
+
+## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.
   - `ch_9_10` change for this run:
     - jobs are window-major in the order given (`--windows W6,W3,W4,W2,W1`), so the pool

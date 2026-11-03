@@ -981,6 +981,37 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
 - **17:51: II-a launched:** 100 candidates + Stage-I point; 37 on e5wimi (30 workers),
   63 on e5power (36); windows W1, W3, W4, W6 with the early stop at 2 tap and 1 bank
   reversals.
+- **19:46: II-a done** (1 h 55 min; forecast was 22:00–23:30).
+  - Early stop: 94 of 101 records. Median wall time is 8.7 min for a stopped window and
+    39.7 min for a full window.
+  - θ bounds: 101 of 101 admitted.
+  - Engagement level `sts+bank` leaves no ranked candidate: only the Stage-I point is
+    eligible, and it is infeasible (9 tap reversals, 1 bank reversal).
+  - The driver falls back to `sts`, which admits 91 candidates; 6 are feasible at hunting
+    tolerance 1.
+  - Leader f6a6c81e99aa:
+    - search windows: e_v,TS 0.00882, e_v,DS 0.00624;
+    - v2 winner 1b945ad40b42 on the same windows: 0.00896 and 0.00900 (scratchpad
+      `v2_on_search.py`), so the leader is −1.6 % on e_v,TS and −31 % on e_v,DS.
+  - **Couplers:** every ranked candidate moves them in every search window: 3–26 moves per
+    window (W3 fewest, W6 most).
+  - **Banks:**
+    - No ranked candidate commits within 2 h after an event in any search window. Their
+      only commits are in W6 at 1.3–1.9 h, before the load shedding at 5.4 h.
+    - All six have g_w_tso_shunt 25–43, the upper half of the box (4.3–42.7).
+    - The five records with a post-event commit have prices 13–22 (incl. the Stage-I point
+      at 13.5). All five reach the hunting thresholds.
+    - In this box, event-responsive banks therefore come with tap or bank reversals: the
+      risk stated in the procedure.
+  - Reporting artefact: stopped records show tap rates such as "270 per 12 h". This is
+    extrapolated from their truncated logs; they are rejected on hunting anyway.
+- **19:46: II-b round 1** centred on f6a6c81e99aa (round-1 box for the bank price
+  ±0.25 decade, i.e. ≈ 21–68). 55 of 64 draws pass the screen; 20 run here, 35 on
+  e5power.
+- **Consequence for the go criteria:** the bank criterion (commits after events in
+  ≥ 2 search windows) is unlikely to be met by the final band. A NOGO starts none of the
+  follow-ups. Whether the follow-ups should still run when only the bank criterion fails
+  is put to the author; nothing changed.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

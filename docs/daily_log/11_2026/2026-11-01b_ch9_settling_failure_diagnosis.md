@@ -762,6 +762,16 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - The shunt27 variant's single reversal is of this kind: trafo 1[0] −1 at 180 s, bank
     z2[0] commits at 5040 s, trafo 1[0] +1 at 5400 s.
   - Median start of a reversal 302 min, near the events at 40–45 % of the window.
+- **Early abort, recomputed with a wall-time model** (windows of a candidate run in parallel at
+  their own speeds; a reversal at simulated time t is seen after wall_w · t / T):
+  - **Tolerance 0:** abort at the first reversal saves 62 % per candidate (corrects the 67 %
+    above, which assumed equal simulation speed in every window), or 30 % per window.
+  - **Tolerance 1** (author question; abort at the second reversal): 39 % per candidate,
+    18 % per window.
+  - **What tolerance 1 does to the run-0004 selection:** 116 feasible instead of 80;
+    best e_v,TS 0.00811; 27 in the band instead of 10, 3 of them bank users. The leader
+    stays 1b945ad40b42, because the bank users in the band have e_v,DS 0.0088–0.0143 and
+    lose the tie-break.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

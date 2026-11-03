@@ -789,6 +789,16 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Without W3 the search admits 47 candidates that fail on all windows, and its band
     misses the all-window leader.
   - All windows with abort: 63 %.
+  - **Author question: W1+W3+W4+W6.**
+    - Compute 84 %, or 53 % with the abort. The feasible set is exact (116 / 0).
+    - The all-window leader is at subset rank 3; the subset band has 33 members with all 27
+      inside. Spearman e_v,TS 0.988. Confirmation gives the same leader.
+    - W1+W2+W3+W6 is similar: 52 %, rank 3, band 35.
+    - With confirmation of the band on the missing windows, the total is ≈ 55 % of an
+      all-window search, against ≈ 45 % for W1+W3+W6.
+    - W4 is the window built to exhaust the continuous reactive range and hand authority to
+      the tap changers (`scenarios_mc_v2._condition_events`): where v3's engagement rules
+      act.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

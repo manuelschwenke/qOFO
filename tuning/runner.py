@@ -175,7 +175,10 @@ def run_scenario_with_records(
             log = run_fn(cfg_sc)
     except Exception as exc:
         failure = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
-        log = []
+        # A search hook's early stop keeps the trajectory: its metrics decide the
+        # (already lost) candidate's rejection reason.  Any other failure: none.
+        log = (list(getattr(exc, "partial_log", None) or [])
+               if type(exc).__name__ == "EarlyStop" else [])
     wall = time.perf_counter() - t0
 
     metrics = extract_metrics(log, cfg_sc, scales=scales)

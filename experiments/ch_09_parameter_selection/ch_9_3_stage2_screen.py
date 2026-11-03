@@ -68,6 +68,49 @@ def _pin_threads() -> None:
         os.environ[var] = "1"
 
 
+def _abort_hook(job: Dict[str, Any], events_s) -> Any:
+    """Per-step hook that stops a window once its candidate is lost anyway.
+
+    Once per TS iteration it counts this window's unexplained tap and bank
+    reversals (the filter's own ``hunting_summary`` / ``shunt_summary`` on the
+    records so far), writes them to ``<abort_dir>/<key>__<window>.json`` and sums
+    the files of all the candidate's windows on this host.  At ``abort_tap`` tap
+    or ``abort_bank`` bank reversals it raises ``EarlyStop``.  A reversal is
+    final once its second move is recorded, so the partial count never exceeds
+    the full one and an aborted candidate is rejected by the filter regardless.
+    """
+    from experiments.runners.multi_tso_dso import EarlyStop
+    from tuning.stage2_search import hunting_summary, shunt_summary
+
+    adir = Path(job["abort_dir"])
+    adir.mkdir(parents=True, exist_ok=True)
+    mine = adir / f"{job['key']}__{job['window']}.json"
+    last = {"n": None}
+
+    def hook(step: int, log: list) -> None:
+        if step % 9:                      # once per TS iteration (T_TS / T_STS)
+            return
+        n = (int(hunting_summary(log, events_s)["n_hunting"]),
+             int(shunt_summary(log, events_s)["n_shunt_hunting"]))
+        if n != last["n"]:
+            mine.write_text(json.dumps({"tap": n[0], "bank": n[1]}), encoding="utf-8")
+            last["n"] = n
+        tap = bank = 0
+        for f in adir.glob(f"{job['key']}__*.json"):
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):  # a sibling is writing it right now
+                continue
+            tap += int(d.get("tap", 0))
+            bank += int(d.get("bank", 0))
+        if ((job["abort_tap"] and tap >= job["abort_tap"])
+                or (job["abort_bank"] and bank >= job["abort_bank"])):
+            raise EarlyStop(f"candidate {job['key']}: {tap} tap and {bank} bank "
+                            f"reversal(s) over its windows")
+
+    return hook
+
+
 def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
     """Evaluate ONE (candidate, window) pair.  Module-level, so picklable.
 
@@ -117,10 +160,18 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
     sc = next(s for s in bank(hours=job["hours"]) if s.name == job["window"])
 
     import time as _t
+    import experiments.runners.multi_tso_dso as _runner
+    use_abort = ((job.get("abort_tap") or job.get("abort_bank"))
+                 and not job.get("is_baseline"))
+    _runner.STEP_HOOK = _abort_hook(job, sc.event_times_s) if use_abort else None
     t0 = _t.perf_counter()
     try:
-        result, records = run_scenario_with_records(sc, base, MetricScales())
+        try:
+            result, records = run_scenario_with_records(sc, base, MetricScales())
+        finally:
+            _runner.STEP_HOOK = None      # a pool worker runs many units
         m = result.metrics
+        early = (result.failure_reason or "").startswith("EarlyStop")
         # Ranking voltage metric (2026-10-16, protocol D1).  'areamean' is the
         # RMS over areas of (area-mean V - v_set), the definition of every
         # campaign before 2026-10-16; 'bus' is the per-bus spatial RMS
@@ -156,8 +207,11 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
             "tap_rev_per_h_dso": float(getattr(m, "tap_reversals_per_h_dso", 0.0) or 0.0),
             "pf_failures": float(getattr(m, "pf_failures", 0) or 0),
             "wall_s": float(result.wall_time_s),
-            "failed": 1.0 if result.failure_reason else 0.0,
+            # An early stop is not a failed simulation: its record holds the
+            # hunting that rejects the candidate (procedure v3).
+            "failed": 1.0 if (result.failure_reason and not early) else 0.0,
             "failure_reason": result.failure_reason or "",
+            "early_abort": 1.0 if early else 0.0,
         }
         row.update(avr_step_metrics(records))
         # Hunting, and the raw move list it is derived from.  Persisting the
@@ -251,6 +305,13 @@ def main(argv: List[str] | None = None) -> int:
                    help="Do not prepend the Stage-I point. For a shard of a "
                         "campaign split over hosts, whose baseline another "
                         "shard evaluates (added 2026-10-31).")
+    p.add_argument("--abort-tap-reversals", type=int, default=0, metavar="N",
+                   help="Stop every window of a candidate once its windows together "
+                        "count N unexplained tap reversals (hunting tolerance + 1); "
+                        "0 = never (default). The Stage-I point is never stopped. "
+                        "Procedure v3, 2026-11-03.")
+    p.add_argument("--abort-bank-reversals", type=int, default=0, metavar="N",
+                   help="As --abort-tap-reversals, for bank hunting reversals.")
     p.add_argument("--span", action="append", default=[], metavar="NAME=DECADES",
                    help="Override one log-span of the search box (repeatable), "
                         "e.g. --span g_w_pcc=1.5. Unlisted coordinates keep "
@@ -415,6 +476,9 @@ def main(argv: List[str] | None = None) -> int:
                 "v_metric": args.v_metric,
                 "out": str(win_dir / f"{key}__{wname}.json"),
                 "force": args.force,
+                "abort_tap": int(args.abort_tap_reversals),
+                "abort_bank": int(args.abort_bank_reversals),
+                "abort_dir": str(win_dir.parent / "_abort"),
             })
     todo = [j for j in jobs if args.force or not Path(j["out"]).exists()]
     print(f"[stage2] {len(seen_keys)} candidates x {len(window_names)} windows "

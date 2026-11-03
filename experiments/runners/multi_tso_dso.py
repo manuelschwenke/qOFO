@@ -465,6 +465,21 @@ def _zone_voltage_error_inputs(net, zd, cfg_v, v_set: float):
     return vm_bus_ids, vm_zone, v_ref_zone
 
 
+class EarlyStop(Exception):
+    """Raised by :data:`STEP_HOOK` to end a run before its horizon.
+
+    Like any exception out of :func:`run_multi_tso_dso`, it carries the records
+    so far as ``partial_log``.  Used by the weight search (procedure v3,
+    2026-11-03) to stop a window once its candidate is rejected anyway.
+    """
+
+
+#: Optional per-step hook ``hook(step, log)``, called after a step's record is
+#: appended (not during the warm-up).  ``None`` outside a search, so no run is
+#: changed by its existence; a hook ends the run by raising :class:`EarlyStop`.
+STEP_HOOK: Optional[Callable[[int, list], None]] = None
+
+
 # =============================================================================
 #  Main simulation function
 # =============================================================================
@@ -5658,6 +5673,8 @@ def _run_multi_tso_dso_impl(
 
         if not _in_warmup:
             log.append(rec)
+            if STEP_HOOK is not None:
+                STEP_HOOK(step, log)
 
         if verbose >= 1:
             _dt_step = perf_counter() - _t_step

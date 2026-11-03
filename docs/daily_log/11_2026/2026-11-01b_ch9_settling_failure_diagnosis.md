@@ -856,6 +856,43 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Reproduction check launched: the winner (no bank commit, so the ledger cannot act) on
     W1 and W2 with the new code, e5wimi, 2 workers, pid 83544,
     `results/diagnostics/2026-11-03_ledger_repro`. Expected: identical rows.
+- **16:3x–16:5x, author: start the campaign by 17:30 at the latest**, i.e. before the
+  ledger verdict, and shorten the preparation.
+  - The g_w_gen diagnostic is dropped: v3's II-a box covers 5·10⁵–5·10⁷.
+  - The running settling tests no longer gate anything; v3 verifies its own Stage-I point.
+- **Code changes for v3 (16:40–16:55):**
+  - `experiments/runners/multi_tso_dso.py`:
+    - module hook `STEP_HOOK(step, log)`, called after each recorded step, `None` by
+      default (no run changes);
+    - exception `EarlyStop`, which carries the records as `partial_log`.
+  - `tuning/runner.py`: an `EarlyStop` keeps its partial records for the metrics; any
+    other failure still gives none.
+  - `ch_9_3_stage2_screen.py`:
+    - options `--abort-tap-reversals N` and `--abort-bank-reversals N`;
+    - `_abort_hook` counts the window's unexplained reversals once per TS iteration with
+      the filter's own `hunting_summary` / `shunt_summary` and sums all the candidate's
+      windows through `<out>/_abort/` files, then raises `EarlyStop`;
+    - the Stage-I point is never stopped;
+    - rows get `early_abort`, and an early stop is not a failed window.
+  - New driver `ch_9_11_procedure_v3.py`, which reuses v2's code (`V2`, `P`) and overrides:
+    - Stage I: STS at θ 0.01, bank price from Δv 0.005, g_w_gen 5·10⁶; g_w_der, g_w_pcc
+      and g_w_tso_oltc from v2's Stage I. Re-running the TS design with the cheaper bank
+      would have put g_w_der at 0.49, where v2 had 0 of 40 feasible;
+    - search windows W1, W3, W4, W6 with the early stop at 2 tap or 1 bank reversals;
+    - selection at tolerance 1 with the engagement levels (couplers + banks, couplers,
+      none);
+    - completion of the band on W2;
+    - go criteria to GO.json / NOGO.json;
+    - copy of every changed Python file to e5power with a hash comparison
+      (`sync_remote_code`).
+  - Tests:
+    - smoke run on 12a46c9001b6, W4 + W6: W4 stopped after 1.6 min at its 2nd reversal,
+      W6 on the candidate total, both rows `early_abort` with n_hunting 2 + 0;
+    - `tests/test_procedure_v3.py`: 2 passed;
+    - ledger and bank tests: 19 passed.
+  - Dry run: Stage-I point λ_max(B) 1.447, θ_STS 0.0100, θ_TS 0.0075; 100 of 512 II-a
+    draws pass the screen (v2: 159).
+  - Procedure text: `docs/tuning/2026-11-03_weight_selection_procedure_v3.md`.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

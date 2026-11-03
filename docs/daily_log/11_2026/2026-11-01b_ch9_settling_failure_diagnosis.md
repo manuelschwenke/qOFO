@@ -640,6 +640,12 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     a possible amendment.
   - 20 units, pid 151840, output `results/diagnostics/2026-11-03_winner_variants_0004/out`;
     ≈3.5–4 h at 4 workers.
+  - **13:57: moved to e5power (author: "then use e5power with more workers").**
+    - The local run was stopped before any unit finished; its start log is kept as
+      `aborted_local_13-52.log`.
+    - Relaunched on e5power at 13:58 with 20 workers (shard pid 15196), alongside the
+      record run's 12 (32 of 36). The script hash matches the committed version.
+    - All 20 units run at once, so the run ends with the slowest W6, ≈15:00–15:10.
   - Settling tests only for variants that pass the frozen filter, on e5power.
   - `ch_9_10` change for this run:
     - jobs are window-major in the order given (`--windows W6,W3,W4,W2,W1`), so the pool

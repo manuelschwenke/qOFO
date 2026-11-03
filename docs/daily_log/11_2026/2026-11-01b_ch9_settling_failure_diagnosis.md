@@ -541,6 +541,62 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     (verified: 12 pool processes), 29 on e5power with 36.
   - Estimate: round 4 ends ≈11:50 (e5power-bound, 145 units). Result ≈13:15–13:45 if the
     first settling check passes.
+- **12:01: round 4 done; stage II-b ends after 4 rounds.**
+  - e5wimi shard exited 11:32, e5power shard 11:56 (pulled 12:00).
+  - 80 / 337 feasible at hunting 0; best unchanged 1b945ad40b42, so f → 0.25.
+  - Runner-up a531b32f7109 (round 4): e_v,TS 0.008247, e_v,DS 0.008281, same tap counts as
+    1b94. The two differ by 0.04 % in the tie-break: the optimum is flat.
+- **13:00: settling confirmation of 1b94 PASSES** (e5power, 36 workers, 12:01–13:00).
+  - p95 22 (≤ 27), median residual 0.42 Mvar (≤ 1), max 27, 0 censored.
+  - It differs from the pq10 verification (p95 24, 0.61 Mvar) although the STS weights are
+    identical: the `frozen_ofo` variant lets the supervisory OFO solve once at t = 0 with the
+    candidate's TS weights (`ch_9_1_ninner_isolated_sts.py:757`), so the TS weights set the
+    starting operating point of the steps. DSO_3 is unchanged (p95 24.55).
+- **13:32: run 0004 DONE** (driver rc 0 after 5.16 h of the last invocation).
+  - Result `configs/paramsets/ch9_selected_uc_2026_11_v2.json` (key 1b945ad40b42, θ_TS,min
+    0.0062 pu, θ_STS,min 0.03 pu, λ_max(B) 1.40).
+  - SELECTED_PARAMSET not switched; the author decides.
+- **Winner against the Stage-I point** (W1–W4, W6; worst window per wear metric):
+
+  | Metric | 1b94 | Stage-I point | 
+  |---|---|---|
+  | e_v,TS | 0.00827 | 0.00845 |
+  | e_v,DS | 0.00828 | 0.01302 |
+  | e_q (interface Q error) | 1.87·10⁵ | 5.49·10⁵ |
+  | TS taps / reversals per day | 18 / 2 | 18 / 4 |
+  | STS taps per day | 4 | 14 |
+  | bank commits (sum) | 0 | 2 |
+  | hunting events | 0 | 1 |
+
+- **W5 report (held out, not used for selection):**
+
+  | Metric | 1b94 | Stage-I point |
+  |---|---|---|
+  | e_v,TS | 0.00933 | 0.00795 |
+  | e_v,DS | 0.01276 | 0.01175 |
+  | e_q | 0.99·10⁵ | 1.01·10⁵ |
+  | TS taps per hour | 1.25 | 0.50 |
+  | bank commits | 0 | 21 |
+  | hunting events | 2 (TS trafo 3[1], dwell 33 and 63 min) | 1 |
+
+  - W5 is the window with structurally zero DER reactive capability (VDE dead zone).
+    Hypothesis: there the banks are the main remaining Q resource, and the winner's bank
+    price (g_w_tso_shunt 88.2 against 27.0 at the Stage-I point) keeps them uncommitted.
+  - Reported only; no re-selection on W5 (no tuning on the test data).
+- **Against v1 (run 0003, selection_a3):** leaders e_v,TS 0.00859–0.00860 (e_v,DS
+  0.0053–0.0067), all failing settling; d162, the only pass, e_v,TS 0.00846, e_v,DS 0.00833,
+  p95 26, 0.71 Mvar. v1 ran before the DSO band 0.92–1.08 was set, so the e_v,DS values are
+  not strictly comparable.
+- **Actuator engagement of the winner, per window:**
+  - TS taps: 1–2 moves in each of W1–W4, 9 in W6 (12 h each).
+  - STS taps: 0 in W1–W4, 2 in W6. Banks: 0 commits in every window, W5 included.
+- **DS voltage against 1.08 pu: not answerable from the stored rows.**
+  - The screen stores no time series; `v_worst_ds` is the p95 over time of the worst-bus
+    |v − 1.03|. The winner's worst window W4 has 0.0517, i.e. the worst bus lies outside
+    [0.978, 1.082] for 5 % of the time; which side is not stored.
+  - The Stage-I point sits at 0.0518–0.0519 in four windows. The repeated value suggests a
+    bus held at the soft DSO band edge with ≈0.002 pu excess (a hypothesis).
+  - A record-saving simulation of the winner is needed to settle it.
 
 ## Open
 

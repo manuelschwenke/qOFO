@@ -136,3 +136,11 @@ report.
 - **2026-11-03 07:59:** driver stopped, with the round-3 local shard left running (author:
   at most 12 workers on e5wimi for round 4). A watcher resumes the driver once that shard
   has exited, with `--local-workers 12 --local-speed 0.9`; no unit is lost or re-run.
+- **08:22:** resumed by the watcher as planned; nothing re-run.
+- **12:01:** stage II-b ended after 4 rounds (rounds 1–3 each found a new best; round 4 did
+  not). 80 of 337 candidates are feasible with hunting tolerance 0, so the fallback was not
+  needed. Best: 1b945ad40b42.
+- **13:00:** settling confirmation of 1b945ad40b42 passed at the first check: p95 22,
+  median residual 0.42 Mvar.
+- **13:32:** result written, `configs/paramsets/ch9_selected_uc_2026_11_v2.json`; W5 report
+  e_v(TS) 0.00933, e_v(DS) 0.01276 (Stage-I point on W5: 0.00795, 0.01175).

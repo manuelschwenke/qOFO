@@ -1474,6 +1474,19 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Interpretation (hypothesis):
     - most W6 reversals follow the turn of the injection profile, not a loop oscillation. A tap that moves just before the 16:00 peak and returns after it has a dwell under 1 h, which the zero-tolerance rule counts.
     - The W6 error level is a spatial spread across buses that holds for all candidates, i.e. a floor of the window, not of the weights.
+- **≈ 15:40, author asks whether W6 reversals could be accepted.**
+  - Claude advised against a window exception. Of 69 W6 reversals, 37 are bank-coupled; 24 follow the profile turn; 8 are other.
+  - Instead Claude proposed a cause-based profile-turn exemption as a fallback. Author: "can you plan this already?"
+- **≈ 15:50: plan written**, `docs/tuning/2026-11-04_amendment_profile_turn_draft.md` (DRAFT, not applied; run 0008 unchanged).
+  - Rule:
+    - turn of the area's residual load (prominence 5 % of the area's IBG capacity within ±1 h);
+    - reversal exempt if a turn lies in [t0 − 900 s, t1], no bank move within ±60 s (taps), one per device per turn.
+  - Dry evaluation on the II-a rows of 109 candidates (`analysis/profile_turn_dry/`):
+    - the rule finds the W6 turn at 2.0 h in every area;
+    - taps only: 24 W6 reversals exempt, 24 candidates released (they would need re-simulation);
+    - taps and banks: 45 released.
+  - Open for the author: D1 banks, D2 trigger (fallback vs adopt), D3 v4.1 full vs re-entry.
+  - Implementation must go into a separate worktree while run 0008 is running: later local shards import this checkout's code.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

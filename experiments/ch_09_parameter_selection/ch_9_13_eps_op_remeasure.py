@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import os
 import pickle
 import sys
 import time
@@ -174,10 +175,20 @@ def summarise(keys, names, L, arg, n_design: int) -> dict:
     }
 
 
+#: Numerical-library thread counts of the capture workers.  Unlimited, each worker ran up to
+#: ~4.6 cores, and ten of them next to another campaign oversubscribed the host (2026-11-04).
+THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+               "NUMEXPR_NUM_THREADS", "NUMBA_NUM_THREADS")
+
+
 def _pin(mask: Optional[int]) -> None:
+    """Restrict this process (and the workers it spawns) to ``mask``."""
     if mask and sys.platform == "win32":
         k32 = ctypes.windll.kernel32
-        k32.SetProcessAffinityMask(k32.GetCurrentProcess(), ctypes.c_size_t(mask))
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        k32.SetProcessAffinityMask.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+        if not k32.SetProcessAffinityMask(k32.GetCurrentProcess(), mask):
+            raise OSError(f"SetProcessAffinityMask({mask:#x}) failed")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -187,9 +198,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--affinity-mask", type=lambda x: int(x, 0), default=None,
                     help="Windows CPU affinity mask, inherited by the capture workers.")
+    ap.add_argument("--threads-per-worker", type=int, default=1)
+    ap.add_argument("--resume", type=Path, default=None,
+                    help="Run folder to continue; captures already there are kept.")
     ap.add_argument("--note", default="")
     args = ap.parse_args(argv)
     _pin(args.affinity_mask)
+    for v in THREAD_VARS:               # inherited by the spawned workers
+        os.environ[v] = str(args.threads_per_worker)
     conds = fresh_conditions()
     params = {"fresh_conditions": f"{len(conds)}: 2016, months 1-12 x days {DAYS} x hours "
                                   f"{CLOCK}", "design_bank": "W1-W6 of run 0001",
@@ -201,7 +217,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             time_series=(f"{len(conds)} capture instants of 2016 and the W1-W6 start states; "
                          "no time-domain simulation"),
             note=args.note or "Re-measurement of eps_op (finite-bank allowance) on the "
-                              "commitment base") as run:
+                              "commitment base", resume=args.resume) as run:
         fresh_dir = run.path("operating_points_fresh")
         fresh_dir.mkdir(parents=True, exist_ok=True)
         jobs = [(n, t.isoformat(), str(fresh_dir)) for n, t in conds]

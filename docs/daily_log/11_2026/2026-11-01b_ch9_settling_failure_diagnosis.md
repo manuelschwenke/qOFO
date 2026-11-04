@@ -1542,6 +1542,25 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Armed 19:49:42: launcher pid 107764 (scratchpad `launch_ref_queue.py`, which repeats a start that dies within 2 min), queue pid 120700. Logs in `<run 0008>/ref_v4/`.
   - Not queued: the settling figure and D1+D2.
   - The suspended v3 follow-up launcher (pid 34968) would switch SELECTED_PARAMSET to v3 if it were resumed.
+- **19:53: run 0008 II-b round 1 done** (here exit 0 at 19:37; e5power done 19:48, pulled 19:52).
+  - Selection 2b_round1: 223/223 inside the θ bounds; engagement level sts+bank (20 candidates); 6 feasible at tolerance 0; ranked first 82c1839cd2c0, b3ca74277466, 0eccdcf9916b, c8c2f9f2cf70.
+  - The best is unchanged (82c1839cd2c0), so f → 0.25.
+  - Round 2 started 19:53, centred on 82c1839cd2c0: 64/64 draws pass the screen; 12 here, 52 on e5power. That is 65 candidates, against 47 in round 1.
+  - Stop rule: if round 2 also leaves the best unchanged, f becomes 0.125 and round 3 runs. If round 3 leaves it unchanged as well, f becomes 0.0625 < F_MIN and II-b ends after round 3.
+- **20:16: queue revised** (author: "Yes. It should wait for W5, and do D1 and D2 before. And after 8 in the morning, please use only 10 workers on e5wimi again"). Commits ed09b29 and fafb0fb; 7 tests pass.
+  - Order: GO → W5 clean → record and switch → D1 + D2 (`ch_9_4_deadband`, 10 workers) → width gate → REF.
+  - Width gate: REF starts only if D1's design width equals the dead band the REF variants run with (0.01 pu TSO and DSO, read from `variants.resolved`). Otherwise the queue stops for the author.
+  - REF runs 10 processes in all (`--jobs` 2, 2, 3, 3 for A, B, D, E). The wall time is still set by E's S1 (about 6.6 h).
+  - The queue pins itself to 0x55555.
+  - `repin_0800.ps1` (pid 112520, scratchpad) re-pins run 0008's tree and the queue launcher's tree to 0x55555 at 2026-11-05 08:00. A dry run found run 0008's 12 Python processes.
+    - A root counts only if its command line is the expected one, and a descendant only if it was created after its parent, so a reused pid is skipped.
+  - Smoke of D1/D2 on the commitment base (`0009_2026-11-04_195947_ch_9_4_deadband_smoke`; old weights a1, W1 only, 0.25 h): complete, no failed run, the D2 event reached the plant.
+    - Runs with the droop active take about 5–6 s per 10-s step (D1 confirmation 505 s, D2 legs 553–567 s; suppressed 86 s). The full D1 + D2 therefore needs about 6 h on 10 workers (estimate).
+    - The smoke's design width is 0.02 pu (rule 0.015 pu), not 0.01 pu. It is only indicative (start-up-dominated 0.25 h, old weights), but the width gate may stop REF.
+    - The smoke took counter 0009 of `results/ch_09_parameter_selection`.
+  - The llvmlite start failure hit the queue's own start 3 times in 4 (20:12–20:16).
+    - Start failures (exit within 120 s) are now repeated up to 12 times, in the queue and the launcher.
+    - Armed 20:16:21 as queue pid 53396 (launcher 9312, `ref_v4/launcher.pid`).
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

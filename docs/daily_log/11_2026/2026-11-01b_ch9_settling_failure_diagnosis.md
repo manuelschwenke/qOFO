@@ -1585,6 +1585,11 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - The queue's first remoting call works from this detached process ("e5power at 3d98d31").
     - The old queue (53396) and launcher (9312) were stopped first; both were only waiting for GO.
   - Run 0008 at 21:54, round 2: 31/52 units here and 95/208 on e5power. Round 2 therefore ends about 00:15, later than the 23:10 estimated at 20:16.
+- **22:47: v3 follow-up launcher ended** (author: "Yes", to "Should I end the suspended v3 follow-up launcher (pid 34968)?").
+  - What it was: `ch_9_12_followups_v3.py --run <0006> --switch-selected`, armed 2026-11-03 21:21:54, suspended since (all 89 threads), with no child besides its console host.
+  - It had done nothing beyond arming: `SELECTED_PARAMSET` is still `ch9_selected_band_2026_10_a1`, and no follow-up run was started.
+  - Note left in `<0006>/followups/STOPPED.txt`.
+  - Run 0008 (106732), the queue (69232, launcher 148152) and the re-pin (112520) are running, untouched.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

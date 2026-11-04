@@ -1487,6 +1487,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - taps and banks: 45 released.
   - Open for the author: D1 banks, D2 trigger (fallback vs adopt), D3 v4.1 full vs re-entry.
   - Implementation must go into a separate worktree while run 0008 is running: later local shards import this checkout's code.
+- **≈ 15:50, author: "Wait for run 0008".** The exemption is not implemented now. D1–D3 are decided at the result.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

@@ -79,6 +79,18 @@ Unchanged from v3:
 - The settling test is unaffected: the subordinate loop is isolated, with the TS layer frozen.
 - This note is thereby complete. It is frozen as of the launch.
 
+## Erratum (2026-11-04 15:20, after the launch; wording only, author: "yes, add erratum")
+
+- The table states the hunting dwell as "< 1 h". The rule the code applies, and the one
+  run 0008 is judged by, is **≤ 1 h**:
+  - `tuning/stage2_search.py::_split_reversals` skips a move pair only when
+    `(t1 - t0) > dwell_s`, so a reversal with a dwell of exactly 3600 s counts as hunting;
+  - the abort hook and the result rows use the same function;
+  - v3 used the same convention at 7200 s ("< 2 h" in its note, ≤ 2 h in the code).
+- Nothing in the code or the run changes. Occasion: in the II-a status at ≈ 15:10, three
+  finished reversals have a dwell of exactly 3600 s; the rejection of one candidate
+  (d5c278b98a71, W6) rests on one of them.
+
 ## Dry run (2026-11-04 13:11)
 
 - Stage-I point: λ v4 1.405 (v3 rule 1.447).

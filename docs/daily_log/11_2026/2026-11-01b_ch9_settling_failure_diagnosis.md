@@ -1428,6 +1428,52 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - earlier: 8 Oct 20:00 failed.
   - By the declared order, the first passing window is 22 Jun 20:00 (G3 and G9 off). It is a candidate period for the "low synchronous generation" analysis; it is not used in the tuning.
 - **≈ 13:30, author: "Hold n = 1".** Entered in the frozen v4 note; v4 launch follows.
+- **13:38: run 0008 launched** (`0008_2026-11-04_133847_ch_9_14_procedure_v4`, commit a707786, driver pid 106732).
+  - Started detached with stdout and stderr in `scratchpad/v4_driver.out/.err`.
+  - Options: `--reuse-stage1` run 0005; `--config-set sts_coupler_hold_after_bank=1`; 10 local workers on mask 0x55555 (checked on the driver and the shard); 30 on e5power.
+  - e5power: 19 Python files copied over 3d98d31, hashes equal; the Stage-I paramset, 6 operating points and 83 λ-bank points pushed.
+  - Stage-I verification re-judged: PASS at the v4 margin (p95 24.0 ≤ 25, residual 0.37 ≤ 0.8).
+    - The logged λ 1.4471 is v2's `describe` value (banks included, 6 points); the v4 λ of the Stage-I point is 1.405.
+  - II-a: 176 / 512 draws pass (λ: 314, θ_TS: 297); 34 candidates here, 143 on e5power.
+    - The local shard logs `lambda over 89 operating points, without shunt`.
+  - Estimated end ≈ 2026-11-05 06:30–08:00.
+- **≈ 15:10: run 0008 status, II-a (no code change, no intervention).**
+  - Progress: here 60 / 136 windows, e5power 232 / 572; no failed rows.
+    - All 11 local processes are on mask 0x55555; e5power has 32 python processes.
+    - Projected II-a end ≈ 16:30–17:30, earlier than estimated (early stop at the first reversal).
+  - Finished candidates: 79 of 177.
+    - 55 were rejected for taps and 22 for banks only.
+    - 2 are complete and clean on W1, W3, W4, W6:
+      - f988258641a4: sts+bank, bank price 22.0, e_v,TS mean 0.0076, W6 0.0153;
+      - b9dcc64d8b49: sts only, price 29.1.
+    - Clean candidates run full windows (≈ 60 min) while rejected ones stop early, so the clean share of the finished set is biased low.
+  - Counted tap reversals in finished rows: 62.
+    - By window: W6 51, W4 9, W1 2.
+    - By type: STS coupler 37, TS OLTC 25.
+  - **Finding (hold n = 1).** 27 coupler reversals lie within 60 s of a bank move; in 26 of them the coupler moves +20 s after the commit, i.e. at the first STS step after the hold.
+    - On this wider candidate set, n = 1 shifts the coupler reaction by one step rather than removing it. In run 0014 (II-c candidates) it removed it.
+    - Not acted on: the procedure is frozen. The zero-tolerance filter rejects these candidates, as declared.
+  - **Boundary (wording).** `_split_reversals` counts a reversal when its dwell is ≤ `dwell_s` (`(t1 - t0) > dwell_s` skips it); the frozen note says "< 1 h".
+    - Three finished reversals have a dwell of exactly 3600 s.
+    - Only d5c278b98a71's rejection rests on one of them (W6, its single counted reversal; early-stopped there).
+    - v3 used the same ≤ convention at 7200 s. Left to the author.
+- **15:20: erratum in the v4 note** (author: "yes, add erratum"). The dwell rule reads ≤ 1 h, as the code applies it. Wording only; no code or run change.
+- **≈ 15:30: why W6 is hard (analysis of the II-a rows, 388 windows; read-only).**
+  - Profile (`data/profiles.csv`, 18 Jul 14:00 + 12 h):
+    - wind WP7/WP10 rises 0.71/0.61 → 0.90/0.91 at 16:00 (+2 h), then falls to 0.40 by 19:00–20:00;
+    - PV falls 0.39 → 0 by 19:00;
+    - of the six windows, W6 has the largest wind range (0.79/0.81) and the steepest 1-h wind change (0.30).
+    - Injection therefore peaks 2 h into the window.
+  - Measured (facts):
+    - the banks step +1 during 0.5–2.0 h and −1 during 2.0–3.0 h;
+    - 45 of 63 counted W6 tap reversals start at 1.7–2.4 h; all 45 start with a +1 move, return within 0.3–1.0 h, and 34 of them have a dwell ≥ 1800 s;
+    - 36 of 63 lie within 60 s of a bank move (see the hold finding above);
+    - full-length W6 rows: e_v,TS 0.0151–0.0153 across candidates, against 0.004–0.006 in W1, W3 and W4;
+    - area-mean error in W6: 0.0033–0.0037; p95 worst bus 0.065 pu; mean excess beyond ±0.02 band 0.025 pu;
+    - λ_max(B) without banks in W6 is not elevated on the TS layers (TS_1 lower than elsewhere). STS_DSO_4 is at 1.40, its highest, but DSO_4 has only 2 of the 63 reversals.
+  - Interpretation (hypothesis):
+    - most W6 reversals follow the turn of the injection profile, not a loop oscillation. A tap that moves just before the 16:00 peak and returns after it has a dwell under 1 h, which the zero-tolerance rule counts.
+    - The W6 error level is a spatial spread across buses that holds for all candidates, i.e. a floor of the window, not of the weights.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

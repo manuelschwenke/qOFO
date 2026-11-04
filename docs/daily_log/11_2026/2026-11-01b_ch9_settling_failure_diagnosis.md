@@ -1561,6 +1561,30 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - The llvmlite start failure hit the queue's own start 3 times in 4 (20:12–20:16).
     - Start failures (exit within 120 s) are now repeated up to 12 times, in the queue and the launcher.
     - Armed 20:16:21 as queue pid 53396 (launcher 9312, `ref_v4/launcher.pid`).
+- **21:28: D1 + D2 moved to e5power** (author: "Yes, put d1 and d2 there. In e5power"). Commit 479035a; 9 tests pass; the dry run on the stand-in gives the commands.
+  - After the switch commit, the v4 parameter set is pushed to e5power, and `ch_9_11_procedure_v3.sync_remote_code` copies this checkout's code there and checks the hashes.
+  - `ch_9_4_deadband` then runs there with 30 workers, through a detached shard (`run_remote`, logs in `ref_v4/_remote/`).
+  - Its run folder is pulled back into `results/ch_09_parameter_selection/`, with `remote_host.json` (host, remote commit, local commit) recorded in its README.
+  - Numbering: thesis_runs numbers a run max + 1 over the folders on its own host.
+    - If e5power's numbers are lower than this host's, e5power first gets an empty folder named after this host's highest run, so the pulled run keeps its number here.
+    - Today e5power is ahead: it holds older folders 0009 and 0010 (`ch_9_5_avr_revalidation`, 2026-10-30/31) that are not here. So the remote runs get 0011 and 0012, and 0010 stays unused here.
+  - Retries: a start that leaves no run folder is repeated (up to 12 times); a folder without `d1/selection.json` is completed with `--reduce` at most twice.
+  - REF stays on e5wimi with 10 processes.
+  - Read-only hash check before the change: e5power's code equals this checkout, except for files the remote runs do not import (`ch_9_16_ref_after_v4.py`, `analysis/profile_turn_dry/*`). So no copy was needed for the smoke.
+  - Smoke on e5power (`--remote-smoke`; W1, 0.25 h, 5 workers, the parameter set selected there, a1): `0011_2026-11-04_212919_ch_9_4_deadband_smoke`, pulled back here at 21:49 (47 files), status complete.
+    - First start (21:29): one worker died abruptly (W1 suppressed, right after the Gurobi licence line), so the pool broke (`BrokenProcessPool`), rc 1.
+      - Nothing in the Windows event log; RAM was free (140 of 191 GB).
+      - No pool broke in six days of logs on either host before this.
+    - The `--reduce` restart (21:36) kept the finished dt check and completed the rest by 21:47, rc 0. The manifest records both invocations (failed, complete).
+    - Result equal to the local smoke 0009 (same code and weights): design width 0.02 pu, rule 0.015 pu, d_max agreeing to about 1e-12; D2 event reached in all three legs.
+    - Wall times on e5power, under run 0008's load: droop active 425–468 s, suppressed 85–90 s. That is about 15 % faster than e5wimi.
+    - So the full D1 + D2 with 30 workers takes about 2–2.5 h (estimate).
+    - `remote_host.json` first said the code was copied; the smoke copied nothing. Corrected by hand at 21:51, and the code now says which applies.
+  - Commit 2c303f8: D1 + D2 is completed with `--reduce` up to 4 times (`D_RETRIES`; the full run has 91 runs, unattended).
+  - Re-armed 21:53:24: queue pid 69232, launcher 148152, both on mask 0x55555. One quick start failure first.
+    - The queue's first remoting call works from this detached process ("e5power at 3d98d31").
+    - The old queue (53396) and launcher (9312) were stopped first; both were only waiting for GO.
+  - Run 0008 at 21:54, round 2: 31/52 units here and 95/208 on e5power. Round 2 therefore ends about 00:15, later than the 23:10 estimated at 20:16.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

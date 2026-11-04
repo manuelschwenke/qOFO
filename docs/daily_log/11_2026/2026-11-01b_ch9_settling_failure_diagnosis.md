@@ -1524,6 +1524,24 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - Estimated gain: about 15 % shorter split stages (II-b rounds 2–4, II-c, completion), roughly 1–1.5 h. Confirmation, verification and W5 run on e5power only.
     - Not done; the author decides.
   - Round 1 at 19:19: here 30/36 window jobs done.
+- **19:50: REF runs queued behind run 0008** (author: "Maybe we can already queue the REF runs with new weights"; later: "some of the GE and GA scenarios didn't converge anyway so they can be excluded").
+  - New `experiments/ch_09_parameter_selection/ch_9_16_ref_after_v4.py` (commit a57a04e) and `tests/test_ref_after_v4.py` (4 tests pass).
+  - Gate: GO.json, and the held-out W5 report counts no tap and no bank reversal (`--no-w5-gate` drops the W5 condition). Reason: run 0006 was GO with 31 W5 reversals, and the author kept its follow-ups paused.
+  - Record step, on the v4 result `ch9_selected_uc_2026_11_v4`, listed under `provenance.record_additions`:
+    - the campaign's `--config-set` fields become parameter-set fields (`sts_coupler_hold_after_bank = 1`). Otherwise the REF controllers would run without the hold the weights were selected with (config default 0).
+    - `provenance.lambda_max_B` = `provenance.v4.lambda_max_B_v4` (banks excluded, author B1b "as in variant M"). `variants.selected_lambda_max` reads this key for M's loop-gain ceiling; the v3/v4 results record only `design_lambda_max_B`, so M would stop with a KeyError.
+  - Then SELECTED_PARAMSET → v4 in `_ch9_selected_design.py`, committed together with the parameter set.
+  - REF: scenarios A, B, D, E (GA, GE excluded), variants S1, M, L2, O2, O3, S2 (longest first), 360 min, `--jobs 5` each, so 20 processes here on mask 0x5555555555; e5power is not used.
+    - Launched 90 s apart, tag `v4_<scenario>`.
+    - A start that dies before its variants finish is completed with `--run-dir` for the missing variants, at most twice.
+  - Checks on a stand-in (the v3 result plus a fake v4 block, run 0006 as the campaign):
+    - the W5 gate skips (31 reversals);
+    - with `--no-w5-gate`, the record additions and the four run_ref commands are as intended;
+    - the record step is idempotent;
+    - `variants.resolved("M")` carries the hold and the λ ceiling, and the Case-2 pair guard passes.
+  - Armed 19:49:42: launcher pid 107764 (scratchpad `launch_ref_queue.py`, which repeats a start that dies within 2 min), queue pid 120700. Logs in `<run 0008>/ref_v4/`.
+  - Not queued: the settling figure and D1+D2.
+  - The suspended v3 follow-up launcher (pid 34968) would switch SELECTED_PARAMSET to v3 if it were resumed.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

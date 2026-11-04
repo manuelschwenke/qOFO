@@ -1590,6 +1590,13 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - It had done nothing beyond arming: `SELECTED_PARAMSET` is still `ch9_selected_band_2026_10_a1`, and no follow-up run was started.
   - Note left in `<0006>/followups/STOPPED.txt`.
   - Run 0008 (106732), the queue (69232, launcher 148152) and the re-pin (112520) are running, untouched.
+- **2026-11-05 00:05: run 0008 II-b round 2 done** (4 h 11 min; here exit 0 at 23:43; e5power done 00:01, pulled 00:04).
+  - Selection 2b_round2: 287/287 inside the θ bounds; engagement level sts+bank (48 candidates); 22 feasible at tolerance 0; ranked first ca2eda42e753, 4d9eabd5bb55, 6cf395038c79, d88cce6949d1.
+  - New best ca2eda42e753, so II-b recentres and f stays 0.25.
+    - Against the round-1 best 82c1839cd2c0, now ranked 5th: e_v_ts 0.00864 against 0.00862, inside the 0.02 indifference; e_v_ds 0.00577 against 0.00587.
+    - Its worst TSO tap rate is 18.0 ops/day, against 10.0 for 82c1839cd2c0. Hunting and V violations are 0 for both.
+  - Round 3 started 00:05, centred on ca2eda42e753: 45/64 draws pass the screen; 8 here, 37 on e5power (shard pid 11368). Round 1 had the same size and took 2 h 23 min, so round 3 should end about 02:30.
+  - Stop rule (F_MIN 0.125, MAX_ROUNDS 4): with f at 0.25, round 3 cannot end II-b. An unchanged best gives f = 0.125, which is not below F_MIN. So round 4 runs in either case, and the 4-round ETA applies: GO/NOGO about 10:00–10:30. This supersedes the 3-round branch noted at 19:53.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

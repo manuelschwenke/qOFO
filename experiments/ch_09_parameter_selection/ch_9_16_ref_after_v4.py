@@ -25,7 +25,14 @@ run 0006 was GO with 31 W5 reversals, and the author kept its follow-ups paused)
 
 2. **Switch.**  SELECTED_PARAMSET -> the v4 result in ``_ch9_selected_design.py``;
    the design file and the parameter set are committed.
-3. **D1 + D2** (``ch_9_4_deadband``) here with 10 workers.
+3. **D1 + D2** (``ch_9_4_deadband``) on e5power with 30 workers (author
+   2026-11-04: "put d1 and d2 there"), idle once the campaign has ended: the
+   parameter set and this checkout's code are copied there (hash-checked, as
+   for the v3 follow-ups), the run is started through a detached shard
+   (``ch_9_6_full_procedure.run_remote``) and its folder is pulled back here.
+   thesis_runs numbers a run max + 1 over its own host's folders, so before the
+   start e5power gets an empty folder of this host's highest number if its own
+   are lower; the run then keeps its number here.
 4. **Width gate.**  REF starts only if D1's design width equals the droop
    dead band the REF variants run with (``tso_qv_deadband_pu``,
    ``dso_qv_deadband_pu``); a different width is the author's decision.
@@ -36,14 +43,20 @@ run 0006 was GO with 31 W5 reversals, and the author kept its follow-ups paused)
    host; a start failure exits within seconds and is repeated up to 12 times) is
    completed with ``--run-dir`` for the missing variants; a later failure is
    retried twice; a variant that fails in the model is a result and is not
-   repeated.  D1 + D2 is retried the same way (``--reduce`` keeps its cached runs).
+   repeated.  D1 + D2 is retried the same way: a start that leaves no run
+   folder is repeated, a run folder without ``d1/selection.json`` is completed
+   with ``--reduce`` (its cached runs are kept) at most twice.
 
-The queue and everything it starts are pinned to the 10-core mask.
+The queue and everything it starts here are pinned to the 10-core mask.
 
-Usage (from the repository root, on e5wimi; waits for the campaign)::
+Usage (from the repository root, on e5wimi with the author's logon, which the
+remoting needs; waits for the campaign)::
 
     python -X utf8 experiments/ch_09_parameter_selection/ch_9_16_ref_after_v4.py \
         --run results/ch_09_parameter_selection/0008_2026-11-04_133847_ch_9_14_procedure_v4
+
+``--remote-smoke`` checks step 3 at once: ``ch_9_4_deadband --smoke`` on e5power
+with the parameter set selected there, pulled back here; nothing else.
 
 Author: Manuel Schwenke / Claude Code (2026-11-04)
 """
@@ -76,8 +89,11 @@ SCENARIO_JOBS = {"A": 2, "B": 2, "D": 3, "E": 3}
 #: Longest first (S1, M; REF runs of 2026-10-31), so the waiting ones are short.
 VARIANTS = "S1,M,L2,O2,O3,S2"
 REF_DIR = ROOT / F.REF_REL
-DEADBAND_DIR = ROOT / "results" / "ch_09_parameter_selection"
-D_WORKERS = 10
+DEADBAND_REL = Path("results") / "ch_09_parameter_selection"
+DEADBAND_DIR = ROOT / DEADBAND_REL
+DEADBAND = "ch_9_4_deadband"
+REMOTE_WORKERS = 30                   # D1 + D2 on e5power (author 2026-11-04)
+SMOKE_WORKERS = 5                     # --remote-smoke: W1, five runs in stage 2
 AFFINITY_MASK = 0x55555               # e5wimi: 10 cores, one logical CPU each
 LAUNCH_GAP_S = 90.0
 #: An exit within START_FAIL_S is a start failure (llvmlite.dll, "[WinError 6]": 2 of
@@ -167,33 +183,109 @@ def switch_selected(key: str, dry_run: bool) -> None:
 
 # -- D1 + D2 and the width gate -----------------------------------------------------------
 
-def deadband(key: str, dry_run: bool) -> Optional[Path]:
-    """D1 + D2 at the switched weights; the run folder, or None."""
-    note = (f"D1/D2 at the procedure-v4 weights {RESULT} ({key}); queued behind the v4 "
-            "campaign (author 2026-11-04)")
-    folder: Optional[Path] = None
+def _remote(script: str) -> str:
+    return P.ps(f"Invoke-Command -ComputerName {P.REMOTE} -ScriptBlock {{ {script} }}")
+
+
+def _rq(rel: Path) -> str:
+    """A path below the repository root on e5power, quoted for PowerShell."""
+    return P._q(P.REMOTE_ROOT + "\\" + str(rel))
+
+
+def _counter(name: str) -> int:
+    from experiments.thesis_runs import RUN_RE
+    m = RUN_RE.match(name)
+    return int(m["counter"]) if m else 0
+
+
+def local_names() -> List[str]:
+    """Run folders of the D1 + D2 parent here and in its archive (thesis_runs counts both)."""
+    return [d.name for base in (DEADBAND_DIR, ROOT / "_local_archive" / DEADBAND_REL)
+            if base.is_dir() for d in base.iterdir() if d.is_dir()]
+
+
+def remote_names() -> List[str]:
+    """The same on e5power."""
+    return _remote("; ".join(
+        f"if (Test-Path {_rq(p)}) {{ Get-ChildItem {_rq(p)} -Directory | "
+        f"ForEach-Object {{ $_.Name }} }}"
+        for p in (DEADBAND_REL, Path("_local_archive") / DEADBAND_REL))).split()
+
+
+def reserve_number() -> int:
+    """The number e5power will give the run, made at least this host's next one."""
+    loc = [n for n in local_names() if _counter(n)]
+    n_loc = max(map(_counter, loc), default=0) + 1
+    n_rem = max(map(_counter, remote_names()), default=0) + 1
+    if n_rem < n_loc:
+        top = max(loc, key=_counter)
+        _remote(f"New-Item -ItemType Directory -Force -Path {_rq(DEADBAND_REL / top)} | Out-Null")
+        P.log(f"{P.REMOTE}: empty {top} created (the number is taken here)")
+    return max(n_loc, n_rem)
+
+
+def push_inputs(paramset: Path) -> None:
+    """The v4 parameter set and this checkout's code, to e5power."""
+    from experiments.ch_09_parameter_selection import ch_9_11_procedure_v3 as V3
+    P.push(paramset, P.REMOTE_ROOT + rf"\configs\paramsets\{RESULT}.json")
+    V3.sync_remote_code()
+
+
+def _pull(name: str, rc: Optional[int]) -> Optional[Path]:
+    clash = [n for n in local_names() if _counter(n) == _counter(name) and n != name]
+    if clash:
+        P.log(f"D1 + D2: number {_counter(name):04d} is taken here by {clash} as well")
+    local = DEADBAND_DIR / name
+    n = P.pull_dir(P.REMOTE_ROOT + "\\" + str(DEADBAND_REL / name), local)
+    P.log(f"D1 + D2: {P.rel(local)} pulled from {P.REMOTE} ({n} files), rc {rc}")
+    from experiments.thesis_runs import annotate_run
+    host = {"host": P.REMOTE, "remote_root": P.REMOTE_ROOT, "remote_head": P.remote_head(),
+            "code": f"this checkout's commit {P.local_head()}, copied over the remote "
+                    "commit and hash-checked (ch_9_11_procedure_v3.sync_remote_code)",
+            "pulled": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "by": P.rel(Path(__file__))}
+    (local / "remote_host.json").write_text(json.dumps(host, indent=1), "utf-8")
+    annotate_run(local, by=Path(__file__), outputs={
+        "remote_host.json": f"simulated on {P.REMOTE}, pulled back to this host"})
+    return local if (local / "d1" / "selection.json").exists() else None
+
+
+def deadband(key: str, dry_run: bool, smoke: bool = False) -> Optional[Path]:
+    """D1 + D2 on e5power at the weights selected there; the pulled run folder, or None."""
+    note = (f"D1/D2 at the procedure-v4 weights {RESULT} ({key}) on {P.REMOTE}; queued "
+            "behind the v4 campaign (author 2026-11-04)")
+    if smoke:
+        note = (f"Smoke of D1/D2 on {P.REMOTE} (the path of {Path(__file__).name}), "
+                f"at the parameter set selected there")
+    name: Optional[str] = None
     starts = fails = 0
     while starts < MAX_STARTS and fails <= RETRIES:
-        argv = ["-m", "experiments.ch_09_parameter_selection.ch_9_4_deadband",
-                "--workers", str(D_WORKERS)]
-        argv += ["--note", note] if folder is None else ["--reduce", P.rel(folder)]
+        argv = ["-m", f"experiments.ch_09_parameter_selection.{DEADBAND}",
+                "--workers", str(SMOKE_WORKERS if smoke else REMOTE_WORKERS)]
+        argv += ["--smoke"] if smoke else []
+        argv += ["--note", note] if name is None else ["--reduce", str(DEADBAND_REL / name)]
         if dry_run:
-            P.log("dry run: " + " ".join(argv))
+            P.log(f"dry run: on {P.REMOTE}: " + " ".join(argv))
             return None
-        t0 = time.time()
-        rc = P.run(argv, OUT / "deadband.log")
+        if name is None:
+            P.log(f"D1 + D2: {P.REMOTE} numbers the run {reserve_number():04d}")
+        before = set(remote_names())
         starts += 1
-        fails += time.time() - t0 >= START_FAIL_S
-        new = [d for d in DEADBAND_DIR.glob("*_ch_9_4_deadband")
-               if d.stat().st_ctime >= t0 - 5.0]
-        folder = folder or (max(new) if new else None)
-        if folder is not None and (folder / "d1" / "selection.json").exists():
-            P.log(f"D1 + D2: {P.rel(folder)}, rc {rc}")
-            return folder
-        # A start failure leaves no folder (retry anew); a broken pool leaves one
+        try:
+            rc: Optional[int] = P.run_remote(f"deadband_{time.strftime('%m%d_%H%M%S')}",
+                                             argv, OUT, [])
+        except RuntimeError as exc:              # the shard died 3 times, or no remoting
+            rc = None
+            P.log(f"D1 + D2: start {starts}: {exc}")
+        new = sorted(n for n in set(remote_names()) - before if f"_{DEADBAND}" in n)
+        name = name or (new[-1] if new else None)
+        # A start failure leaves no folder (start anew); a broken pool leaves one
         # whose cached runs --reduce keeps (done.json) and whose missing ones it runs.
+        fails += name is not None or rc is None
+        if name is not None and _remote(
+                f"Test-Path {_rq(DEADBAND_REL / name / 'd1' / 'selection.json')}").strip() == "True":
+            return _pull(name, rc)
         P.log(f"D1 + D2: start {starts} ended with rc {rc}; "
-              + ("no run folder" if folder is None else "no d1/selection.json"))
+              + ("no run folder" if name is None else "no d1/selection.json"))
     return None
 
 
@@ -285,16 +377,25 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="gates, record and commands only: nothing written, committed or run")
     ap.add_argument("--paramset-dir", type=Path, default=None,
                     help="read the result from this folder (tests)")
+    ap.add_argument("--remote-smoke", action="store_true",
+                    help=f"only {DEADBAND} --smoke on {P.REMOTE}, pulled back here, at once")
     a = ap.parse_args(argv)
     V4._pin(a.affinity_mask)
     run = (ROOT / a.run).resolve() if not a.run.is_absolute() else a.run
-    OUT = run / ("ref_v4_dry" if a.dry_run else "ref_v4")
+    OUT = run / ("ref_v4_dry" if a.dry_run else "ref_v4_smoke" if a.remote_smoke else "ref_v4")
     OUT.mkdir(parents=True, exist_ok=True)
     P.RUN = OUT                                   # P.log writes to ref_v4/driver.log
+    if not a.dry_run:                             # the remoting works from this process
+        P.log(f"{P.REMOTE} at {P.remote_head()[:7]}")
+    if a.remote_smoke:
+        folder = deadband("remote smoke", dry_run=False, smoke=True)
+        P.log(f"remote smoke: {P.rel(folder) if folder else 'no d1/selection.json'}")
+        return 0 if folder else 1
     scen = [s.strip() for s in a.scenarios.split(",") if s.strip()]
-    P.log(f"queue armed for {run.name}: D1 + D2 ({D_WORKERS} workers), then REF {scen} "
-          f"(jobs {[SCENARIO_JOBS[s] for s in scen]}), variants {VARIANTS}, mask "
-          f"{a.affinity_mask:#x}, W5 gate {not a.no_w5_gate}" + (" (dry run)" if a.dry_run else ""))
+    P.log(f"queue armed for {run.name}: D1 + D2 ({P.REMOTE}, {REMOTE_WORKERS} workers), "
+          f"then REF here {scen} (jobs {[SCENARIO_JOBS[s] for s in scen]}), variants "
+          f"{VARIANTS}, mask {a.affinity_mask:#x}, W5 gate {not a.no_w5_gate}"
+          + (" (dry run)" if a.dry_run else ""))
     key = F.wait_for_campaign(run)
     if key is None:
         (OUT / "SKIPPED.txt").write_text("campaign not GO\n", "utf-8")
@@ -307,6 +408,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return _stop(f"W5 gate: {why}")
     record(path, a.dry_run)
     switch_selected(key, a.dry_run)
+    if not a.dry_run:
+        push_inputs(path)
     folder = deadband(key, a.dry_run)
     if folder is not None:
         ok, why = width_gate(folder)

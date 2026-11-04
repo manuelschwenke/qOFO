@@ -38,8 +38,9 @@ def test_record_additions_conflict_and_unknown_field():
 
 def test_scenarios_and_variants():
     assert tuple(Q.SCENARIO_JOBS) == ("A", "B", "D", "E")   # GA, GE excluded (author 2026-11-04)
-    assert sum(Q.SCENARIO_JOBS.values()) == 10 == Q.D_WORKERS  # e5wimi: 10 workers
+    assert sum(Q.SCENARIO_JOBS.values()) == 10                 # e5wimi: 10 workers
     assert Q.AFFINITY_MASK == 0x55555
+    assert Q.REMOTE_WORKERS == 30                              # D1 + D2 on e5power
     assert sorted(Q.VARIANTS.split(",")) == sorted("L2,S1,S2,O2,O3,M".split(","))
 
 
@@ -76,6 +77,59 @@ def test_ref_late_failures_stop_after_retries(tmp_path, monkeypatch):
     monkeypatch.setattr(Q, "START_FAIL_S", -1.0)     # every exit counts as late
     res = Q.ref_one(0, "A", "k", dry_run=False)
     assert len(calls) == 1 + Q.RETRIES and res["folder"] is None
+
+
+LOCAL = ["0008_2026-11-04_133847_ch_9_14_procedure_v4", "0009_2026-11-04_195947_ch_9_4_deadband_smoke"]
+
+
+def _fake_remote(tmp_path, monkeypatch, remote, outcomes):
+    """e5power as a list of folder names; each start applies the next outcome:
+    None (start failure: no folder), "broken" (folder, no selection) or "ok"."""
+    from experiments.ch_09_parameter_selection import ch_9_6_full_procedure as P
+    monkeypatch.setattr(P, "RUN", tmp_path)
+    monkeypatch.setattr(Q, "OUT", tmp_path)
+    monkeypatch.setattr(Q, "local_names", lambda: list(LOCAL))
+    monkeypatch.setattr(Q, "remote_names", lambda: list(remote))
+    made, selected, calls = [], set(), []
+
+    def remote_cmd(script):
+        if script.startswith("New-Item"):
+            made.append(script)
+            remote.append(script.split("\\")[-1].split("'")[0])
+        return "True" if any(n in script for n in selected) else "False"
+    monkeypatch.setattr(Q, "_remote", remote_cmd)
+
+    def run_remote(tag, argv, where, pull):
+        calls.append(argv)
+        out = outcomes[len(calls) - 1]
+        if out is not None and "--reduce" not in argv:
+            remote.append(f"{max(map(Q._counter, remote)) + 1:04d}_2026-11-05_080000_ch_9_4_deadband")
+        if out == "ok":
+            selected.add(remote[-1])
+        return 0 if out == "ok" else 1
+    monkeypatch.setattr(P, "run_remote", run_remote)
+    monkeypatch.setattr(Q, "_pull", lambda name, rc: tmp_path / name)
+    return made, calls
+
+
+def test_reserve_number(tmp_path, monkeypatch):
+    remote = ["0006_2026-11-03_211954_ch_9_11_procedure_v3"]
+    made, _ = _fake_remote(tmp_path, monkeypatch, remote, [])
+    assert Q.reserve_number() == 10 and len(made) == 1 and remote[-1] == LOCAL[-1]
+    remote = ["0010_2026-10-31_093854_ch_9_5_avr_revalidation"]   # e5power ahead
+    made, _ = _fake_remote(tmp_path, monkeypatch, remote, [])
+    assert Q.reserve_number() == 11 and not made
+
+
+def test_deadband_remote_retries(tmp_path, monkeypatch):
+    remote = ["0006_2026-11-03_211954_ch_9_11_procedure_v3"]
+    _, calls = _fake_remote(tmp_path, monkeypatch, remote, [None, None, "broken", "ok"])
+    folder = Q.deadband("k", dry_run=False)
+    assert folder.name == "0010_2026-11-05_080000_ch_9_4_deadband" and len(calls) == 4
+    assert "--note" in calls[2] and calls[3][-2:] == [
+        "--reduce", str(Q.DEADBAND_REL / folder.name)]
+    _, calls = _fake_remote(tmp_path, monkeypatch, list(remote), ["broken"] * 9)
+    assert Q.deadband("k", dry_run=False) is None and len(calls) == 1 + Q.RETRIES
 
 
 def test_width_gate(tmp_path, monkeypatch):

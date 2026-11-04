@@ -1458,7 +1458,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - Only d5c278b98a71's rejection rests on one of them (W6, its single counted reversal; early-stopped there).
     - v3 used the same ≤ convention at 7200 s. Left to the author.
 - **15:20: erratum in the v4 note** (author: "yes, add erratum"). The dwell rule reads ≤ 1 h, as the code applies it. Wording only; no code or run change.
-- **≈ 15:30: why W6 is hard (analysis of the II-a rows, 388 windows; read-only).**
+- **≈ 15:25: why W6 is hard (analysis of the II-a rows, 388 windows; read-only).**
   - Profile (`data/profiles.csv`, 18 Jul 14:00 + 12 h):
     - wind WP7/WP10 rises 0.71/0.61 → 0.90/0.91 at 16:00 (+2 h), then falls to 0.40 by 19:00–20:00;
     - PV falls 0.39 → 0 by 19:00;
@@ -1474,10 +1474,10 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Interpretation (hypothesis):
     - most W6 reversals follow the turn of the injection profile, not a loop oscillation. A tap that moves just before the 16:00 peak and returns after it has a dwell under 1 h, which the zero-tolerance rule counts.
     - The W6 error level is a spatial spread across buses that holds for all candidates, i.e. a floor of the window, not of the weights.
-- **≈ 15:40, author asks whether W6 reversals could be accepted.**
+- **≈ 15:35, author asks whether W6 reversals could be accepted.**
   - Claude advised against a window exception. Of 69 W6 reversals, 37 are bank-coupled; 24 follow the profile turn; 8 are other.
   - Instead Claude proposed a cause-based profile-turn exemption as a fallback. Author: "can you plan this already?"
-- **≈ 15:50: plan written**, `docs/tuning/2026-11-04_amendment_profile_turn_draft.md` (DRAFT, not applied; run 0008 unchanged).
+- **≈ 15:45: plan written**, `docs/tuning/2026-11-04_amendment_profile_turn_draft.md` (DRAFT, not applied; run 0008 unchanged).
   - Rule:
     - turn of the area's residual load (prominence 5 % of the area's IBG capacity within ±1 h);
     - reversal exempt if a turn lies in [t0 − 900 s, t1], no bank move within ±60 s (taps), one per device per turn.

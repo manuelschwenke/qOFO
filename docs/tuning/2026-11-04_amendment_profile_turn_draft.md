@@ -1,6 +1,6 @@
 # Amendment draft: profile-turn exemption of reversals (fallback for v4)
 
-**Status:** DRAFT 2026-11-04 ≈ 15:50, planned at the author's request
+**Status:** DRAFT 2026-11-04 ≈ 15:45, planned at the author's request
 ("can you plan this already?"). It is not applied, and run 0008 (procedure v4) continues
 unchanged.
 - The rule's parameters were fixed before the dry evaluation below was run.

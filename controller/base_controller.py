@@ -440,6 +440,31 @@ class BaseOFOController(ABC):
         import dataclasses
         self.params = dataclasses.replace(self.params, g_z=g_z)
 
+    def hold_oltcs(self, n_iterations: int) -> None:
+        """Hold every OLTC integer at its present position for the next
+        ``n_iterations`` calls of :meth:`step`, starting with the next one.
+
+        Uses the iteration lock of :attr:`OFOParameters.int_cooldown`
+        (``_int_lock_until``): a lock that already runs longer is kept, a
+        shorter one is extended.  Shunt integers and continuous actuators
+        are not affected.  ``n_iterations <= 0`` does nothing.
+
+        Used by the cascade runner when a TS bank commit is announced to
+        this STS (``sts_coupler_hold_after_bank``): the STS measurement of
+        that instant predates the switch.
+        """
+        if self._u_current is None:
+            raise RuntimeError(
+                "Controller not initialised. Call initialise() first."
+            )
+        if n_iterations <= 0:
+            return
+        until = self.iteration + int(n_iterations)
+        for idx in self._oltc_int_indices:
+            self._int_lock_until[idx] = max(
+                self._int_lock_until.get(idx, until), until
+            )
+
     def step(
         self,
         measurement: Measurement,

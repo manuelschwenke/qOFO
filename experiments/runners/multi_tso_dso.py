@@ -4875,6 +4875,15 @@ def _run_multi_tso_dso_impl(
                                 ),
                             )
                             dso_ctrl_aff.receive_disturbance_message(msg)
+                            # The STS step of this instant reads a measurement
+                            # taken before the switch: hold its couplers so they
+                            # do not answer the deviation the bank answers.
+                            # Step 1 included (the STS then reads the initial
+                            # operating point).
+                            if config.sts_coupler_hold_after_bank > 0:
+                                dso_ctrl_aff.hold_oltcs(
+                                    config.sts_coupler_hold_after_bank
+                                )
 
             # TSO sends Q setpoints to DSOs via grouped setpoint messages
             for z, ctrl in tso_controllers.items():

@@ -108,7 +108,7 @@ def _fake_remote(tmp_path, monkeypatch, remote, outcomes):
             selected.add(remote[-1])
         return 0 if out == "ok" else 1
     monkeypatch.setattr(P, "run_remote", run_remote)
-    monkeypatch.setattr(Q, "_pull", lambda name, rc: tmp_path / name)
+    monkeypatch.setattr(Q, "_pull", lambda name, rc, synced: tmp_path / name)
     return made, calls
 
 
@@ -129,7 +129,7 @@ def test_deadband_remote_retries(tmp_path, monkeypatch):
     assert "--note" in calls[2] and calls[3][-2:] == [
         "--reduce", str(Q.DEADBAND_REL / folder.name)]
     _, calls = _fake_remote(tmp_path, monkeypatch, list(remote), ["broken"] * 9)
-    assert Q.deadband("k", dry_run=False) is None and len(calls) == 1 + Q.RETRIES
+    assert Q.deadband("k", dry_run=False) is None and len(calls) == 1 + Q.D_RETRIES
 
 
 def test_width_gate(tmp_path, monkeypatch):

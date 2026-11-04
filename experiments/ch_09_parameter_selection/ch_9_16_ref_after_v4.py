@@ -45,7 +45,7 @@ run 0006 was GO with 31 W5 reversals, and the author kept its follow-ups paused)
    retried twice; a variant that fails in the model is a result and is not
    repeated.  D1 + D2 is retried the same way: a start that leaves no run
    folder is repeated, a run folder without ``d1/selection.json`` is completed
-   with ``--reduce`` (its cached runs are kept) at most twice.
+   with ``--reduce`` (its cached runs are kept) at most four times.
 
 The queue and everything it starts here are pinned to the 10-core mask.
 
@@ -102,6 +102,9 @@ LAUNCH_GAP_S = 90.0
 START_FAIL_S = 120.0
 MAX_STARTS = 12
 RETRIES = 2
+#: D1 + D2 completions with --reduce: a worker death breaks the whole pool (the
+#: e5power smoke, 2026-11-04 21:31, one of 7 runs), and the cached runs are kept.
+D_RETRIES = 4
 OUT: Path = ROOT                      # set in main()
 
 
@@ -231,7 +234,7 @@ def push_inputs(paramset: Path) -> None:
     V3.sync_remote_code()
 
 
-def _pull(name: str, rc: Optional[int]) -> Optional[Path]:
+def _pull(name: str, rc: Optional[int], synced: bool) -> Optional[Path]:
     clash = [n for n in local_names() if _counter(n) == _counter(name) and n != name]
     if clash:
         P.log(f"D1 + D2: number {_counter(name):04d} is taken here by {clash} as well")
@@ -240,8 +243,9 @@ def _pull(name: str, rc: Optional[int]) -> Optional[Path]:
     P.log(f"D1 + D2: {P.rel(local)} pulled from {P.REMOTE} ({n} files), rc {rc}")
     from experiments.thesis_runs import annotate_run
     host = {"host": P.REMOTE, "remote_root": P.REMOTE_ROOT, "remote_head": P.remote_head(),
-            "code": f"this checkout's commit {P.local_head()}, copied over the remote "
-                    "commit and hash-checked (ch_9_11_procedure_v3.sync_remote_code)",
+            "code": (f"this checkout's commit {P.local_head()}, copied over the remote "
+                     "commit and hash-checked (ch_9_11_procedure_v3.sync_remote_code)"
+                     if synced else "the remote checkout as it was (not copied)"),
             "pulled": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "by": P.rel(Path(__file__))}
     (local / "remote_host.json").write_text(json.dumps(host, indent=1), "utf-8")
     annotate_run(local, by=Path(__file__), outputs={
@@ -258,7 +262,7 @@ def deadband(key: str, dry_run: bool, smoke: bool = False) -> Optional[Path]:
                 f"at the parameter set selected there")
     name: Optional[str] = None
     starts = fails = 0
-    while starts < MAX_STARTS and fails <= RETRIES:
+    while starts < MAX_STARTS and fails <= D_RETRIES:
         argv = ["-m", f"experiments.ch_09_parameter_selection.{DEADBAND}",
                 "--workers", str(SMOKE_WORKERS if smoke else REMOTE_WORKERS)]
         argv += ["--smoke"] if smoke else []
@@ -283,7 +287,7 @@ def deadband(key: str, dry_run: bool, smoke: bool = False) -> Optional[Path]:
         fails += name is not None or rc is None
         if name is not None and _remote(
                 f"Test-Path {_rq(DEADBAND_REL / name / 'd1' / 'selection.json')}").strip() == "True":
-            return _pull(name, rc)
+            return _pull(name, rc, synced=not smoke)
         P.log(f"D1 + D2: start {starts} ended with rc {rc}; "
               + ("no run folder" if name is None else "no d1/selection.json"))
     return None

@@ -300,8 +300,14 @@ def lambda_max_B(
     g_w: np.ndarray,
     *,
     rel_tol: float = 1e-10,
+    exclude_classes: Sequence[str] = (),
 ) -> float:
     """``lambda_max(B)`` for one layer at one weight vector.
+
+    ``exclude_classes`` drops those actuator columns from ``B`` before the
+    eigenvalue, e.g. ``("shunt",)`` for the loop gain without the banks
+    (procedure v4, author 2026-11-04: the banks are discrete and dwell-locked
+    and are judged by the hunting filter instead).
 
     Computed on ``C = G_w^{-1/2} (g_v S_V + g_q S_Q) G_w^{-1/2}``, which shares
     its non-zero spectrum with ``B`` and is the smaller of the two.  Near-zero
@@ -323,6 +329,11 @@ def lambda_max_B(
     C = (d_inv_sqrt[:, None] * C) * d_inv_sqrt[None, :]
     C = 0.5 * (C + C.T)                       # symmetrise against round-off
     keep = _exclusive_keep(lc, np.diag(C))
+    if exclude_classes:
+        idx = range(C.shape[0]) if keep is None else keep
+        keep = [i for i in idx if lc.classes[i] not in exclude_classes]
+        if not keep:
+            return 0.0
     if keep is not None:
         C = C[np.ix_(keep, keep)]
     eig = np.linalg.eigvalsh(C)
@@ -631,17 +642,20 @@ def screen_weights(
     weights: Dict[str, float],
     *,
     engage_reading: str = "systematic",
+    exclude_classes: Sequence[str] = (),
 ) -> List[LayerScreen]:
     """Evaluate one candidate across every condition and layer.
 
     Pure linear algebra on the cached Gram matrices: no plant, no simulation.
+    ``exclude_classes`` is passed to :func:`lambda_max_B`; the engage
+    deviations are unaffected.
     """
     rows: List[LayerScreen] = []
     for op in ops:
         for lc in op.layers:
             g_v, g_q = _layer_weights(lc, weights)
             g_w = lc.g_w_vector(weights)
-            lam = lambda_max_B(lc, g_v, g_q, g_w)
+            lam = lambda_max_B(lc, g_v, g_q, g_w, exclude_classes=exclude_classes)
             dev = engage_deviation(lc, g_v, g_q, g_w, reading=engage_reading)
             per_class: Dict[str, float] = {}
             for cls in sorted(set(lc.classes) & INTEGER_CLASSES):

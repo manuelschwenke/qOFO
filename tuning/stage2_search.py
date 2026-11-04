@@ -648,8 +648,12 @@ def hunting_summary(records: Sequence[Any], events_s: Sequence[float] = (),
 
 def shunt_summary(records: Sequence[Any],
                   events_s: Sequence[float] = (),
-                  *, startup_s: float = 0.0) -> Dict[str, Any]:
+                  *, dwell_s: float = HUNT_DWELL_S,
+                  startup_s: float = 0.0) -> Dict[str, Any]:
     """Switched-shunt commits: counts, short reversals, and bank hunting.
+
+    ``dwell_s`` is the hunting dwell of ``n_shunt_hunting`` (procedure v4: 1 h,
+    author 2026-11-04); ``shunt_reversals`` keeps the 2 h of its definition.
 
     Since 2026-10-22 a bulk MSC/MSR bank is an integer input of the TS-MIQP,
     priced by ``g_w_tso_shunt`` like a tap by its tap price, so its wear is
@@ -702,7 +706,7 @@ def shunt_summary(records: Sequence[Any],
         per_bank[key] = per_bank.get(key, 0) + 1
     hunt, legit, startup = _split_reversals(
         [(float(t), str(k), int(s)) for t, k, s in moves], events_s,
-        HUNT_DWELL_S, 1.0, startup_s)
+        dwell_s, 1.0, startup_s)
     return {"shunt_commits": n_up + n_dn, "shunt_up": n_up, "shunt_down": n_dn,
             "shunt_reversals": n_rev, "shunt_max_level": max_level,
             "shunt_ops_max_bank": max(per_bank.values(), default=0),

@@ -1230,7 +1230,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Bank price floor at 1.546 / 1.6: 13.5 / 12.7 at 8ad82442269b's weights; 10.9 / 10.4
     at ccc91db1de92's.
 - **Author: "Keep 1.546"** (λ ceiling unchanged; recorded in the v4 draft).
-- **≈ 11:30: re-measurement of ε_op** (author: "can you remeasure it? … we have to wait
+- **≈ 11:05: re-measurement of ε_op** (author: "can you remeasure it? … we have to wait
   … anyway").
   - Rule declared in the v4 draft before any result.
   - New script `experiments/ch_09_parameter_selection/ch_9_13_eps_op_remeasure.py`, a
@@ -1250,6 +1250,171 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Observation from the smoke test: the STS layer (DSO_4, designed to λ_STS 1.4 on the
     same 6 points) often sets λ_max. The TS-only and STS-only shifts are therefore
     reported separately.
+- **11:12: run 0007 launched** (commit 006a2d0). Two problems:
+  - **The in-script affinity call failed silently:** `SetProcessAffinityMask` had no
+    ctypes argtypes.
+  - **Mis-pinning of another session's processes:** while correcting this from outside,
+    I pinned the wrong process tree. pid 105740 and its 13 children are the parallel
+    session's coupler-hold evaluation (`…_ch_9_13_coupler_hold`, h0/h1/h6), not run 0007.
+    The tree was found by a command-line filter that also matched `spawn_main`.
+    - That tree ran on mask 0x55555 for about 4–5 min and was restored to 0xFFFFFFFFFF
+      at 11:21:27.
+    - It was not interrupted, only slowed.
+  - **Oversubscription:** the capture workers ran numerical-library threads, up to ≈ 4.6
+    cores per worker. Next to the other campaign, 4 of 96 captures finished in 9 min.
+- **11:24: run 0007 stopped and resumed** (commit 8d04d51): one thread per worker
+  (`OMP/MKL/OPENBLAS/NUMEXPR/NUMBA_NUM_THREADS=1`), affinity with argtypes, `--resume`.
+  - The 4 finished captures are kept by the cache.
+  - Resumed 11:27 as pid 66120, with 10 workers on 0x55555.
+  - Note: the parallel session's processes run unpinned (about 11 workers), so e5wimi's
+    total load exceeds the author's 10-core cap. Not touched; reported to the author.
+- **11:31: run 0007 done** (93 of 96 captures in 203 s).
+  - 3 captures failed: F0408_14, F0622_14, F0822_14, LoadflowNotConverged at the start
+    state (summer and spring middays).
+  - **Declared rule: ε_op,new = 2.88.**
+    - All 264 candidates count as "near the ceiling", because the STS layer sits at 1.4
+      ≥ 1.391 for every candidate. The near-ceiling filter does not discriminate; a flaw
+      of my rule.
+    - λ_max(D ∪ F) is set by F0822_08 (TS_2) for 263 of 264 candidates.
+  - **Post-hoc analysis (not part of the rule), `analysis_commitment_split.json`:** the
+    large shifts are a commitment-state effect, not sampling noise.
+    - In 10 of 93 fresh points the zone-2 generator G3 (nuclear, bus 31, the only machine
+      in zone 2) is not committed by the merit order. Checked at F0822_08 against F0108_14
+      (`net.gen.in_service`).
+    - All six design windows have G3 committed.
+    - With G3 off, the voltage curvature of the zone-2 actuators roughly triples (IBG
+      1.3e-7 → 5e-7, banks 1.3e-4 → 4.4e-4), and so does λ.
+      - TS λ over the 264 candidates: median 3.53, max 5.93; only 16 below 2.
+      - 8ad82442269b: 4.16 with G3 off, against 1.40 on D.
+    - With G3 committed (83 fresh points), shifts near the ceiling: median 0.3 %, p95 59 %,
+      max 106 %. The large ones come from a zone-3 machine (`TS_3:gen6`) not committed:
+      8ad82442269b reaches 1.85 at F1022_14 (TS_3).
+  - Reading:
+    - Established, in the screen's model: in G3-off states the selected weights violate
+      the contraction condition λ < 2 of the linearised TS iteration in zone 2.
+    - Hypothesis: limit cycles or hunting in zone 2 whenever G3 is off. This would be
+      consistent with the Case-2 scenarios GA and GE (both G3 off; GE ended in
+      LoadflowNotConverged for 5 of 6 variants with c08b). Not verified by simulation.
+  - Consequence for v4 (author decides): ε_op cannot cover this, because it is a gap in
+    the coverage of commitment states, not a sampling margin. The screen bank needs the
+    commitment states (at least G3 off and the zone-3 machine off), or the weights must
+    depend on the commitment state. The latter is an architectural change.
+- **≈ 11:40, author:** GA (G3 off) with the trial set 8ad82442269b "does not work well …
+  a lot of oscillations". The predicted non-contraction in zone 2 is thus observed in one
+  simulation (the author's run, not inspected here).
+  - Frequency of G3 off, from the merit-order table of 2026-11-03 (6-h windows): 20 % of
+    hourly starts; December 58 %; 8–24 % in the other months; at all hours. Among the 93
+    fresh 12-h captures: 11 %.
+  - Author's question: exclude the G3-off cases, or re-tune? Options discussed: a robust
+    single set (screen bank with the commitment states), commitment-scheduled weights,
+    or exclusion as a declared scope limit.
+- **≈ 11:45: B1 check** (author: "I would prefer B1. you can do the check … we should not
+  investigate in too many new directions"). Screen only, on the enlarged bank (99 points:
+  W1–W6 and the 93 fresh points, G3-off included); no simulation.
+  - 3 of the 264 run-0006 candidates already pass (λ ≤ 1.546): 779a03b9bda4, 4b9bb14c0313,
+    466260e30090.
+    - Search-window e_v,TS 0.00857, 0.00831, 0.00955 (leader 8ad82442269b: 0.00869).
+    - Counted reversals 3, 2, 1 (truncated at the early stop); no bank commits after events.
+    - Common to them: higher g_w_pcc (0.80–1.46) and bank prices (38–49).
+  - 8ad82442269b on the enlarged bank: λ 4.16 (F0822_08, TS_2).
+    - No single weight suffices, even ×1000.
+    - g_w_der, g_w_pcc and g_w_tso_shunt together ×2.72 (bank price 22.8 → 62).
+    - θ_TS,min stays 0.0069 pu, so the TS taps stay active.
+  - **Bank price floor under B1:**
+    - 29.0 with IBG and PCC frozen (the absolute floor, set by F0822_08 TS_2);
+    - 33.8 / 39.9 with g_w_der and g_w_pcc at the upper edge of the v3 box;
+    - none with g_w_pcc at its Stage-I value;
+    - the box edge is 42.7.
+  - **Run 0006 evidence:** no candidate with a bank price ≥ 25 commits a bank after an event
+    in any window (107 candidates at 25–50). At 20–25: 24 of 61 in ≥ 2 windows.
+    - Hence B1 with banks in the λ check is incompatible with "banks commit after events".
+  - **Variant with the λ check over the continuous actuators only** (banks excluded; the
+    code has this as `central_lambda_rule = "continuous"` for variant M):
+    - 8ad82442269b needs only g_w_der and g_w_pcc ×1.45 (0.016 and 0.59); the bank price
+      can stay at 22.8.
+    - Its λ with banks excluded is 2.24 on the enlarged bank.
+  - Options put to the author:
+    - B1a: banks in the λ check, and the bank-engagement requirement dropped (reported
+      only).
+    - B1b: λ over the continuous actuators only, plus a G3-off window among the search
+      windows, so that the zero-tolerance hunting filter judges the banks there.
+- **≈ 11:50, author: "B1b, banks engage".** Recorded in the v4 draft; no code changed yet.
+- **≈ 11:55, author accepts W7:** 8 Oct 2016 20:00 + 12 h, G3 off, with W4's load ramp. The operability check follows.
+- **≈ 12:00, author: "can you then just replace the old W4 by the new window?"** Run 0006
+  records (264 candidates, truncated at the early stop):
+
+  | window | candidates with ≥ 1 counted reversal | reversals only in this window | bank commit ≤ 2 h after an event |
+  |---|---|---|---|
+  | W1 (outage, 5 Jan 08:00) | 7 | 0 | 15 |
+  | W3 (outage, 4 Jan 08:00) | 19 | 2 | 48 |
+  | W4 (load ramp, 26 Nov 10:00) | 54 | 15 | 50 |
+  | W6 (load shedding, 18 Jul 14:00) | 229 | 180 | 1 |
+
+  - W4 is the second most discriminating window for hunting, and with W3 the main source
+    of the bank-engagement credit.
+  - W1 is the most redundant: it has the same event type as W3, one day apart, and decided
+    no rejection on its own.
+  - Proposal to the author: replace W1 rather than W4. W1 moves to the completion stage
+    with W2, so all windows still enter the final ranking.
+- Author question (≈ 12:00): why is bank engagement a problem, when at 0.03 pu deviation
+  even an expensive bank should switch in?
+  - Answer recorded in the v4 draft: the commit threshold is Δv_eng = 0.005 pu ×
+    price / 13.49. So at 0.03 pu uniform deviation a bank commits up to a price of about
+    80.
+  - In the tuning windows the residual deviation after an event stays below about
+    0.01 pu: the leader's per-window e_v,TS is 0.004–0.006, W6 0.015. The continuous
+    actuators correct first, and without a reserve term nothing rewards a bank for taking
+    over.
+  - This explains why no bank commits above a price of 25. Reading, not separately
+    verified per event.
+- W7 operability check (S2, S1, S1e under LOC) launched, `scratchpad/w7_operability.py`.
+- **12:37: W7 = 8 Oct 20:00 fails.**
+  - S2 passes (V_TS 1.009–1.041 after the ramp).
+  - S1 (LOC, no events, 12 h, dt 180 s) and S1e (with the ramp) end in
+    LoadflowNotConverged, each after ≈ 19.5 min wall.
+  - G3 is the only machine off-line besides the usual.
+- **12:38: replacement rule declared in the v4 draft, then all 8 remaining G3-off candidates
+  screened in parallel.** Night starts first: 22 Jun 20:00, 22 Oct 02:00. Then day starts:
+  22 Jun 08:00, 22 Aug 08:00, 8 Oct 14:00, 22 Oct 08:00, 8 Dec 08:00, 8 Dec 14:00.
+  - `scratchpad/w7op_driver.py`, 8 single-threaded processes on mask 0x55555.
+- **≈ 12:42, author: "Replace W1".** v4 search windows W3, W4, W6, W7; W1 moves to the completion stage with W2.
+- **≈ 12:45, author proposal: G3 off out of the tuning, into an additional analysis**; asks
+  whether G3 must then be must-run. Screen on the 89 G3-on points:
+  - B1b: 220 of 264 pass, 8ad82442269b 1.532;
+  - banks in λ: 178 pass, 8ad82442269b 1.851 (F1022_14, zone-3 machine off).
+  - REF G3 status: A–E on; RA, RE, GA, GE off.
+  - Recommendation recorded in the v4 draft: scope restriction (MC G3-on filter, REF A–E
+    main, RA, RE, GA, GE additional) instead of must-run.
+- **≈ 12:50, author: "Yes, scope filter".**
+  - v4 search windows back to W1, W3, W4, W6; W7 dropped.
+  - Screen bank W1–W6 plus the 89 G3-on points; λ over the continuous actuators.
+  - MC filter G3-on (to be implemented); RA, RE, GA, GE as the additional analysis.
+  - The running G3-off window screen continues, for the additional analysis only.
+- **≈ 12:53, author:** slow reversals (dwell 1–2 h) do not count as hunting. The v4 dwell threshold is therefore 1 h.
+  - Launch v4 after the parallel session's tap-hold result, with 30 workers on e5power and 10 on e5wimi.
+  - Clock times of my entries between 11:31 and 12:50 were corrected at 12:55: they had been estimated and ran up to 1 h 20 min ahead. The anchors are file times (W7 check finished 12:37:42, the 8-window screen started 12:39).
+- **12:55–13:15: procedure v4 built** (code; not launched). Waiting for the tap-hold result.
+  - `tuning/stage1_screen.py`: `lambda_max_B` and `screen_weights` take `exclude_classes`.
+    - The columns of those classes are dropped from B, after the MSC/MSR group reduction.
+    - Default unchanged. For 8ad82442269b on the 99-point bank: 2.2377 without banks, against 2.2378 with the bank weight at 1e7.
+  - `tuning/stage2_search.py`: `shunt_summary(..., dwell_s=HUNT_DWELL_S)`. Bank hunting now takes the dwell like the taps; `shunt_reversals` keeps 2 h.
+  - `ch_9_3_stage2_screen.py`:
+    - `--hunt-dwell-s` (job field `dwell_s`, filter and early stop; recorded as `hunt_dwell_s` in each row);
+    - `--lambda-exclude CLASSES` and `--lambda-extra-ops DIR` (points that enter λ only);
+    - `--config-set FIELD=VALUE`, ported by hand from f1f4a6c (minimal/thesis-core);
+    - all recorded in `run_meta.json`.
+  - New driver `ch_9_14_procedure_v4.py`: v3 with `configure()` patches, not applied at import.
+    - Tolerance 0, early stop at 1, dwell 3600 s.
+    - Settling 3 periods (verification 25); go e_v,TS ≤ 0.01.
+    - λ without banks on W1–W6 plus the 83 G3-on points of run 0007 (copied into the run, pushed to e5power).
+    - Stage-I verification re-judged at the v4 margin; `--config-set`; 10 local workers pinned to 0x55555; 30 remote.
+  - Tests: `tests/test_procedure_v4.py` (5) and v3 (5) pass together; 57 tests of the procedure, shunt and ledger modules pass.
+  - Dry run 13:11:
+    - Stage-I λ v4 1.405 (v3 rule 1.447);
+    - II-a: 176 / 512 draws pass (v3 rule 100);
+    - the screen arguments are as intended.
+  - Frozen note `docs/tuning/2026-11-04_weight_selection_procedure_v4.md`; the only open item is the tap hold.
+  - The hold code is uncommitted in the shared checkout (`configs/config.py`, `controller/base_controller.py`, `experiments/runners/multi_tso_dso.py`; field `sts_coupler_hold_after_bank`). It must be ported here if adopted.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

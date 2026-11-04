@@ -1508,6 +1508,13 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - It stops at a later counted coupler reversal (DSO_3|trafo_8, 8280 → 11180 s; the turn is 1080 s before t0, more than L = 900 s). The candidate stays rejected.
   - Commits on the fallback branch: 21b8f0c (code, tests, note), then the smoke note.
 - **16:45: run 0008 II-a near its end**: here 134/136, e5power 559/572.
+- **17:29: run 0008 II-a done** (local shard exit 0 at 17:08; e5power done 17:28, 572 files pulled).
+  - Selection 2a: 177/177 inside the θ bounds; engagement level **sts+bank** (9 candidates); **3 feasible at tolerance 0**.
+    - 82c1839cd2c0: e_v,TS 0.00862, e_v,DS 0.00587, bank price 23.0, 7 bank commits.
+    - f988258641a4: e_v,TS 0.00883, bank price 22.0, 8 commits.
+    - b9cff7864fd0: e_v,TS 0.00919, bank price 13.4, 28 commits.
+  - 17:29:55: II-b round 1 started, centred on 82c1839cd2c0: 46/64 draws pass the screen; 8 here, 38 on e5power.
+    - The local shard started without the llvmlite failure.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

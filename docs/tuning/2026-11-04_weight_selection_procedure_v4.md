@@ -66,13 +66,18 @@ Unchanged from v3:
 - The tap changers stay in B, as in v3.
 - Precedent in the code: `central_lambda_rule = "continuous"` of variant M.
 
-## Open before the launch
+## Tap hold at bank switching (author ≈ 13:30: "Hold n = 1")
 
-- **Tap hold at bank switching** (parallel session "Tap hunting vs. shunt control"). If
-  the author adopts it, its config is passed with `--config-set` to every simulated window
-  and stated here.
-  - The settling test is unaffected: it isolates the subordinate loop with the TS layer
-    frozen, so no TS bank switches there.
+- `--config-set sts_coupler_hold_after_bank=1` in every simulated window.
+  - After a TS-MIQP bank commit, the hosting STS holds all its coupler OLTCs for the one STS step of the commit instant, step 1 included.
+  - The STS learns of the commit from the `ShuntDisturbanceMessage` it already receives, not from the plant.
+  - Code: commit 3b4aab0, a port of the parallel session's change (run 0014, note `2026-11-04c_sts_coupler_hold_after_bank.md`).
+- Evidence (run 0014, II-c candidates on W1, W3, W4, W6):
+  - the hold removes every coupler move at a bank instant;
+  - 17.9 goes 2 → 0 counted reversals, the leader 1 → 0;
+  - e_v,TS unchanged; e_v,DS +0.0002 (mainly W4).
+- The settling test is unaffected: the subordinate loop is isolated, with the TS layer frozen.
+- This note is thereby complete. It is frozen as of the launch.
 
 ## Dry run (2026-11-04 13:11)
 

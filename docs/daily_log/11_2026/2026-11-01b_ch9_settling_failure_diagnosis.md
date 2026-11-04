@@ -1415,6 +1415,19 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - the screen arguments are as intended.
   - Frozen note `docs/tuning/2026-11-04_weight_selection_procedure_v4.md`; the only open item is the tap hold.
   - The hold code is uncommitted in the shared checkout (`configs/config.py`, `controller/base_controller.py`, `experiments/runners/multi_tso_dso.py`; field `sts_coupler_hold_after_bank`). It must be ported here if adopted.
+- **13:13: the parallel hold evaluation finished** (run 0014; note `2026-11-04c_sts_coupler_hold_after_bank.md` in the shared checkout).
+  - Hold n = 1 and n = 6 both remove the coupler moves at bank instants.
+  - II-c candidates: 17.9 goes 2 → 0 reversals, the leader 1 → 0, 14.1 stays at 2 / 3.
+  - e_v,TS unchanged.
+  - **13:20: hold ported here** (commit 3b4aab0; runner hunk placed by hand); 26 tests pass.
+  - Smoke run of 8ad82442269b, W4, 12 min, hold 1 with the v4 options: ok.
+  - Launch waits for the author's choice of n.
+- **13:2x: G3-off window screen done (additional analysis only).** S2, S1 and S1e under LOC, with W4's ramp:
+  - pass: 22 Jun 20:00, 22 Oct 02:00, 8 Oct 14:00, 22 Oct 08:00, 8 Dec 08:00, 8 Dec 14:00;
+  - fail: 22 Jun 08:00 (ControllerNotConverged), 22 Aug 08:00 (LoadflowNotConverged);
+  - earlier: 8 Oct 20:00 failed.
+  - By the declared order, the first passing window is 22 Jun 20:00 (G3 and G9 off). It is a candidate period for the "low synchronous generation" analysis; it is not used in the tuning.
+- **≈ 13:30, author: "Hold n = 1".** Entered in the frozen v4 note; v4 launch follows.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

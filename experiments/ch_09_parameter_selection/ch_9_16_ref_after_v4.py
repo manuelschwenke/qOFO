@@ -33,8 +33,10 @@ run 0006 was GO with 31 W5 reversals, and the author kept its follow-ups paused)
    processes in all (``--jobs`` 2, 2, 3, 3; S1 of E sets the wall time either
    way), launched 90 s apart so the run folders are numbered one at a time.  A
    start that dies before its variants finish (the llvmlite start failure of this
-   host) is completed with ``--run-dir`` for the missing variants, twice at most;
-   a variant that fails in the model is a result and is not repeated.
+   host; a start failure exits within seconds and is repeated up to 12 times) is
+   completed with ``--run-dir`` for the missing variants; a later failure is
+   retried twice; a variant that fails in the model is a result and is not
+   repeated.  D1 + D2 is retried the same way (``--reduce`` keeps its cached runs).
 
 The queue and everything it starts are pinned to the 10-core mask.
 
@@ -78,6 +80,11 @@ DEADBAND_DIR = ROOT / "results" / "ch_09_parameter_selection"
 D_WORKERS = 10
 AFFINITY_MASK = 0x55555               # e5wimi: 10 cores, one logical CPU each
 LAUNCH_GAP_S = 90.0
+#: An exit within START_FAIL_S is a start failure (llvmlite.dll, "[WinError 6]": 2 of
+#: 3 starts of this queue on 2026-11-04 20:12) and is repeated up to MAX_STARTS times;
+#: a later failure is retried RETRIES times.
+START_FAIL_S = 120.0
+MAX_STARTS = 12
 RETRIES = 2
 OUT: Path = ROOT                      # set in main()
 
@@ -165,7 +172,8 @@ def deadband(key: str, dry_run: bool) -> Optional[Path]:
     note = (f"D1/D2 at the procedure-v4 weights {RESULT} ({key}); queued behind the v4 "
             "campaign (author 2026-11-04)")
     folder: Optional[Path] = None
-    for attempt in range(1 + RETRIES):
+    starts = fails = 0
+    while starts < MAX_STARTS and fails <= RETRIES:
         argv = ["-m", "experiments.ch_09_parameter_selection.ch_9_4_deadband",
                 "--workers", str(D_WORKERS)]
         argv += ["--note", note] if folder is None else ["--reduce", P.rel(folder)]
@@ -174,6 +182,8 @@ def deadband(key: str, dry_run: bool) -> Optional[Path]:
             return None
         t0 = time.time()
         rc = P.run(argv, OUT / "deadband.log")
+        starts += 1
+        fails += time.time() - t0 >= START_FAIL_S
         new = [d for d in DEADBAND_DIR.glob("*_ch_9_4_deadband")
                if d.stat().st_ctime >= t0 - 5.0]
         folder = folder or (max(new) if new else None)
@@ -182,7 +192,7 @@ def deadband(key: str, dry_run: bool) -> Optional[Path]:
             return folder
         # A start failure leaves no folder (retry anew); a broken pool leaves one
         # whose cached runs --reduce keeps (done.json) and whose missing ones it runs.
-        P.log(f"D1 + D2: attempt {attempt + 1} ended with rc {rc}; "
+        P.log(f"D1 + D2: start {starts} ended with rc {rc}; "
               + ("no run folder" if folder is None else "no d1/selection.json"))
     return None
 
@@ -229,7 +239,8 @@ def ref_one(i: int, s: str, key: str, dry_run: bool) -> Dict[str, Any]:
     note = (f"Ch 10 REF, scenario {s}, with the procedure-v4 weights {RESULT} ({key}); "
             "queued behind the v4 campaign (author 2026-11-04)")
     folder: Optional[Path] = None
-    for attempt in range(1 + RETRIES):
+    starts = fails = 0
+    while starts < MAX_STARTS and fails <= RETRIES:
         miss = names if folder is None else _missing(folder, names)
         if not miss:
             break
@@ -240,11 +251,14 @@ def ref_one(i: int, s: str, key: str, dry_run: bool) -> Dict[str, Any]:
         if dry_run:
             P.log("dry run: " + " ".join(argv))
             return {"scenario": s, "folder": None, "status": {}}
+        t0 = time.time()
         rc = P.run(argv, OUT / f"ref_{s}.log")
+        starts += 1
+        fails += time.time() - t0 >= START_FAIL_S
         folder = _folder(tag)
         left = names if folder is None else _missing(folder, names)
         if left:
-            P.log(f"REF {s}: attempt {attempt + 1} ended with rc {rc}; "
+            P.log(f"REF {s}: start {starts} ended with rc {rc}; "
                   + ("no run folder" if folder is None else f"missing {left}"))
     status = {} if folder is None else {
         n: json.loads((folder / n / "status.json").read_text("utf-8"))["status"]

@@ -43,6 +43,41 @@ def test_scenarios_and_variants():
     assert sorted(Q.VARIANTS.split(",")) == sorted("L2,S1,S2,O2,O3,M".split(","))
 
 
+def _fake_ref(tmp_path, monkeypatch, n_fail):
+    """P.run that fails ``n_fail`` times without a run folder, then completes."""
+    from experiments.ch_09_parameter_selection import ch_9_6_full_procedure as P
+    monkeypatch.setattr(P, "RUN", tmp_path)
+    monkeypatch.setattr(Q, "OUT", tmp_path)
+    monkeypatch.setattr(Q, "REF_DIR", tmp_path / "ref")
+    monkeypatch.setattr(P, "rel", str)               # tmp_path may be on another drive
+    calls = []
+
+    def run(argv, logfile):
+        calls.append(argv)
+        if len(calls) <= n_fail:
+            return 1
+        d = tmp_path / "ref" / "0010_2026-11-05_080000_run_ref_v4_A"
+        for n in Q.VARIANTS.split(","):
+            (d / n).mkdir(parents=True, exist_ok=True)
+            (d / n / "status.json").write_text('{"status": "ok"}', "utf-8")
+        return 0
+    monkeypatch.setattr(P, "run", run)
+    return calls
+
+
+def test_ref_start_failures_are_repeated(tmp_path, monkeypatch):
+    calls = _fake_ref(tmp_path, monkeypatch, n_fail=5)
+    res = Q.ref_one(0, "A", "k", dry_run=False)
+    assert len(calls) == 6 and set(res["status"].values()) == {"ok"}
+
+
+def test_ref_late_failures_stop_after_retries(tmp_path, monkeypatch):
+    calls = _fake_ref(tmp_path, monkeypatch, n_fail=50)
+    monkeypatch.setattr(Q, "START_FAIL_S", -1.0)     # every exit counts as late
+    res = Q.ref_one(0, "A", "k", dry_run=False)
+    assert len(calls) == 1 + Q.RETRIES and res["folder"] is None
+
+
 def test_width_gate(tmp_path, monkeypatch):
     (tmp_path / "d1").mkdir()
     sel = tmp_path / "d1" / "selection.json"

@@ -1067,6 +1067,189 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Stage-I verification taken over from 0005; II-a on 37 + 63 candidates with
     `--startup-exempt-s 900`.
   - Follow-up launcher re-armed for 0006 with `--switch-selected` (pid 34968).
+- **23:33: run 0006, II-a done** (remote shard ended 23:28, about 30 min later than
+  estimated).
+  - Engagement level `sts+bank`: 5 candidates incl. the Stage-I point, 0 feasible.
+    - Stage-I point d6aa9ec0ad10 (bank price 13.49): banks after events in all 4 search
+      windows, but 8 counted tap reversals and 1 bank reversal.
+    - The others (prices 14.7–23.0) stop at 2–3 tap reversals; 6991782d98c8 also has
+      16 TSO tap operations per 12 h (limit 15).
+  - Level `sts` applies: 95 candidates, 7 feasible at tolerance 1, bank prices 25.2–42.5.
+    - Leader b9dcc64d8b49: e_v,TS 0.00875, e_v,DS 0.00606 on W1+W3+W4+W6; price 29.07;
+      g_w_gen 1.67·10⁶; 1 counted reversal.
+  - Reading (hypothesis): exemption (a) moved the stops later but did not make cheap banks
+    feasible. The stops now come mostly from a W6 episode at 1.3–3 h (bank commit and
+    release within ≈ 1 h; several couplers and `1[0]` reverse together).
+  - II-b round 1 started 23:33 (54 candidates; 20 local, 34 on e5power).
+- **2026-11-04 01:38: II-b round 1 done** (2 h 05 min; fewer early stops than in II-a).
+  - Level `sts+bank` again 0 feasible: 14 of 155 candidates have banks after events in
+    ≥ 2 windows, none passes the hunting limits.
+  - Level `sts`: 20 feasible, bank prices 24.6–49.6.
+  - New leader fc7fd1df5d51: e_v,TS 0.00875, e_v,DS 0.00556 (tie-break within 2 %);
+    bank price 40.1; g_w_gen 8.8·10⁵; g_w_tso_oltc 24.3.
+  - Round 2: 27 candidates (10 local, 17 on e5power), started 01:38.
+- **02:58: II-b round 2 done.** First feasible candidate at level `sts+bank`:
+  77930f9b1f53.
+  - Weights: bank price 23.3, g_w_gen 1.15·10⁶, g_w_tso_oltc 22.6, g_w_der 0.016,
+    g_w_pcc 0.45.
+  - Search windows: e_v,TS 0.00868, e_v,DS 0.00597; 1 counted reversal;
+    0 bank reversals; 0 start-up exemptions.
+  - Bank commits, none released:
+    - W1: z2[0] at 11.65 h, not within 2 h of the outage;
+    - W3: z3[0] at 4.8 h, the outage;
+    - W4: z2[0] at 5.4 h, the start of the load ramp;
+    - W6: z2[0] at 1.45 h, then z2[2] and z2[4] at 1.9 h, in the 1.3–3 h episode, but
+      held.
+  - The counted reversal: DSO_1|trafo_2[0] in W4 at 5.4 → 5.73 h. This is a move at
+    the ramp start reversed within the merged ramp event; it counts by design.
+  - Round 3 is centred on it: 34 candidates (12 local, 22 on e5power), started 02:58.
+- **04:45: II-b round 3 done** (1 h 47 min).
+  - Level `sts+bank`: 2 feasible of 23 bank-engaging candidates.
+    - 77930f9b1f53 stays the leader.
+    - Second: ccc91db1de92, e_v,TS 0.00877 (inside the 2 % band), e_v,DS 0.00599;
+      bank price 19.7, g_w_gen 3.3·10⁶, g_w_tso_oltc 16.1; 0 counted reversals.
+  - f → 0.25. Round 4 (last): 46 candidates (17 local, 29 on e5power), started 04:45.
+  - Full-window wall time of the leader: W1 26, W3 42, W4 31, W6 56 min. II-c
+    therefore needs about 1 h (one wave, W6 sets the pace).
+- **06:57: II-b done after 4 rounds** (round 4: 2 h 12 min).
+  - Level `sts+bank`: 6 feasible of 43 bank-engaging candidates.
+  - II-b leader 8ad82442269b: e_v,TS 0.00869, e_v,DS 0.00593 (77930f9b1f53 has 0.00868
+    and 0.00597; the tie-break inside the 2 % band decides). Its weights:
+    g_w_tso_shunt 22.76, g_w_gen 1.29·10⁶, g_w_tso_oltc 19.6, g_w_der 0.011,
+    g_w_pcc 0.41.
+- **06:57: Stage II-c started.** Only 2 of 7 grid prices pass the screen, because the
+  contraction bound binds. Screen values at the leader's other weights (recomputed
+  here with `V2.passes_screen`'s functions):
+
+  | g_w_tso_shunt | 4.27 | 5.42 | 6.88 | 8.74 | 11.1 | 14.1 | 17.9 | 22.8 (leader) |
+  |---|---|---|---|---|---|---|---|---|
+  | λ_max(B) | 3.41 | 2.83 | 2.37 | 2.01 | 1.73 | 1.51 | 1.40 | 1.40 |
+
+  - Ceiling 1.546, so the bank price can drop only to about 13–14.
+  - θ_TS,min is 0.0069 pu throughout.
+  - Hence II-c simulates 14.1 and 17.9 only.
+  - Model fact: λ_max(B) grows as the bank price falls, because the bank step enters
+    the linearised loop gain. Above about 17, the λ of 1.40 is set by another
+    actuator.
+- **07:54: Stage II-c done.** Pick: the leader itself, 8ad82442269b (bank price 22.76).
+
+  | g_w_tso_shunt | e_v,TS | counted reversals | bank reversals | windows with banks after events | verdict |
+  |---|---|---|---|---|---|
+  | 14.1 (58bcdc27c248) | 0.00864 | 2 | 0 | 4 | rejected |
+  | 17.9 (29580fc8a748) | 0.00865 | 2 | 0 | 3 | rejected |
+  | 22.76 (leader) | 0.00869 | 1 | 0 | 2 | feasible |
+
+  - All three share one counted reversal: DSO_1|trafo_2[0] in W4, a move at the ramp
+    start (5.4 h) reversed within the merged ramp event (5.53–5.74 h).
+  - The cheaper two add a second: DSO_4|trafo_11[0] in W3, a move at the restoration
+    (5.8 h) reversed 2 min later (5.83 h).
+  - At these prices bank z3[0] commits at the outage and is released at the restoration
+    in W3. The leader's bank stays committed.
+  - Both counted reversals are a move at an event reversed within minutes. That is the
+    case Amendment 2 considered and kept as hunting. Not changed; noted for the thesis
+    discussion of the hunting rule.
+- **07:54: completion on W2 started:** 6 band candidates + the Stage-I point (2 local,
+  4 on e5power).
+- **08:05–08:21: e5wimi capped at 10 cores** (author: "reduce load at e5wimi to 10 cores
+  max", without aborting anything). Nothing was stopped and no code was changed.
+  - Method: Windows CPU affinity on the campaign's process trees:
+    - driver 29448 and its children (screen 83192, workers 72568, 149404, 151400);
+    - follow-up launcher 34968.
+  - New child processes inherit the mask, so later local steps stay inside it: W5 with
+    2 workers; on GO, D1+D2 with `--d-workers 30`, which then shares 10 processors. The
+    settling confirmation and the REF runs run on e5power and are unaffected.
+  - Final mask 0x55555 (logical processors 0, 2, …, 18). e5wimi has 20 cores and 40
+    logical processors (AMD EPYC 9475F).
+    - Masks 30–39, even 20–38 and 10–19 gave the 3 workers only 33–60 % of a core each.
+      An unpinned worker reached 99 % at the same time.
+    - With 0x55555 all three run at 95–96 %.
+    - Likely cause (hypothesis): contention with the other users' 25 unpinned python
+      processes and hyper-threading siblings.
+  - Effect on the timeline: about 10 min at half speed for the 3 local W2 jobs. The
+    estimate stays at ≈ 08:50–09:00.
+- **08:52: completion on W2 done.** All 6 band candidates are feasible at level `sts+bank`
+  on all five windows (W1–W4, W6).
+  - 8ad82442269b ranks first: e_v,TS 0.00799, e_v,DS 0.00571 (go threshold 0.00910;
+    v2 winner 0.00827). It makes no bank move in W2.
+  - Next: 77930f9b1f53 (0.00798 / 0.00575) and d890586ee0f9 (0.00803 / 0.00573).
+  - Settling confirmation of 8ad82442269b on e5power started 08:52.
+- **≈ 09:00:** at the author's request, 8ad82442269b was written as the trial set
+  `trial_8ad8_v3_run0006` in the shared checkout (`run_multi_system_ofo.TRIAL_PARAMSET`);
+  see that checkout's `docs/daily_log/11_2026/2026-11-04_trial_paramset_v3_leader.md`.
+- **09:55: settling confirmation PASS, SELECTED 8ad82442269b.**
+  - 120 isolated interface steps (W1–W4, W6) on e5power.
+  - Pooled n_settle (1 Mvar): median 10.5, p95 23.0, max 46; 1 censored step (DSO_3).
+    The 4-period budget (p95 ≤ 36) and v2's 3-period limit (p95 ≤ 27) are both met.
+  - Median residual 0.33 Mvar (limit 1).
+  - Per DSO p95: DSO_1 22.1, DSO_2 16.5, DSO_3 30.2, DSO_4 14.3. DSO_3 alone is above 27;
+    the criterion is pooled.
+  - Per window p95: W1 22.4, W2 18.7, W3 26.4, W4 26.9, W6 17.0.
+  - Share of steps ≤ 27: 97.5 %; ≤ 36: 99.2 %.
+  - W5 report started 09:55 (local, inside the 10-core cap).
+- **10:23: run 0006 done, GO** (13.06 h). It wrote
+  `configs/paramsets/ch9_selected_uc_2026_11_v3.json` (8ad82442269b).
+  - Go checks: e_v,TS 0.00799 ≤ 0.00910; couplers in every search window (4, 6, 16,
+    19 moves); banks after events in 2 windows; all limits met.
+- **W5 report (held out, not part of the go criteria): 31 counted tap reversals**, against
+  0–1 per window in W1–W4 and W6.
+  - W5 is 3 Feb 20:00 + 12 h (night; outage 4.8 h, restoration 5.8 h); e_v,TS 0.00612,
+    e_v,DS 0.00810; no voltage violations.
+  - Coupler activity: 1.33 DSO tap operations per hour, against 0.08–0.33 in the other
+    windows. 13 bank operations; z2[0], z2[2], z2[4] and z3[0] switch together at the
+    outage (4.8 h), the restoration (5.8 h) and the morning ramp (11.25–11.35 h).
+  - Classification of the 31 reversals:
+
+    | first move | dwell < 1 h | dwell 1–2 h |
+    |---|---|---|
+    | within 10 min of a bank switching | 14 | 8 |
+    | no bank switching | 4 | 5 |
+
+    - 0 bank reversals; 5 reversals explained by an event; 0 start-up exemptions.
+  - Reading (hypothesis): the bank–coupler coupling under discussion in the parallel
+    session dominates W5. 22 of 31 reversals start at a bank switching. The search windows
+    (all day-time starts) did not expose it; W5 is the only night window.
+- **10:25:04: follow-up launcher 34968 suspended** (NtSuspendProcess), before it started
+  anything (its log still shows only "armed").
+  - Reason: the W5 result, and the author's statement at 10:1x that a tap hold at bank
+    switching is being evaluated and a re-tuning may follow. The author had not yet
+    answered whether to hold the follow-ups.
+  - SELECTED_PARAMSET unchanged; no REF run and no D1+D2 started.
+  - Resume with NtResumeProcess on pid 34968; it then continues as armed.
+- **≈ 10:40: author: "Keep paused".** The launcher stays suspended (checked: 89 threads
+  suspended).
+- **≈ 10:40: first author decisions for the next selection (v4)**, recorded in
+  `docs/tuning/2026-11-04_procedure_v4_requirements_draft.md`:
+  - hunting tolerance 0 (taps and banks);
+  - settling p95 ≤ 27 (3 TS periods);
+  - go e_v,TS ≤ 0.01 (absolute);
+  - λ ceiling: the author asked "1.6 actually, correct?". The code (`stage1_screen`)
+    screens at 1.6 and selects at 1.6 / 1.035 = 1.546, with ε_op 3.5 % for operating
+    points outside the screened bank. Open.
+  - Run 0006 re-scored at zero tolerance (exact for the evaluated candidates): 11 of 264
+    feasible, only ccc91db1de92 with banks after events.
+  - Bank price floor at 1.546 / 1.6: 13.5 / 12.7 at 8ad82442269b's weights; 10.9 / 10.4
+    at ccc91db1de92's.
+- **Author: "Keep 1.546"** (λ ceiling unchanged; recorded in the v4 draft).
+- **≈ 11:30: re-measurement of ε_op** (author: "can you remeasure it? … we have to wait
+  … anyway").
+  - Rule declared in the v4 draft before any result.
+  - New script `experiments/ch_09_parameter_selection/ch_9_13_eps_op_remeasure.py`, a
+    thesis run with target `ch:param:experiment:d`.
+    - It captures 96 fresh operating points (2016; 12 months × days 8, 22 × hours 02, 08,
+      14, 20) with the design bank's convention, in a Pool of 10 workers pinned by
+      `--affinity-mask`.
+    - It computes λ_max per candidate and operating point for all 264 candidates of run
+      0006: overall, TS-only, STS-only.
+    - It reports s(w) = λ_max(D ∪ F)/λ_max(D) − 1, ε_op,new by the rule, the setting
+      conditions and layers, and a resampling of 6-point banks (2000 per candidate,
+      seed 20261104).
+  - Checks before launch:
+    - a fresh capture of W1 reproduces the stored W1 λ to 10 digits; one capture takes
+      29 s;
+    - a smoke test of the λ part takes ≈ 20 s for 264 × 102.
+  - Observation from the smoke test: the STS layer (DSO_4, designed to λ_STS 1.4 on the
+    same 6 points) often sets λ_max. The TS-only and STS-only shifts are therefore
+    reported separately.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

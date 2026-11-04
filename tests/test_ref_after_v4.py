@@ -37,5 +37,18 @@ def test_record_additions_conflict_and_unknown_field():
 
 
 def test_scenarios_and_variants():
-    assert Q.SCENARIOS == ("A", "B", "D", "E")       # GA, GE excluded (author 2026-11-04)
+    assert tuple(Q.SCENARIO_JOBS) == ("A", "B", "D", "E")   # GA, GE excluded (author 2026-11-04)
+    assert sum(Q.SCENARIO_JOBS.values()) == 10 == Q.D_WORKERS  # e5wimi: 10 workers
+    assert Q.AFFINITY_MASK == 0x55555
     assert sorted(Q.VARIANTS.split(",")) == sorted("L2,S1,S2,O2,O3,M".split(","))
+
+
+def test_width_gate(tmp_path, monkeypatch):
+    (tmp_path / "d1").mkdir()
+    sel = tmp_path / "d1" / "selection.json"
+    monkeypatch.setattr(Q, "ref_width", lambda: {"tso_qv_deadband_pu": 0.01,
+                                                 "dso_qv_deadband_pu": 0.01})
+    sel.write_text('{"delta_design_pu": 0.01, "delta_rule_pu": 0.0075}', "utf-8")
+    assert Q.width_gate(tmp_path)[0]
+    sel.write_text('{"delta_design_pu": 0.015, "delta_rule_pu": 0.0125}', "utf-8")
+    assert not Q.width_gate(tmp_path)[0]

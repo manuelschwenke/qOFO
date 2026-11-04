@@ -1488,6 +1488,26 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Open for the author: D1 banks, D2 trigger (fallback vs adopt), D3 v4.1 full vs re-entry.
   - Implementation must go into a separate worktree while run 0008 is running: later local shards import this checkout's code.
 - **≈ 15:50, author: "Wait for run 0008".** The exemption is not implemented now. D1–D3 are decided at the result.
+- **≈ 15:55: Claude advised against aborting 0008. Author: "Keep 0008, prep fallback".**
+- **16:00–16:45: fallback implemented, switched off by default, NOT merged.**
+  - Branch `res/profile-turn-fallback-2026-11-04`, worktree `F:\qOFO_res_pt`.
+    - It is separate because run 0008's later local stages import `F:\qOFO_res` code.
+  - New: `tuning/profile_turns.py`; `ch_9_15_procedure_v4_1.py` (`--banks yes|no` required); `tests/test_profile_turns.py`.
+  - Changed:
+    - `tuning/stage2_search.py`: `hunting_summary` / `shunt_summary` take `turns=None`, and None means exactly v4;
+    - `ch_9_3_stage2_screen.py`: `--write-profile-turns`, `--profile-turns`, `--profile-turn-banks`; the window configuration moved unchanged into `_window_config`.
+  - Tests: 10 new tests pass, including the off-path regression over the stored rows of run 0008; the v3, v4 and hold tests pass.
+    - The v2 procedure tests fail when run after the v3/v4 tests, on the unchanged `F:\qOFO_res` code too. This is test-state pollution that predates the change.
+  - Smoke launch failures: `import llvmlite` fails intermittently ("[WinError 6] The handle is invalid").
+    - It is not caused by stdin, PATH or affinity; foreground runs pass. The same error hit run 0004 on 2 Nov at 11:06, and the driver's shard retry absorbed it.
+    - The smoke was finally started via `Win32_Process.Create` with retries; one attempt in three failed.
+    - Risk for run 0008: its stage transitions start fresh processes; each shard has 3 attempts.
+  - **Smoke 16:20–16:45** (one worker, mask 0x55555): candidate 0e54bf50664d, W6 at 12 h, exemption on.
+    - Its first 23 moves are identical to run 0008's row.
+    - The 1[0] reversal at the turn (7020 → 8640 s) is exempt, and the window continues.
+    - It stops at a later counted coupler reversal (DSO_3|trafo_8, 8280 → 11180 s; the turn is 1080 s before t0, more than L = 900 s). The candidate stays rejected.
+  - Commits on the fallback branch: 21b8f0c (code, tests, note), then the smoke note.
+- **16:45: run 0008 II-a near its end**: here 134/136, e5power 559/572.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

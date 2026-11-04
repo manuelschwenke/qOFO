@@ -1515,6 +1515,15 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - b9cff7864fd0: e_v,TS 0.00919, bank price 13.4, 28 commits.
   - 17:29:55: II-b round 1 started, centred on 82c1839cd2c0: 46/64 draws pass the screen; 8 here, 38 on e5power.
     - The local shard started without the llvmlite failure.
+- **19:22: e5wimi core cap lifted to 20** (author: "From now on, you can also use 20 cores on e5wimi again").
+  - Host: 40 logical CPUs on 20 physical cores. The new mask is 0x5555555555: one logical CPU on each physical core, the same convention as the 10-core mask 0x55555.
+  - Run 0008's own processes were re-pinned from 0x55555 to 0x5555555555: the driver (pid 106732), the round-1 local shard (82420) and its 10 pool workers. Nothing was aborted, and no other session's process was touched.
+  - Reason: at 19:19 the host was about 11 % loaded. CPUs 1, 3, 5 and 7 (the HT siblings of the shard's cores) carried other processes, and CPUs 20–39 were idle. With the wider mask the scheduler can move the workers onto idle physical cores.
+  - The driver's `--local-workers 10` is fixed in memory. Later stages therefore still run 10 workers here and keep the 10 : 30 split (local speed factor 0.7).
+  - 20 workers here would need `--resume <run 0008> --local-workers 20 --affinity-mask 0x5555555555`, best restarted during an assembly step, when no shard is running.
+    - Estimated gain: about 15 % shorter split stages (II-b rounds 2–4, II-c, completion), roughly 1–1.5 h. Confirmation, verification and W5 run on e5power only.
+    - Not done; the author decides.
+  - Round 1 at 19:19: here 30/36 window jobs done.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

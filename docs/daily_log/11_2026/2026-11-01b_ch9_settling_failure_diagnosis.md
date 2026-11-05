@@ -1636,6 +1636,15 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Cause (reading of `simulate()`, not tested): the stored windows are copied into `complete/windows` on this host only; the remote shard does not get them. The pull uses `overwrite=False`, so the copies here are kept and the duplicate windows are discarded. Results are therefore unaffected; only time is lost.
   - The same happened in run 0006 (v3), but there 4 candidates × 5 windows fit in one wave (56 min). Here it costs about 2 h.
   - Not changed mid-run. ETA: e5power done about 08:20–08:30; settling confirmation (about 1 h in v3), W5 (about 0.5 h), GO/NOGO about 10:00–10:30.
+- **07:25, author: "Can you already do the settling check for the leader on e5wimi or is it only clear after w2 on e5power?"** Answer: not worth it; nothing changed.
+  - Stage 6 checks the first of the five-window ranking, so formally only after W2.
+  - A provisional ranking on 21/27 candidates with W2 kept the leader first. The 6 missing ones could only displace it with W2 e_v_ts ≤ 0.00372; the observed range was 0.00404–0.00422.
+  - `V2.confirm` would reuse a result found in `expC/criterion_results.json`. But on e5wimi (10 workers from 08:00) the 120 steps take about 3 h, i.e. later than e5power from about 08:25. Unfinished, it would also collide with the driver's pull into `expC/cand_<key>`.
+- **08:00:11: re-pin done** — 3 Python processes (driver 106732, queue 69232, launcher 148152) on 0x55555; the re-pin script (112520) has exited.
+- **08:33: run 0008 Stage 5 done; settling confirmation started.** e5power done 08:28 (110 units), pulled 08:32.
+  - Selection complete: 28/28 inside the θ bounds; engagement level sts+bank (27 candidates); 27 feasible at tolerance 0; ranked first 061dadc05755, 8f8e0d8fadf4, ca2eda42e753, d88cce6949d1. Same order as the provisional ranking at 07:25.
+  - Leader on five windows: e_v_ts 0.008023, e_v_ds 0.005457. The lowest e_v_ts is 0.007873, so the indifference limit is 0.008030: the leader is inside the band by 0.09 %.
+  - Settling confirmation of 061dadc05755 on e5power (30 workers, pid 25240). By v3's time (63 min) it ends about 09:40; W5 and GO/NOGO about 10:10.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

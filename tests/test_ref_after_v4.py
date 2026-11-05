@@ -1,4 +1,6 @@
 """ch_9_16_ref_after_v4: the W5 gate and the record additions (2026-11-04)."""
+import json
+
 import pytest
 
 from experiments.ch_09_parameter_selection import ch_9_16_ref_after_v4 as Q
@@ -38,8 +40,8 @@ def test_record_additions_conflict_and_unknown_field():
 
 def test_scenarios_and_variants():
     assert tuple(Q.SCENARIO_JOBS) == ("A", "B", "D", "E")   # GA, GE excluded (author 2026-11-04)
-    assert sum(Q.SCENARIO_JOBS.values()) == 10                 # e5wimi: 10 workers
-    assert Q.AFFINITY_MASK == 0x55555
+    assert sum(Q.SCENARIO_JOBS.values()) == 12                 # e5wimi: 12 workers
+    assert Q.AFFINITY_MASK == 0x555555 and bin(Q.AFFINITY_MASK).count("1") == 12
     assert Q.REMOTE_WORKERS == 30                              # D1 + D2 on e5power
     assert sorted(Q.VARIANTS.split(",")) == sorted("L2,S1,S2,O2,O3,M".split(","))
 
@@ -130,6 +132,32 @@ def test_deadband_remote_retries(tmp_path, monkeypatch):
         "--reduce", str(Q.DEADBAND_REL / folder.name)]
     _, calls = _fake_remote(tmp_path, monkeypatch, list(remote), ["broken"] * 9)
     assert Q.deadband("k", dry_run=False) is None and len(calls) == 1 + Q.D_RETRIES
+
+
+def test_parallel_ref(tmp_path, monkeypatch):
+    """REF starts while D1 + D2 still runs; the width gate is then recorded, not obeyed."""
+    import threading
+    monkeypatch.setattr(Q, "OUT", tmp_path)
+    started = threading.Event()
+    seen = {}
+
+    def deadband(key, dry_run):
+        seen["ref_started_first"] = started.wait(5)    # sequential code would time out
+        return tmp_path / "0012_db"
+
+    def ref_one(i, s, key, dry_run):
+        started.set()
+        return {"scenario": s, "folder": f"ref_{s}", "status": {"S1": "ok"}}
+    monkeypatch.setattr(Q, "deadband", deadband)
+    monkeypatch.setattr(Q, "ref_one", ref_one)
+    monkeypatch.setattr(Q, "width_gate", lambda folder: (False, "D1 design width 0.02 pu"))
+    monkeypatch.setattr(Q.P, "rel", str)
+    assert Q.parallel("k", ["A", "B"], dry_run=False) == 0
+    assert seen["ref_started_first"]
+    done = json.loads((tmp_path / "REF_DONE.json").read_text("utf-8"))
+    assert done["parallel"] and done["width_gate"] == {"ok": False, "why": "D1 design width 0.02 pu"}
+    assert [r["scenario"] for r in done["runs"]] == ["A", "B"]
+    assert (tmp_path / "WIDTH_GATE_FAILED.txt").exists()
 
 
 def test_width_gate(tmp_path, monkeypatch):

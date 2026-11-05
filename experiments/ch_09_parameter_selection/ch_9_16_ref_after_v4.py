@@ -36,9 +36,9 @@ run 0006 was GO with 31 W5 reversals, and the author kept its follow-ups paused)
 4. **Width gate.**  REF starts only if D1's design width equals the droop
    dead band the REF variants run with (``tso_qv_deadband_pu``,
    ``dso_qv_deadband_pu``); a different width is the author's decision.
-5. **REF** here: scenarios A, B, D, E, each with the six variants, 360 min, 10
-   processes in all (``--jobs`` 2, 2, 3, 3; S1 of E sets the wall time either
-   way), launched 90 s apart so the run folders are numbered one at a time.  A
+5. **REF** here: scenarios A, B, D, E, each with the six variants, 360 min, 12
+   processes in all (``--jobs`` 3 each; author 2026-11-05: "we can use 12 workers
+   here"), launched 90 s apart so the run folders are numbered one at a time.  A
    start that dies before its variants finish (the llvmlite start failure of this
    host; a start failure exits within seconds and is repeated up to 12 times) is
    completed with ``--run-dir`` for the missing variants; a later failure is
@@ -47,7 +47,12 @@ run 0006 was GO with 31 W5 reversals, and the author kept its follow-ups paused)
    folder is repeated, a run folder without ``d1/selection.json`` is completed
    with ``--reduce`` (its cached runs are kept) at most four times.
 
-The queue and everything it starts here are pinned to the 10-core mask.
+``--parallel-ref`` (author 2026-11-05: "Yes, REF in parallel") starts REF at the
+same time as D1 + D2 instead of after the width gate.  The gate is then a check on
+the finished REF runs, not a precondition: its verdict goes into ``REF_DONE.json``,
+and a failed gate also writes ``WIDTH_GATE_FAILED.txt`` (the author decides).
+
+The queue and everything it starts here are pinned to the 12-core mask.
 
 Usage (from the repository root, on e5wimi with the author's logon, which the
 remoting needs; waits for the campaign)::
@@ -84,8 +89,8 @@ from experiments.ch_09_parameter_selection import ch_9_12_followups_v3 as F  # n
 from experiments.ch_09_parameter_selection import ch_9_14_procedure_v4 as V4  # noqa: E402
 
 RESULT = V4.RESULT
-#: Scenario -> run_ref --jobs; 10 processes in all (e5wimi, author 2026-11-04).
-SCENARIO_JOBS = {"A": 2, "B": 2, "D": 3, "E": 3}
+#: Scenario -> run_ref --jobs; 12 processes in all (e5wimi, author 2026-11-05).
+SCENARIO_JOBS = {"A": 3, "B": 3, "D": 3, "E": 3}
 #: Longest first (S1, M; REF runs of 2026-10-31), so the waiting ones are short.
 VARIANTS = "S1,M,L2,O2,O3,S2"
 REF_DIR = ROOT / F.REF_REL
@@ -94,7 +99,7 @@ DEADBAND_DIR = ROOT / DEADBAND_REL
 DEADBAND = "ch_9_4_deadband"
 REMOTE_WORKERS = 30                   # D1 + D2 on e5power (author 2026-11-04)
 SMOKE_WORKERS = 5                     # --remote-smoke: W1, five runs in stage 2
-AFFINITY_MASK = 0x55555               # e5wimi: 10 cores, one logical CPU each
+AFFINITY_MASK = 0x555555              # e5wimi: 12 cores, one logical CPU each
 LAUNCH_GAP_S = 90.0
 #: An exit within START_FAIL_S is a start failure (llvmlite.dll, "[WinError 6]": 2 of
 #: 3 starts of this queue on 2026-11-04 20:12) and is repeated up to MAX_STARTS times;
@@ -106,6 +111,7 @@ RETRIES = 2
 #: e5power smoke, 2026-11-04 21:31, one of 7 runs), and the cached runs are kept.
 D_RETRIES = 4
 OUT: Path = ROOT                      # set in main()
+PARALLEL = False                      # --parallel-ref, set in main()
 
 
 def w5_clean(doc: dict) -> Tuple[bool, str]:
@@ -334,6 +340,9 @@ def ref_one(i: int, s: str, key: str, dry_run: bool) -> Dict[str, Any]:
     tag = f"v4_{s}"
     note = (f"Ch 10 REF, scenario {s}, with the procedure-v4 weights {RESULT} ({key}); "
             "queued behind the v4 campaign (author 2026-11-04)")
+    if PARALLEL:
+        note += ("; started with D1/D2, so the width gate is checked after this run "
+                 "(ref_v4/REF_DONE.json; author 2026-11-05)")
     folder: Optional[Path] = None
     starts = fails = 0
     while starts < MAX_STARTS and fails <= RETRIES:
@@ -369,8 +378,31 @@ def _stop(why: str) -> int:
     return 0
 
 
+def parallel(key: str, scen: List[str], dry_run: bool) -> int:
+    """D1 + D2 on e5power and REF here at once; the width gate then judges REF."""
+    with ThreadPoolExecutor(max_workers=1 + len(scen)) as ex:
+        fut = ex.submit(deadband, key, dry_run)
+        res = list(ex.map(lambda t: ref_one(t[0], t[1], key, dry_run), enumerate(scen)))
+        folder = fut.result()
+    ok, why = (width_gate(folder) if folder is not None
+               else (False, "D1 + D2 gave no d1/selection.json"))
+    P.log(f"width gate on the parallel REF runs: {why}")
+    if dry_run:
+        P.log("queue finished (dry run)")
+        return 0
+    if not ok:
+        (OUT / "WIDTH_GATE_FAILED.txt").write_text(why + "\n", "utf-8")
+    (OUT / "REF_DONE.json").write_text(json.dumps(
+        {"selected": key, "paramset": RESULT, "parallel": True,
+         "deadband": P.rel(folder) if folder else None,
+         "width_gate": {"ok": ok, "why": why}, "runs": res,
+         "finished": f"{datetime.now():%Y-%m-%d %H:%M:%S}"}, indent=1), "utf-8")
+    P.log("queue finished" + ("" if ok else "; width gate failed, the author decides"))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    global OUT
+    global OUT, PARALLEL
     ap = argparse.ArgumentParser(prog="ch_9_16_ref_after_v4")
     ap.add_argument("--run", type=Path, required=True)
     ap.add_argument("--no-w5-gate", action="store_true",
@@ -383,7 +415,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="read the result from this folder (tests)")
     ap.add_argument("--remote-smoke", action="store_true",
                     help=f"only {DEADBAND} --smoke on {P.REMOTE}, pulled back here, at once")
+    ap.add_argument("--parallel-ref", action="store_true",
+                    help="REF here at the same time as D1 + D2; the width gate judges it after")
     a = ap.parse_args(argv)
+    PARALLEL = a.parallel_ref
     V4._pin(a.affinity_mask)
     run = (ROOT / a.run).resolve() if not a.run.is_absolute() else a.run
     OUT = run / ("ref_v4_dry" if a.dry_run else "ref_v4_smoke" if a.remote_smoke else "ref_v4")
@@ -397,7 +432,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0 if folder else 1
     scen = [s.strip() for s in a.scenarios.split(",") if s.strip()]
     P.log(f"queue armed for {run.name}: D1 + D2 ({P.REMOTE}, {REMOTE_WORKERS} workers), "
-          f"then REF here {scen} (jobs {[SCENARIO_JOBS[s] for s in scen]}), variants "
+          f"{'with' if a.parallel_ref else 'then'} REF here {scen} "
+          f"(jobs {[SCENARIO_JOBS[s] for s in scen]}), variants "
           f"{VARIANTS}, mask {a.affinity_mask:#x}, W5 gate {not a.no_w5_gate}"
           + (" (dry run)" if a.dry_run else ""))
     key = F.wait_for_campaign(run)
@@ -414,6 +450,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     switch_selected(key, a.dry_run)
     if not a.dry_run:
         push_inputs(path)
+    if a.parallel_ref:
+        return parallel(key, scen, a.dry_run)
     folder = deadband(key, a.dry_run)
     if folder is not None:
         ok, why = width_gate(folder)

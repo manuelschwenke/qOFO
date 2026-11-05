@@ -1645,6 +1645,11 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Selection complete: 28/28 inside the θ bounds; engagement level sts+bank (27 candidates); 27 feasible at tolerance 0; ranked first 061dadc05755, 8f8e0d8fadf4, ca2eda42e753, d88cce6949d1. Same order as the provisional ranking at 07:25.
   - Leader on five windows: e_v_ts 0.008023, e_v_ds 0.005457. The lowest e_v_ts is 0.007873, so the indifference limit is 0.008030: the leader is inside the band by 0.09 %.
   - Settling confirmation of 061dadc05755 on e5power (30 workers, pid 25240). By v3's time (63 min) it ends about 09:40; W5 and GO/NOGO about 10:10.
+- **09:45: settling confirmation PASS; SELECTED 061dadc05755.** e5power done 09:43 (1 h 10 min), pulled 09:45.
+  - Criterion (`expC/criterion_results.json`): p95 23.05 ≤ 27 over 120 steps; 3 steps over the limit; max 32; censored 0; median residual 0.344 Mvar.
+  - The ninner pooled statistics: median 12, p95 20.0. The criterion's p95 is computed differently (23.05); the criterion decides.
+  - Per DSO interface p95: DSO_1 24.3, DSO_2 16.0, DSO_3 30.2, DSO_4 13.75. DSO_3 alone is above 27. The criterion is pooled by design, so this does not fail it.
+  - Stage 7 started 09:45: W5 for the report (2 workers here, child pid 100760), then the result parameter set and the go criteria. About 30 min.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

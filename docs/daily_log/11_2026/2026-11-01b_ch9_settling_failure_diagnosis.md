@@ -1910,3 +1910,14 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - In those 20 s the area-2 STS support falls from 78 to 66 Mvar, and the machines are not at their Q limits (area-1 headroom 189 / 305 Mvar).
   - The SVR only raises the set-points at its 180-s dispatches, so the recovery takes minutes: 73 mpu at 215.7, 48 mpu at 216.3 min.
   - S2 peaks lower (68 mpu) because its STSs supply 232–297 Mvar.
+- **18:50: why the SVR parks area-1 machines at 0.95 pu** (author: "why is 0.95 needed in the svr scenarios? The O scenarios never have such low voltages, correct?").
+  - Lowest AVR set-points in E:
+    - S1 area 1 0.95; S2 areas 1 and 3 0.95;
+    - O2 1.021–1.029, O3 1.021–1.031, M 0.998–1.022.
+    - The OFO variants never go below 1.02.
+  - Mechanism (svr_controller.py; err = v_ref − v_pilot):
+    - the area-1 pilot error is −4 to −6 mpu throughout, so the pilot is above its reference;
+    - the regional level q_1 integrates downwards: −0.03 at 5 min, −0.12 at 25, −0.16 at 48, −0.22 at 100, −0.34 at 200 min;
+    - the RPRs lower both real area-1 machines' set-points to the 0.95 floor (48 and 180 min), and machine 1 still produces +61 to +77 Mvar there, so its absorption target is never reached.
+  - The G1 network equivalent is in area 1 at a fixed 1.03 pu and is not an SVR actuator (non_dispatchable). Hypothesis: it holds the pilot above the SVR's reference, so the SVR integrates against a pilot it cannot move (wind-up), and the floor is saturation, not a need.
+  - The same happens in A (63 min) and B (48 min), so it is a property of the S variants in this period, not of scenario E.

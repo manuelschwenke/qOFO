@@ -121,6 +121,7 @@ D1_HOURS = 2.0
 WARMUP_S = 1800.0      # D1 start-up phase, reported separately
 EVENT_S = 3610.0       # D2 event: 60 min + 10 s (TS/STS dispatch at 3600 s)
 OBSERVE_S = 1800.0     # D2 observation after the event (10 TS periods)
+COMMIT_WINDOW_S = 12 * 3600.0   # unit commitment over the design window (Stage II --hours 12)
 Q_STEP_MVAR = 200.0
 EVENTS: Dict[str, tuple] = {   # name -> (pandapower TS bus, Q of the new load)
     "b7_ind": (7, +Q_STEP_MVAR), "b7_cap": (7, -Q_STEP_MVAR),
@@ -148,7 +149,10 @@ def _config(width: float, start, duration_s: float, events=(), dt_s: float = DT_
         verbose=0)
     sc = ScenarioSpec(name="deadband", start_time=start, duration_s=duration_s,
                       contingencies=tuple(events), scenario=MC_NETWORK, dt_s=dt_s)
-    return sc.overlay_on(cfg)
+    # The machines are those of the 12-h design window, not of this run's own span
+    # (run 0012: the 1.5-h D2 window took G3 off line in W2, both D1 and D2 G3, G7, G9
+    # in W6; author 2026-11-05: "Yes, fix and rerun").
+    return dataclasses.replace(sc.overlay_on(cfg), unit_commitment_window_s=COMMIT_WINDOW_S)
 
 
 def _event(name: str, t_s: float) -> ContingencyEvent:
@@ -482,6 +486,7 @@ def main(argv=None) -> int:
               "measurement_noise": False, "tested_width_from_s": warmup,
               "d1_rule": "drift (routine intervals without a discrete event)",
               "cap_step_mvar": CAP_STEP_MVAR, "design_margin_steps": DESIGN_STEPS,
+              "unit_commitment_window_s": COMMIT_WINDOW_S,
               "stage1_from": args.stage1_from}
     with start_thesis_run(
             __file__, target=["ch:timescales:deadband"],

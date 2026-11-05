@@ -2017,6 +2017,11 @@ def _run_multi_tso_dso_impl(
         # ``start_time``, which for an April start_time is ~3.5 months of
         # rows that compute_zonal_gen_dispatch would scan in vain.
         t_end = start_time + timedelta(seconds=config.n_total_s)
+        # The commitment may be decided over a longer span than the run
+        # (config.unit_commitment_window_s; the D1/D2 runs stand for 12-h windows).
+        _uc_window_s = getattr(config, "unit_commitment_window_s", None)
+        _uc_profiles = (profiles.loc[start_time:start_time + timedelta(seconds=float(_uc_window_s))]
+                        if _uc_window_s else None)
         profiles = profiles.loc[start_time:t_end]
 
         # Held profiles and load ramps (step tests of ch:case3), on the
@@ -2046,8 +2051,11 @@ def _run_multi_tso_dso_impl(
             # controller model is built without it; the outage masks tell the
             # controllers (an operator knows which units are off).
             _t = perf_counter()
+            if _uc_profiles is not None:
+                print(f"  [9] unit commitment over {float(_uc_window_s) / 3600:g} h "
+                      f"(unit_commitment_window_s), the run spans {config.n_total_s / 3600:g} h")
             gen_dispatch, _committed = compute_merit_order_dispatch(
-                net, profiles, dispatch_zone_map,
+                net, profiles if _uc_profiles is None else _uc_profiles, dispatch_zone_map,
                 min_stable_frac=config.gen_min_stable_frac,
                 merit_order=config.gen_merit_order,
             )

@@ -90,8 +90,8 @@ def _fake_remote(tmp_path, monkeypatch, remote, outcomes):
     from experiments.ch_09_parameter_selection import ch_9_6_full_procedure as P
     monkeypatch.setattr(P, "RUN", tmp_path)
     monkeypatch.setattr(Q, "OUT", tmp_path)
-    monkeypatch.setattr(Q, "local_names", lambda: list(LOCAL))
-    monkeypatch.setattr(Q, "remote_names", lambda: list(remote))
+    monkeypatch.setattr(Q, "local_names", lambda *a: list(LOCAL))
+    monkeypatch.setattr(Q, "remote_names", lambda *a: list(remote))
     made, selected, calls = [], set(), []
 
     def remote_cmd(script):
@@ -169,3 +169,36 @@ def test_width_gate(tmp_path, monkeypatch):
     assert Q.width_gate(tmp_path)[0]
     sel.write_text('{"delta_design_pu": 0.015, "delta_rule_pu": 0.0125}', "utf-8")
     assert not Q.width_gate(tmp_path)[0]
+
+
+def test_ref_remote_completes_and_pulls(tmp_path, monkeypatch):
+    """--ref-remote: a start that leaves variants missing is completed with --run-dir."""
+    from experiments.ch_09_parameter_selection import ch_9_6_full_procedure as P
+    monkeypatch.setattr(P, "RUN", tmp_path)
+    monkeypatch.setattr(Q, "OUT", tmp_path)
+    monkeypatch.setattr(P, "rel", str)
+    monkeypatch.setattr(Q, "ROOT", tmp_path)
+    remote, calls = ["0013_2026-11-05_102533_run_ref_v4_E"], []
+    monkeypatch.setattr(Q, "remote_names", lambda *a: list(remote))
+    monkeypatch.setattr(Q, "reserve_number", lambda *a: 14)
+    names = Q.VARIANTS.split(",")
+
+    def run_remote(tag, argv, where, pull):
+        calls.append(argv)
+        if "--run-dir" not in argv:
+            remote.append("0014_2026-11-05_120000_run_ref_v4_A")
+        return 1 if len(calls) == 1 else 0
+
+    def pull(name, rc, synced, rel, what, need):
+        d = tmp_path / rel / name
+        for n in (names[:3] if len(calls) == 1 else names):
+            (d / n).mkdir(parents=True, exist_ok=True)
+            (d / n / "status.json").write_text('{"status": "ok"}', "utf-8")
+        return d
+    monkeypatch.setattr(P, "run_remote", run_remote)
+    monkeypatch.setattr(Q, "_pull", pull)
+    res = Q.ref_remote_one(0, "A", "k", dry_run=False)
+    assert len(calls) == 2 and "--jobs" in calls[0] and calls[0][calls[0].index("--jobs") + 1] == "6"
+    assert calls[1][-2:] == ["--run-dir", str(Q.F.REF_REL / "0014_2026-11-05_120000_run_ref_v4_A")]
+    assert calls[1][calls[1].index("--variants") + 1] == ",".join(names[3:])
+    assert set(res["status"].values()) == {"ok"} and res["host"] == "e5power"

@@ -98,6 +98,7 @@ DEADBAND_REL = Path("results") / "ch_09_parameter_selection"
 DEADBAND_DIR = ROOT / DEADBAND_REL
 DEADBAND = "ch_9_4_deadband"
 REMOTE_WORKERS = 30                   # D1 + D2 on e5power (author 2026-11-04)
+REMOTE_REF_JOBS = 6                   # --ref-remote: 4 x 6 = 24 of e5power's 30 workers
 SMOKE_WORKERS = 5                     # --remote-smoke: W1, five runs in stage 2
 AFFINITY_MASK = 0x555555              # e5wimi: 12 cores, one logical CPU each
 LAUNCH_GAP_S = 90.0
@@ -207,28 +208,28 @@ def _counter(name: str) -> int:
     return int(m["counter"]) if m else 0
 
 
-def local_names() -> List[str]:
-    """Run folders of the D1 + D2 parent here and in its archive (thesis_runs counts both)."""
-    return [d.name for base in (DEADBAND_DIR, ROOT / "_local_archive" / DEADBAND_REL)
+def local_names(rel: Path = DEADBAND_REL) -> List[str]:
+    """Run folders of the parent ``rel`` here and in its archive (thesis_runs counts both)."""
+    return [d.name for base in (ROOT / rel, ROOT / "_local_archive" / rel)
             if base.is_dir() for d in base.iterdir() if d.is_dir()]
 
 
-def remote_names() -> List[str]:
+def remote_names(rel: Path = DEADBAND_REL) -> List[str]:
     """The same on e5power."""
     return _remote("; ".join(
         f"if (Test-Path {_rq(p)}) {{ Get-ChildItem {_rq(p)} -Directory | "
         f"ForEach-Object {{ $_.Name }} }}"
-        for p in (DEADBAND_REL, Path("_local_archive") / DEADBAND_REL))).split()
+        for p in (rel, Path("_local_archive") / rel))).split()
 
 
-def reserve_number() -> int:
+def reserve_number(rel: Path = DEADBAND_REL) -> int:
     """The number e5power will give the run, made at least this host's next one."""
-    loc = [n for n in local_names() if _counter(n)]
+    loc = [n for n in local_names(rel) if _counter(n)]
     n_loc = max(map(_counter, loc), default=0) + 1
-    n_rem = max(map(_counter, remote_names()), default=0) + 1
+    n_rem = max(map(_counter, remote_names(rel)), default=0) + 1
     if n_rem < n_loc:
         top = max(loc, key=_counter)
-        _remote(f"New-Item -ItemType Directory -Force -Path {_rq(DEADBAND_REL / top)} | Out-Null")
+        _remote(f"New-Item -ItemType Directory -Force -Path {_rq(rel / top)} | Out-Null")
         P.log(f"{P.REMOTE}: empty {top} created (the number is taken here)")
     return max(n_loc, n_rem)
 
@@ -240,13 +241,14 @@ def push_inputs(paramset: Path) -> None:
     V3.sync_remote_code()
 
 
-def _pull(name: str, rc: Optional[int], synced: bool) -> Optional[Path]:
-    clash = [n for n in local_names() if _counter(n) == _counter(name) and n != name]
+def _pull(name: str, rc: Optional[int], synced: bool, rel: Path = DEADBAND_REL,
+          what: str = "D1 + D2", need: Optional[str] = "d1/selection.json") -> Optional[Path]:
+    clash = [n for n in local_names(rel) if _counter(n) == _counter(name) and n != name]
     if clash:
-        P.log(f"D1 + D2: number {_counter(name):04d} is taken here by {clash} as well")
-    local = DEADBAND_DIR / name
-    n = P.pull_dir(P.REMOTE_ROOT + "\\" + str(DEADBAND_REL / name), local)
-    P.log(f"D1 + D2: {P.rel(local)} pulled from {P.REMOTE} ({n} files), rc {rc}")
+        P.log(f"{what}: number {_counter(name):04d} is taken here by {clash} as well")
+    local = ROOT / rel / name
+    n = P.pull_dir(P.REMOTE_ROOT + "\\" + str(rel / name), local, True)
+    P.log(f"{what}: {P.rel(local)} pulled from {P.REMOTE} ({n} files), rc {rc}")
     from experiments.thesis_runs import annotate_run
     host = {"host": P.REMOTE, "remote_root": P.REMOTE_ROOT, "remote_head": P.remote_head(),
             "code": (f"this checkout's commit {P.local_head()}, copied over the remote "
@@ -256,7 +258,7 @@ def _pull(name: str, rc: Optional[int], synced: bool) -> Optional[Path]:
     (local / "remote_host.json").write_text(json.dumps(host, indent=1), "utf-8")
     annotate_run(local, by=Path(__file__), outputs={
         "remote_host.json": f"simulated on {P.REMOTE}, pulled back to this host"})
-    return local if (local / "d1" / "selection.json").exists() else None
+    return local if need is None or (local / need).exists() else None
 
 
 def deadband(key: str, dry_run: bool, smoke: bool = False) -> Optional[Path]:
@@ -372,6 +374,75 @@ def ref_one(i: int, s: str, key: str, dry_run: bool) -> Dict[str, Any]:
     return {"scenario": s, "folder": P.rel(folder) if folder else None, "status": status}
 
 
+def ref_remote_one(i: int, s: str, key: str, dry_run: bool) -> Dict[str, Any]:
+    """One scenario on e5power (``--ref-remote``): launch, complete, pull back here."""
+    if not dry_run:
+        time.sleep(LAUNCH_GAP_S * i)
+    rel, names, tag = F.REF_REL, VARIANTS.split(","), f"v4_{s}"
+    note = (f"Ch 10 REF, scenario {s}, with the procedure-v4 weights {RESULT} ({key}); "
+            f"on {P.REMOTE} with --jobs {REMOTE_REF_JOBS} (author 2026-11-05: \"Yes, REF to "
+            "e5power\"); width gate checked on the D1 + D2 run (ref_v4/REF_DONE.json)")
+    name: Optional[str] = None
+    local: Optional[Path] = None
+    starts = fails = 0
+    while starts < MAX_STARTS and fails <= RETRIES:
+        miss = names if local is None else _missing(local, names)
+        if not miss:
+            break
+        argv = ["-m", "experiments.ch_11_case2_multisystem.ref.run_ref",
+                "--variants", ",".join(miss), "--jobs", str(min(REMOTE_REF_JOBS, len(miss)))]
+        argv += (["--scenario", s, "--minutes", "360", "--tag", tag, "--note", note]
+                 if name is None else ["--run-dir", str(rel / name)])
+        if dry_run:
+            P.log(f"dry run: on {P.REMOTE}: " + " ".join(argv))
+            return {"scenario": s, "folder": None, "status": {}}
+        if name is None:
+            P.log(f"REF {s}: {P.REMOTE} numbers the run {reserve_number(rel):04d}")
+        before = set(remote_names(rel))
+        starts += 1
+        t0 = time.time()
+        try:
+            rc: Optional[int] = P.run_remote(f"ref_{s}_{time.strftime('%m%d_%H%M%S')}",
+                                             argv, OUT, [])
+        except RuntimeError as exc:              # the shard died 3 times, or no remoting
+            rc = None
+            P.log(f"REF {s}: start {starts}: {exc}")
+        fails += rc is None or time.time() - t0 >= START_FAIL_S
+        new = sorted(n for n in set(remote_names(rel)) - before if n.endswith(f"_run_ref_{tag}"))
+        name = name or (new[-1] if new else None)
+        if name is not None:
+            local = _pull(name, rc, synced=True, rel=rel, what=f"REF {s}", need=None)
+        left = names if local is None else _missing(local, names)
+        if left:
+            P.log(f"REF {s}: start {starts} ended with rc {rc}; "
+                  + ("no run folder" if name is None else f"missing {left}"))
+    status = {} if local is None else {
+        n: json.loads((local / n / "status.json").read_text("utf-8"))["status"]
+        for n in names if (local / n / "status.json").exists()}
+    P.log(f"REF {s}: {P.rel(local) if local else 'no run folder'}; {status}")
+    return {"scenario": s, "folder": P.rel(local) if local else None, "status": status,
+            "host": P.REMOTE}
+
+
+def ref_remote(key: str, scen: List[str], folder: Path, dry_run: bool) -> int:
+    """REF on e5power, all scenarios at once; the width gate of the given D1 + D2 run."""
+    ok, why = width_gate(folder)
+    P.log(f"width gate ({P.rel(folder)}): {why}")
+    with ThreadPoolExecutor(max_workers=len(scen)) as ex:
+        res = list(ex.map(lambda t: ref_remote_one(t[0], t[1], key, dry_run), enumerate(scen)))
+    if dry_run:
+        P.log("queue finished (dry run)")
+        return 0
+    if not ok:
+        (OUT / "WIDTH_GATE_FAILED.txt").write_text(why + "\n", "utf-8")
+    (OUT / "REF_DONE.json").write_text(json.dumps(
+        {"selected": key, "paramset": RESULT, "remote": P.REMOTE, "deadband": P.rel(folder),
+         "width_gate": {"ok": ok, "why": why}, "runs": res,
+         "finished": f"{datetime.now():%Y-%m-%d %H:%M:%S}"}, indent=1), "utf-8")
+    P.log("queue finished" + ("" if ok else "; width gate failed, the author decides"))
+    return 0
+
+
 def _stop(why: str) -> int:
     P.log(f"{why}; stopped, the author decides")
     (OUT / "SKIPPED.txt").write_text(why + "\n", "utf-8")
@@ -417,6 +488,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help=f"only {DEADBAND} --smoke on {P.REMOTE}, pulled back here, at once")
     ap.add_argument("--parallel-ref", action="store_true",
                     help="REF here at the same time as D1 + D2; the width gate judges it after")
+    ap.add_argument("--ref-remote", type=Path, default=None, metavar="DEADBAND_RUN",
+                    help="REF on e5power after the given D1 + D2 run (no new D1 + D2)")
     a = ap.parse_args(argv)
     PARALLEL = a.parallel_ref
     V4._pin(a.affinity_mask)
@@ -450,6 +523,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     switch_selected(key, a.dry_run)
     if not a.dry_run:
         push_inputs(path)
+    if a.ref_remote is not None:
+        folder = a.ref_remote if a.ref_remote.is_absolute() else ROOT / a.ref_remote
+        return ref_remote(key, scen, folder, a.dry_run)
     if a.parallel_ref:
         return parallel(key, scen, a.dry_run)
     folder = deadband(key, a.dry_run)

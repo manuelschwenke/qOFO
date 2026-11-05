@@ -1694,7 +1694,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Cause of the close event: not established. No session event at 11:03 (RDP session 285 disconnects at 10:47–10:59 only).
     - Hypothesis: a visible console window of the launcher was closed.
     - Fix for any relaunch: start with `CREATE_NO_WINDOW` and `FOR_DISABLE_CONSOLE_CTRL_HANDLER=1`.
-- **11:10–11:40: Chapter 8 D1 results updated from run 0012** (author: "can you regenerate the D1/D2 figures in the thesis with the new data?").
+- **11:05–11:15: Chapter 8 D1 results updated from run 0012** (author: "can you regenerate the D1/D2 figures in the thesis with the new data?").
   - The thesis has no D1/D2 figure; there are the D1/D2 paragraphs, `tab:param:deadband:d2`, and a `\todo` for a D2 figure.
   - Extraction script: scratchpad `d1d2_numbers.py`. Applied to run 0010 (`Z:/.../0010_2026-10-28_153900_ch_9_4_deadband`), it reproduces every number of the D1/D2 paragraphs and the table; the one exception is the W5 over-voltage duration, 160 s against 170 s in the text.
   - `Z:/latex_diss_clone/Chapters/Chapter08.tex` (not committed):

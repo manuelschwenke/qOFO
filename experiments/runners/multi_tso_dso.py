@@ -3252,7 +3252,10 @@ def _run_multi_tso_dso_impl(
     # transformer stays held, as it is excluded from the MIQP too.
     from controller.local_rules import BankRelay, LocalDiscreteRules, TapRelay
     _tap_relays: List[TapRelay] = []
-    if (not _central and not _install_local_taps
+    # Under SVR with ``svr_fix_machine_taps`` the machine taps stay at their start
+    # position: the relay would undo the RPR's AVR set-point changes (author 2026-11-05).
+    _fix_mt = bool(getattr(config, "svr_fix_machine_taps", False)) and _svr_tso
+    if (not _central and not _install_local_taps and not _fix_mt
             and (_local_tso or _svr_tso or _tso_oltc_local)):
         _hold_mt = (config.oltc_cooldown_s_mt
                     if config.oltc_cooldown_s_mt is not None

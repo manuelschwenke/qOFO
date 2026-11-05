@@ -1660,6 +1660,15 @@ class MultiTSOConfig:
     the complete RVR output between regional samples and preserves the matched
     S1/O1 supervisory cadence; True is a faster multirate PI experiment."""
 
+    svr_fix_machine_taps: bool = False
+    """Hold the machine-transformer taps at their start position under ``tso_mode='svr'``
+    (no local TapRelay on the machine transformers; couplers, network OLTCs and the
+    banks keep their local rules).  The relay holds the HV side at 1.03 +/- 0.01 pu and
+    undoes every AVR set-point change the RPR makes, so the pilot error persists and
+    the regional integrator winds the set-points down to ``v_set_min_pu`` (scenario E,
+    run 0017: G10's machine tap +1 every 15 min, both area-1 machines at 0.95 pu).
+    Author 2026-11-05: "Keep fixed"."""
+
     svr_rpr_voltage_priority: bool = False
     """Block machine RPR moves predicted to worsen the local pilot error.
 

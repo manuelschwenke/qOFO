@@ -112,6 +112,9 @@ _SVR = dict(
     svr_pilot_buses=PILOT_BUSES, svr_t_rvr_s=300.0, svr_t_rpr_s=60.0,
     # No supervisory dead band: the OFO's tracking has none either.
     svr_deadband_pu=0.0,
+    # Machine taps held fixed: their local relay undoes the RPR's AVR set-point
+    # changes and winds the SVR to its floor (author 2026-11-05: "Keep fixed").
+    svr_fix_machine_taps=True,
     **_LOCAL_STS, **_LOCAL_SHUNTS,
 )
 
@@ -165,7 +168,8 @@ K1_EXTRA = list(LEGACY)
 _SVR_FIELDS = {"tso_mode", "tso_local_mode", "svr_pilot_buses", "svr_t_rvr_s",
                "svr_t_rpr_s", "svr_k_p_rvr", "svr_k_p_rpr",
                "svr_rvr_p_every_step", "svr_deadband_pu",
-               "svr_rpr_voltage_priority", "svr_rvr_law", "svr_rpr_law"}
+               "svr_rpr_voltage_priority", "svr_rvr_law", "svr_rpr_law",
+               "svr_fix_machine_taps"}
 STEP_ALLOWED: Dict[Tuple[str, str], set] = {
     ("L2", "S1m"): _SVR_FIELDS,
     ("S1m", "O0"): {"svr_rvr_law", "svr_rpr_law"},

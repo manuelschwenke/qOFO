@@ -1663,6 +1663,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - 14 of the 16 tap reversals lie inside these three in/out cycles; they start up to about 13 min before or after the bank comes in. They are on the STS couplers of all four DSOs together (DSO_1 trafo_2, DSO_3 trafo_8, DSO_4 trafo_11 in each cycle; DSO_2 trafo_4/5, DSO_4 trafo_10 and TS trafo 3[1] in the third). The other 2 (DSO_1 trafo_1/trafo_2) start at 17280 s, an event time with a bank switch (z2[2], z2[5], z3[0]).
   - Hypothesis (not tested): in W5 the IBG reactive capability is zero (VDE dead band), so the TS controller has only banks and taps. The z2[0] in/out cycle and the common-mode coupler reversals are one oscillation. `sts_coupler_hold_after_bank = 1` (one period, 180 s) is much shorter than the 2300–2900 s cycle.
   - The queue's W5 gate (0 tap and 0 bank reversals) therefore fails: D1 + D2 and REF do not start, and the record additions and the switch of `SELECTED_PARAMSET` are not made. The author decides.
+  - Confirmed 10:13:26: the queue logged "campaign GO, selected 061dadc05755" and "W5 gate: W5 report: 16 tap and 3 bank reversal(s) counted; stopped, the author decides", and wrote `ref_v4/SKIPPED.txt`. Queue (69232) exit 0 after 44442 s; the launcher (148152) did not repeat it and has exited. No ch_9_16 process remains.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

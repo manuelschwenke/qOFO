@@ -1680,6 +1680,13 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - REF here, launched 90 s apart: `results/ch_11_case2_multisystem/ref/0010_..._run_ref_v4_A` (10:21), `0011_..._v4_B`, `0012_..._v4_D` and `0013_..._v4_E` (10:25).
     - Checked at 10:26: 4 run_ref processes + 12 pool workers, all on mask 0x555555.
   - ETA: D1 + D2 pulled back about 12:45; REF (2 batches of about 2.2 h) about 15:00–15:30; then the width gate verdict in `REF_DONE.json`.
+- **10:55: D1 + D2 done on e5power and pulled back; the width gate will pass.**
+  - The run took 31 min (10:21–10:52), not the 2–2.5 h estimated from the smoke. Complete: 91 `done.json` (all runs), rc 0, 523 files pulled.
+  - D1 selection (`0012_2026-11-05_102108_ch_9_4_deadband/d1/selection.json`): design width `delta_design_pu` 0.01 pu, rule width 0.0075 pu; d_max 0.0034 pu (capability-limited intervals); candidates 0.005–0.02.
+    - Both smokes had given 0.02 pu, but with the earlier weights.
+  - `width_gate()` evaluated read-only at 10:57: True. D1 design width 0.01 pu equals REF's `tso_qv_deadband_pu` and `dso_qv_deadband_pu` (0.01). So the parallel REF runs use the dead band that D1 designs.
+  - Confirmation (width 0.01): TS droop never activates in any window. STS activations: W2 32, W4 97, W5 82; 0 in W1, W3, W6. Identical to the run without the dead band in W1, W3, W5 and W6; not in W2 and W4.
+  - The queue now waits for REF (about 15:00–15:30) and then writes the gate verdict into `REF_DONE.json`.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

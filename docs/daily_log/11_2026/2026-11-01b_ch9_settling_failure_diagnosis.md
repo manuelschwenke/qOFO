@@ -1942,3 +1942,14 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - MachineTrf of G9 (trafo 10) steps +1 every 15 min from 108.7 to 212.3 min (1 → 6).
   - Mechanism: in the S variants the machine-transformer OLTCs run the local rule-based voltage control and undo each AVR set-point reduction of the SVR. The pilot error persists, and the regional integrator winds the set-points down to the 0.95 floor. Two controllers act on the same voltage with different laws.
   - Re-selecting the pilot would not change this.
+- **19:40: machine taps fixed under SVR; rerun plan** (author: "Keep fixed. Analyse afterwards if a tap change would have been needed. Plan the reruns then + ch 9 rerun").
+  - Code, commit aa5e4d3:
+    - `MultiTSOConfig.svr_fix_machine_taps` (default False); the runner installs no machine-transformer TapRelay under tso_mode='svr' when it is set;
+    - set in run_case1 `_SVR` (Case 1 S1m, S1, O0; inherited by Case 2 S1, S2) and in the guard set `_SVR_FIELDS`;
+    - LOC and the OFO variants are unchanged; resolved configs checked; 36 SVR/variant tests pass.
+  - Smoke running here: S1, scenario E, 60 min, tag smoke_fixmt.
+  - Rerun plan (to confirm with the author):
+    1. REF scenario E, all six variants, new run on e5power with 6 jobs, about 5 h. The O/L2/M code paths are unchanged, but one run folder keeps the figures and the provenance clean.
+    2. Tap analysis on that run: per machine, the time the HV side is outside the relay band 1.03 ± 0.01 pu for longer than the 15-min hold, the time at the AVR limits, and the Q headroom. A tap change "would have been needed" where the band is left while the AVR is at a limit.
+    3. Case 1 (Ch 9) rerun with run_case1 on the commitment base with the v4 weights and fixed taps (L2, S1m, S1, O0, O1, O2), about 5–6 h. Decisions needed: the event schedule (the six-event make_config schedule, or that of scenario A/E, see the Ch 10 todo), and whether O1 (TS-OFO on AVRs with local machine taps) gets the same fix.
+    4. Monte Carlo after the G3-on filter (author's OK pending), with all variants including the fixed taps.

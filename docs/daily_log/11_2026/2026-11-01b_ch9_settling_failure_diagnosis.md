@@ -1709,6 +1709,44 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - handover up to 610 s (star) and 740 s (wide);
     - W1, W3, W4, W5 are close to run 0010.
   - The D2 text and table still give run 0010; the author decides.
+- **11:20–11:37: REF moved to e5power** (author: "Yes, REF to e5power").
+  - Code (`ch_9_16_ref_after_v4.py`, commit 2123e14):
+    - new `--ref-remote DEADBAND_RUN`: `ref_remote_one()` runs one scenario on e5power with `--jobs 6`, completes missing variants with `--run-dir`, and pulls it back with `remote_host.json`;
+    - `ref_remote()` runs the four scenarios 90 s apart and writes `REF_DONE.json` with the width gate of the given D1 + D2 run;
+    - `local_names`/`remote_names`/`reserve_number`/`_pull` take the parent folder;
+    - 11 tests pass, and the dry run is as expected.
+  - The four orphaned local REF runs (and their 12 workers) were stopped at 11:29 with `taskkill /T`. `ABANDONED.txt` was written in `ref/0010`–`0013` and annotated in their READMEs.
+  - Launched 11:31 through `pythonw.exe` (scratchpad `launch_ref_remote.py`, no console window, `CREATE_NO_WINDOW`, `FOR_DISABLE_CONSOLE_CTRL_HANDLER=1`): launcher 145920, queue 109684.
+    - Code sync hash-checked; e5power had no REF folders, so an empty `0013_...` was mirrored.
+    - Runs `ref/0014_..._v4_A`, `0015_..._v4_B`, `0016_..._v4_D`, `0017_..._v4_E` (shards 14264, 10832, 10492, 25148).
+    - At 11:45 all 24 variants are running.
+  - ETA: S1 sets the wall time (3.7 and 4.2 h on e5wimi in the REF runs of 28 and 29 Oct; the other variants are under 1.5 h). With e5power about 15 % faster, REF is done about 15:00–15:30. My earlier 2.2-h-per-run figure was too low, so the gain over running here is small (about 15–30 min).
+- **11:32: Experiment C settling figure updated** (author: "i meant if the settling figure was updated (experiment C)").
+  - It had not been: the v4 queue has no settling-figure step, and the v3 follow-up that had one was ended.
+  - Regenerated with `ch_9_12_followups_v3.settling_figure(run 0008, "061dadc05755")`: start = `stage1/verification/v2_pq10/20261103-164943`, final = `expC/cand_061dadc05755/20261105-083343`. The generator copy is `graphics/Ch8/data/2026-11-05_settling/`, with its provenance header corrected to run 0008.
+  - Chapter 8 Experiment C paragraph, `tab:param:timescales:ninner` and the dispatch-period summary updated:
+    - selected: n_s,95 23.05, 117/120 ≤ 27, STS 3 p95 30.2, residual median 0.34 Mvar, 21 steps > 1 Mvar;
+    - starting: 24.0, 118/120, residual 0.37 Mvar, 27 steps > 1 Mvar;
+    - the first-ranked candidate passed.
+  - The narrative changed: the starting weights now meet the requirement too. The section's provenance block and the selection results before it still give run 0001 (`\todo`).
+- **11:40: D2 (and D1 W6) failure explained** (author: "please find out what is wrong with D2 and why it fails").
+  - 18 of the 91 runs of 0012 failed (n_records 0):
+    - all three D1 W6 runs;
+    - all 12 D2 W6 legs, at step 42 (power flow, after the first bank switching);
+    - 3 of the 4 droop-disabled D2 W2 legs, at steps 382–384.
+  - The D1 selection therefore covers W1–W5 only, and the "identical" verdict for W6 in `confirmation.json` compares two empty runs. This is also why D1 + D2 took only 31 min.
+  - Cause: `compute_merit_order_dispatch` commits units over the run's own window. Computed with the runner for each window:
+
+    | | 12 h (design window) | 2 h (D1) | 1.5 h (D2) |
+    |---|---|---|---|
+    | W2 | all on | all on | G3 off |
+    | W6 | G9 off | G3, G7, G9 off | G3, G7, G9 off |
+    | W1, W3, W4, W5 | all on | all on | all on |
+
+  - So D1 W6 and D2 W2/W6 ran outside the design envelope "G3 committed", on a weaker grid than the 12-h windows of the selection.
+  - The failure itself (non-convergence after a bank dispatch with three machines off line) is a model robustness issue of that weaker state; not investigated further.
+  - D1 numbers for W1–W5 and D2 for W1, W3, W4, W5 are valid. Chapter 8 D1 now says "W1–W5" with a `\todo`, and the D2 `\todo` gives the cause.
+  - Proposed fix (to discuss): compute the commitment over the 12-h design window in ch_9_4_deadband, then rerun D1 + D2.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

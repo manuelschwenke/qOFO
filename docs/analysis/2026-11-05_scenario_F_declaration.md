@@ -1,6 +1,6 @@
 # Declaration: Case-2 scenario F, area-2 deficit far beyond its own TS resources (written before any run)
 
-Date: 2026-11-05, about 23:00, before the first run of scenario F or FM.
+Date: 2026-11-05, 22:35, before the first run of scenario F or FM (committed in 3197fc1, launched 22:37).
 Request (author, 2026-11-05 evening, while the E rerun with fixed machine taps was starting):
 "Could we even have a more drastical scenario F with e.g. two subsequent 400 Mvar steps?",
 "Maybe this would also fit in the night simulation plan", "A scenario where we see a huge

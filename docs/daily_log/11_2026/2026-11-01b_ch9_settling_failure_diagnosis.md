@@ -1967,7 +1967,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Launched without a console window (scratchpad `launch_generic.py` through pythonw, `CREATE_NO_WINDOW`), 6 jobs each:
     - REF scenario E, all six variants, tag v4_E_fixmt: `results/ch_11_case2_multisystem/ref/0019_2026-11-05_215935_run_ref_v4_E_fixmt`. It supersedes run 0017 for S1, S2 and L2; O2, O3 and M are unchanged code paths and serve as a cross-check.
     - Case 1 on scenario A (L2, S1m, S1, O0, O1, O2), tag v4_A: `results/ch_10_case1_svr/0001_2026-11-05_215956_run_case1_v4_A`.
-- **22:05–23:05: scenario F designed and declared** (author: "Could we even have a more drastical scenario F with e.g. two subsequent 400 Mvar steps?", "Maybe this would also fit in the night simulation plan", "A scenario where we see a huge difference and really need sts resources").
+- **22:00–22:36: scenario F designed and declared** (author: "Could we even have a more drastical scenario F with e.g. two subsequent 400 Mvar steps?", "Maybe this would also fit in the night simulation plan", "A scenario where we see a huge difference and really need sts resources").
   - Declaration (before any run): `docs/analysis/2026-11-05_scenario_F_declaration.md`.
   - F: E's G3 (30:40) and 9–39 (121:40) events, then 400 Mvar at IEEE 4 (212:20) and 400 Mvar at IEEE 8 (271:10, phase 70 s).
   - FM: the same with 2 × 350 Mvar, as F's declared fallback.
@@ -1985,3 +1985,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - `ref/run_ref_remote.py`, the `--ref-remote` path of ch_9_16 for one scenario with its own tag and note (code sync, run number reservation, completion with `--run-dir`, pull);
     - tests `test_scenario_F.py` and `test_ref_remote_driver.py` (2 pass).
   - Runner check: the F config creates the two dormant loads (load buses 3 and 7), and G3 is committed.
+- **22:37–22:42: F and FM launched on e5power** through `run_ref_remote` (one pythonw driver each on e5wimi, scratchpad `launch_generic.py`, started 2 min apart so the run numbers are taken one at a time).
+  - F: e5power run 0020 (`0020_2026-11-05_223831_run_ref_v4_F`). The code was copied over e5power's 3d98d31 (28 files, hashes equal). e5power got an empty 0019 folder, because this host's E rerun holds that number.
+  - FM: e5power run 0021.
+  - 6 jobs each, 12 of e5power's 36 logical CPUs. Pulled back here when done; expected 03:00–04:00 (S1 2.8–5.1 h on e5power).

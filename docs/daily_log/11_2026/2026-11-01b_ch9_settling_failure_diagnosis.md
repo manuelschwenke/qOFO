@@ -1815,6 +1815,22 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - the starting-weights sentence of the Experiment C paragraph replaced by "The search of Experiment B changes only the supervisory weights, which this test holds, so the selected weights keep the subordinate weights verified in step 2.";
     - `tab:param:timescales:ninner` reduced to one column (selected weights), caption "Subordinate settling at the selected weights";
     - the dropped values kept in LaTeX comments.
+- **15:00–15:30: Chapter 8 Experiment B updated to run 0008** (author: "all the weights are there, correct? so we could fill in all the numbers of experiment B, and update also in the comments to the latest run"). Thesis repo, not committed. Script: scratchpad `expb_update.py`; backup `Chapter08_before_expb.tex`.
+  - Provenance: the two superseded blocks under the weights section (qOFO 0008 amendment1, 0001 band) and the two under "Confirmation of the Period" → run 0008's `latex_header.tex`. The PROCEDURE/Execution comment now points to v4 and run 0008.
+  - `tab:param:weights:resolved`:
+    - starting = Stage-I point `stage1_v3_uc_2026_11_pq10`: 8.97e-2, 8.97e-2, 5.00e6, 21.3, 13.5; STS 0.4, 1e4, 1.50, 10.8;
+    - selected = 061dadc05755: 1.42e-2, 8.73e-1, 1.70e6, 15.6, 19.0; STS held, same values;
+    - the `\todo{tbd}` cells are filled.
+  - Result paragraph rewritten:
+    - 379 simulated (incl. the Stage-I point), 299 stopped early;
+    - 74 at engagement level sts+bank, 31 feasible; removals hunting 35, TS tap operations 14, AVR 10 (overlapping); the Stage-I point hunts 3 times;
+    - II-b new best in rounds 2 and 3; II-c keeps the bank price;
+    - settling 23.05; λ_max(B) 1.40 without banks; θ_STS,min 0.010 pu;
+    - vs starting: e_v_ts −2 %, e_v_ds −28 %, e_q −71 %; TS taps 18 vs 16, STS taps 8 vs 24 per day; AVR ≤ 0.0018 pu; band excess 4e-5 vs 4.0e-3 pu;
+    - W5: 6.17e-3 / 6.52e-3 and 6.16e-3 / 6.47e-3 pu; tap hunting 16 / 16, bank hunting 3 / 10.
+  - Method numbers whose sentences stay true: STS engagement band 0.005–0.015 pu (1.035–1.045 pu), STS Δv_eng 0.01 pu, hunting within one hour, AVR weight 5e6, 176 screened candidates.
+  - `\todo` at the Procedure paragraph listing the v3/v4 changes not yet in the text: one STS variant; banks 0.005 pu (they no longer act after the TS taps); search windows W1, W3, W4, W6 with early stop and W2 completion; measured engagement filters; Stage II-c; tolerance 0; λ without banks on G3-on points; tap hold n = 1.
+  - Checks: braces balanced; begin/end of table, figure, tabular, itemize, enumerate balanced. Not compiled.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

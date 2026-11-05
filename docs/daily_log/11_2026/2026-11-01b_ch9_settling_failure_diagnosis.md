@@ -1759,6 +1759,12 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - Run `0013_2026-11-05_120147_ch_9_4_deadband`; stage 1 (7 runs) started 12:01.
     - ETA about 14:00 (estimate: run 0012 did 73 successful runs in 31 min on 30 workers).
   - REF on e5power uses the D1 design width 0.010 pu of run 0012. If the rerun's design width differs (W6 now enters), REF must be judged against it (the width gate of `REF_DONE.json` refers to 0012).
+- **12:12: run 0013 stage 1 done — D1 design width 0.0125 pu.** All 7 runs complete (W6 720 records; 4.6–9.5 min each).
+  - d_max 0.00517 pu at W6 STS (W6 TS 0.0037); W1–W5 identical to run 0012 (largest W2 STS 0.0034).
+  - Δ* = 0.010 pu, design (+1 step) **0.0125 pu**, narrower 0.010 pu.
+  - Discrete steps included ("as written"): 0.06 pu (d_max_all_routine 0.054 pu, W6). Start-up: 0.057 pu.
+  - Consequence: REF (e5power, runs 0014–0017, since 11:32) runs with 0.010 pu, the `MultiTSOConfig` default (`tso_qv_deadband_pu`, `dso_qv_deadband_pu`). That is Δ*, not the design width. The width gate against run 0013 fails. Author decides: restart REF at 0.0125 pu or let it finish.
+  - Stage 2 (84 runs: confirmation at 0.0125/0.010, D2 at 0.0125/0.025/off) running; watcher on launcher 156644.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

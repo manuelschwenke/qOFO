@@ -1921,3 +1921,24 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - the RPRs lower both real area-1 machines' set-points to the 0.95 floor (48 and 180 min), and machine 1 still produces +61 to +77 Mvar there, so its absorption target is never reached.
   - The G1 network equivalent is in area 1 at a fixed 1.03 pu and is not an SVR actuator (non_dispatchable). Hypothesis: it holds the pilot above the SVR's reference, so the SVR integrates against a pilot it cannot move (wind-up), and the floor is saturation, not a need.
   - The same happens in A (63 min) and B (48 min), so it is a property of the S variants in this period, not of scenario E.
+- **19:20: pilot re-selection (option c) checked; the real cause of the SVR floor is the machine-transformer OLTCs** (author: "I would try (c) first").
+  - Area-1 candidates on the base case (S1 config, t = 0, machines at 1.03 pu; scratchpad pilot_area1.py, linearised):
+
+    | IEEE bus | V0 (pu) | dV/dV, own machines | dV/dV, equivalent | own share | reach with own machines in [0.95, 1.05] |
+    |---|---|---|---|---|---|
+    | 2 | 1.030 | — | — | 0.76 | — |
+    | 25 | 1.034 | — | — | 0.77 | — |
+    | 26 (current pilot) | 1.040 | 0.71 | 0.15 | 0.83 | 0.983–1.054 |
+    | 27 | 1.030 | — | — | 0.78 | — |
+    | 28 | 1.038 | — | — | 0.92 | — |
+    | 29 | 1.036 | — | — | 0.95 | — |
+    | 1 | — | — | — | 0.32 | — |
+    | 39 | — | — | — | 0.03 | — |
+
+    The current pilot is controllable by the own machines and 1.03 is reachable, so the equivalent hypothesis of 18:50 is not supported.
+  - S1 log: at the 0.95 pu set-point, G10 (area 1) still produces +61 to +77 Mvar, as under O2 at 1.03 pu (+57 to +72), and is far from its Q limits (−229 / +478 Mvar).
+  - Local tap moves under S1 (53 in all; none under O2, where OFO dispatches the machine taps):
+    - MachineTrf of G10 (trafo 0) steps +1 every 15 min from 2.7 to 237 min (positions 1 → 9);
+    - MachineTrf of G9 (trafo 10) steps +1 every 15 min from 108.7 to 212.3 min (1 → 6).
+  - Mechanism: in the S variants the machine-transformer OLTCs run the local rule-based voltage control and undo each AVR set-point reduction of the SVR. The pilot error persists, and the regional integrator winds the set-points down to the 0.95 floor. Two controllers act on the same voltage with different laws.
+  - Re-selecting the pilot would not change this.

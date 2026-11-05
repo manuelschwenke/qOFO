@@ -114,7 +114,8 @@ EPS_U = 0.003
 CAP_STEP_MVAR = 1.0
 # Design margin in candidate steps above the rule's smallest admissible width
 # (author decision 2026-10-28: 0.0075 -> 0.010 pu).
-DESIGN_STEPS = 1
+DESIGN_STEPS = 0       # design width = Delta* (author 2026-11-05: "we leave 0.01 and we drop
+                       # the one design width step more argument"; was 1 since 2026-10-28)
 SUPPRESSED = 1.0       # pu half-width no routine excursion reaches = droop off
 DT_S = 10.0
 D1_HOURS = 2.0

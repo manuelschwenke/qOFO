@@ -1597,6 +1597,12 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - Its worst TSO tap rate is 18.0 ops/day, against 10.0 for 82c1839cd2c0. Hunting and V violations are 0 for both.
   - Round 3 started 00:05, centred on ca2eda42e753: 45/64 draws pass the screen; 8 here, 37 on e5power (shard pid 11368). Round 1 had the same size and took 2 h 23 min, so round 3 should end about 02:30.
   - Stop rule (F_MIN 0.125, MAX_ROUNDS 4): with f at 0.25, round 3 cannot end II-b. An unchanged best gives f = 0.125, which is not below F_MIN. So round 4 runs in either case, and the 4-round ETA applies: GO/NOGO about 10:00–10:30. This supersedes the 3-round branch noted at 19:53.
+- **02:57: run 0008 II-b round 3 done** (2 h 53 min, not the 2 h 23 min estimated; here exit 0 at 01:43; e5power done 02:54, pulled 02:56).
+  - Selection 2b_round3: 332/332 inside the θ bounds; engagement level sts+bank (63 candidates); 28 feasible at tolerance 0; ranked first 061dadc05755, ca2eda42e753, 8f8e0d8fadf4, 4d9eabd5bb55.
+  - New best 061dadc05755: e_v_ts 0.00872, e_v_ds 0.00556, e_q 1.45e5, worst taps 18.0/day TSO and 8.0/day DSO, 4 bank ops/day. Hunting and V violations are 0.
+    - Against the round-2 best ca2eda42e753: e_v_ts 0.00872 against 0.00864, inside the 0.02 indifference; e_v_ds 0.00556 against 0.00577; e_q 1.45e5 against 1.91e5.
+    - Observation: e_v_ts of the incumbent has risen each round (0.00862, 0.00864, 0.00872), while e_v_ds falls. The lowest e_v_ts in the union is 0.00861 (4d9eabd5bb55), so the new best is 1.3 % above it, still inside the indifference.
+  - Round 4 (the last, MAX_ROUNDS 4) started 02:57, centred on 061dadc05755: 47/64 draws pass the screen; 9 here, 38 on e5power (shard pid 19492). By round 3's rate it ends about 05:55, and II-b ends with it. GO/NOGO about 10:00–10:30.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

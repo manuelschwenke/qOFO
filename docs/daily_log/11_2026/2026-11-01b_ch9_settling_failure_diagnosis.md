@@ -1854,6 +1854,16 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Experiment C: "for the STS weights before the search (step 2)".
   - The Procedure `\todo` was removed.
   - Checks: environments and braces balanced. Not compiled.
+- **16:47: REF complete (e5power), queue finished.** `ref_v4/REF_DONE.json`: width gate ok.
+  - D1 0.010 pu = REF's TSO/DSO dead band 0.010. The file names run 0012, whose width equals that of the run of record 0014.
+  - All 24 variants `ok`:
+    - A `ref/0014_2026-11-05_113214_run_ref_v4_A`, back 14:28;
+    - B `0015_…_v4_B`, back 14:54;
+    - D `0016_…_v4_D`, back 15:25;
+    - E `0017_…_v4_E`, back 16:46.
+  - S1 sets the wall time: about 2.8 / 3.3 / 3.8 / 5.1 h for A / B / D / E. In E the steps slowed to 43–45 s around t = 300 min, with the STS tap-rate limit active in most steps (similar share in D).
+  - The queue's copies of the shard logs failed every time (remote PowerShell "Preparing modules for first use"); the run folders are complete.
+  - Queue 109684 and launcher 145920 have exited.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

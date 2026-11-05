@@ -1811,6 +1811,10 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Regenerated `graphics/Ch8/settling_cdf.tex`; layout checked on the matplotlib preview.
   - Chapter 8: caption "at the selected weights"; the figure comment says the Stage-I curve was dropped.
   - The Experiment C paragraph and `tab:param:timescales:ninner` still compare with the "starting weights" (= Stage-I weights). Not changed (author decides).
+  - 14:55, author: "Yes, drop it there too". Chapter 8 (not committed):
+    - the starting-weights sentence of the Experiment C paragraph replaced by "The search of Experiment B changes only the supervisory weights, which this test holds, so the selected weights keep the subordinate weights verified in step 2.";
+    - `tab:param:timescales:ninner` reduced to one column (selected weights), caption "Subordinate settling at the selected weights";
+    - the dropped values kept in LaTeX comments.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

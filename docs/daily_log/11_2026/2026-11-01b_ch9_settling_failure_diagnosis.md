@@ -1650,6 +1650,12 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - The ninner pooled statistics: median 12, p95 20.0. The criterion's p95 is computed differently (23.05); the criterion decides.
   - Per DSO interface p95: DSO_1 24.3, DSO_2 16.0, DSO_3 30.2, DSO_4 13.75. DSO_3 alone is above 27. The criterion is pooled by design, so this does not fail it.
   - Stage 7 started 09:45: W5 for the report (2 workers here, child pid 100760), then the result parameter set and the go criteria. About 30 min.
+- **10:00: trial parameter set for 061dadc05755 in the shared checkout** (author: "can you already set 061dadc05755 as a trial paramset such i can run it in run_multi_system_ofo").
+  - New, untracked: `Z:/Python_Projekte/qOFO/configs/paramsets/trial_061d_v4_run0008.json`. It holds the 10 weights at full precision from `selection_complete_sts+bank.json` (ranked[0], equal to `expC/cand_061dadc05755_weights.json`) plus `sts_coupler_hold_after_bank: 1`, the v4 config set. Its form follows `trial_8ad8_v3_run0006.json`.
+  - `Z:/.../experiments/run_multi_system_ofo.py`: `TRIAL_PARAMSET` set to `"trial_061d_v4_run0008"` (was `"trial_8ad8_v3_run0006"`), plus one comment entry. Nothing committed there; the file already had the author's uncommitted changes, which are untouched.
+  - Its name differs from the driver's output `ch9_selected_uc_2026_11_v4`, which the driver refuses to overwrite.
+  - Check: `apply_paramset(make_config(), TRIAL_PARAMSET)` loads in Z. With `main()`'s frozen network and `dso_gamma_oltc_q = 0`, the config equals the settling run's `resolved_config.json` in all 226 fields, except output settings (verbose, live plots, result_dir) and `sts_coupler_hold_after_bank`.
+  - Finding: the v4 settling check ran with `sts_coupler_hold_after_bank = 0`. `CONFIG_SET` is applied only in `screen_argv` (12-h screen windows), not in `settle_argv`. Whether the flag matters for isolated interface steps is open (it acts only after a bank switch).
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

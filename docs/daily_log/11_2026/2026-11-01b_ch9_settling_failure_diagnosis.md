@@ -1664,6 +1664,17 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Hypothesis (not tested): in W5 the IBG reactive capability is zero (VDE dead band), so the TS controller has only banks and taps. The z2[0] in/out cycle and the common-mode coupler reversals are one oscillation. `sts_coupler_hold_after_bank = 1` (one period, 180 s) is much shorter than the 2300–2900 s cycle.
   - The queue's W5 gate (0 tap and 0 bank reversals) therefore fails: D1 + D2 and REF do not start, and the record additions and the switch of `SELECTED_PARAMSET` are not made. The author decides.
   - Confirmed 10:13:26: the queue logged "campaign GO, selected 061dadc05755" and "W5 gate: W5 report: 16 tap and 3 bank reversal(s) counted; stopped, the author decides", and wrote `ref_v4/SKIPPED.txt`. Queue (69232) exit 0 after 44442 s; the launcher (148152) did not repeat it and has exited. No ch_9_16 process remains.
+- **10:17: queue restarted past the W5 gate, REF in parallel with D1 + D2.**
+  - Author, 10:00: "we can use 12 workers here on e5wimi, and 30 on e5power. could we then run D1/D2 on e5power and parallel here REF?". Then, to "Run D1+D2 and REF with the v4 weights despite the W5 reversals?": "Yes, REF in parallel".
+  - Code (`ch_9_16_ref_after_v4.py`, commit 151e97f):
+    - `SCENARIO_JOBS` 3 per scenario (12 processes), `AFFINITY_MASK` 0x555555 (12 cores). This supersedes the 10-worker rule for e5wimi.
+    - New `--parallel-ref` and function `parallel()`: D1 + D2 (`deadband`) and the four `ref_one` run in one thread pool. The width gate is applied after both, recorded in `REF_DONE.json` (`parallel`, `width_gate`), plus `WIDTH_GATE_FAILED.txt` if it fails. It does not stop REF.
+    - Module flag `PARALLEL` adds to each REF run's note that the width gate is checked after the run.
+    - Tests: `test_scenarios_and_variants` (12 workers, mask) and new `test_parallel_ref` (REF starts while D1 + D2 still runs; failed gate recorded). 10 pass. Dry run on 0008 gives the expected commands.
+  - The old marker was renamed `ref_v4/SKIPPED_w5_gate_2026-11-05_1013.txt`.
+  - Launched 10:19 with `--no-w5-gate --parallel-ref` through Win32_Process.Create: launcher 101380 (scratchpad `launch_ref_queue_par.py`, mask 0x555555), queue 87744.
+    - 10:19:57: the record additions were written to `ch9_selected_uc_2026_11_v4.json` (`sts_coupler_hold_after_bank` 1, `lambda_max_B` 1.4048).
+    - 10:20:03: `SELECTED_PARAMSET = ch9_selected_uc_2026_11_v4` (commit 3ef2329).
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

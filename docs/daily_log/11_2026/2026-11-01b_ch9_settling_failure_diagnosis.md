@@ -1864,6 +1864,22 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - S1 sets the wall time: about 2.8 / 3.3 / 3.8 / 5.1 h for A / B / D / E. In E the steps slowed to 43–45 s around t = 300 min, with the STS tap-rate limit active in most steps (similar share in D).
   - The queue's copies of the shard logs failed every time (remote PowerShell "Preparing modules for first use"); the run folders are complete.
   - Queue 109684 and launcher 145920 have exited.
+- **17:25–18:10: Chapter 10 reference run = scenario E** (author: "I would only report run E then as reference run ... And the cross scenario evaluation then comes from the Monte Carlo evaluation. E CLEANLY SHOWS cascade profit").
+  - Headline e_v (mpu), A / B / D / E:
+    - L2 11.2 / 9.7 / 10.5 / 16.1; S1 8.2 / 6.9 / 7.8 / 13.2; S2 8.5 / 8.1 / 7.7 / 10.0;
+    - O2 6.8 / 5.1 / 6.1 / 9.9; O3 6.6 / 4.7 / 5.9 / 8.5; M 6.4 / 4.8 / 5.6 / 7.6.
+    - In A, O2 and O3 leave 0.95–1.05 pu in area 2 for about 65 % of the time.
+  - Code: `figures_ref.py --event N` (commit 8ce99e6) chooses the load step for case3_event (E: event 3).
+  - Thesis (`Z:/latex_diss_clone`, not committed):
+    - `figures_ref.py run 0017 --thesis --event 3` wrote the PDFs and `graphics/Ch10/data/2026-11-05_case3_ref/` CSVs; `make_tikz_tables.py` copied there and run;
+    - the seven `graphics/Ch10/case3_*.tex` point to the new data folder, with axis limits widened to E's ranges (area-2 error up to 130 mpu, STS deviations up to 141 mpu, corridor 2–3 down to −297 Mvar) and the event window moved to 210–222 min (scenario script `ch10_fig_axes.py`).
+  - `Chapter10.tex` ch:case3:nominal rewritten for E (script `ch10_ref_E.py`, backup `Chapter10_before_E.tex`):
+    - provenance block = run 0017's header; events and the scenario's design reason (declaration 2026-10-30);
+    - all numbers from report.md / metrics.json and the figure CSVs (`e_derived.py`): ordering shares, recovery after the load step, droop withdrawal (Δe_post O3 19.9, S2 34.2, O2 −6.9 mpu; W 82 / 28 / 22 Mvar min), corridor distances to M;
+    - `tab:case3:ref` rows for E;
+    - captions of vtrack and tieflow updated.
+  - Not redone for E: the ripple analysis and the per-coupler box analysis of STS 2. The latter is kept as a `\todo` naming scenario A.
+  - New `\todo`: the area-2 over-voltage, with a bus > 1.05 pu for 58 % (O3) / 61 % (S2) of the run, max 1.062 / 1.074 pu; < 0.95 pu ≤ 1.1 %. Measured from log.pkl zone_v_max/min; cause not examined.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

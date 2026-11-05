@@ -68,7 +68,7 @@ import datetime as _dt
 import json
 import pickle
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from configs.config import MultiTSOConfig
 from configs.paramsets import apply_paramset
@@ -119,8 +119,10 @@ _SVR = dict(
 )
 
 VARIANTS: Dict[str, Dict[str, Any]] = {
+    # Machine taps fixed in LOC too, for one rule: they move only when an MIQP
+    # dispatches them (author 2026-11-05: "Held fixed").
     "L2": dict(tso_mode="local", tso_local_mode="qv", tso_oltc_mode="local",
-               **_LOCAL_STS, **_LOCAL_SHUNTS),
+               fix_machine_taps=True, **_LOCAL_STS, **_LOCAL_SHUNTS),
     "S1m": dict(_SVR, svr_k_p_rvr=0.0, svr_k_p_rpr=0.0,
                 svr_rpr_voltage_priority=False),
     # Integral laws WITH the safeguard (author 2026-10-07; was "S1g" in the
@@ -185,8 +187,12 @@ STEP_ALLOWED: Dict[Tuple[str, str], set] = {
 # ---------------------------------------------------------------------------
 
 
-def base_config(minutes: int = HORIZON_MIN) -> MultiTSOConfig:
-    """make_config + Chapter-8 batch network + Chapter-8 weights + horizon."""
+def base_config(minutes: int = HORIZON_MIN, scenario: Optional[str] = None) -> MultiTSOConfig:
+    """make_config + Chapter-8 batch network + Chapter-8 weights + horizon.
+
+    ``scenario`` (a key of ``ch_11_case2_multisystem/ref/scenarios.py``) replaces the six
+    make_config contingencies by that schedule, and its period if it names one (author
+    2026-11-05: Case 1 on scenario A, "It doesnt have to prove sts support")."""
     cfg = dataclasses.replace(
         make_config(),
         n_total_s=60.0 * minutes,
@@ -202,12 +208,18 @@ def base_config(minutes: int = HORIZON_MIN) -> MultiTSOConfig:
         live_plot_sbx=False,
         live_plot_sbxv=False,
     )
+    if scenario is not None:
+        from experiments.ch_11_case2_multisystem.ref import scenarios as _sc
+        spec = _sc.SCENARIOS[scenario]
+        cfg = dataclasses.replace(cfg, contingencies=list(spec["events"]()))
+        if spec.get("start"):
+            cfg = dataclasses.replace(cfg, start_time=_dt.datetime.fromisoformat(str(spec["start"])))
     return apply_paramset(cfg, PARAMSET, verbose=False)
 
 
-def resolved(name: str, minutes: int = HORIZON_MIN) -> MultiTSOConfig:
+def resolved(name: str, minutes: int = HORIZON_MIN, scenario: Optional[str] = None) -> MultiTSOConfig:
     """The config the runner receives for a variant or a Pareto point."""
-    cfg = base_config(minutes)
+    cfg = base_config(minutes, scenario)
     if name in VARIANTS:
         return dataclasses.replace(cfg, **VARIANTS[name])
     if name in PARETO or name in LEGACY:
@@ -245,8 +257,8 @@ def assert_case1_controlled() -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_one(name: str, out: Path, minutes: int) -> int:
-    cfg = resolved(name, minutes)
+def run_one(name: str, out: Path, minutes: int, scenario: Optional[str] = None) -> int:
+    cfg = resolved(name, minutes, scenario)
     d = out / name
     d.mkdir(parents=True, exist_ok=True)
     cfg = dataclasses.replace(cfg, result_dir=str(d))
@@ -276,13 +288,13 @@ def run_one(name: str, out: Path, minutes: int) -> int:
     return len(log)
 
 
-def _run_one_logged(name: str, out: str, minutes: int) -> int:
+def _run_one_logged(name: str, out: str, minutes: int, scenario: Optional[str] = None) -> int:
     """:func:`run_one` in a worker process, its console into ``<variant>/``."""
     import contextlib
     d = Path(out) / name
     d.mkdir(parents=True, exist_ok=True)
     with open(d / "console.log", "w", encoding="utf-8") as fh,             contextlib.redirect_stdout(fh):
-        return run_one(name, Path(out), minutes)
+        return run_one(name, Path(out), minutes, scenario)
 
 
 def main() -> None:
@@ -295,6 +307,9 @@ def main() -> None:
                     help="add the variants to this existing run of run_case1 "
                          "(it must carry a run_manifest.json)")
     ap.add_argument("--minutes", type=int, default=HORIZON_MIN)
+    ap.add_argument("--scenario", default=None,
+                    help="event schedule of ch_11_case2_multisystem/ref/scenarios.py "
+                         "(e.g. A) instead of the six make_config contingencies")
     ap.add_argument("--list", action="store_true")
     add_run_arguments(ap)
     args = ap.parse_args()
@@ -321,21 +336,22 @@ def main() -> None:
     # that the variants differ from it only in their mechanism.
     with start_thesis_run(
             __file__, target=TARGET, feeds=FEEDS,
-            config=base_config(args.minutes), paramset=PARAMSET,
+            config=base_config(args.minutes, args.scenario), paramset=PARAMSET,
             parameters={"variants": sel, "horizon_min": args.minutes,
+                        "scenario": args.scenario or "make_config (six contingencies)",
                         "network": "DSO_3 x2 (load and DER)"},
             note=args.note, tag=args.tag, resume=args.run_dir) as run:
         out = run.root
-        print(f"run dir: {out}  |  horizon {args.minutes} min  |  {sel}")
+        print(f"run dir: {out}  |  horizon {args.minutes} min  |  scenario {args.scenario}  |  {sel}")
         failed = []
         if args.jobs > 1:
             from concurrent.futures import ProcessPoolExecutor
             with ProcessPoolExecutor(max_workers=args.jobs) as ex:
                 counts = dict(zip(sel, ex.map(
                     _run_one_logged, sel, [str(out)] * len(sel),
-                    [args.minutes] * len(sel))))
+                    [args.minutes] * len(sel), [args.scenario] * len(sel))))
         for s in sel:
-            n = (counts[s] if args.jobs > 1 else run_one(s, out, args.minutes))
+            n = (counts[s] if args.jobs > 1 else run_one(s, out, args.minutes, args.scenario))
             status = json.loads((out / s / "status.json").read_text(
                 encoding="utf-8"))["status"]
             if status != "ok":

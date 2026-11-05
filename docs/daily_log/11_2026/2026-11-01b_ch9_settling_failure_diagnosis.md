@@ -1774,7 +1774,28 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - D1 row of the experiment table: "and add one candidate step as a design margin" removed;
     - method: the margin sentence replaced by "The selected half-width is the design half-width, Δ_db = Δ*", the removed text kept as a LaTeX comment, and "narrower" → "next narrower candidate";
     - D1 selection sentences from run 0014: 0.0052 pu (W6, STS) → Δ* = Δ_db = 0.010 pu; discrete steps 0.021 (W2, W4), 0.012 (W5), 0.054 pu (W6); as written 0.060 pu;
-    - the confirmation sentences and D2 still await stage 2 (`	odo`).
+    - the confirmation sentences and D2 still await stage 2 (`\todo`).
+- **13:47: run 0014 complete — D1/D2 of record.** 84/84 stage-2 runs, no failure, every D2 disturbance reached the plant (`d2_events_not_reached` 0).
+  - D1 confirmation at Δ* = 0.010 pu:
+    - no activation from continuous movement;
+    - converters activating at discrete steps: 16 (W2), 31 (W4), 18 (W5), 29 (W6: 28 STS + 1 TS); delivered ≤ 2.8 / 3.3 / 0 / 7.8 Mvar;
+    - longest activation 40 s in W6, otherwise ≤ 20 s;
+    - deviation from the droop-disabled run ≤ 0.030 pu and 23.9 Mvar (W6), ≤ 0.0105 pu and 6.6 Mvar elsewhere; at the narrower 0.0075 pu, 0.032 pu and 25.8 Mvar;
+    - tap and bank operations unchanged everywhere.
+  - D2 (W1–W3, W6):
+    - support at Δ* 72–94 Mvar; voltage-step reduction 30–37 % (bus 8) and 15–24 % (bus 12); at 2Δ*, 33–50 / 19–37 Mvar and 14–20 / 7–13 %;
+    - W4 48–51 Mvar (STS only); W5 none; hand-over ≤ 360 s (W4: 400 s);
+    - droop off: STS above 1.1 pu after both inductive steps in W6 (up to 1.109); droop on: STS ≤ 1.079 pu, TS 0.964–1.099 pu in all windows;
+    - W2, bus-12 capacitive step: TS 1.102 pu for 60 s at 2Δ* and 1.103 pu for 100 s with the droop off;
+    - W5 TS ≤ 1.0974 pu (the earlier 1.106 pu / 170 s no longer occurs);
+    - the W6 inductive steps get no TS support.
+  - Chapter 8 (not committed):
+    - provenance block → run 0014's header;
+    - D1 confirmation sentences and the D2 paragraph rewritten;
+    - `tab:param:deadband:d2` rows replaced;
+    - the run-0012 `\todo`s removed; earlier numbers kept as LaTeX comments.
+    - Tools: scratchpad `d2_update.py`, and the extraction `d1d2_numbers.py` (output `d1d2_numbers_0014.txt`).
+  - Run 0014's D1 width (0.010 pu) equals REF's dead band, so the REF runs on e5power stay consistent with D1.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

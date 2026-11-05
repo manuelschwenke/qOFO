@@ -1953,3 +1953,11 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     2. Tap analysis on that run: per machine, the time the HV side is outside the relay band 1.03 ± 0.01 pu for longer than the 15-min hold, the time at the AVR limits, and the Q headroom. A tap change "would have been needed" where the band is left while the AVR is at a limit.
     3. Case 1 (Ch 9) rerun with run_case1 on the commitment base with the v4 weights and fixed taps (L2, S1m, S1, O0, O1, O2), about 5–6 h. Decisions needed: the event schedule (the six-event make_config schedule, or that of scenario A/E, see the Ch 10 todo), and whether O1 (TS-OFO on AVRs with local machine taps) gets the same fix.
     4. Monte Carlo after the G3-on filter (author's OK pending), with all variants including the fixed taps.
+- **19:55: fix_machine_taps generalised; O1 included; LOC and Ch 9 scenario discussed** (author: "use it in O1 also too keep it consistent. Should it be held in LOC to to be consistent?"; "ch.9 could use a milder one, like A ... It doesnt have to prove sts support").
+  - Commit 6d69e37: `svr_fix_machine_taps` → `fix_machine_taps`.
+    - Applies to the TapRelay and the DiscreteTapControl path.
+    - Set for Case 1 S1m, S1, O0, O1 and Case 2 S1, S2; allowed on the O1 → O2 step.
+    - Resolved configs checked; 36 tests pass.
+  - LOC: its machine-tap relays move rarely: E 4 moves in 6 h (G4 2, G7 1, G10 1), A 5. The frequent local moves are network OLTCs (trafo 3, 4).
+  - Recommendation: hold LOC's machine taps fixed as well. Then the uniform rule is "machine taps move only when an MIQP dispatches them" (O2, O3, M), and the effect on LOC is small. Not set yet.
+  - Ch 9 on scenario A: run_case1 has no scenario option (six make_config contingencies). It needs a `--scenario` that takes the events of ref/scenarios.py, as run_ref does.

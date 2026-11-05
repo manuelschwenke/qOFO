@@ -1902,3 +1902,11 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - batch 2 would be re-simulated unless its verdicts are entered;
   - `pull_dir` should log the full stderr.
 - Any amendment now would be declared after the results are known.
+- **18:30: why the SVR variants peak at E's load step** (author: "Why is the peak so high anyway? Investigate!"). From the S1, S2 and O2 log.pkl of run 0017, at 20-s resolution:
+  - Area 2 has no synchronous machine after G3's trip (30:40), and the tie 9–39 to the G1 equivalent is open from 121:40. After the 600-Mvar step, only the neighbours' machines and the STSs can respond.
+  - Under the classical scheme, the area-1 secondary regulation, which holds the pilot bus only, has moved the AVR set-points of both real area-1 machines to the 0.95 pu floor before the step: the first by 48 min, the second by 180 min. The G1 equivalent stays at 1.03.
+  - Under SVR+, one area-3 machine is also at 0.95 by 210 min. Under OFO the area-1 machines stay at 1.029–1.03 pu.
+  - At the step, area-2 voltages fall to 0.903 pu under S1 (O2: 0.939) and to 0.877 pu 20 s later; e_v,2 is 101 then 130 mpu.
+  - In those 20 s the area-2 STS support falls from 78 to 66 Mvar, and the machines are not at their Q limits (area-1 headroom 189 / 305 Mvar).
+  - The SVR only raises the set-points at its 180-s dispatches, so the recovery takes minutes: 73 mpu at 215.7, 48 mpu at 216.3 min.
+  - S2 peaks lower (68 mpu) because its STSs supply 232–297 Mvar.

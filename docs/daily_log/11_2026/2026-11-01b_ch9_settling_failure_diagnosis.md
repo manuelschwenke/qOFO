@@ -1614,6 +1614,23 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - g_v 4.0e4, g_q 0.4, dso_g_v 1.0e4, g_w_der 0.014, g_w_pcc 0.873, g_w_gen 1.70e6, g_w_tso_oltc 15.61, g_w_tso_shunt 19.02, g_w_dso_der 1.50, g_w_dso_oltc 10.84.
     - Aggregate: e_v_ts 0.00872, e_v_ds 0.00556, e_q 1.45e5, worst taps 18.0/day TSO and 8.0/day DSO, 4 bank ops/day.
   - II-c (bank price on its own, W1/W3/W4/W6 without the early stop): g_w_tso_shunt grid 4.27–15.36 (7 points), 7/7 pass the screen; 1 here, 6 on e5power (pid 27272).
+- **05:39: run 0008 II-c done; the leader is kept.** Here exit 0 at 05:31; e5power done 05:35, pulled 05:39.
+  - All 7 lower bank prices are rejected for hunting. The leader is the only feasible point (selection 2c: 1/9 feasible at tolerance 0).
+
+    | g_w_tso_shunt | tap hunting | bank hunting | bank after events | e_v_ts |
+    |---|---|---|---|---|
+    | 4.27 | 9 | 15 | 4 windows | 0.00870 |
+    | 5.28 | 14 | 9 | 4 | 0.00869 |
+    | 6.54 | 10 | 4 | 4 | 0.00869 |
+    | 8.10 | 6 | 1 | 4 | 0.00868 |
+    | 10.02 | 7 | 0 | 4 | 0.00869 |
+    | 12.41 | 8 | 0 | 4 | 0.00869 |
+    | 15.36 | 2 | 0 | 3 | 0.00869 |
+    | **19.02 (leader)** | 0 | 0 | 2 | 0.00872 |
+
+  - Observation: bank hunting falls to 0 at a price of about 10. Tap hunting persists up to 15.36, i.e. 19 % below the leader's price. Consistent with the round-4 hypothesis that the leader sits at the edge of the hunting-free region; here along the bank-price axis.
+  - e_v_ts hardly changes across the grid (0.00868–0.00872), so the price is set by hunting, not by voltage error.
+  - Stage 5 started 05:39: completion of the band on W2 (27 band candidates and the Stage-I point); 5 here, 22 on e5power (pid 17764).
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

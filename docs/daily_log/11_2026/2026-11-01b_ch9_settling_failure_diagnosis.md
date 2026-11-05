@@ -1608,6 +1608,12 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Only 3 of 48 round-4 candidates are clean in all four windows (59b9c16c9bc9, 772dfdc0707a, d6aa9ec0ad10), against 15 of 46 in round 3.
   - Each of the 44 aborted candidates has at least one window with a reversal. Of the reversing windows: 45 have TSO and DSO tap reversals, 9 TSO only, 7 DSO only, 4 TSO + shunt, 3 shunt only. The other aborted windows show no reversal.
   - Hypothesis (not tested): the incumbent 061dadc05755 lies near the edge of the hunting-free region in weight space; most draws within f = 0.25 of it hunt. That makes the held-out W5 gate more likely to fail.
+- **04:35: run 0008 II-b done after 4 rounds; II-c started.** Local round-4 shard exit 0 at 04:34.
+  - Selection 2b_round4: 379/379 inside the θ bounds; engagement level sts+bank (74 candidates); 31 feasible at tolerance 0; ranked first 061dadc05755, ca2eda42e753, 8f8e0d8fadf4, 772dfdc0707a.
+  - Best unchanged, so f → 0.125; MAX_ROUNDS reached. II-b leader 061dadc05755:
+    - g_v 4.0e4, g_q 0.4, dso_g_v 1.0e4, g_w_der 0.014, g_w_pcc 0.873, g_w_gen 1.70e6, g_w_tso_oltc 15.61, g_w_tso_shunt 19.02, g_w_dso_der 1.50, g_w_dso_oltc 10.84.
+    - Aggregate: e_v_ts 0.00872, e_v_ds 0.00556, e_q 1.45e5, worst taps 18.0/day TSO and 8.0/day DSO, 4 bank ops/day.
+  - II-c (bank price on its own, W1/W3/W4/W6 without the early stop): g_w_tso_shunt grid 4.27–15.36 (7 points), 7/7 pass the screen; 1 here, 6 on e5power (pid 27272).
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

@@ -1747,6 +1747,18 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - The failure itself (non-convergence after a bank dispatch with three machines off line) is a model robustness issue of that weaker state; not investigated further.
   - D1 numbers for W1–W5 and D2 for W1, W3, W4, W5 are valid. Chapter 8 D1 now says "W1–W5" with a `\todo`, and the D2 `\todo` gives the cause.
   - Proposed fix (to discuss): compute the commitment over the 12-h design window in ch_9_4_deadband, then rerun D1 + D2.
+- **11:50–12:01: commitment-window fix and D1 + D2 rerun** (author: "Yes, fix and rerun"). Commit 87c1e84.
+  - `configs/config.py`: new `MultiTSOConfig.unit_commitment_window_s: Optional[float] = None`. `None` = the run window, so the default behaviour is unchanged (REF, MC, screen).
+  - `experiments/runners/multi_tso_dso.py`: before clipping the profiles to the run, a frame over `[start, start + window]` is kept. `compute_merit_order_dispatch` uses it when the option is set. The per-step dispatch between the committed machines is unchanged, and the runner prints the window used.
+  - `ch_9_4_deadband.py`: `COMMIT_WINDOW_S = 12 h` (Stage II `--hours 12`), set in `_config` after the scenario overlay and recorded in the run parameters (`unit_commitment_window_s`).
+  - Checks:
+    - commitment at 2 h and 1.5 h is now W2 all on, W6 only G9 off, W1 all on (= the 12-h windows);
+    - a 900-s W6 run passes step 42 with no power-flow failure;
+    - new `tests/test_unit_commitment_window.py` (2 tests); `test_qv_deadband.py` and `test_ref_after_v4.py` pass (22).
+  - Rerun here: launcher 156644 (scratchpad `launch_deadband_rerun.py`, pythonw, no console, 12 workers, mask 0x555555).
+    - Run `0013_2026-11-05_120147_ch_9_4_deadband`; stage 1 (7 runs) started 12:01.
+    - ETA about 14:00 (estimate: run 0012 did 73 successful runs in 31 min on 30 workers).
+  - REF on e5power uses the D1 design width 0.010 pu of run 0012. If the rerun's design width differs (W6 now enters), REF must be judged against it (the width gate of `REF_DONE.json` refers to 0012).
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

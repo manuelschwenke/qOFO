@@ -1603,6 +1603,11 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - Against the round-2 best ca2eda42e753: e_v_ts 0.00872 against 0.00864, inside the 0.02 indifference; e_v_ds 0.00556 against 0.00577; e_q 1.45e5 against 1.91e5.
     - Observation: e_v_ts of the incumbent has risen each round (0.00862, 0.00864, 0.00872), while e_v_ds falls. The lowest e_v_ts in the union is 0.00861 (4d9eabd5bb55), so the new best is 1.3 % above it, still inside the indifference.
   - Round 4 (the last, MAX_ROUNDS 4) started 02:57, centred on 061dadc05755: 47/64 draws pass the screen; 9 here, 38 on e5power (shard pid 19492). By round 3's rate it ends about 05:55, and II-b ends with it. GO/NOGO about 10:00–10:30.
+- **04:28: run 0008 round 4, e5power part done early** (rc 0 at 04:25, 1 h 28 min against 2 h 49 min in round 3; 152 files pulled). Local shard at 35/40 units.
+  - Cause: early aborts, not failures. Round 4 has 174/191 windows with `early_abort`, against 120/184 in round 3; `failed` is 0 in both.
+  - Only 3 of 48 round-4 candidates are clean in all four windows (59b9c16c9bc9, 772dfdc0707a, d6aa9ec0ad10), against 15 of 46 in round 3.
+  - Each of the 44 aborted candidates has at least one window with a reversal. Of the reversing windows: 45 have TSO and DSO tap reversals, 9 TSO only, 7 DSO only, 4 TSO + shunt, 3 shunt only. The other aborted windows show no reversal.
+  - Hypothesis (not tested): the incumbent 061dadc05755 lies near the edge of the hunting-free region in weight space; most draws within f = 0.25 of it hunt. That makes the held-out W5 gate more likely to fail.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

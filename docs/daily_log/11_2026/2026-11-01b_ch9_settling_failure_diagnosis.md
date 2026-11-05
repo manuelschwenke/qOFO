@@ -1815,7 +1815,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - the starting-weights sentence of the Experiment C paragraph replaced by "The search of Experiment B changes only the supervisory weights, which this test holds, so the selected weights keep the subordinate weights verified in step 2.";
     - `tab:param:timescales:ninner` reduced to one column (selected weights), caption "Subordinate settling at the selected weights";
     - the dropped values kept in LaTeX comments.
-- **15:00–15:30: Chapter 8 Experiment B updated to run 0008** (author: "all the weights are there, correct? so we could fill in all the numbers of experiment B, and update also in the comments to the latest run"). Thesis repo, not committed. Script: scratchpad `expb_update.py`; backup `Chapter08_before_expb.tex`.
+- **14:35–14:57: Chapter 8 Experiment B updated to run 0008** (author: "all the weights are there, correct? so we could fill in all the numbers of experiment B, and update also in the comments to the latest run"). Thesis repo, not committed. Script: scratchpad `expb_update.py`; backup `Chapter08_before_expb.tex`.
   - Provenance: the two superseded blocks under the weights section (qOFO 0008 amendment1, 0001 band) and the two under "Confirmation of the Period" → run 0008's `latex_header.tex`. The PROCEDURE/Execution comment now points to v4 and run 0008.
   - `tab:param:weights:resolved`:
     - starting = Stage-I point `stage1_v3_uc_2026_11_pq10`: 8.97e-2, 8.97e-2, 5.00e6, 21.3, 13.5; STS 0.4, 1e4, 1.50, 10.8;

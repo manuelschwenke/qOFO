@@ -1796,6 +1796,21 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - the run-0012 `\todo`s removed; earlier numbers kept as LaTeX comments.
     - Tools: scratchpad `d2_update.py`, and the extraction `d1d2_numbers.py` (output `d1d2_numbers_0014.txt`).
   - Run 0014's D1 width (0.010 pu) equals REF's dead band, so the REF runs on e5power stay consistent with D1.
+- **14:30–14:50: Experiment C figure redesigned** (author: "lets redesign the figure ... just dropping the second "starting weights" curve, only showing settlement distribution of final weights, also only 80 % of the height").
+  - Reason (author's question, "the weights coming from the tuning are, when it comes to settling, not better then the starting weights, correct?"):
+    - Yes. The selected weights give n_s,95 23.05, 117/120 ≤ 27; the starting weights give 24.0, 118/120.
+    - The "starting" curve is the Stage-I point (stage1/verification/v2_pq10), whose subordinate weights equal the selected ones (g_v, g_q, dso_g_v, g_w_dso_der, g_w_dso_oltc, dso_gamma_oltc_q; checked in both resolved configs).
+    - Since procedure v2, Stage II searches only the TS weights, which the settling test does not see. The two curves coincide by construction.
+    - The residual differences (STS 3 p95 24.55 → 30.2) are unexplained. Hypothesis: the start state or code changes between 3 and 5 Nov.
+  - `graphics/Ch8/data/2026-11-05_settling/make_settling_cdf.py` rewritten (thesis repo, not committed):
+    - one series (selected weights, tumidblue), no legend;
+    - height 0.24\textwidth (was 0.3);
+    - BUNDLE = run 0008, source expC/cand_061dadc05755/20261105-083343;
+    - `.dat` with n, F_final;
+    - the 97.5 % marker at n = 27 and the rule labels kept.
+  - Regenerated `graphics/Ch8/settling_cdf.tex`; layout checked on the matplotlib preview.
+  - Chapter 8: caption "at the selected weights"; the figure comment says the Stage-I curve was dropped.
+  - The Experiment C paragraph and `tab:param:timescales:ninner` still compare with the "starting weights" (= Stage-I weights). Not changed (author decides).
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

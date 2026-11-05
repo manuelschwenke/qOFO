@@ -1765,6 +1765,16 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Discrete steps included ("as written"): 0.06 pu (d_max_all_routine 0.054 pu, W6). Start-up: 0.057 pu.
   - Consequence: REF (e5power, runs 0014–0017, since 11:32) runs with 0.010 pu, the `MultiTSOConfig` default (`tso_qv_deadband_pu`, `dso_qv_deadband_pu`). That is Δ*, not the design width. The width gate against run 0013 fails. Author decides: restart REF at 0.0125 pu or let it finish.
   - Stage 2 (84 runs: confirmation at 0.0125/0.010, D2 at 0.0125/0.025/off) running; watcher on launcher 156644.
+- **12:20–13:00: design margin dropped; stage 2 rerun at 0.010 pu** (author: "no, we leave 0.01 and we drop the "one design witdth step more argument" in the thesis, please").
+  - `ch_9_4_deadband.DESIGN_STEPS` 1 → 0 (commit 97e5a12): design width = Δ*. Stage 2 then confirms Δ* and the next narrower candidate, and D2 runs at Δ* and 2Δ*.
+  - Run 0013's stage 2 was stopped at 12:19 after 1 of 84 runs (launcher 156644, `taskkill /T`); `STOPPED.txt` written and annotated.
+  - Run `0014_2026-11-05_122112_ch_9_4_deadband` (`--stage1-from` 0013, 12 workers, launcher 131980, scratchpad `launch_deadband_stage2.py`): D1 d_max 0.00517 pu → Δ* = design = 0.010 pu, narrower 0.0075 pu; stage 2 with 84 runs, ETA about 14:00.
+  - So REF on e5power (0.010 pu) matches D1 again.
+  - Chapter 8 (not committed):
+    - D1 row of the experiment table: "and add one candidate step as a design margin" removed;
+    - method: the margin sentence replaced by "The selected half-width is the design half-width, Δ_db = Δ*", the removed text kept as a LaTeX comment, and "narrower" → "next narrower candidate";
+    - D1 selection sentences from run 0014: 0.0052 pu (W6, STS) → Δ* = Δ_db = 0.010 pu; discrete steps 0.021 (W2, W4), 0.012 (W5), 0.054 pu (W6); as written 0.060 pu;
+    - the confirmation sentences and D2 still await stage 2 (`	odo`).
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

@@ -1831,6 +1831,29 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Method numbers whose sentences stay true: STS engagement band 0.005–0.015 pu (1.035–1.045 pu), STS Δv_eng 0.01 pu, hunting within one hour, AVR weight 5e6, 176 screened candidates.
   - `\todo` at the Procedure paragraph listing the v3/v4 changes not yet in the text: one STS variant; banks 0.005 pu (they no longer act after the TS taps); search windows W1, W3, W4, W6 with early stop and W2 completion; measured engagement filters; Stage II-c; tolerance 0; λ without banks on G3-on points; tap hold n = 1.
   - Checks: braces balanced; begin/end of table, figure, tabular, itemize, enumerate balanced. Not compiled.
+- **15:00–15:20: Experiment B procedure text rewritten to v4** (author: "Yes, rewrite to v4"). Thesis repo, not committed. Script: scratchpad `expb_v4_text.py` (every replacement asserted unique); backup `Chapter08_before_v4text.tex`.
+  - Assumptions:
+    - the windows all have G3 committed, and states with less synchronous generation are outside the scope;
+    - the search simulates W1, W3, W4, W6, and W2 is added for the final ranking;
+    - after a bank switching, the STS couplers hold their taps for one subordinate iteration (stale measurement).
+  - Desired behaviour:
+    - item 2: the couplers must move at least once in every search window;
+    - item 3: start-up exemption (first two moves, first within 15 min); banks must switch within 2 h after the disturbance in ≥ 2 search windows.
+  - Step 1:
+    - one STS priority (10×), with the v2 variants in a comment;
+    - bank Δv_eng 0.005 pu, equal to the acceptable TS deviation; the "banks act after the TS taps" reason removed;
+    - coupler ladder 0.01 → 0.015 → 0.02 pu, with the band of item 2 centred on the value used.
+  - Step 2: verification of the single STS design (margin p95 ≤ 25, median residual ≤ 0.8 Mvar); stop if no engagement deviation passes.
+  - Step 3: λ check on W1–W6 plus 83 G3-on points; simulation in the search windows; early stop at the first counted reversal, the starting weights always in full.
+  - Step 4: the bank price is tuned on its own (8 log-spaced values from the range edge up to the leader's, no early stop, lowest feasible within the 2 % band joins the ranking).
+  - Step 5:
+    - measured engagement filters, with the fallback order banks then couplers;
+    - "No hunting is tolerated" (the v2 tolerance-1 fallback removed);
+    - the 2 % band is completed on W2 and ranked over five windows.
+  - Convergence check: bank columns left out of B (author B1b).
+  - Experiment C: "for the STS weights before the search (step 2)".
+  - The Procedure `\todo` was removed.
+  - Checks: environments and braces balanced. Not compiled.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

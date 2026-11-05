@@ -114,7 +114,7 @@ _SVR = dict(
     svr_deadband_pu=0.0,
     # Machine taps held fixed: their local relay undoes the RPR's AVR set-point
     # changes and winds the SVR to its floor (author 2026-11-05: "Keep fixed").
-    svr_fix_machine_taps=True,
+    fix_machine_taps=True,
     **_LOCAL_STS, **_LOCAL_SHUNTS,
 )
 
@@ -130,7 +130,7 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
     "O0": dict(_SVR, svr_k_p_rvr=0.0, svr_k_p_rpr=0.0,
                svr_rpr_voltage_priority=False,
                svr_rvr_law="ofo", svr_rpr_law="ofo"),
-    "O1": dict(tso_mode="ofo", tso_oltc_mode="local",
+    "O1": dict(tso_mode="ofo", tso_oltc_mode="local", fix_machine_taps=True,
                **_LOCAL_STS, **_LOCAL_SHUNTS),
     "O2": dict(tso_mode="ofo", **_LOCAL_STS),
 }
@@ -169,14 +169,14 @@ _SVR_FIELDS = {"tso_mode", "tso_local_mode", "svr_pilot_buses", "svr_t_rvr_s",
                "svr_t_rpr_s", "svr_k_p_rvr", "svr_k_p_rpr",
                "svr_rvr_p_every_step", "svr_deadband_pu",
                "svr_rpr_voltage_priority", "svr_rvr_law", "svr_rpr_law",
-               "svr_fix_machine_taps"}
+               "fix_machine_taps"}
 STEP_ALLOWED: Dict[Tuple[str, str], set] = {
     ("L2", "S1m"): _SVR_FIELDS,
     ("S1m", "O0"): {"svr_rvr_law", "svr_rpr_law"},
     ("S1m", "S1"): {"svr_rpr_voltage_priority"},
     ("O0", "O1"): _SVR_FIELDS,
     ("O1", "O2"): {"tso_oltc_mode", "install_tso_tertiary_shunts",
-                   "shunt_dispatch"},
+                   "shunt_dispatch", "fix_machine_taps"},
 }
 
 

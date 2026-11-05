@@ -3181,7 +3181,8 @@ def _run_multi_tso_dso_impl(
     #
     # L1/L2 keep the relay: there the AVR setpoints are pinned, so it has a
     # static target and no fight arises.
-    _install_local_taps = _local_tso and not _tso_oltc_local and not _svr_tso
+    _install_local_taps = (_local_tso and not _tso_oltc_local and not _svr_tso
+                           and not bool(getattr(config, "fix_machine_taps", False)))
     if _local_tso:
         # (1) Pin generator AVR setpoints.  Under SVR this is only the starting
         # point: the RPR writes net.gen.vm_pu from the first dispatch onward.
@@ -3252,9 +3253,10 @@ def _run_multi_tso_dso_impl(
     # transformer stays held, as it is excluded from the MIQP too.
     from controller.local_rules import BankRelay, LocalDiscreteRules, TapRelay
     _tap_relays: List[TapRelay] = []
-    # Under SVR with ``svr_fix_machine_taps`` the machine taps stay at their start
-    # position: the relay would undo the RPR's AVR set-point changes (author 2026-11-05).
-    _fix_mt = bool(getattr(config, "svr_fix_machine_taps", False)) and _svr_tso
+    # With ``fix_machine_taps`` the machine taps stay at their start position: under SVR
+    # (and a TS-OFO on the AVRs) the relay undoes the AVR set-point changes (author
+    # 2026-11-05).
+    _fix_mt = bool(getattr(config, "fix_machine_taps", False))
     if (not _central and not _install_local_taps and not _fix_mt
             and (_local_tso or _svr_tso or _tso_oltc_local)):
         _hold_mt = (config.oltc_cooldown_s_mt

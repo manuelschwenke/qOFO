@@ -1631,6 +1631,11 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Observation: bank hunting falls to 0 at a price of about 10. Tap hunting persists up to 15.36, i.e. 19 % below the leader's price. Consistent with the round-4 hypothesis that the leader sits at the edge of the hunting-free region; here along the bank-price axis.
   - e_v_ts hardly changes across the grid (0.00868–0.00872), so the price is set by hunting, not by voltage error.
   - Stage 5 started 05:39: completion of the band on W2 (27 band candidates and the Stage-I point); 5 here, 22 on e5power (pid 17764).
+- **07:08: Stage 5 still running on e5power.** Here exit 0 at 06:10 (6 units, 0.51 h). e5power at 60/110 units.
+  - e5power simulates all five windows (W1–W4, W6) for its 22 candidates, i.e. 110 units, not only the 22 W2 windows. Here only the missing windows ran (6 units).
+  - Cause (reading of `simulate()`, not tested): the stored windows are copied into `complete/windows` on this host only; the remote shard does not get them. The pull uses `overwrite=False`, so the copies here are kept and the duplicate windows are discarded. Results are therefore unaffected; only time is lost.
+  - The same happened in run 0006 (v3), but there 4 candidates × 5 windows fit in one wave (56 min). Here it costs about 2 h.
+  - Not changed mid-run. ETA: e5power done about 08:20–08:30; settling confirmation (about 1 h in v3), W5 (about 0.5 h), GO/NOGO about 10:00–10:30.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

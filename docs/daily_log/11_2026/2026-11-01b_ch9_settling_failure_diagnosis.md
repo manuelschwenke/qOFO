@@ -1962,3 +1962,26 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Recommendation: hold LOC's machine taps fixed as well. Then the uniform rule is "machine taps move only when an MIQP dispatches them" (O2, O3, M), and the effect on LOC is small. Not set yet.
   - Ch 9 on scenario A: run_case1 has no scenario option (six make_config contingencies). It needs a `--scenario` that takes the events of ref/scenarios.py, as run_ref does.
 - **21:20: LOC's machine taps fixed too; run_case1 --scenario** (author: "Held fixed"). Commit 49b52e9: L2 (Case 1, inherited by Case 2) gets fix_machine_taps; `run_case1 --scenario A` takes A's three events (1840, 7300, 12740 s) and keeps the period; the Case 1 guard passes; 36 tests pass. Note: the clock times of the entries between 17:30 and 21:15 were corrected at 21:25 from the commit times (they had been estimated).
+- **21:55–22:00: smoke confirms the fix; overnight reruns launched on e5wimi.**
+  - Smoke run 0018 (S1, scenario E, 60 min, fixed taps): 180 records and no local tap move. The area-1 AVR set-points stay at 0.994 / 1.024–1.031 pu (before: wound down to 0.950). The regional level is −0.085 at 59 min (before: −0.172), and the pilot error is ±8–10 mpu.
+  - Launched without a console window (scratchpad `launch_generic.py` through pythonw, `CREATE_NO_WINDOW`), 6 jobs each:
+    - REF scenario E, all six variants, tag v4_E_fixmt: `results/ch_11_case2_multisystem/ref/0019_2026-11-05_215935_run_ref_v4_E_fixmt`. It supersedes run 0017 for S1, S2 and L2; O2, O3 and M are unchanged code paths and serve as a cross-check.
+    - Case 1 on scenario A (L2, S1m, S1, O0, O1, O2), tag v4_A: `results/ch_10_case1_svr/0001_2026-11-05_215956_run_case1_v4_A`.
+- **22:05–23:05: scenario F designed and declared** (author: "Could we even have a more drastical scenario F with e.g. two subsequent 400 Mvar steps?", "Maybe this would also fit in the night simulation plan", "A scenario where we see a huge difference and really need sts resources").
+  - Declaration (before any run): `docs/analysis/2026-11-05_scenario_F_declaration.md`.
+  - F: E's G3 (30:40) and 9–39 (121:40) events, then 400 Mvar at IEEE 4 (212:20) and 400 Mvar at IEEE 8 (271:10, phase 70 s).
+  - FM: the same with 2 × 350 Mvar, as F's declared fallback.
+  - Bounds (plant only; shared notes `sts_access_gain_scripts/scarcity_F_*`; start point: the 360-min commitment on the current base):
+    - After step 1, area 2's own TS resources restore the level (+12 mpu).
+    - After step 2, the TS-a2 level is −89.6 mpu (min 0.914 pu), and the TS-all level is −41 mpu.
+    - Restoring the level takes about 55 % of the 754-Mvar area-2 STS DER capability, at STS V ≤ 1.09 pu.
+    - FM: −67.7 / −16.4 mpu, 41 %. E on the same base: −28.5 mpu, 17 %.
+  - Findings on the way:
+    - Two 400 Mvar connects at the same bus share one dormant load (key (bus, P, Q) in `contingency.py`), so the second step would do nothing. Hence the two buses.
+    - A cold-started power flow with both steps diverges for every candidate of 700 Mvar or more. Warm-started from the state after step 1, as the runner meets the step, every state converges.
+    - A 2-min capture commits G3 off (own-window commitment); the bounds use the 360-min one.
+  - Code:
+    - `ref/scenarios.py` F and FM;
+    - `ref/run_ref_remote.py`, the `--ref-remote` path of ch_9_16 for one scenario with its own tag and note (code sync, run number reservation, completion with `--run-dir`, pull);
+    - tests `test_scenario_F.py` and `test_ref_remote_driver.py` (2 pass).
+  - Runner check: the F config creates the two dormant loads (load buses 3 and 7), and G3 is committed.

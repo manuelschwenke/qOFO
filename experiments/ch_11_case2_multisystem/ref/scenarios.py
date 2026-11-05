@@ -88,6 +88,25 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
               "600 Mvar at bus 4",
         events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
                         _load(3, 600.0, _at(210, 140))]),
+    # Declared 2026-11-05 before any run (docs/analysis/
+    # 2026-11-05_scenario_F_declaration.md; author: "two subsequent 400 Mvar
+    # steps", "a scenario where we see a huge difference and really need sts
+    # resources"): E's first two events, then two 400 Mvar steps -- IEEE 4 (the
+    # location rule) and IEEE 8 (B's load bus) -- 59 min apart.  After the first
+    # step area 2's own TS resources still restore the level (bound +12 mpu);
+    # after the second they leave it 90 mpu low, and restoring it takes ~55 % of
+    # the area-2 STS DER capability.  Two load buses, because connect events with
+    # equal (bus, P, Q) share one dormant load (contingency.py).  FM: the same with
+    # 2 x 350 Mvar, declared as F's fallback (~41 %).
+    "F": dict(
+        title="area-2 deficit far beyond own TS resources: G3 out, line 9-39 out, "
+              "400 Mvar at bus 4, then 400 Mvar at bus 8",
+        events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
+                        _load(3, 400.0, _at(210, 140)), _load(7, 400.0, _at(270, 70))]),
+    "FM": dict(
+        title="F's fallback: G3 out, line 9-39 out, 350 Mvar at bus 4, then 350 Mvar at bus 8",
+        events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
+                        _load(3, 350.0, _at(210, 140)), _load(7, 350.0, _at(270, 70))]),
     # Renewable-dominated period under unit commitment (author decision
     # 2026-10-31): the earliest 6-h window of the profile year, outside the
     # excluded days, starting at a full hour between 06:00 and 12:00, in which

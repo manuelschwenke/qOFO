@@ -1656,6 +1656,13 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Its name differs from the driver's output `ch9_selected_uc_2026_11_v4`, which the driver refuses to overwrite.
   - Check: `apply_paramset(make_config(), TRIAL_PARAMSET)` loads in Z. With `main()`'s frozen network and `dso_gamma_oltc_q = 0`, the config equals the settling run's `resolved_config.json` in all 226 fields, except output settings (verbose, live plots, result_dir) and `sts_coupler_hold_after_bank`.
   - Finding: the v4 settling check ran with `sts_coupler_hold_after_bank = 0`. `CONFIG_SET` is applied only in `screen_argv` (12-h screen windows), not in `settle_argv`. Whether the flag matters for isolated interface steps is open (it acts only after a bank switch).
+- **10:09: run 0008 done, GO; selected 061dadc05755** (20.51 h). The driver wrote `configs/paramsets/ch9_selected_uc_2026_11_v4.json`.
+  - Go checks all true: e_v_ts 0.00802 ≤ 0.01; STS couplers move in every search window (W1 4, W3 5, W4 10, W6 16); banks after events in 2 windows; all limits met.
+  - **W5 report (held out): 16 tap and 3 bank reversals counted** (`n_hunting` 16, `n_shunt_hunting` 3). Also e_v_ts 0.00617, e_v_ds 0.00616, no V violation, 23 bank commits (12 up, 11 down), 84 tap moves. v3 (8ad8) had 31 tap and 0 bank reversals there.
+  - Structure: bank z2[0] switches in and out three times — 4140/6480 s, 14220/16740 s, 40140/43020 s; dwell 2340–2880 s, under the 1-h hunting dwell. These are the 3 bank reversals.
+  - 14 of the 16 tap reversals lie inside these three in/out cycles; they start up to about 13 min before or after the bank comes in. They are on the STS couplers of all four DSOs together (DSO_1 trafo_2, DSO_3 trafo_8, DSO_4 trafo_11 in each cycle; DSO_2 trafo_4/5, DSO_4 trafo_10 and TS trafo 3[1] in the third). The other 2 (DSO_1 trafo_1/trafo_2) start at 17280 s, an event time with a bank switch (z2[2], z2[5], z3[0]).
+  - Hypothesis (not tested): in W5 the IBG reactive capability is zero (VDE dead band), so the TS controller has only banks and taps. The z2[0] in/out cycle and the common-mode coupler reversals are one oscillation. `sts_coupler_hold_after_bank = 1` (one period, 180 s) is much shorter than the 2300–2900 s cycle.
+  - The queue's W5 gate (0 tap and 0 bank reversals) therefore fails: D1 + D2 and REF do not start, and the record additions and the switch of `SELECTED_PARAMSET` are not made. The author decides.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

@@ -1675,6 +1675,11 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - Launched 10:19 with `--no-w5-gate --parallel-ref` through Win32_Process.Create: launcher 101380 (scratchpad `launch_ref_queue_par.py`, mask 0x555555), queue 87744.
     - 10:19:57: the record additions were written to `ch9_selected_uc_2026_11_v4.json` (`sts_coupler_hold_after_bank` 1, `lambda_max_B` 1.4048).
     - 10:20:03: `SELECTED_PARAMSET = ch9_selected_uc_2026_11_v4` (commit 3ef2329).
+    - 10:20:51: e5power code synced (23 Python files over 3d98d31, hashes equal).
+    - D1 + D2 on e5power from 10:21: run `0012_2026-11-05_102108_ch_9_4_deadband` (shard pid 28576, 30 workers).
+    - REF here, launched 90 s apart: `results/ch_11_case2_multisystem/ref/0010_..._run_ref_v4_A` (10:21), `0011_..._v4_B`, `0012_..._v4_D` and `0013_..._v4_E` (10:25).
+    - Checked at 10:26: 4 run_ref processes + 12 pool workers, all on mask 0x555555.
+  - ETA: D1 + D2 pulled back about 12:45; REF (2 batches of about 2.2 h) about 15:00–15:30; then the width gate verdict in `REF_DONE.json`.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

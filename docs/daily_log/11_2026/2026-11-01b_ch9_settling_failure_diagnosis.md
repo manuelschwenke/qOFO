@@ -1864,7 +1864,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - S1 sets the wall time: about 2.8 / 3.3 / 3.8 / 5.1 h for A / B / D / E. In E the steps slowed to 43–45 s around t = 300 min, with the STS tap-rate limit active in most steps (similar share in D).
   - The queue's copies of the shard logs failed every time (remote PowerShell "Preparing modules for first use"); the run folders are complete.
   - Queue 109684 and launcher 145920 have exited.
-- **17:25–18:10: Chapter 10 reference run = scenario E** (author: "I would only report run E then as reference run ... And the cross scenario evaluation then comes from the Monte Carlo evaluation. E CLEANLY SHOWS cascade profit").
+- **17:30–18:26: Chapter 10 reference run = scenario E** (author: "I would only report run E then as reference run ... And the cross scenario evaluation then comes from the Monte Carlo evaluation. E CLEANLY SHOWS cascade profit").
   - Headline e_v (mpu), A / B / D / E:
     - L2 11.2 / 9.7 / 10.5 / 16.1; S1 8.2 / 6.9 / 7.8 / 13.2; S2 8.5 / 8.1 / 7.7 / 10.0;
     - O2 6.8 / 5.1 / 6.1 / 9.9; O3 6.6 / 4.7 / 5.9 / 8.5; M 6.4 / 4.8 / 5.6 / 7.6.
@@ -1902,7 +1902,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - batch 2 would be re-simulated unless its verdicts are entered;
   - `pull_dir` should log the full stderr.
 - Any amendment now would be declared after the results are known.
-- **18:30: why the SVR variants peak at E's load step** (author: "Why is the peak so high anyway? Investigate!"). From the S1, S2 and O2 log.pkl of run 0017, at 20-s resolution:
+- **18:40–19:00: why the SVR variants peak at E's load step** (author: "Why is the peak so high anyway? Investigate!"). From the S1, S2 and O2 log.pkl of run 0017, at 20-s resolution:
   - Area 2 has no synchronous machine after G3's trip (30:40), and the tie 9–39 to the G1 equivalent is open from 121:40. After the 600-Mvar step, only the neighbours' machines and the STSs can respond.
   - Under the classical scheme, the area-1 secondary regulation, which holds the pilot bus only, has moved the AVR set-points of both real area-1 machines to the 0.95 pu floor before the step: the first by 48 min, the second by 180 min. The G1 equivalent stays at 1.03.
   - Under SVR+, one area-3 machine is also at 0.95 by 210 min. Under OFO the area-1 machines stay at 1.029–1.03 pu.
@@ -1910,7 +1910,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - In those 20 s the area-2 STS support falls from 78 to 66 Mvar, and the machines are not at their Q limits (area-1 headroom 189 / 305 Mvar).
   - The SVR only raises the set-points at its 180-s dispatches, so the recovery takes minutes: 73 mpu at 215.7, 48 mpu at 216.3 min.
   - S2 peaks lower (68 mpu) because its STSs supply 232–297 Mvar.
-- **18:50: why the SVR parks area-1 machines at 0.95 pu** (author: "why is 0.95 needed in the svr scenarios? The O scenarios never have such low voltages, correct?").
+- **19:50–20:15: why the SVR parks area-1 machines at 0.95 pu** (author: "why is 0.95 needed in the svr scenarios? The O scenarios never have such low voltages, correct?").
   - Lowest AVR set-points in E:
     - S1 area 1 0.95; S2 areas 1 and 3 0.95;
     - O2 1.021–1.029, O3 1.021–1.031, M 0.998–1.022.
@@ -1921,7 +1921,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - the RPRs lower both real area-1 machines' set-points to the 0.95 floor (48 and 180 min), and machine 1 still produces +61 to +77 Mvar there, so its absorption target is never reached.
   - The G1 network equivalent is in area 1 at a fixed 1.03 pu and is not an SVR actuator (non_dispatchable). Hypothesis: it holds the pilot above the SVR's reference, so the SVR integrates against a pilot it cannot move (wind-up), and the floor is saturation, not a need.
   - The same happens in A (63 min) and B (48 min), so it is a property of the S variants in this period, not of scenario E.
-- **19:20: pilot re-selection (option c) checked; the real cause of the SVR floor is the machine-transformer OLTCs** (author: "I would try (c) first").
+- **20:35–21:00: pilot re-selection (option c) checked; the real cause of the SVR floor is the machine-transformer OLTCs** (author: "I would try (c) first").
   - Area-1 candidates on the base case (S1 config, t = 0, machines at 1.03 pu; scratchpad pilot_area1.py, linearised):
 
     | IEEE bus | V0 (pu) | dV/dV, own machines | dV/dV, equivalent | own share | reach with own machines in [0.95, 1.05] |
@@ -1942,7 +1942,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     - MachineTrf of G9 (trafo 10) steps +1 every 15 min from 108.7 to 212.3 min (1 → 6).
   - Mechanism: in the S variants the machine-transformer OLTCs run the local rule-based voltage control and undo each AVR set-point reduction of the SVR. The pilot error persists, and the regional integrator winds the set-points down to the 0.95 floor. Two controllers act on the same voltage with different laws.
   - Re-selecting the pilot would not change this.
-- **19:40: machine taps fixed under SVR; rerun plan** (author: "Keep fixed. Analyse afterwards if a tap change would have been needed. Plan the reruns then + ch 9 rerun").
+- **21:00–21:08: machine taps fixed under SVR; rerun plan** (author: "Keep fixed. Analyse afterwards if a tap change would have been needed. Plan the reruns then + ch 9 rerun").
   - Code, commit aa5e4d3:
     - `MultiTSOConfig.svr_fix_machine_taps` (default False); the runner installs no machine-transformer TapRelay under tso_mode='svr' when it is set;
     - set in run_case1 `_SVR` (Case 1 S1m, S1, O0; inherited by Case 2 S1, S2) and in the guard set `_SVR_FIELDS`;
@@ -1953,7 +1953,7 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
     2. Tap analysis on that run: per machine, the time the HV side is outside the relay band 1.03 ± 0.01 pu for longer than the 15-min hold, the time at the AVR limits, and the Q headroom. A tap change "would have been needed" where the band is left while the AVR is at a limit.
     3. Case 1 (Ch 9) rerun with run_case1 on the commitment base with the v4 weights and fixed taps (L2, S1m, S1, O0, O1, O2), about 5–6 h. Decisions needed: the event schedule (the six-event make_config schedule, or that of scenario A/E, see the Ch 10 todo), and whether O1 (TS-OFO on AVRs with local machine taps) gets the same fix.
     4. Monte Carlo after the G3-on filter (author's OK pending), with all variants including the fixed taps.
-- **19:55: fix_machine_taps generalised; O1 included; LOC and Ch 9 scenario discussed** (author: "use it in O1 also too keep it consistent. Should it be held in LOC to to be consistent?"; "ch.9 could use a milder one, like A ... It doesnt have to prove sts support").
+- **21:10–21:15: fix_machine_taps generalised; O1 included; LOC and Ch 9 scenario discussed** (author: "use it in O1 also too keep it consistent. Should it be held in LOC to to be consistent?"; "ch.9 could use a milder one, like A ... It doesnt have to prove sts support").
   - Commit 6d69e37: `svr_fix_machine_taps` → `fix_machine_taps`.
     - Applies to the TapRelay and the DiscreteTapControl path.
     - Set for Case 1 S1m, S1, O0, O1 and Case 2 S1, S2; allowed on the O1 → O2 step.
@@ -1961,3 +1961,4 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - LOC: its machine-tap relays move rarely: E 4 moves in 6 h (G4 2, G7 1, G10 1), A 5. The frequent local moves are network OLTCs (trafo 3, 4).
   - Recommendation: hold LOC's machine taps fixed as well. Then the uniform rule is "machine taps move only when an MIQP dispatches them" (O2, O3, M), and the effect on LOC is small. Not set yet.
   - Ch 9 on scenario A: run_case1 has no scenario option (six make_config contingencies). It needs a `--scenario` that takes the events of ref/scenarios.py, as run_ref does.
+- **21:20: LOC's machine taps fixed too; run_case1 --scenario** (author: "Held fixed"). Commit 49b52e9: L2 (Case 1, inherited by Case 2) gets fix_machine_taps; `run_case1 --scenario A` takes A's three events (1840, 7300, 12740 s) and keeps the period; the Case 1 guard passes; 36 tests pass. Note: the clock times of the entries between 17:30 and 21:15 were corrected at 21:25 from the commit times (they had been estimated).

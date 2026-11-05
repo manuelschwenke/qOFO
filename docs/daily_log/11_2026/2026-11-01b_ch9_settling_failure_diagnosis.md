@@ -1687,6 +1687,28 @@ Source: the persisted tap moves and `hunting_detail` of all 244 candidates. No s
   - `width_gate()` evaluated read-only at 10:57: True. D1 design width 0.01 pu equals REF's `tso_qv_deadband_pu` and `dso_qv_deadband_pu` (0.01). So the parallel REF runs use the dead band that D1 designs.
   - Confirmation (width 0.01): TS droop never activates in any window. STS activations: W2 32, W4 97, W5 82; 0 in W1, W3, W6. Identical to the run without the dead band in W1, W3, W5 and W6; not in W2 and W4.
   - The queue now waits for REF (about 15:00–15:30) and then writes the gate verdict into `REF_DONE.json`.
+- **11:03: REF pool workers and the queue aborted by a console close event.**
+  - `forrtl: error (200): program aborting due to window-CLOSE event` (Intel Fortran runtime handler, in `ref_A.log` and the queue's `console.log`).
+  - All 12 pool workers died at 11:03:46–55 (BrokenProcessPool; no variant had finished). The queue restarted the four scenarios with `--run-dir` (pids 100164, 45932, 72304, 113392), then died itself; launcher 101380 logged "exit 2 after 2652 s" and, being past 120 s, did not repeat it.
+  - The four run_ref restarts run on as orphans since 11:04 (12 workers, mask 0x555555), in folders 0010–0013, still attached to the launcher's console (conhost 144312, session 259). Nothing will write `REF_DONE.json` for them.
+  - Cause of the close event: not established. No session event at 11:03 (RDP session 285 disconnects at 10:47–10:59 only).
+    - Hypothesis: a visible console window of the launcher was closed.
+    - Fix for any relaunch: start with `CREATE_NO_WINDOW` and `FOR_DISABLE_CONSOLE_CTRL_HANDLER=1`.
+- **11:10–11:40: Chapter 8 D1 results updated from run 0012** (author: "can you regenerate the D1/D2 figures in the thesis with the new data?").
+  - The thesis has no D1/D2 figure; there are the D1/D2 paragraphs, `tab:param:deadband:d2`, and a `\todo` for a D2 figure.
+  - Extraction script: scratchpad `d1d2_numbers.py`. Applied to run 0010 (`Z:/.../0010_2026-10-28_153900_ch_9_4_deadband`), it reproduces every number of the D1/D2 paragraphs and the table; the one exception is the W5 over-voltage duration, 160 s against 170 s in the text.
+  - `Z:/latex_diss_clone/Chapters/Chapter08.tex` (not committed):
+    - provenance block replaced by run 0012's `latex_header.tex`;
+    - D1 paragraph: max continuous deviation 0.0034 pu (W2, STS); Δ* 0.0075, design 0.010 pu (unchanged); discrete steps 0.021 pu (capability) and 0.012 pu (switching, W5); as written 0.025 pu;
+    - D1 confirmation: converters active 16/31/18 (W2/W4/W5), 16/24/27 at the narrower width; delivered ≤ 2.8/3.3/0 Mvar; max Δv 0.0105 pu and ΔQ_if 6.6 Mvar (0.0126 and 9.3 at the narrower width); tap and bank operations unchanged. At the narrower width one W2 converter is active for 30 s (> 20 s).
+    - A `\todo` at D2.
+  - **D2 of run 0012 is not usable as it stands:**
+    - all 12 W6 legs fail before the disturbance (power flow did not converge, step 42, `n_records` 0);
+    - the droop-disabled W2 legs diverge after the step (power flow, steps 382–384, i.e. about 4 min after 3610 s);
+    - in W2 at the design width, b11_cap holds a TS bus at up to 1.120 pu for 160 s (1.123 pu at twice the width);
+    - handover up to 610 s (star) and 740 s (wide);
+    - W1, W3, W4, W5 are close to run 0010.
+  - The D2 text and table still give run 0010; the author decides.
 
 ## Open
   - Settling tests only for variants that pass the frozen filter, on e5power.

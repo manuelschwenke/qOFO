@@ -115,6 +115,19 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
         title="F's fallback: G3 out, line 9-39 out, 350 Mvar at bus 4, then 350 Mvar at bus 8",
         events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
                         _load(3, 350.0, _at(210, 140)), _load(7, 350.0, _at(270, 60))]),
+    # Declared 2026-11-06 before any run (docs/analysis/2026-11-06_scenario_E2_
+    # declaration.md; author: "with 9-39 in operation, and maybe G3 and load step
+    # overlapping, then G3 coming back, then a line drop later"): E without the
+    # 9-39 opening, which raised the controllers' mismatch loop gain most (CEN
+    # 3.1 at its former cap), and at most two disturbances at a time.  The line
+    # (3-4, line 4) is the area-2 line or tie other than 9-39 whose opening leaves
+    # the largest area-2 deficit at the TS-a2 bound, with every controller's
+    # mismatch loop gain < 2 and the frozen-control minimum >= 0.90 pu.
+    "E2": dict(
+        title="area-2 Q-scarce without 9-39: G3 out, 600 Mvar at bus 4, G3 back, "
+              "line 3-4 out",
+        events=lambda: [_gen(1, _at(30, 40)), _load(3, 600.0, _at(90, 100)),
+                        _gen(1, _at(150, 140), "restore"), _line(4, _at(240, 60))]),
     # Renewable-dominated period under unit commitment (author decision
     # 2026-10-31): the earliest 6-h window of the profile year, outside the
     # excluded days, starting at a full hour between 06:00 and 12:00, in which

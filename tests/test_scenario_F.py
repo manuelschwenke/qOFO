@@ -24,6 +24,19 @@ def test_every_scheduled_event_lies_on_the_step_grid():
             assert ev.effective_time_s % sc.DT_S == 0.0, (name, ev.effective_time_s)
 
 
+def test_E2_keeps_9_39_and_at_most_two_disturbances_at_a_time():
+    ev = sc.events("E2")
+    kinds = [(x.element_type, x.action, x.element_index if x.element_index >= 0 else x.bus)
+             for x in ev]
+    assert kinds == [("gen", "trip", 1), ("load", "connect", 3), ("gen", "restore", 1),
+                     ("line", "trip", 4)]
+    assert all(not (x.element_type == "line" and x.element_index == 14) for x in ev)
+    t = [x.effective_time_s for x in ev]
+    assert t == sorted(t) and t[1] < t[2] < t[3]          # G3 back before the line trip
+    assert len({x % sc.T_TS for x in t}) == 4             # distinct dispatch phases
+    assert sc.events("E2")[1].q_mvar == 600.0 and sc.start_time("E2") is None
+
+
 def test_at_rejects_off_grid_times():
     import pytest
     with pytest.raises(ValueError, match="step grid"):

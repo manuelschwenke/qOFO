@@ -92,6 +92,10 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
               central_period_s=None, central_lambda_rule="continuous",
               **_O_STS_LABELS),
 }
+#: M with its loop gain capped at the selected design's lambda_max_B instead of
+#: M_LAMBDA_TARGET (author 2026-11-06: "would this be the best rule anyway, to have a
+#: similar lambda than in the OFO scenarios?"), run next to M to decide the rule.
+VARIANTS["Msel"] = dict(VARIANTS["M"])
 
 #: Registered variants that must not enter a run of record yet.
 NOT_READY: Dict[str, str] = {}
@@ -122,6 +126,8 @@ STEP_ALLOWED: Dict[Tuple[str, str], set] = {
                   "local_sensitivities_dso", "central_period_s",
                   "central_dso_g_v", "central_lambda_target",
                   "central_lambda_rule", "central_ts_discrete_cooldown"},
+    # The two loop-gain rules for the centralised reference.
+    ("M", "Msel"): {"central_lambda_target"},
 }
 
 
@@ -145,15 +151,17 @@ def resolved(name: str, minutes: int, events: Iterable[Any] = (),
                        f"valid: {sorted(VARIANTS)}")
     cfg = base_config(minutes, events, noise_seed)
     cfg = dataclasses.replace(cfg, **VARIANTS[name])
-    if name == "M":
+    if name in ("M", "Msel"):
         # M weights the STS buses as the STS-OFOs do (the paramset's dso_g_v),
         # not with the dataclass default 2e4, which was ~9x the selected value.
         # Its loop gain over the continuous actuators is capped at
-        # M_LAMBDA_TARGET: the runner scales all of M's g_w by
-        # kappa = lambda_max / target when it lies above (v4 weights: 1.781).
+        # M_LAMBDA_TARGET (Msel: the selected design's lambda_max_B): the runner
+        # scales all of M's g_w by kappa = lambda_max / target when it lies
+        # above (v4 weights: 1.781).
         cfg = dataclasses.replace(
             cfg, central_dso_g_v=float(cfg.dso_g_v),
-            central_lambda_target=M_LAMBDA_TARGET,
+            central_lambda_target=(M_LAMBDA_TARGET if name == "M"
+                                   else selected_lambda_max()),
             central_ts_discrete_cooldown=ts_equivalent_cooldown(cfg))
     return cfg
 

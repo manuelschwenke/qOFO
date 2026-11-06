@@ -75,6 +75,13 @@ def test_m_targets_the_declared_loop_gain_below_the_selected_designs():
     assert 0.0 < m.central_lambda_target < v.selected_lambda_max() < 2.0
 
 
+def test_msel_is_m_at_the_selected_designs_loop_gain():
+    m, ms = v.resolved("M", 10), v.resolved("Msel", 10)
+    assert ms.central_lambda_target == pytest.approx(v.selected_lambda_max())
+    diff = {f.name for f in dataclasses.fields(m) if getattr(m, f.name) != getattr(ms, f.name)}
+    assert diff == {"central_lambda_target"}
+
+
 def test_s1_to_s2_changes_only_the_sts_controller_and_the_access():
     a, b = v.resolved("S1", 10), v.resolved("S2", 10)
     diff = {f.name for f in dataclasses.fields(a)

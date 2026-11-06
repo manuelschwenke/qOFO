@@ -197,3 +197,47 @@ Read from the logs of run 0019 (CEN is identical in run 0017):
   - two discussion statements;
   - a todo marking the front statements and fig:case_svr:pareto as still from 2026-10-06.
   - tab:case_svr:stats stays from the old ensemble (MC campaign).
+
+## 09:25–09:42: CEN loop gain under model mismatch (author: "yes, check it. and we should have a reference CEN that does not oscillate, so maybe we have to lower the lambda a little more?")
+
+Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.pkl`.
+- **Method.**
+  - Capture M's controller at initialisation (the runner's `debug_central_curvature` hook,
+    patched to raise) and apply M's own κ (1.268).
+  - Rebuild its H on the plant copy after E's disturbances (warm-started PF, plant settings) and
+    take the eigenvalues of K = G_w⁻¹ H_mᵀ D_v H_t on the continuous columns (TS-IBG, AVR,
+    STS-IBG).
+  - A real eigenvalue > 2 means the per-tick error map flips sign and grows (period 2).
+  - Operating point stays t = 0; only topology and the load step change.
+  - G3's machine transformer stays energised at no load: the sensitivity builder drops a column
+    when it is out of service.
+- **Result** (max Re μ; in brackets without IBG1, the area-2 TS-IBG):
+
+  | state | max Re μ | without IBG1 | cycle in the run |
+  |---|---|---|---|
+  | intact (model) | 1.405 | 1.12 | no |
+  | 9–39 open only | 1.67 | 1.38 | — |
+  | G3 out | 2.17 | 1.82 | no (30:40–121:40) |
+  | G3 out + 9–39 open | 3.12 | 2.71 | yes (121:40–212:20) |
+  | + 600 Mvar | 3.29 | 2.87 | no (after ~215 min) |
+
+- **The dominant mode is carried by the TS-IBGs** (participation IBG3 1.00, IBG1 0.6–0.9, IBG2
+  0.4, IBG0 0.3); no AVR is among the top participants. So the IBG movement weights, not the AVR
+  weights, are the lever.
+- **Confirmed:** the disturbances raise the mismatch loop gain far beyond 2 (×2.2 after G3 and
+  9–39).
+- **Not explained by this static, unconstrained check:**
+  - Why no cycle after the G3 outage alone (2.17, marginal).
+  - Why it ends after the load step (3.29). The area-2 IBG is then at its Q maximum for the whole
+    window (reserve 0.000, 205 Mvar), but without it the gain is still 2.87.
+  - The operating point (t = 0 here) and the active constraints decide where the cycle appears.
+- **Required CEN target** (at this operating point; the largest eigenvalue scales with
+  1/target): max Re μ ≤ 2 after G3 + 9–39 needs λ_target ≤ 0.90; ≤ 1.6 needs 0.72; ≤ 1.4 needs
+  0.63.
+- **Side findings:**
+  - The `variants.py` comment says CEN's loop gain is 0.98, below the target; with v4 it is
+    1.781, and κ = 1.268 is applied.
+  - Ch 10 says "CEN runs at the selected weights": it runs at the selected weights × 1.268.
+  - The author has seen the cascade oscillate in other windows too: the same mismatch question
+    applies to the per-area TS-OFOs. Not examined here.
+- **CEN wall time** in run 0019: 1.8 h (e5wimi).

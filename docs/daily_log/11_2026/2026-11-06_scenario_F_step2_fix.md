@@ -129,3 +129,71 @@ only, no new simulation).
   - Access under the classical law: −27 % (was −24 %), area 2 24.8 → 14.9 mpu.
   - Under OFO: unchanged, −14 %.
   - SVR's peak after the step: 138 mpu. SVR reaches 0.868 pu 20 s after the step.
+
+## 09:05–09:12: CEN oscillation in fig:case3:tieflow (author: "what happens with CEN in figure 10.7")
+
+Read from the logs of run 0019 (CEN is identical in run 0017):
+- **What.** Between the opening of tie 9–39 (121:40) and the load step (212:20), every
+  continuous CEN set-point reverses direction at nearly every 20-s iteration (sign-flip share
+  0.96–1.00). This is a period-2 cycle at constant amplitude.
+  - Summed TS-IBG movement: about 55 Mvar per step. Summed AVR movement: about 0.0016 pu per step.
+  - All actuators flip in phase, together with the mean voltage of all three areas (area 2:
+    about 9.6 mpu per step). It is one common voltage-level mode.
+  - Taps, banks and coupler taps take no part. The cycle starts at 121:40 and has died out by
+    about 215 min.
+- **Share of CEN's effort.** 77 % of its AVR travel (0.42 of 0.55 pu) and 87 % of its TS-IBG
+  movement fall in this window. The Ch 10 sentence "CEN moves the AVR set-points 18 times as far
+  as OFO+" therefore mostly measures this cycle (not yet changed in the text).
+- **Margin by design.** CEN's loop gain at the selected weights is 1.781 at t = 0. The runner
+  scales all CEN movement weights by κ = 1.268 to reach the target λ_max(M) = 1.405
+  (`M/console.log`), a factor 1.42 to the limit 2. It is evaluated at the t = 0 operating point
+  with the intact topology.
+- **Hypothesis (not verified).** With 9–39 open, the plant's sensitivity of this mode exceeds
+  the cached one by more than that factor, so the effective per-iteration gain reaches 2.
+  - The amplitude is bounded by a nonlinearity (constraints).
+  - After the load step, the operating point and active set change and the cycle ends.
+  - Why the cascade (same weights, 180-s TS dispatch) does not show it is not established.
+- **Check proposed (not run):** the eigenvalues of the error map I − H_true·M_model at ~150 min,
+  with the post-trip sensitivity.
+
+## 09:14–09:22: Ch 9 on Case 1 run 0001 (author: "Yes, update Ch 9")
+
+- **Front rematched to v4** (commit 6cb0d19). The K1-PAR rule puts one S1 tuning at λ_max(B)
+  of the selected weights: v4 gives 1.405, so S1_T128 (T_RVR = 128.1 s) replaces S1_T137
+  (1.31). The ceiling 1.6 (112.5 s) and 600 s are unchanged.
+- **Front launched** 09:14:34 into run 0001: `run_case1 --only K1-PAR --scenario A --jobs 7
+  --run-dir …0001…`, local, pythonw, console in the scratchpad (`case1A_par_console.log`).
+  S1 runs took 4.7–5.3 h in K1-REF, so expect about 14:00–14:30.
+- **Tool fixes** (this commit):
+  - `report_case1.py` took the event times from the variant's make_config contingencies (the
+    six old minutes) and would have measured eq:case3:epost at the wrong times for a scenario
+    run. New `event_minutes()` reads the run's recorded scenario.
+  - `figures_case1.py`: the same for the event lines; panel (b) now shows the disturbance and
+    area with the largest growth under S1^- (on A: the G4 outage, area 1; on the six old
+    events: the tie trip at 210 min, as before).
+- **Results of run 0001** (`report_case1.py`, 09:17):
+  - S1m = O0 to 4.7e-10 pu (bus voltages) and 1.3e-10 pu (AVR); no output constraint active.
+  - Monitored voltages 0.942–1.055 pu. No regional level at its bound; AVR references at their
+    limits in 2 / 90 / 99.7 % of the plant steps (areas 1/2/3).
+  - Growth under S1m/O0: 3.6 (G4 outage) / 2.8 (load) / 1.1 (tie trip) mpu; under O1/O2
+    ≤ 0.13 mpu. The safeguard (S1) suppresses it after G4 and the load step, but not after the
+    tie trip (1.10 mpu, as S1m's 1.11). Why is open.
+  - Deployed tunings, RMS over areas:
+
+    | variant | AVR travel (pu) | pilot (mpu) | e_v (mpu) | worst (mpu) |
+    |---|---|---|---|---|
+    | S1 | 0.12 | 2.5 | 12.9 | 86 |
+    | S1m/O0 | 0.45 | 2.9 | 13.0 | 88 |
+    | O1 | 0.049 | 5.7 | 10.2 | 83 |
+    | O2 | 0.052 | 5.4 | 7.2 | 83 |
+    | L2 | 0 | 12.3 | 17.0 | 91 |
+
+- **Thesis** (scratchpad `ch9_ref_A_0001.py`, 09:21; CRLF kept; backups in
+  `thesis_backup_0017/`):
+  - instrument paragraph (scenario A's three events);
+  - the three observations of ch:case_svr:equivalence;
+  - Fig. 9.1 regenerated;
+  - tab:case_svr:reference (5 rows);
+  - two discussion statements;
+  - a todo marking the front statements and fig:case_svr:pareto as still from 2026-10-06.
+  - tab:case_svr:stats stays from the old ensemble (MC campaign).

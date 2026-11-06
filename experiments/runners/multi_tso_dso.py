@@ -4805,6 +4805,15 @@ def _run_multi_tso_dso_impl(
                                 ),
                             )
                             dso_ctrl_aff.receive_disturbance_message(msg)
+                            # The STS step of this instant reads a measurement
+                            # taken before the switch: hold its couplers so they
+                            # do not answer the deviation the bank answers.
+                            # Step 1 included (the STS then reads the initial
+                            # operating point).
+                            if config.sts_coupler_hold_after_bank > 0:
+                                dso_ctrl_aff.hold_oltcs(
+                                    config.sts_coupler_hold_after_bank
+                                )
 
             # The offset as it stands at dispatch, after this step's commits:
             # the setpoint the STS receives is u_pcc plus this.

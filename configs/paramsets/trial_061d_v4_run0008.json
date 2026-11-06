@@ -1,0 +1,35 @@
+{
+  "name": "trial_061d_v4_run0008",
+  "title": "TRIAL (not yet the procedure's output): procedure-v4 selection 061dadc05755 of run 0008, before its W5 report and go criteria",
+  "description": [
+    "Weight set of 2026-11-05 10:00 for trying in run_multi_system_ofo.main(); it is the candidate procedure v4 has selected, not its written output.",
+    "Status at writing: ranked first on all five windows (W1-W4, W6) at engagement level sts+bank (27/27 feasible at hunting tolerance 0); settling confirmation PASS (p95 23.05 <= 27 over 120 steps, max 32, median residual 0.34 Mvar; per DSO p95: DSO_1 24.3, DSO_2 16.0, DSO_3 30.2, DSO_4 13.75). The W5 report and the go criteria (started 09:45) are pending. The procedure's own output will be configs/paramsets/ch9_selected_uc_2026_11_v4.json in the worktree F:/qOFO_res.",
+    "Base: stage1_v3_uc_2026_11_pq10; Stage II-a/II-b (4 rounds) on W1, W3, W4, W6 with hunting tolerance 0 and dwell < 1 h; Stage II-c kept the bank price 19.02 (all 7 lower prices 4.27-15.36 hunt).",
+    "Measured in run 0008 (frozen network, 12-h evented windows, config sts_coupler_hold_after_bank=1): e_v_ts 0.008023 and e_v_ds 0.005457 over W1-W4, W6; worst 18 TSO and 8 DSO tap ops per day, 4 bank ops per day; 0 hunting, 0 V violations.",
+    "sts_coupler_hold_after_bank = 1 is part of the set: procedure v4 evaluated every candidate with it (config_set), and the record additions of ch_9_16 add it to the result's fields."
+  ],
+  "provenance": {
+    "key": "061dadc05755",
+    "run": "results/ch_09_parameter_selection/0008_2026-11-04_133847_ch_9_14_procedure_v4 (in the worktree F:/qOFO_res)",
+    "weights_from": "selection/selection_complete_sts+bank.json, ranked[0] (equal to expC/cand_061dadc05755_weights.json)",
+    "base_paramset": "stage1_v3_uc_2026_11_pq10",
+    "config_set": ["sts_coupler_hold_after_bank=1"],
+    "lambda_max_B": 1.404769626437365,
+    "procedure": "experiments/ch_09_parameter_selection/ch_9_14_procedure_v4.py (branch res/commitment-base-2026-10-31)",
+    "daily_log": "docs/daily_log/11_2026/2026-11-01b_ch9_settling_failure_diagnosis.md (branch res/commitment-base-2026-10-31)",
+    "created": "2026-11-05"
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.4,
+    "dso_g_v": 10000.0,
+    "g_w_der": 0.014211188776637435,
+    "g_w_pcc": 0.8729582741905181,
+    "g_w_gen": 1701774.6318173753,
+    "g_w_tso_oltc": 15.61053974546674,
+    "g_w_tso_shunt": 19.018174133315103,
+    "g_w_dso_der": 1.499327154316085,
+    "g_w_dso_oltc": 10.839405936667927,
+    "sts_coupler_hold_after_bank": 1
+  }
+}

@@ -309,15 +309,15 @@ def make_config() -> MultiTSOConfig:
         # -- Boundary equivalent for neighbouring TS areas -------------------
         tie_boundary_equivalent="thevenin",
         # -- Profile & contingency schedule ----------------------------------
-        start_time=datetime(2016, 1, 5, 8, 0),
+        start_time=datetime(2016, 1, 5, 6, 0),
         use_profiles=True,
         contingencies=[
             ContingencyEvent(minute=30,  element_type="gen",  element_index=2, action="trip"),
             ContingencyEvent(minute=180, element_type="gen",  element_index=2, action="restore"),
-            ContingencyEvent(minute=120,  element_type="load", bus=11, p_mw=0,   q_mvar=250, action="connect"),
-            ContingencyEvent(minute=330, element_type="load", bus=11, p_mw=0,   q_mvar=250, action="trip"),
-            ContingencyEvent(minute=180, element_type="load", bus=5, p_mw=150, q_mvar=100, action="connect"),
-            ContingencyEvent(minute=1000, element_type="load", bus=5, p_mw=150, q_mvar=100, action="trip"),
+            ContingencyEvent(minute=90,  element_type="load", bus=13, p_mw=100,   q_mvar=-350, action="connect"),
+            ContingencyEvent(minute=330, element_type="load", bus=13, p_mw=100,   q_mvar=-350, action="trip"),
+            #ContingencyEvent(minute=180, element_type="load", bus=5, p_mw=150, q_mvar=100, action="connect"),
+            #ContingencyEvent(minute=1000, element_type="load", bus=5, p_mw=150, q_mvar=100, action="trip"),
             ContingencyEvent(minute=300, element_type="line", element_index=25, action="trip"),
             ContingencyEvent(minute=420, element_type="line", element_index=25, action="restore"),
         ],
@@ -332,7 +332,7 @@ def make_config() -> MultiTSOConfig:
 #: ``experiments/ch_11_case2_multisystem/ref/scenarios.py``, e.g. ``"GA"``
 #: (08 Jan 2016 06:00, G3 decommitted by the merit order, A's events).
 #: ``None`` runs :func:`make_config`.
-SCENARIO: Optional[str] = None
+SCENARIO: Optional[str] = 'E2' #'GA'
 #: Case-2 variant for :data:`SCENARIO`, a key of
 #: ``experiments/ch_11_case2_multisystem/variants.py``: "O3" (OFO+, STS
 #: access), "O2" (OFO, no STS access), "L2", "S1", "S2", "M".
@@ -341,6 +341,26 @@ VARIANT: str = "O3"
 #: NOISE_SEED; not imported, because run_ref sets the Agg backend on import).
 SCENARIO_MINUTES: int = 360
 SCENARIO_NOISE_SEED: int = 20261027
+
+#: Parameter set :func:`main` applies in place of SELECTED_PARAMSET, to try a
+#: weight set without changing the chapter's selection; ``None`` runs
+#: SELECTED_PARAMSET.
+#:   "ch9_selected_uc_2026_11_v2": the procedure-v2 winner 1b945ad40b42
+#:       (run 0004, settling-confirmed);
+#:   "trial_1b94_sts010_shunt27" (2026-11-03, a diagnostic, not a selection):
+#:       that winner with the STS coupler price at theta_STS,min = 0.01 pu and
+#:       the bank price at its Stage-I value;
+#:   "trial_8ad8_v3_run0006" (2026-11-04): the procedure-v3 leader 8ad82442269b
+#:       of run 0006 before its settling confirmation;
+#:   "trial_061d_v4_run0008" (2026-11-05): the procedure-v4 selection
+#:       061dadc05755 of run 0008 (settling PASS) before its W5 report.
+#: Also applied on top of a :data:`SCENARIO` config (in place of its paramset
+#: of record).
+TRIAL_PARAMSET: Optional[str] = "trial_061d_v4_run0008"
+#: Run :func:`main` on the doubled-DSO_3 network the Chapter-9 weights are
+#: designed and evaluated on (``_ch9_selected_design.FROZEN_DSO_*``);
+#: :func:`make_config` itself is symmetric.
+TRIAL_FROZEN_NETWORK: bool = True
 
 
 def scenario_config(name: str, variant: str = "O3",
@@ -398,19 +418,35 @@ def main() -> None:
     )
     if SCENARIO is not None:
         cfg = scenario_config(SCENARIO, VARIANT)
+        if TRIAL_PARAMSET is not None:
+            cfg = apply_paramset(cfg, TRIAL_PARAMSET)
         print(f"Case-2 scenario {SCENARIO}, variant {VARIANT}: start "
               f"{cfg.start_time:%Y-%m-%d %H:%M}, {cfg.n_total_s / 60:.0f} min, "
               f"{len(cfg.contingencies)} events")
     else:
-        cfg = apply_paramset(make_config(), SELECTED_PARAMSET)
-        cfg = dataclasses.replace(cfg, dso_gamma_oltc_q=1.0)  # TEST: couplers also track interface Q
-    print(f"Controller weights: {SELECTED_PARAMSET}")
+        cfg = apply_paramset(make_config(), TRIAL_PARAMSET or SELECTED_PARAMSET)
+        if TRIAL_FROZEN_NETWORK:
+            from experiments.ch_09_parameter_selection._ch9_selected_design import (
+                FROZEN_DSO_DER_SCALE, FROZEN_DSO_LOAD_P_SCALE,
+            )
+            cfg = dataclasses.replace(cfg, dso_der_scale=dict(FROZEN_DSO_DER_SCALE),
+                                      dso_load_p_scale=dict(FROZEN_DSO_LOAD_P_SCALE))
+        # TEST (couplers also track interface Q) was 1.0; 0.0 since 2026-11-03 for the
+        # trial set, as in its diagnostics (couplers voltage-driven only).
+        cfg = dataclasses.replace(cfg, dso_gamma_oltc_q=0.0)
+    print(f"Controller weights: {TRIAL_PARAMSET or SELECTED_PARAMSET}")
     run_dir = new_run_dir("run_multi_system_ofo", cfg)
     log = run_multi_tso_dso(cfg)
     with (run_dir.root / "records.pkl").open("wb") as handle:
         pickle.dump(log, handle, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"\nSimulation complete. {len(log)} steps recorded.")
     print(f"Results: {run_dir.root}")
+    if cfg.live_plot_controller or cfg.live_plot_cascade or cfg.live_plot_overview:
+        # The live windows freeze once the run stops pumping them; keep them
+        # usable until they are closed (records are already on disk).
+        from visualisation.live_base import show_until_closed
+        print("Live windows stay open; close them to return to the prompt.")
+        show_until_closed()
 
 
 def make_config_ch9_frozen() -> MultiTSOConfig:

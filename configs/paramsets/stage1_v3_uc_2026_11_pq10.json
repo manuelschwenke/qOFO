@@ -1,0 +1,44 @@
+{
+  "name": "stage1_v3_uc_2026_11_pq10",
+  "title": "Procedure v3 Stage-I point (pi_q 10, theta_STS 0.01 pu)",
+  "description": [
+    "Designed by experiments\\ch_09_parameter_selection\\ch_9_11_procedure_v3.py under docs/tuning/2026-11-03_weight_selection_procedure_v3.md.",
+    "NOT a tuned point: the starting point of the v3 Stage-II search."
+  ],
+  "provenance": {
+    "producer": "experiments\\ch_09_parameter_selection\\ch_9_11_procedure_v3.py",
+    "procedure": "docs/tuning/2026-11-03_weight_selection_procedure_v3.md",
+    "date": "2026-11-03",
+    "operating_points": "results\\ch_09_parameter_selection\\0001_2026-10-31_135000_ch_9_6_full_procedure\\operating_points",
+    "operating_point_horizon_s": 43200.0,
+    "d_engage_pu": {
+      "oltc": 0.0075,
+      "dso_oltc": 0.01,
+      "shunt": 0.005
+    },
+    "g_w_gen": 5000000.0,
+    "lambda_targets": {
+      "TS": 1.0,
+      "STS": 1.4
+    },
+    "select_ceiling": 1.5458937198067635,
+    "rho": 25000.0,
+    "kappa": 0.2667863373570788,
+    "theta_sts_min": 0.01,
+    "theta_ts_min": 0.0075,
+    "lambda_max_B": 1.4471499454852388,
+    "lambda_max_B_sts": 1.4000000000417168
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.4,
+    "dso_g_v": 10000.0,
+    "g_w_der": 0.08969523650650978,
+    "g_w_pcc": 0.08969523650650978,
+    "g_w_gen": 5000000.0,
+    "g_w_tso_oltc": 21.307839984260788,
+    "g_w_tso_shunt": 13.49112602197785,
+    "g_w_dso_der": 1.499327154316085,
+    "g_w_dso_oltc": 10.839405936667928
+  }
+}

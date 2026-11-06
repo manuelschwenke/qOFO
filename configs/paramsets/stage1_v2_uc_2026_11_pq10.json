@@ -1,0 +1,67 @@
+{
+  "name": "stage1_v2_uc_2026_11_pq10",
+  "title": "Procedure v2 Stage-I variant pi_q = 10 (subordinate layer first)",
+  "description": [
+    "Designed by experiments\\ch_09_parameter_selection\\ch_9_8_procedure_v2.py under docs/tuning/2026-11-02_weight_selection_procedure_v2.md.",
+    "NOT a tuned point: one of three Stage-I variants, of which the settling verification chooses the starting point of the Stage-II search.",
+    "TS part identical to stage1_start_uc_2026_10 (procedure v1 Stage I)."
+  ],
+  "provenance": {
+    "producer": "experiments\\ch_09_parameter_selection\\ch_9_8_procedure_v2.py",
+    "procedure": "docs/tuning/2026-11-02_weight_selection_procedure_v2.md",
+    "date": "2026-11-02",
+    "network": "rural_700",
+    "dso_der_scale": {
+      "DSO_3": 2.0
+    },
+    "dso_load_p_scale": {
+      "DSO_3": 2.0
+    },
+    "unit_commitment": true,
+    "operating_points": "results\\ch_09_parameter_selection\\0001_2026-10-31_135000_ch_9_6_full_procedure\\operating_points",
+    "operating_point_horizon_s": 43200.0,
+    "priorities": {
+      "pi_v_ts": 1.0,
+      "pi_q": 10.0,
+      "pi_v_ds": 1.0
+    },
+    "tau": 1.0,
+    "d_engage_pu": {
+      "oltc": 0.0075,
+      "dso_oltc": 0.03,
+      "shunt": 0.01
+    },
+    "lambda_targets": {
+      "TS": 1.0,
+      "STS": 1.4
+    },
+    "kappa": 0.2767826364091128,
+    "integer_floors": {
+      "TS_1": 0.35521759288628274,
+      "TS_2": 0.48047156949581993,
+      "TS_3": 0.4341221662578467,
+      "STS_DSO_1": 0.16988723011787424,
+      "STS_DSO_2": 0.1825425521350258,
+      "STS_DSO_3": 0.1740902847875121,
+      "STS_DSO_4": 0.19047248610469722
+    },
+    "select_ceiling": 1.5458937198067635,
+    "rho": 25000.0,
+    "theta_sts_min": 0.029999999999999995,
+    "theta_ts_min": 0.0075,
+    "lambda_max_B": 1.3999999999543808,
+    "lambda_max_B_sts": 1.3999999999543808
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.4,
+    "dso_g_v": 10000.0,
+    "g_w_der": 0.08969523650650978,
+    "g_w_pcc": 0.08969523650650978,
+    "g_w_gen": 100000000.0,
+    "g_w_tso_oltc": 21.307839984260788,
+    "g_w_tso_shunt": 26.9822520439557,
+    "g_w_dso_der": 1.4451773607964318,
+    "g_w_dso_oltc": 32.51821781000378
+  }
+}

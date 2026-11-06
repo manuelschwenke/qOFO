@@ -2015,6 +2015,21 @@ class MultiTSOConfig:
     one on/off cycle of three MSCs, against +3.0 Mvar in the plant).  Runs
     made before 2026-11-02 correspond to ``False``."""
 
+    sts_coupler_hold_after_bank: int = 0  # added 2026-11-04
+    """STS iterations during which ALL coupler OLTCs of an STS are held after
+    the TS-MIQP commits a bank on one of its tertiaries, starting with the STS
+    step of the commit instant.  At that instant the STS reads a measurement
+    taken before the switch, so its couplers would answer the same deviation
+    as the bank (run 0006, Stage II-c: every counted reversal at the cheaper
+    bank prices).  1 = only the stale step; the STS DER stay free.  The STS
+    learns of the commit from the ``ShuntDisturbanceMessage`` it already
+    receives, not from the plant.  The first TS dispatch (step 1) is
+    included (author decision 2026-11-04): there the TS-MIQP engages MSCs in
+    every Chapter-9 window and, without the hold, the STS moves couplers on
+    the initial operating point and reverses some within 160 s.  0 = off, as
+    in every run before 2026-11-04.  Local bank relays send no message and
+    trigger no hold."""
+
     def validate_integrator_mode(self) -> None:
         """Fail-fast consistency check for the switched-shunt dispatch mode.
 
@@ -2041,6 +2056,12 @@ class MultiTSOConfig:
         if self.shunt_t_dwell_s < 0.0:
             raise ValueError(
                 f"shunt_t_dwell_s must be >= 0, got {self.shunt_t_dwell_s}"
+            )
+        if (not isinstance(self.sts_coupler_hold_after_bank, int)
+                or self.sts_coupler_hold_after_bank < 0):
+            raise ValueError(
+                "sts_coupler_hold_after_bank must be an int >= 0, got "
+                f"{self.sts_coupler_hold_after_bank!r}"
             )
         if min(self.tso_shunt_msc_n_levels, self.tso_shunt_msr_n_levels) < 1:
             raise ValueError("MSC/MSR n_levels must be >= 1")

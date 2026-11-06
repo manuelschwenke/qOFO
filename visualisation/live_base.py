@@ -296,6 +296,29 @@ class LiveWindow:
         raise NotImplementedError
 
 
+def show_until_closed() -> None:
+    """Keep the live windows usable after the run: run the GUI event loop
+    until every open figure is closed (``plt.ioff(); plt.show(block=True)``).
+
+    During a run the windows are pumped only by :meth:`LiveWindow.update`;
+    after the last step nothing does.  In PyCharm's Python console the idle
+    console did not take over either (run 0025, 2026-11-06: console idle,
+    window not responding for 96 s after the records were written), so the
+    windows froze.  Blocking here works the same in the console, under Run
+    and in plain ``python``; the prompt returns once the windows are closed.
+
+    No-op without open figures or on a non-interactive backend (``Agg`` in
+    tests and batch runs).
+    """
+    from matplotlib.backends import BackendFilter, backend_registry
+
+    interactive = backend_registry.list_builtin(BackendFilter.INTERACTIVE)
+    if not plt.get_fignums() or plt.get_backend().lower() not in interactive:
+        return
+    plt.ioff()
+    plt.show(block=True)
+
+
 def _tick_spacing_min(duration_min: float) -> float:
     for limit, spacing in ((600, 120), (240, 60), (120, 30), (60, 15), (20, 5)):
         if duration_min > limit:
@@ -358,18 +381,39 @@ def patch(color: str, label: str, alpha: float = 0.6, hatch: Optional[str] = Non
                  alpha=alpha, label=label, hatch=hatch, lw=0.0)
 
 
-def legend(ax: plt.Axes, handles, *, ncol: Optional[int] = None,
-           loc: str = "upper left", fontsize: float = 6.5) -> None:
+def legend(
+    ax: plt.Axes,
+    handles,
+    *,
+    ncol: Optional[int] = None,
+    loc: str = "upper left",
+    fontsize: float = 6.5,
+    columnspacing: float = 1.0,
+    handlelength: float = 1.6,
+    handletextpad: float = 0.8,
+) -> None:
     if not handles:
         return
-    ax.legend(handles=handles, loc=loc, fontsize=fontsize, frameon=True,
-              framealpha=0.75, edgecolor="none", ncol=ncol or min(len(handles), 4),
-              handlelength=1.6, columnspacing=1.0, borderaxespad=0.3)
+
+    ax.legend(
+        handles=handles,
+        loc=loc,
+        fontsize=fontsize,
+        frameon=True,
+        framealpha=0.75,
+        edgecolor="none",
+        ncol=ncol or min(len(handles), 4),
+        handlelength=handlelength,
+        columnspacing=columnspacing,
+        handletextpad=handletextpad,
+        borderaxespad=0.3,
+    )
 
 
 __all__ = [
     "COLOUR_ACT_BAND", "COLOUR_MEAS_BAND", "EMPTY_GREY", "LIMIT_RED",
     "LiveWindow", "REF_GREY", "Trace", "_c", "empty_note", "event_label",
     "fill_section_band", "finite_range", "legend", "patch", "proxy",
-    "set_band", "set_ylim_from", "style_axes", "tile_title", "value_tag",
+    "set_band", "set_ylim_from", "show_until_closed", "style_axes",
+    "tile_title", "value_tag",
 ]

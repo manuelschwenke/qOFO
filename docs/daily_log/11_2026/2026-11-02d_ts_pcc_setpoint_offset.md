@@ -128,6 +128,15 @@ Options (not implemented, for decision):
   The failure, `test_case2_variants::test_m_is_ready_and_has_the_cascade_timescale`
   (900 vs 1080 s), also fails on a clean checkout of HEAD 40f4e14; it is not
   caused by this change.
+
+### Thesis text (2026-11-03)
+`Z:\latex_diss_clone\Chapters\Chapter05.tex`, around
+`eq:shunt_interface_offset`, kept deliberately short at the author's request:
+equation and Δν ∈ {−1,+1} kept (author); three new sentences say the
+increment of Δν = +1 is stored and subtracted at the Δν = −1 that switches
+the level off, instead of being evaluated anew, so the estimate returns to
+zero with de-energised banks.  A LaTeX comment records the reason and the
+qOFO commit.
 - Analyses that compare `zone_q_pcc_set` with metered interface flow must add
   `zone_q_pcc_sh_offset` as well; `dso_trafo_q_set_mvar` already holds the
   shifted value on the STS side.

@@ -1,0 +1,31 @@
+{
+  "name": "trial_8ad8_v3_run0006",
+  "title": "TRIAL (not yet a selection): procedure-v3 leader 8ad82442269b of run 0006, before its settling confirmation",
+  "description": [
+    "Weight set of 2026-11-04 09:00 for trying in run_multi_system_ofo.main(); it is the current leader of procedure v3 (amendment 2), not its final output.",
+    "Status at writing: ranked first on all five windows (W1-W4, W6) at engagement level sts+bank; the settling confirmation (started 08:52) and the W5 report are pending. The procedure's own output will be configs/paramsets/ch9_selected_uc_2026_11_v3.json in the worktree F:/qOFO_res.",
+    "Update 2026-11-04 10:30: settling PASS (p95 23.0, median residual 0.33 Mvar); selected; go criteria GO. The held-out W5 (3 Feb 20:00, night) counts 31 tap reversals (22 begin within 10 min of a bank switching), against 0-1 in each other window.",
+    "Base: stage1_v3_uc_2026_11_pq10 (theta_STS,min 0.01 pu); Stage II-a/II-b search on W1, W3, W4, W6; Stage II-c kept the bank price (14.1 and 17.9 rejected on a second counted reversal).",
+    "Measured in run 0006 (shunt_ff_ledger True, frozen network, 12-h evented windows): e_v_ts 0.00799 and e_v_ds 0.00571 over W1-W4, W6 (v2 winner 0.00827); 1 counted tap reversal (DSO_1|trafo_2[0], W4 ramp), 0 bank reversals; banks commit at the W3 outage and the W4 load ramp and are held; STS couplers move in every window."
+  ],
+  "provenance": {
+    "key": "8ad82442269b",
+    "run": "results/ch_09_parameter_selection/0006_2026-11-03_211954_ch_9_11_procedure_v3 (in the worktree F:/qOFO_res)",
+    "base_paramset": "stage1_v3_uc_2026_11_pq10",
+    "procedure": "docs/tuning/2026-11-03_weight_selection_procedure_v3.md (branch res/commitment-base-2026-10-31)",
+    "daily_log": "docs/daily_log/11_2026/2026-11-01b_ch9_settling_failure_diagnosis.md (branch res/commitment-base-2026-10-31)",
+    "created": "2026-11-04"
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.4,
+    "dso_g_v": 10000.0,
+    "g_w_der": 0.011309609844356052,
+    "g_w_pcc": 0.40782464234504123,
+    "g_w_gen": 1285016.6948418445,
+    "g_w_tso_oltc": 19.612997716026342,
+    "g_w_tso_shunt": 22.757574669398625,
+    "g_w_dso_der": 1.499327154316085,
+    "g_w_dso_oltc": 10.839405936667927
+  }
+}

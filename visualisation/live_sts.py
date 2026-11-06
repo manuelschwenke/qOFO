@@ -103,7 +103,7 @@ class STSLiveWindow(LiveWindow):
     # ── artists ─────────────────────────────────────────────────────────────
 
     def _build_static(self) -> None:
-        titles = {"iface": "Interface Q", "v": "HV voltages", "der": "DER Q (sum)",
+        titles = {"iface": "Interface Q", "v": "HV voltages", "der": "IBG Q (sum)",
                   "tap": "Coupler taps"}
         nan = np.array([np.nan])
         self._a_v, self._a_der, self._notes, self._arts = {}, {}, {}, {}
@@ -164,9 +164,18 @@ class STSLiveWindow(LiveWindow):
                 (tap,) = ax_t.plot([], [], color=c, lw=1.1, drawstyle="steps-post")
                 arts.append((cap_lo, cap_hi, meas, sp, tap))
             self._arts[d] = arts
-            legend(ax_q, [a[2] for a in arts] + [
-                proxy("0.3", ls="--", lw=0.9, label="set"),
-                proxy("0.3", ls=":", lw=0.8, label="capability")], ncol=n + 2, fontsize=6)
+            legend(
+                ax_q,
+                [a[2] for a in arts] + [
+                    proxy("0.3", ls="--", lw=0.9, label="set"),
+                    proxy("0.3", ls=":", lw=0.8, label="cap."),
+                ],
+                ncol=n + 2,
+                fontsize=6,
+                columnspacing=0.5,
+                handlelength=1.3,
+                handletextpad=0.4,
+            )
 
     # ── ingest ──────────────────────────────────────────────────────────────
 

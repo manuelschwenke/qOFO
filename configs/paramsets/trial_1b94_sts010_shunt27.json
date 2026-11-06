@@ -1,0 +1,29 @@
+{
+  "name": "trial_1b94_sts010_shunt27",
+  "title": "TRIAL (not a selection): v2 winner 1b945ad40b42 with theta_STS,min 0.01 pu and the Stage-I bank price",
+  "description": [
+    "Diagnostic weight set of 2026-11-03 for trying in run_multi_system_ofo.main(); it is not the output of a selection procedure.",
+    "Base: ch9_selected_uc_2026_11_v2 (key 1b945ad40b42, procedure v2, run 0004).",
+    "Changed: g_w_dso_oltc 32.518 -> 10.839 (theta_STS,min 0.03 -> 0.01 pu, outside the frozen bounds [0.02, 0.04]); g_w_tso_shunt 88.197 -> 26.982 (the Stage-I value of stage1_v2_uc_2026_11_pq10).",
+    "Diagnostics (W1-W4, W6, run-0004 code, shunt_ff_ledger False): sts010 alone passes the frozen filter; shunt27 alone and shunt27 + sts020 fail on one unexplained TS-tap reversal (W6, trafo 1[0]). This combination has not been simulated."
+  ],
+  "provenance": {
+    "base_paramset": "ch9_selected_uc_2026_11_v2",
+    "base_key": "1b945ad40b42",
+    "diagnostics": "results/diagnostics/2026-11-03_winner_variants_0004 (in the worktree F:/qOFO_res)",
+    "daily_log": "docs/daily_log/11_2026/2026-11-01b_ch9_settling_failure_diagnosis.md (branch res/commitment-base-2026-10-31)",
+    "created": "2026-11-03"
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.4,
+    "dso_g_v": 10000.0,
+    "g_w_der": 0.008879923514291888,
+    "g_w_pcc": 0.33713925662879307,
+    "g_w_gen": 36734059.31651122,
+    "g_w_tso_oltc": 17.72846931308833,
+    "g_w_tso_shunt": 26.9822520439557,
+    "g_w_dso_der": 1.4451773607964318,
+    "g_w_dso_oltc": 10.839405936667925
+  }
+}

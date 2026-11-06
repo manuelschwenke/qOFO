@@ -145,7 +145,7 @@ class TSLiveWindow(LiveWindow):
 
         if self._pairs:
             ax = self.ax["tie"]
-            tile_title(ax, "Tie-line Q (+ out of lower zone)")
+            tile_title(ax, "Tie-line Q")
             ax.set_ylabel("Q / Mvar")
             ax.axhline(0.0, color=REF_GREY, lw=0.6)
             # Pair colours avoid the zone colours (_c(1.._n_zones)).
@@ -180,7 +180,7 @@ class TSLiveWindow(LiveWindow):
                 )
             legend(ax, self._zone_handles() + [
                 proxy("0.3", label="SG mean"), proxy("0.3", ls=":", lw=0.9, label="SG min"),
-                proxy("0.3", ls="--", label="DER mean")], ncol=3)
+                proxy("0.3", ls="--", label="IBG mean")], ncol=3)
             self._tag_res = value_tag(ax)
 
         if self._iline:
@@ -204,7 +204,7 @@ class TSLiveWindow(LiveWindow):
 
         if self._qder:
             ax = self.ax["qder"]
-            tile_title(ax, "TS-DER Q")
+            tile_title(ax, "TS-IBG Q")
             ax.set_ylabel("Q / Mvar")
             ax.axhline(0.0, color=REF_GREY, lw=0.6)
             self._a_qder = {z: [ax.plot([], [], color=self._zc[z], lw=0.9, alpha=0.85)[0]

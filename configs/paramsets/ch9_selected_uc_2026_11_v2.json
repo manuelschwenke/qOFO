@@ -1,0 +1,394 @@
+{
+  "name": "ch9_selected_uc_2026_11_v2",
+  "title": "Controller weights selected by procedure v2 (subordinate layer first) on the unit-commitment base",
+  "description": [
+    "Selected by docs/tuning/2026-11-02_weight_selection_procedure_v2.md (frozen 2026-11-02): STS weights designed in Stage I and verified by the settling test (variant pi_q = 10); Stage II-a/II-b over the five TS weights; filter with theta_STS,min in [0.02, 0.04] pu and theta_TS,min <= 0.009 pu; ranking on the per-bus TS voltage deviation with a 2 % band on the STS deviation; settling confirmation in rank order."
+  ],
+  "provenance": {
+    "producer": "experiments\\ch_09_parameter_selection\\ch_9_8_procedure_v2.py",
+    "run_dir": "results\\ch_09_parameter_selection\\0004_2026-11-02_091930_ch_9_8_procedure_v2",
+    "procedure": "docs/tuning/2026-11-02_weight_selection_procedure_v2.md",
+    "starting_paramset": "stage1_v2_uc_2026_11_pq10",
+    "stage1_variant_pi_q": 10.0,
+    "stage1_verification": {
+      "10": {
+        "run": "results\\ch_09_parameter_selection\\0004_2026-11-02_091930_ch_9_8_procedure_v2\\stage1\\verification\\v2_pq10\\20261102-092004",
+        "n_steps": 120,
+        "p95": 24.0,
+        "per_dso_p95": {
+          "DSO_1": 18.55,
+          "DSO_2": 13.2,
+          "DSO_3": 24.55,
+          "DSO_4": 16.65
+        },
+        "n_over": 0,
+        "censored": 0,
+        "max": 27,
+        "median_residual_mvar": 0.6123244305141053,
+        "pass": true
+      },
+      "20": {
+        "run": "results\\ch_09_parameter_selection\\0004_2026-11-02_091930_ch_9_8_procedure_v2\\stage1\\verification\\v2_pq20\\20261102-092004",
+        "n_steps": 120,
+        "p95": 23.0,
+        "per_dso_p95": {
+          "DSO_1": 17.55,
+          "DSO_2": 13.1,
+          "DSO_3": 24.1,
+          "DSO_4": 16.1
+        },
+        "n_over": 0,
+        "censored": 0,
+        "max": 27,
+        "median_residual_mvar": 0.4057158835460033,
+        "pass": true
+      },
+      "30": {
+        "run": "results\\ch_09_parameter_selection\\0004_2026-11-02_091930_ch_9_8_procedure_v2\\stage1\\verification\\v2_pq30\\20261102-092004",
+        "n_steps": 120,
+        "p95": 23.0,
+        "per_dso_p95": {
+          "DSO_1": 17.55,
+          "DSO_2": 16.2,
+          "DSO_3": 23.55,
+          "DSO_4": 15.75
+        },
+        "n_over": 0,
+        "censored": 0,
+        "max": 27,
+        "median_residual_mvar": 0.3139287241713742,
+        "pass": true
+      }
+    },
+    "dso_voltage_band_pu": [
+      0.92,
+      1.08
+    ],
+    "simulated_windows": "W1,W2,W3,W4,W6",
+    "w5_report": {
+      "e_v_ts": 0.009331838213883186,
+      "e_v_ds": 0.012756387704655524,
+      "v_metric": "bus",
+      "e_v_ts_areamean": 0.006071094625893288,
+      "e_v_ds_areamean": 0.01202620034120015,
+      "e_v_ts_bus": 0.009331838213883186,
+      "e_v_ds_bus": 0.012756387704655524,
+      "e_q": 98956.80958104582,
+      "v_band_excess_ts": 0.0048190850680815715,
+      "v_band_excess_ds": 0.003643823667129477,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "v_worst_ts": 0.04749413741195237,
+      "v_worst_ds": 0.0348877414579236,
+      "tap_ops_per_h_tso": 1.2505789717461788,
+      "tap_ops_per_h_dso": 0.33348772579898106,
+      "tap_rev_per_h_tso": 0.33348772579898106,
+      "tap_rev_per_h_dso": 0.16674386289949053,
+      "pf_failures": 0.0,
+      "wall_s": 1536.825332198292,
+      "failed": 0.0,
+      "failure_reason": "",
+      "avr_max_step_pu": 0.00014941743314689226,
+      "avr_total_variation_pu": 0.02048797368141475,
+      "n_hunting": 2,
+      "n_hunting_1h": 1,
+      "n_event_explained": 3,
+      "n_moves": 34,
+      "hunting_detail": [
+        {
+          "transformer": "3[1]",
+          "t0_s": 4500.0,
+          "t1_s": 6480.0,
+          "dwell_s": 1980.0
+        },
+        {
+          "transformer": "3[1]",
+          "t0_s": 10440.0,
+          "t1_s": 14220.0,
+          "dwell_s": 3780.0
+        }
+      ],
+      "moves": [
+        [
+          900.0,
+          "3[1]",
+          1
+        ],
+        [
+          1800.0,
+          "3[1]",
+          1
+        ],
+        [
+          4220.0,
+          "DSO_2|trafo_5[0]",
+          -1
+        ],
+        [
+          4320.0,
+          "DSO_1|trafo_2[0]",
+          -1
+        ],
+        [
+          4460.0,
+          "DSO_3|trafo_8[0]",
+          -1
+        ],
+        [
+          4500.0,
+          "3[1]",
+          1
+        ],
+        [
+          6480.0,
+          "3[1]",
+          -1
+        ],
+        [
+          7740.0,
+          "3[1]",
+          -1
+        ],
+        [
+          10440.0,
+          "3[1]",
+          -1
+        ],
+        [
+          14220.0,
+          "3[1]",
+          1
+        ],
+        [
+          17280.0,
+          "1[0]",
+          1
+        ],
+        [
+          17280.0,
+          "1[1]",
+          1
+        ],
+        [
+          17280.0,
+          "3[1]",
+          1
+        ],
+        [
+          18180.0,
+          "3[1]",
+          1
+        ],
+        [
+          20880.0,
+          "1[0]",
+          -1
+        ],
+        [
+          20880.0,
+          "1[1]",
+          -1
+        ],
+        [
+          20880.0,
+          "3[1]",
+          -1
+        ],
+        [
+          20880.0,
+          "DSO_1|trafo_2[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_2|trafo_5[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_4|trafo_10[0]",
+          1
+        ],
+        [
+          20880.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          21780.0,
+          "1[1]",
+          -1
+        ],
+        [
+          21780.0,
+          "3[1]",
+          -1
+        ],
+        [
+          22680.0,
+          "3[1]",
+          -1
+        ],
+        [
+          36720.0,
+          "3[1]",
+          1
+        ],
+        [
+          38340.0,
+          "1[1]",
+          1
+        ],
+        [
+          40500.0,
+          "3[1]",
+          1
+        ],
+        [
+          41080.0,
+          "DSO_1|trafo_2[0]",
+          -1
+        ],
+        [
+          41080.0,
+          "DSO_2|trafo_5[0]",
+          -1
+        ],
+        [
+          41120.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          41220.0,
+          "1[0]",
+          1
+        ],
+        [
+          41380.0,
+          "DSO_1|trafo_2[0]",
+          -1
+        ],
+        [
+          41400.0,
+          "3[1]",
+          1
+        ],
+        [
+          41400.0,
+          "DSO_2|trafo_5[0]",
+          -1
+        ]
+      ],
+      "events_s": [
+        17280.0,
+        20880.0
+      ],
+      "shunt_commits": 0,
+      "shunt_up": 0,
+      "shunt_down": 0,
+      "shunt_reversals": 0,
+      "shunt_max_level": 0.0,
+      "shunt_ops_max_bank": 0,
+      "n_shunt_hunting": 0,
+      "n_shunt_event_explained": 0,
+      "shunt_hunting_detail": [],
+      "shunt_moves": [],
+      "shunt_ops_per_h_bank": 0.0
+    },
+    "selected_key": "1b945ad40b42",
+    "max_hunting_applied": 0,
+    "n_feasible": 80,
+    "theta_sts_min_pu": 0.02999999999999999,
+    "theta_ts_min_pu": 0.006240121943208559,
+    "failed_settling": [],
+    "lambda_max_B": 1.3999999999543813,
+    "aggregate_ranked_windows_per_bus": {
+      "e_v_ts": 0.008265492296444998,
+      "e_v_ds": 0.008277277819761193,
+      "e_q": 187174.44081471898,
+      "worst_tap_ops_per_day_tso": 18.008337193144975,
+      "worst_tap_ops_per_day_dso": 4.001852709587773,
+      "worst_tap_rev_per_day_tso": 2.0009263547938865,
+      "worst_tap_rev_per_day_dso": 0.0,
+      "worst_avr_max_step_pu": 0.00010344034518627865,
+      "worst_v_band_excess_ts": 0.025162855036320198,
+      "worst_v_band_excess_ds": 0.014795721269433454,
+      "n_hunting": 0.0,
+      "n_hunting_1h": 0.0,
+      "n_event_explained": 1.0,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "worst_v_worst_ts": 0.0653252271960889,
+      "worst_v_worst_ds": 0.051732797610207056,
+      "pf_failures": 0.0,
+      "n_failed_windows": 0,
+      "has_shunt_wear": 1.0,
+      "worst_shunt_ops_per_day_bank": 0.0,
+      "n_shunt_hunting": 0.0,
+      "n_shunt_event_explained": 0.0,
+      "shunt_commits": 0.0
+    },
+    "baseline_aggregate": {
+      "e_v_ts": 0.008449970750370014,
+      "e_v_ds": 0.013016828442736906,
+      "e_q": 548595.855612932,
+      "worst_tap_ops_per_day_tso": 18.008337193144975,
+      "worst_tap_ops_per_day_dso": 14.006484483557204,
+      "worst_tap_rev_per_day_tso": 4.001852709587773,
+      "worst_tap_rev_per_day_dso": 2.0009263547938865,
+      "worst_avr_max_step_pu": 2.8515954965779855e-05,
+      "worst_v_band_excess_ts": 0.025395594397234947,
+      "worst_v_band_excess_ds": 0.0217094527021625,
+      "n_hunting": 1.0,
+      "n_hunting_1h": 0.0,
+      "n_event_explained": 1.0,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "worst_v_worst_ts": 0.0647887769378122,
+      "worst_v_worst_ds": 0.0518768626156902,
+      "pf_failures": 0.0,
+      "n_failed_windows": 0,
+      "has_shunt_wear": 1.0,
+      "worst_shunt_ops_per_day_bank": 2.0,
+      "n_shunt_hunting": 0.0,
+      "n_shunt_event_explained": 0.0,
+      "shunt_commits": 2.0
+    },
+    "settling": {
+      "run": "results\\ch_09_parameter_selection\\0004_2026-11-02_091930_ch_9_8_procedure_v2\\expC\\cand_1b945ad40b42\\20261103-120148",
+      "n_steps": 120,
+      "p95": 22.0,
+      "per_dso_p95": {
+        "DSO_1": 18.1,
+        "DSO_2": 15.55,
+        "DSO_3": 24.55,
+        "DSO_4": 12.0
+      },
+      "n_over": 0,
+      "censored": 0,
+      "max": 27,
+      "median_residual_mvar": 0.41797751680560014,
+      "pass": true
+    },
+    "weight_fingerprint": "1b945ad40b42",
+    "design_rho": 25000.0,
+    "design_kappa": 0.2767826364091128,
+    "design_theta_sts_min": 0.02999999999999999,
+    "design_theta_ts_min": 0.006240121943208559,
+    "design_lambda_max_B": 1.3999999999543813,
+    "design_lambda_max_B_sts": 1.3999999999543813
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.4,
+    "dso_g_v": 10000.0,
+    "g_w_der": 0.008879923514291888,
+    "g_w_pcc": 0.33713925662879307,
+    "g_w_gen": 36734059.31651122,
+    "g_w_tso_oltc": 17.72846931308833,
+    "g_w_tso_shunt": 88.1970943765491,
+    "g_w_dso_der": 1.4451773607964318,
+    "g_w_dso_oltc": 32.518217810003776
+  }
+}

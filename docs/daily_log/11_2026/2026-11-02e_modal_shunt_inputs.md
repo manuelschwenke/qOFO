@@ -97,6 +97,37 @@ Checks:
     `export/dynamic_snapshot.py` and `pf/naming.py` equal the campaign commit 781a819,
     ignoring line endings.
 
+## Tap rows below 0.5 s (author question, 2026-11-02)
+The caption of Table 8.2 called 0.5 s "the time resolution of the evaluation". That was
+inaccurate: 0.5 s is `T_MIN`, the start of the modal evaluation. The grid is 0.02 s up to
+60 s. Below 0.5 s the fast repeated eigenvalues (e.g. 84 identical 10 ms lags, cluster
+condition up to 1e16) cannot be decomposed reliably. The coupler and bus-12 tap rows
+("5 + 0.5") are therefore upper bounds.
+
+**Check (scratch computation, not a documented run).**
+- Method: the taps-in system of each window, exactly as in `run()` (`tapsin_system`,
+  slack-machine tap skipped), coupler (`TAP_NC3W`) and bus-12 (`TAP_other`) taps only.
+  Exact zero-order-hold discretisation with `expm([[A, B], [0, 0]] * 0.01)`, no
+  eigen-decomposition. Simulated `y = C x + D` for 0–3 s against `y_inf` of `analyse()`.
+- Coverage: W1–W6, both droop cases, 14 taps × 82 outputs = 13 776 pairs.
+
+| tap | droop inert | droop on its slope | pairs outside the band after 0.5 s |
+|:--|--:|--:|--:|
+| coupler | 0.00 s | ≤ 0.10 s (W4, TAP_NC3W_DSO_3_t7 -> its own Q: jump 22 × band, final 14 × band) | 0 |
+| bus 12 | 0.00 s | ≤ 0.03 s | 0 |
+
+The largest error at 0.5 s is 0.87 × band (W4, droop on its slope).
+
+**Author decision: fix the wording, keep 0.5 s.**
+- Chapter08.tex: the caption now reads "Settling is evaluated from 0.5 s after the step
+  on; shorter settling times are given as ≤ 0.5 s".
+- The cells now read `$5 + {\leq}\,0.5$`.
+- The text sentence ("settle within 0.5 s of contact") was already correct as a bound.
+- A LaTeX comment records the check. The values 0.10 s / 0.03 s are not quoted in the text,
+  for two reasons: there is no documented run, and below ~0.1 s the RMS model (phasors,
+  instantaneous tap contact, 10–20 ms converter lags) does not support that precision.
+- T_STS is unaffected: 5 + ≤ 0.5 ≤ 5.5 s, against the binding 17.7 s.
+
 ## Open
 - **Base.** All rows of Table 8.2 come from the 2026-09-23 linearisations (snapshots of
   2026-09-08). The commitment base of 2026-10-31 is not linearised.

@@ -69,17 +69,18 @@ def test_m_weights_the_sts_buses_like_the_sts_controllers():
     assert m.control_scope == "central"
 
 
-def test_m_targets_the_declared_loop_gain_below_the_selected_designs():
+def test_m_targets_the_selected_designs_loop_gain():
     m = v.resolved("M", 10)
-    assert m.central_lambda_target == pytest.approx(0.90)
-    assert 0.0 < m.central_lambda_target < v.selected_lambda_max() < 2.0
+    assert m.central_lambda_target == pytest.approx(v.selected_lambda_max())
+    assert 0.0 < m.central_lambda_target < 2.0
 
 
-def test_msel_is_m_at_the_selected_designs_loop_gain():
-    m, ms = v.resolved("M", 10), v.resolved("Msel", 10)
-    assert ms.central_lambda_target == pytest.approx(v.selected_lambda_max())
-    diff = {f.name for f in dataclasses.fields(m) if getattr(m, f.name) != getattr(ms, f.name)}
-    assert diff == {"central_lambda_target"}
+def test_msel_is_m_and_m090_differs_only_in_the_fallback_ceiling():
+    m, ms, ml = v.resolved("M", 10), v.resolved("Msel", 10), v.resolved("M090", 10)
+    fields = [f.name for f in dataclasses.fields(m)]
+    assert {k for k in fields if getattr(m, k) != getattr(ms, k)} == set()
+    assert {k for k in fields if getattr(m, k) != getattr(ml, k)} == {"central_lambda_target"}
+    assert ml.central_lambda_target == pytest.approx(v.M_LAMBDA_FALLBACK) == pytest.approx(0.90)
 
 
 def test_s1_to_s2_changes_only_the_sts_controller_and_the_access():

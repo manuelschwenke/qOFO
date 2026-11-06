@@ -339,3 +339,21 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
   - Without access, O2's area-2 level falls to −30.9 mpu in stage 2 (bound −28.3).
 - **λ rule:** on E2, M (0.90) and Msel (1.405) differ by ≤ 0.4 mpu per stage. On old E only 0.90
   is free of the cycle.
+
+## 12:12–12:17: CEN ceiling back to the selected design's λ, 0.90 as fallback (author: "I would at least try 1.405 since it is the better argument, but if it does not work, take a lower lambda")
+
+- **Rule:** M (CEN) is capped at the selected design's λ_max_B (1.405), the cascade's own ceiling.
+  Lower it (variant M090, `M_LAMBDA_FALLBACK = 0.90`) only in a scenario where M runs a period-2
+  cycle, as on old E (runs 0019/0024).
+- **On E2,** M at 1.405 (run 0026, then named Msel) shows no cycle and has the lowest overall
+  error (9.14 mpu).
+- **Code** (`variants.py`):
+  - M → selected λ.
+  - Msel = M (kept for run 0026's provenance).
+  - M090 = M at 0.90.
+  - Guard pairs (M, Msel) = ∅ and (M, M090) = {central_lambda_target}.
+  - Tests: 14 pass; the stale cooldown test still fails (unrelated, n = 44 vs 53).
+- **Runs made while M was capped at 0.90** (09:44–12:15): 0024 (old E) and 0025/M (E2).
+- **Plan for E2's CEN of record:** once 0025 is pulled, move 0025/M aside as `M_lambda090` and
+  rerun M (1.405) into run 0025. The result should equal 0026/Msel (same config), which doubles
+  as a determinism check.

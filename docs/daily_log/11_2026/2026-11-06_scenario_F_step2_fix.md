@@ -70,3 +70,61 @@ Area 2, after the load step (212:20–360):
 - Code copied over e5power's 3d98d31 (28 files, hashes equal; includes the new `scenarios.py`).
 - 6 jobs each. Last night's pair took 3 h 44 min, so both should be back around 11:10–11:20.
 - Driver logs: `results/ch_11_case2_multisystem/ref/_remote/v4_F_r2|v4_FM_r2/driver.log`.
+
+## 07:45–08:20: machine-tap analysis on runs 0019 and 0001 (author: "Yes, both")
+
+Question (author 2026-11-05): "Keep fixed. Analyse afterwards if a tap change would have been
+needed." Script and output: shared notes `sts_access_gain_scripts/tap_analysis.py/.out` (logs
+only, no new simulation).
+
+- **Relay rule in the code** (`controller/local_rules.TapRelay`, as installed in
+  `multi_tso_dso.py`): one tap step when the HV side leaves 1.03 ± 0.01 pu, at most one per
+  900 s; the slack machine (G1) has none.
+- **Criterion "needed".** HV side outside the band while the machine itself cannot correct it:
+  - HV low and (AVR at 1.05 pu or q_max − q < 2 % of the range), or
+  - HV high and (AVR at 0.95 pu or q − q_min < 2 %).
+  Only then would a tap add capability. Elsewhere the deviation is the controller's choice.
+- **Result, REF E run 0019 (L2, S1, S2):** 0.0 % of the time for every machine.
+- **Result, Case 1 run 0001 (L2, S1m, S1, O0, O1):** 0.0 %, except G3 under S1m/S1/O0 with
+  1.3–1.9 % (area 2, before G3 is used up by the AVR at 1.05).
+- **What a relay would have done.** An open-loop replay of the rule moves G10's tap 24 times
+  upward under S1 and S2.
+  - G10's HV side is below 1.02 pu for 99.6 % (S1) and 98.4 % (S2) of the run, min 0.957 pu.
+  - Meanwhile its AVR stays at 0.984–1.019 pu (never at a limit) with ≥ 210 Mvar of margin.
+  - The low voltage is the SVR's choice (pilot node plus alignment of the reactive levels).
+  - In run 0017 the relays did act (53 local tap moves under S1), and G10's AVR sat at 0.950 pu
+    for 87 % of the run: the wind-up that `fix_machine_taps` removes.
+- **Why SVR's area-1 error rose (7.8 → 14.2 mpu).**
+  - Level −4.7 → −8.2 mpu, shape 5.7 → 11.0 mpu.
+  - The relays had held the machines' HV buses near 1.03 pu, a second, local voltage control.
+    Without them, SVR's own objective shows: the pilot is still held (e_vp area 1: 4.0 → 4.1 mpu),
+    but not the rest of area 1.
+- **Consistency with the thesis.** Ch 7 and `tab:case3:variants` already state "held" for LOC,
+  SVR and SVR+. Run 0017 did not match this; run 0019 does.
+
+## 08:00–08:30: Ch 10 reference run moved to run 0019 (thesis clone, not committed)
+
+- **Figures.** `figures_ref.py 0019 --thesis Z:\latex_diss_clone --event 3`, then
+  `make_tikz_tables.py`.
+  - The data folder `graphics/Ch10/data/2026-11-05_case3_ref/` is overwritten. Its README now
+    names run 0019 and code 48d6193 (HEAD at launch; the manifest has no git state).
+  - The 0017 data and the old `.tex` are backed up in the scratchpad (`thesis_backup_0017/`).
+- **Axis limits widened** to the new ranges (scratchpad `ch10_fig_axes_0019.py`): vtrack panels
+  52/142/62/94, summary 94, event 142, stsv 152, tie flows 1-2 [−125, 145] and 2-3 [−312, 88].
+- **Text and table** (scratchpad `ch10_ref_E_0019.py`, each replacement asserted once):
+  - provenance block of 0019;
+  - table rows LOC/SVR/SVR+;
+  - 35 text numbers in the voltage, interface, STS-voltage and tie-flow subsections;
+  - one sentence on G10 under the classical scheme;
+  - one sentence on the held taps (the tap analysis), with comments.
+- **Scarcity bound in the setup text:** 27 mpu / 13 % → 29 mpu / 17 %. This is the bound at the
+  run's own start point (360-min commitment), from the F declaration.
+- **Correction found by the table check:** OFO's f_V^STS is 7.355 mpu (RMS over the four STS, as
+  the caption says).
+  - The table had 7.3; now 7.4.
+  - "pay 0.7 mpu more than under OFO" is now 0.6.
+- **Key changes for the reader.**
+  - Law change SVR → OFO: −45 % (was −25 %); SVR+ → OFO+: −35 % (was −16 %).
+  - Access under the classical law: −27 % (was −24 %), area 2 24.8 → 14.9 mpu.
+  - Under OFO: unchanged, −14 %.
+  - SVR's peak after the step: 138 mpu. SVR reaches 0.868 pu 20 s after the step.

@@ -468,6 +468,21 @@ def _zone_voltage_error_inputs(net, zd, cfg_v, v_set: float):
     return vm_bus_ids, vm_zone, v_ref_zone
 
 
+class EarlyStop(Exception):
+    """Raised by :data:`STEP_HOOK` to end a run before its horizon.
+
+    Like any exception out of :func:`run_multi_tso_dso`, it carries the records
+    so far as ``partial_log``.  Used by the weight search (procedure v3,
+    2026-11-03) to stop a window once its candidate is rejected anyway.
+    """
+
+
+#: Optional per-step hook ``hook(step, log)``, called after a step's record is
+#: appended (not during the warm-up).  ``None`` outside a search, so no run is
+#: changed by its existence; a hook ends the run by raising :class:`EarlyStop`.
+STEP_HOOK: Optional[Callable[[int, list], None]] = None
+
+
 # =============================================================================
 #  Main simulation function
 # =============================================================================
@@ -1995,6 +2010,11 @@ def _run_multi_tso_dso_impl(
         # ``start_time``, which for an April start_time is ~3.5 months of
         # rows that compute_zonal_gen_dispatch would scan in vain.
         t_end = start_time + timedelta(seconds=config.n_total_s)
+        # The commitment may be decided over a longer span than the run
+        # (config.unit_commitment_window_s; the D1/D2 runs stand for 12-h windows).
+        _uc_window_s = getattr(config, "unit_commitment_window_s", None)
+        _uc_profiles = (profiles.loc[start_time:start_time + timedelta(seconds=float(_uc_window_s))]
+                        if _uc_window_s else None)
         profiles = profiles.loc[start_time:t_end]
 
         # Held profiles and load ramps (step tests of ch:case3), on the
@@ -2024,8 +2044,11 @@ def _run_multi_tso_dso_impl(
             # controller model is built without it; the outage masks tell the
             # controllers (an operator knows which units are off).
             _t = perf_counter()
+            if _uc_profiles is not None:
+                print(f"  [9] unit commitment over {float(_uc_window_s) / 3600:g} h "
+                      f"(unit_commitment_window_s), the run spans {config.n_total_s / 3600:g} h")
             gen_dispatch, _committed = compute_merit_order_dispatch(
-                net, profiles, dispatch_zone_map,
+                net, profiles if _uc_profiles is None else _uc_profiles, dispatch_zone_map,
                 min_stable_frac=config.gen_min_stable_frac,
                 merit_order=config.gen_merit_order,
             )
@@ -3101,7 +3124,8 @@ def _run_multi_tso_dso_impl(
     #
     # L1/L2 keep the relay: there the AVR setpoints are pinned, so it has a
     # static target and no fight arises.
-    _install_local_taps = _local_tso and not _tso_oltc_local and not _svr_tso
+    _install_local_taps = (_local_tso and not _tso_oltc_local and not _svr_tso
+                           and not bool(getattr(config, "fix_machine_taps", False)))
     if _local_tso:
         # (1) Pin generator AVR setpoints.  Under SVR this is only the starting
         # point: the RPR writes net.gen.vm_pu from the first dispatch onward.
@@ -3172,7 +3196,11 @@ def _run_multi_tso_dso_impl(
     # transformer stays held, as it is excluded from the MIQP too.
     from controller.local_rules import BankRelay, LocalDiscreteRules, TapRelay
     _tap_relays: List[TapRelay] = []
-    if (not _central and not _install_local_taps
+    # With ``fix_machine_taps`` the machine taps stay at their start position: under SVR
+    # (and a TS-OFO on the AVRs) the relay undoes the AVR set-point changes (author
+    # 2026-11-05).
+    _fix_mt = bool(getattr(config, "fix_machine_taps", False))
+    if (not _central and not _install_local_taps and not _fix_mt
             and (_local_tso or _svr_tso or _tso_oltc_local)):
         _hold_mt = (config.oltc_cooldown_s_mt
                     if config.oltc_cooldown_s_mt is not None
@@ -5598,6 +5626,8 @@ def _run_multi_tso_dso_impl(
 
         if not _in_warmup:
             log.append(rec)
+            if STEP_HOOK is not None:
+                STEP_HOOK(step, log)
 
         if verbose >= 1:
             _dt_step = perf_counter() - _t_step

@@ -311,10 +311,11 @@ def fig_qerr(logs, events, out: Path) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-def fig_event(logs, events, out: Path, t_ts_min: float = 3.0) -> pd.DataFrame:
-    """The load step (event 2) in area 2: e_v,2 and the change of the summed
-    interface flow of the area-2 STSs since the step's pre-event state."""
-    t_e = events[1][0]
+def fig_event(logs, events, out: Path, t_ts_min: float = 3.0, which: int = 2) -> pd.DataFrame:
+    """The load step (event ``which``, 1-based; 2 in scenario A, 3 in E) in area 2:
+    e_v,2 and the change of the summed interface flow of the area-2 STSs since the
+    step's pre-event state."""
+    t_e = events[which - 1][0]
     lo, hi = t_e - 2.0, t_e + 10.0
     names = [n for n in ("S1", "S2", "O2", "O3", "M") if n in logs]
     fig, axes = plt.subplots(1, 2, figsize=(WIDTH, 5.4 * CM))
@@ -465,7 +466,7 @@ STEMS = ("case3_vtrack", "case3_stsv", "case3_qtrack", "case3_qerr",
          "case3_event", "case3_summary", "case3_tieflow")
 
 
-def make_figures(run: Path, thesis: Optional[Path] = None) -> List[str]:
+def make_figures(run: Path, thesis: Optional[Path] = None, event: int = 2) -> List[str]:
     _setup()
     logs = _load(run)
     if not logs:
@@ -479,7 +480,7 @@ def make_figures(run: Path, thesis: Optional[Path] = None) -> List[str]:
         "case3_stsv": lambda: fig_stsv(logs, events, out),
         "case3_qtrack": lambda: fig_qtrack(logs, events, out),
         "case3_qerr": lambda: fig_qerr(logs, events, out),
-        "case3_event": lambda: fig_event(logs, events, out),
+        "case3_event": lambda: fig_event(logs, events, out, which=event),
         "case3_summary": lambda: fig_summary(logs, metrics, out),
         "case3_tieflow": lambda: fig_tieflow(logs, events, out),
     }
@@ -537,8 +538,11 @@ def main() -> None:
     ap.add_argument("run", help="run_ref run folder")
     ap.add_argument("--thesis", default=None,
                     help="LaTeX root: copy PDFs and data into graphics/Ch10")
+    ap.add_argument("--event", type=int, default=2,
+                    help="1-based index of the area-2 load step for case3_event "
+                         "(2 in scenario A, 3 in E; author 2026-11-05: E is the reference run)")
     a = ap.parse_args()
-    print("written:", make_figures(Path(a.run), a.thesis and Path(a.thesis)))
+    print("written:", make_figures(Path(a.run), a.thesis and Path(a.thesis), a.event))
 
 
 if __name__ == "__main__":

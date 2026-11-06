@@ -92,6 +92,13 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
               central_period_s=None, central_lambda_rule="continuous",
               **_O_STS_LABELS),
 }
+#: Msel: run 0026 (E2) under this name, when M was capped at 0.90 and Msel at the
+#: selected design's lambda_max_B; since 12:15 that day M is the latter, so Msel = M.
+#: M090: M at M_LAMBDA_FALLBACK, for a scenario in which M at the selected lambda runs
+#: a period-2 cycle (author 2026-11-06: "I would at least try 1.405 since it is the
+#: better argument, but if it does not work, take a lower lambda").
+VARIANTS["Msel"] = dict(VARIANTS["M"])
+VARIANTS["M090"] = dict(VARIANTS["M"])
 
 #: Registered variants that must not enter a run of record yet.
 NOT_READY: Dict[str, str] = {}
@@ -122,6 +129,9 @@ STEP_ALLOWED: Dict[Tuple[str, str], set] = {
                   "local_sensitivities_dso", "central_period_s",
                   "central_dso_g_v", "central_lambda_target",
                   "central_lambda_rule", "central_ts_discrete_cooldown"},
+    # The two loop-gain rules for the centralised reference.
+    ("M", "Msel"): set(),
+    ("M", "M090"): {"central_lambda_target"},
 }
 
 
@@ -145,15 +155,17 @@ def resolved(name: str, minutes: int, events: Iterable[Any] = (),
                        f"valid: {sorted(VARIANTS)}")
     cfg = base_config(minutes, events, noise_seed)
     cfg = dataclasses.replace(cfg, **VARIANTS[name])
-    if name == "M":
-        # "At the same weights": M weights the STS buses as the STS-OFOs do
-        # (the paramset's dso_g_v), not with the dataclass default 2e4, which
-        # was ~9x the selected value.  The target is a ceiling only: M's
-        # continuous loop gain (0.98) lies below it, so its weights stay as
-        # selected.
+    if name in ("M", "Msel", "M090"):
+        # M weights the STS buses as the STS-OFOs do (the paramset's dso_g_v),
+        # not with the dataclass default 2e4, which was ~9x the selected value.
+        # Its loop gain over the continuous actuators is capped at the selected
+        # design's lambda_max_B, the cascade's own ceiling (M090: at
+        # M_LAMBDA_FALLBACK): the runner scales all of M's g_w by
+        # kappa = lambda_max / target when it lies above (v4 weights: 1.781).
         cfg = dataclasses.replace(
             cfg, central_dso_g_v=float(cfg.dso_g_v),
-            central_lambda_target=selected_lambda_max(),
+            central_lambda_target=(M_LAMBDA_FALLBACK if name == "M090"
+                                   else selected_lambda_max()),
             central_ts_discrete_cooldown=ts_equivalent_cooldown(cfg))
     return cfg
 
@@ -178,13 +190,20 @@ def ts_equivalent_cooldown(cfg: MultiTSOConfig) -> int:
     return int((1 + int(c)) * round(ratio) - 1)
 
 
+#: M's fallback ceiling over the continuous actuators (variant M090).  In REF E (run 0019)
+#: M at the selected design's lambda_max_B (1.405) ran a period-2 cycle of its TS-IBG and
+#: AVR set-points between the opening of 9-39 and the load step: with the plant's
+#: post-disturbance sensitivities its mismatch loop gain is 3.12 at that cap (shared notes
+#: cen_mismatch.py); at 0.90 the cycle is gone (run 0024).  M was capped at 0.90 from
+#: 09:44 to 12:15 on 2026-11-06 (runs 0024, 0025/M); on E2 the two caps differ by
+#: <= 0.4 mpu per stage, and the selected lambda is the better argument (author).
+M_LAMBDA_FALLBACK = 0.90
+
+
 def selected_lambda_max() -> float:
     """``lambda_max_B`` of the selected design, from the paramset provenance.
 
-    M's loop-gain ceiling: the runner slows M's weights only if its loop gain
-    over the continuous actuators exceeded it (0.98 < 1.467, so they stay as
-    selected).  Taps and banks are rate-limited instead
-    (:func:`ts_equivalent_cooldown`).
+    M's loop-gain ceiling (the cascade's own); :data:`M_LAMBDA_FALLBACK` for M090.
     """
     prov = load_paramset(PARAMSET).get("provenance") or {}
     lam = prov.get("lambda_max_B")

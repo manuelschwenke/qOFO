@@ -68,6 +68,51 @@ def _pin_threads() -> None:
         os.environ[var] = "1"
 
 
+def _abort_hook(job: Dict[str, Any], events_s) -> Any:
+    """Per-step hook that stops a window once its candidate is lost anyway.
+
+    Once per TS iteration it counts this window's unexplained tap and bank
+    reversals (the filter's own ``hunting_summary`` / ``shunt_summary`` on the
+    records so far), writes them to ``<abort_dir>/<key>__<window>.json`` and sums
+    the files of all the candidate's windows on this host.  At ``abort_tap`` tap
+    or ``abort_bank`` bank reversals it raises ``EarlyStop``.  A reversal is
+    final once its second move is recorded, so the partial count never exceeds
+    the full one and an aborted candidate is rejected by the filter regardless.
+    """
+    from experiments.runners.multi_tso_dso import EarlyStop
+    from tuning.stage2_search import HUNT_DWELL_S, hunting_summary, shunt_summary
+
+    adir = Path(job["abort_dir"])
+    adir.mkdir(parents=True, exist_ok=True)
+    mine = adir / f"{job['key']}__{job['window']}.json"
+    last = {"n": None}
+
+    def hook(step: int, log: list) -> None:
+        if step % 9:                      # once per TS iteration (T_TS / T_STS)
+            return
+        su = float(job.get("startup_s", 0.0))
+        dw = float(job.get("dwell_s", HUNT_DWELL_S))
+        n = (int(hunting_summary(log, events_s, dwell_s=dw, startup_s=su)["n_hunting"]),
+             int(shunt_summary(log, events_s, dwell_s=dw, startup_s=su)["n_shunt_hunting"]))
+        if n != last["n"]:
+            mine.write_text(json.dumps({"tap": n[0], "bank": n[1]}), encoding="utf-8")
+            last["n"] = n
+        tap = bank = 0
+        for f in adir.glob(f"{job['key']}__*.json"):
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):  # a sibling is writing it right now
+                continue
+            tap += int(d.get("tap", 0))
+            bank += int(d.get("bank", 0))
+        if ((job["abort_tap"] and tap >= job["abort_tap"])
+                or (job["abort_bank"] and bank >= job["abort_bank"])):
+            raise EarlyStop(f"candidate {job['key']}: {tap} tap and {bank} bank "
+                            f"reversal(s) over its windows")
+
+    return hook
+
+
 def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
     """Evaluate ONE (candidate, window) pair.  Module-level, so picklable.
 
@@ -88,7 +133,7 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
     from tuning.metrics import MetricScales
     from tuning.parameters import apply_to_config
     from tuning.runner import run_scenario_with_records
-    from tuning.stage2_search import (avr_step_metrics, hunting_summary,
+    from tuning.stage2_search import (HUNT_DWELL_S, avr_step_metrics, hunting_summary,
                                   shunt_summary)
     from tuning.scenarios_mc_v2 import condition_set, condition_set_evented
 
@@ -114,18 +159,25 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
             dso_der_scale=dict(FROZEN_DSO_DER_SCALE),
             dso_load_p_scale=dict(FROZEN_DSO_LOAD_P_SCALE))
     if job.get("config_set"):
-        # --config-set (2026-11-03): explicit config fields, applied last, e.g.
-        # shunt_ff_ledger=false to reproduce runs made before that flag existed.
-        import dataclasses as _dc
-        base = _dc.replace(base, **job["config_set"])
+        # --config-set (2026-11-03, ported from f1f4a6c on 2026-11-04): explicit
+        # config fields, applied last, e.g. shunt_ff_ledger=false.
+        base = dataclasses.replace(base, **job["config_set"])
     bank = (condition_set_evented if job.get("evented") else condition_set)
     sc = next(s for s in bank(hours=job["hours"]) if s.name == job["window"])
 
     import time as _t
+    import experiments.runners.multi_tso_dso as _runner
+    use_abort = ((job.get("abort_tap") or job.get("abort_bank"))
+                 and not job.get("is_baseline"))
+    _runner.STEP_HOOK = _abort_hook(job, sc.event_times_s) if use_abort else None
     t0 = _t.perf_counter()
     try:
-        result, records = run_scenario_with_records(sc, base, MetricScales())
+        try:
+            result, records = run_scenario_with_records(sc, base, MetricScales())
+        finally:
+            _runner.STEP_HOOK = None      # a pool worker runs many units
         m = result.metrics
+        early = (result.failure_reason or "").startswith("EarlyStop")
         # Ranking voltage metric (2026-10-16, protocol D1).  'areamean' is the
         # RMS over areas of (area-mean V - v_set), the definition of every
         # campaign before 2026-10-16; 'bus' is the per-bus spatial RMS
@@ -161,16 +213,22 @@ def _run_one_window(job: Dict[str, Any]) -> Dict[str, Any]:
             "tap_rev_per_h_dso": float(getattr(m, "tap_reversals_per_h_dso", 0.0) or 0.0),
             "pf_failures": float(getattr(m, "pf_failures", 0) or 0),
             "wall_s": float(result.wall_time_s),
-            "failed": 1.0 if result.failure_reason else 0.0,
+            # An early stop is not a failed simulation: its record holds the
+            # hunting that rejects the candidate (procedure v3).
+            "failed": 1.0 if (result.failure_reason and not early) else 0.0,
             "failure_reason": result.failure_reason or "",
+            "early_abort": 1.0 if early else 0.0,
         }
         row.update(avr_step_metrics(records))
         # Hunting, and the raw move list it is derived from.  Persisting the
         # moves is what lets a revised wear definition be applied without
         # re-simulating; the first Stage II-b dropped its records and could
         # not be re-scored when the definition changed.
-        row.update(hunting_summary(records, sc.event_times_s))
-        row.update(shunt_summary(records, sc.event_times_s))
+        su = float(job.get("startup_s", 0.0))
+        dw = float(job.get("dwell_s", HUNT_DWELL_S))
+        row.update(hunting_summary(records, sc.event_times_s, dwell_s=dw, startup_s=su))
+        row.update(shunt_summary(records, sc.event_times_s, dwell_s=dw, startup_s=su))
+        row["hunt_dwell_s"] = dw
         # Per hour, like the tap rates, so aggregate() and check_limits()
         # treat bank wear exactly as they treat tap wear (2026-10-22).
         row["shunt_ops_per_h_bank"] = (float(row["shunt_ops_max_bank"])
@@ -257,6 +315,29 @@ def main(argv: List[str] | None = None) -> int:
                    help="Do not prepend the Stage-I point. For a shard of a "
                         "campaign split over hosts, whose baseline another "
                         "shard evaluates (added 2026-10-31).")
+    p.add_argument("--abort-tap-reversals", type=int, default=0, metavar="N",
+                   help="Stop every window of a candidate once its windows together "
+                        "count N unexplained tap reversals (hunting tolerance + 1); "
+                        "0 = never (default). The Stage-I point is never stopped. "
+                        "Procedure v3, 2026-11-03.")
+    p.add_argument("--abort-bank-reversals", type=int, default=0, metavar="N",
+                   help="As --abort-tap-reversals, for bank hunting reversals.")
+    p.add_argument("--startup-exempt-s", type=float, default=0.0, metavar="S",
+                   help="Do not count the reversal formed by a device's first two "
+                        "moves in a window when the first lies before S seconds "
+                        "(filter and early stop alike; reported as startup_detail). "
+                        "0 = off (default). Procedure v3 amendment 2, 2026-11-03.")
+    p.add_argument("--hunt-dwell-s", type=float, default=None, metavar="S",
+                   help="Hunting dwell [s] for taps and banks (filter and early stop): "
+                        "a reversal counts only below it. Default: "
+                        "tuning.stage2_search.HUNT_DWELL_S (2 h). Procedure v4: 3600.")
+    p.add_argument("--lambda-exclude", default="", metavar="CLASSES",
+                   help="Comma list of actuator classes left out of lambda_max(B), "
+                        "e.g. 'shunt' (procedure v4, 2026-11-04). Default: none.")
+    p.add_argument("--lambda-extra-ops", type=Path, default=None, metavar="DIR",
+                   help="Directory of further pickled operating points (op_*.npz) "
+                        "that enter lambda_max(B) only, not the simulated windows "
+                        "(procedure v4: the G3-on points of run 0007).")
     p.add_argument("--span", action="append", default=[], metavar="NAME=DECADES",
                    help="Override one log-span of the search box (repeatable), "
                         "e.g. --span g_w_pcc=1.5. Unlisted coordinates keep "
@@ -340,11 +421,28 @@ def main(argv: List[str] | None = None) -> int:
     ceiling = select_ceiling()
     kept: List[Dict[str, Any]] = []
     lam_all: List[float] = []
+    # The lambda bank: the simulated conditions plus --lambda-extra-ops; the
+    # columns of --lambda-exclude are left out of B.
+    lam_ops = list(ops)
+    if args.lambda_extra_ops is not None:
+        import pickle
+        extra = sorted(Path(args.lambda_extra_ops).glob("op_*.npz"))
+        if not extra:
+            raise SystemExit(f"--lambda-extra-ops: no op_*.npz in {args.lambda_extra_ops}")
+        for f in extra:
+            with f.open("rb") as fh:
+                lam_ops.append(pickle.load(fh))
+    lam_excl = tuple(c.strip() for c in args.lambda_exclude.split(",") if c.strip())
+    print(f"[stage2] lambda over {len(lam_ops)} operating points"
+          + (f", without {', '.join(lam_excl)}" if lam_excl else ""))
+
+    def lam_of(w: Dict[str, float]) -> float:
+        return worst(screen_weights(lam_ops, w, exclude_classes=lam_excl)).lambda_max
 
     if args.candidates_json:
         explicit = json.loads(args.candidates_json.read_text(encoding='utf-8'))
         for w in explicit:
-            lam = worst(screen_weights(ops, w)).lambda_max
+            lam = lam_of(w)
             lam_all.append(lam)
             kept.append({"weights": w, "lambda_max_B": lam})
         print(f"[stage2] {len(kept)} explicit candidates from "
@@ -353,7 +451,7 @@ def main(argv: List[str] | None = None) -> int:
         box = Box(centre=centre, spans=spans)
         cands = sobol_candidates(box, args.n, seed=args.seed)
         for w in cands:
-            lam = worst(screen_weights(ops, w)).lambda_max
+            lam = lam_of(w)
             lam_all.append(lam)
             if lam <= ceiling:
                 kept.append({"weights": w, "lambda_max_B": lam})
@@ -368,7 +466,7 @@ def main(argv: List[str] | None = None) -> int:
     # interface-Q bound needs a reference that is a stated design point rather
     # than whichever candidate happened to score best.
     if not args.skip_baseline:
-        centre_lambda = worst(screen_weights(ops, centre)).lambda_max
+        centre_lambda = lam_of(centre)
         kept.insert(0, {"weights": dict(centre), "lambda_max_B": centre_lambda,
                         "is_baseline": True})
         print(f"[stage2a] baseline (Stage-I point) prepended, "
@@ -397,6 +495,10 @@ def main(argv: List[str] | None = None) -> int:
         "skip_baseline": bool(args.skip_baseline),
         "config_set": config_set,
         "lambda_max_all": lam_all,
+        "lambda_n_points": len(lam_ops),
+        "lambda_exclude": list(lam_excl),
+        "lambda_extra_ops": str(args.lambda_extra_ops) if args.lambda_extra_ops else None,
+        "hunt_dwell_s": args.hunt_dwell_s,
         "estimated_wall_h": est_h,
         "argv": sys.argv,
     }
@@ -441,6 +543,12 @@ def main(argv: List[str] | None = None) -> int:
                 "config_set": config_set,
                 "out": str(win_dir / f"{key}__{wname}.json"),
                 "force": args.force,
+                "abort_tap": int(args.abort_tap_reversals),
+                "abort_bank": int(args.abort_bank_reversals),
+                "abort_dir": str(win_dir.parent / "_abort"),
+                "startup_s": float(args.startup_exempt_s),
+                **({} if args.hunt_dwell_s is None
+                   else {"dwell_s": float(args.hunt_dwell_s)}),
             })
     todo = [j for j in jobs if args.force or not Path(j["out"]).exists()]
     print(f"[stage2] {len(seen_keys)} candidates x {len(window_names)} windows "

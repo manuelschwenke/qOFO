@@ -1,0 +1,1020 @@
+{
+  "name": "ch9_selected_uc_2026_11_v4",
+  "title": "Controller weights selected by procedure v4 on the unit-commitment base",
+  "description": [
+    "Selected by docs/tuning/2026-11-04_weight_selection_procedure_v4.md: v3 (amendments 1 and 2) with hunting tolerance 0 and dwell < 1 h, settling budget 3 periods, go e_v_ts <= 0.01, lambda_max(B) <= 1.546 without the banks on W1-W6 plus 83 G3-on points of run 0007 (envelope: G3 committed); config sts_coupler_hold_after_bank=1."
+  ],
+  "provenance": {
+    "producer": "experiments\\ch_09_parameter_selection\\ch_9_14_procedure_v4.py",
+    "run_dir": "results\\ch_09_parameter_selection\\0008_2026-11-04_133847_ch_9_14_procedure_v4",
+    "procedure": "docs/tuning/2026-11-04_weight_selection_procedure_v4.md",
+    "starting_paramset": "stage1_v3_uc_2026_11_pq10",
+    "stage1_verification": {
+      "0.01": {
+        "run": "results\\ch_09_parameter_selection\\0005_2026-11-03_164755_ch_9_11_procedure_v3\\stage1\\verification\\v2_pq10\\20261103-164943",
+        "n_steps": 120,
+        "p95": 24.0,
+        "per_dso_p95": {
+          "DSO_1": 25.65,
+          "DSO_2": 21.1,
+          "DSO_3": 24.55,
+          "DSO_4": 19.1
+        },
+        "n_over": 0,
+        "censored": 0,
+        "max": 35,
+        "median_residual_mvar": 0.36523627162203454,
+        "pass": true,
+        "limit_p95": 36,
+        "label": "v2_pq10",
+        "paramset": "stage1_v3_uc_2026_11_pq10",
+        "verified": true,
+        "margin_v4": {
+          "p95": 25.0,
+          "median_residual_mvar": 0.8
+        }
+      }
+    },
+    "dso_voltage_band_pu": [
+      0.92,
+      1.08
+    ],
+    "search_windows": [
+      "W1",
+      "W3",
+      "W4",
+      "W6"
+    ],
+    "ranked_windows": "W1,W2,W3,W4,W6",
+    "w5_report": {
+      "e_v_ts": 0.0061715637150254795,
+      "e_v_ds": 0.006164671531113157,
+      "v_metric": "bus",
+      "e_v_ts_areamean": 0.00303741513633488,
+      "e_v_ds_areamean": 0.004874797143434503,
+      "e_v_ts_bus": 0.0061715637150254795,
+      "e_v_ds_bus": 0.006164671531113157,
+      "e_q": 125726.91735178957,
+      "v_band_excess_ts": 0.0019889595284517127,
+      "v_band_excess_ds": 5.371787962350783e-05,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "v_worst_ts": 0.04189484429552526,
+      "v_worst_ds": 0.02012854897853877,
+      "tap_ops_per_h_tso": 0.6669754515979621,
+      "tap_ops_per_h_dso": 1.3339509031959242,
+      "tap_rev_per_h_tso": 0.4168596572487263,
+      "tap_rev_per_h_dso": 0.7503473830477073,
+      "pf_failures": 0.0,
+      "wall_s": 1423.1877432987094,
+      "failed": 0.0,
+      "failure_reason": "",
+      "early_abort": 0.0,
+      "avr_max_step_pu": 0.002279093930077636,
+      "avr_total_variation_pu": 0.2072481297933615,
+      "n_hunting": 16,
+      "n_hunting_1h": 16,
+      "n_event_explained": 4,
+      "n_startup_exempt": 0,
+      "startup_detail": [],
+      "n_moves": 84,
+      "hunting_detail": [
+        {
+          "transformer": "DSO_2|trafo_5[0]",
+          "t0_s": 13420.0,
+          "t1_s": 16620.0,
+          "dwell_s": 3200.0
+        },
+        {
+          "transformer": "DSO_2|trafo_5[0]",
+          "t0_s": 41000.0,
+          "t1_s": 41920.0,
+          "dwell_s": 920.0
+        },
+        {
+          "transformer": "3[1]",
+          "t0_s": 40500.0,
+          "t1_s": 43020.0,
+          "dwell_s": 2520.0
+        },
+        {
+          "transformer": "DSO_1|trafo_2[0]",
+          "t0_s": 3940.0,
+          "t1_s": 5120.0,
+          "dwell_s": 1180.0
+        },
+        {
+          "transformer": "DSO_1|trafo_2[0]",
+          "t0_s": 13780.0,
+          "t1_s": 16200.0,
+          "dwell_s": 2420.0
+        },
+        {
+          "transformer": "DSO_1|trafo_2[0]",
+          "t0_s": 17280.0,
+          "t1_s": 17600.0,
+          "dwell_s": 320.0
+        },
+        {
+          "transformer": "DSO_1|trafo_2[0]",
+          "t0_s": 41260.0,
+          "t1_s": 42140.0,
+          "dwell_s": 880.0
+        },
+        {
+          "transformer": "DSO_3|trafo_8[0]",
+          "t0_s": 4120.0,
+          "t1_s": 5360.0,
+          "dwell_s": 1240.0
+        },
+        {
+          "transformer": "DSO_3|trafo_8[0]",
+          "t0_s": 14120.0,
+          "t1_s": 16740.0,
+          "dwell_s": 2620.0
+        },
+        {
+          "transformer": "DSO_3|trafo_8[0]",
+          "t0_s": 40980.0,
+          "t1_s": 42100.0,
+          "dwell_s": 1120.0
+        },
+        {
+          "transformer": "DSO_4|trafo_11[0]",
+          "t0_s": 4240.0,
+          "t1_s": 5160.0,
+          "dwell_s": 920.0
+        },
+        {
+          "transformer": "DSO_4|trafo_11[0]",
+          "t0_s": 14100.0,
+          "t1_s": 16320.0,
+          "dwell_s": 2220.0
+        },
+        {
+          "transformer": "DSO_4|trafo_11[0]",
+          "t0_s": 41200.0,
+          "t1_s": 42200.0,
+          "dwell_s": 1000.0
+        },
+        {
+          "transformer": "DSO_1|trafo_1[0]",
+          "t0_s": 17280.0,
+          "t1_s": 18200.0,
+          "dwell_s": 920.0
+        },
+        {
+          "transformer": "DSO_4|trafo_10[0]",
+          "t0_s": 40480.0,
+          "t1_s": 42740.0,
+          "dwell_s": 2260.0
+        },
+        {
+          "transformer": "DSO_2|trafo_4[0]",
+          "t0_s": 41000.0,
+          "t1_s": 42180.0,
+          "dwell_s": 1180.0
+        }
+      ],
+      "moves": [
+        [
+          700.0,
+          "DSO_2|trafo_5[0]",
+          -1
+        ],
+        [
+          900.0,
+          "3[1]",
+          1
+        ],
+        [
+          3940.0,
+          "DSO_1|trafo_2[0]",
+          -1
+        ],
+        [
+          4120.0,
+          "DSO_3|trafo_8[0]",
+          -1
+        ],
+        [
+          4240.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          5120.0,
+          "DSO_1|trafo_1[0]",
+          1
+        ],
+        [
+          5120.0,
+          "DSO_1|trafo_2[0]",
+          1
+        ],
+        [
+          5160.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          5320.0,
+          "DSO_2|trafo_5[0]",
+          1
+        ],
+        [
+          5360.0,
+          "DSO_3|trafo_8[0]",
+          1
+        ],
+        [
+          5400.0,
+          "3[1]",
+          -1
+        ],
+        [
+          6860.0,
+          "DSO_4|trafo_10[0]",
+          1
+        ],
+        [
+          7020.0,
+          "DSO_2|trafo_4[0]",
+          1
+        ],
+        [
+          7260.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          7340.0,
+          "DSO_3|trafo_8[0]",
+          1
+        ],
+        [
+          7480.0,
+          "DSO_2|trafo_5[0]",
+          1
+        ],
+        [
+          7560.0,
+          "DSO_1|trafo_2[0]",
+          1
+        ],
+        [
+          7900.0,
+          "DSO_4|trafo_10[0]",
+          1
+        ],
+        [
+          9520.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          13240.0,
+          "DSO_3|trafo_8[0]",
+          -1
+        ],
+        [
+          13240.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          13420.0,
+          "DSO_2|trafo_5[0]",
+          -1
+        ],
+        [
+          13780.0,
+          "DSO_1|trafo_2[0]",
+          -1
+        ],
+        [
+          14100.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          14120.0,
+          "DSO_3|trafo_8[0]",
+          -1
+        ],
+        [
+          14140.0,
+          "DSO_2|trafo_4[0]",
+          -1
+        ],
+        [
+          16200.0,
+          "DSO_1|trafo_2[0]",
+          1
+        ],
+        [
+          16320.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          16620.0,
+          "DSO_2|trafo_5[0]",
+          1
+        ],
+        [
+          16740.0,
+          "DSO_3|trafo_8[0]",
+          1
+        ],
+        [
+          17280.0,
+          "1[0]",
+          1
+        ],
+        [
+          17280.0,
+          "1[1]",
+          1
+        ],
+        [
+          17280.0,
+          "3[1]",
+          1
+        ],
+        [
+          17280.0,
+          "DSO_1|trafo_1[0]",
+          -1
+        ],
+        [
+          17280.0,
+          "DSO_1|trafo_2[0]",
+          -1
+        ],
+        [
+          17600.0,
+          "DSO_1|trafo_2[0]",
+          1
+        ],
+        [
+          17940.0,
+          "DSO_2|trafo_4[0]",
+          1
+        ],
+        [
+          18180.0,
+          "3[1]",
+          1
+        ],
+        [
+          18200.0,
+          "DSO_1|trafo_1[0]",
+          1
+        ],
+        [
+          18200.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          18480.0,
+          "DSO_3|trafo_8[0]",
+          1
+        ],
+        [
+          20880.0,
+          "1[0]",
+          -1
+        ],
+        [
+          20880.0,
+          "1[1]",
+          -1
+        ],
+        [
+          20880.0,
+          "3[1]",
+          -1
+        ],
+        [
+          20900.0,
+          "DSO_4|trafo_10[0]",
+          1
+        ],
+        [
+          20900.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          21000.0,
+          "DSO_2|trafo_5[0]",
+          1
+        ],
+        [
+          21780.0,
+          "3[1]",
+          -1
+        ],
+        [
+          26100.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          27140.0,
+          "DSO_2|trafo_5[0]",
+          -1
+        ],
+        [
+          27980.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          28180.0,
+          "DSO_2|trafo_5[0]",
+          -1
+        ],
+        [
+          28220.0,
+          "DSO_3|trafo_8[0]",
+          -1
+        ],
+        [
+          28260.0,
+          "DSO_1|trafo_2[0]",
+          -1
+        ],
+        [
+          31960.0,
+          "DSO_2|trafo_5[0]",
+          1
+        ],
+        [
+          32320.0,
+          "DSO_1|trafo_2[0]",
+          1
+        ],
+        [
+          32320.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          36340.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          36500.0,
+          "DSO_2|trafo_5[0]",
+          -1
+        ],
+        [
+          36520.0,
+          "DSO_1|trafo_2[0]",
+          -1
+        ],
+        [
+          36640.0,
+          "DSO_4|trafo_10[0]",
+          -1
+        ],
+        [
+          36860.0,
+          "DSO_2|trafo_4[0]",
+          -1
+        ],
+        [
+          40020.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          40480.0,
+          "DSO_4|trafo_10[0]",
+          -1
+        ],
+        [
+          40500.0,
+          "3[1]",
+          1
+        ],
+        [
+          40600.0,
+          "DSO_2|trafo_5[0]",
+          -1
+        ],
+        [
+          40600.0,
+          "DSO_3|trafo_8[0]",
+          -1
+        ],
+        [
+          40840.0,
+          "DSO_1|trafo_2[0]",
+          -1
+        ],
+        [
+          40980.0,
+          "DSO_3|trafo_8[0]",
+          -1
+        ],
+        [
+          41000.0,
+          "DSO_2|trafo_4[0]",
+          -1
+        ],
+        [
+          41000.0,
+          "DSO_2|trafo_5[0]",
+          -1
+        ],
+        [
+          41200.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          41260.0,
+          "DSO_1|trafo_2[0]",
+          -1
+        ],
+        [
+          41920.0,
+          "DSO_2|trafo_5[0]",
+          1
+        ],
+        [
+          42100.0,
+          "DSO_3|trafo_8[0]",
+          1
+        ],
+        [
+          42140.0,
+          "DSO_1|trafo_2[0]",
+          1
+        ],
+        [
+          42180.0,
+          "DSO_2|trafo_4[0]",
+          1
+        ],
+        [
+          42200.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          42480.0,
+          "DSO_3|trafo_8[0]",
+          1
+        ],
+        [
+          42500.0,
+          "DSO_2|trafo_5[0]",
+          1
+        ],
+        [
+          42580.0,
+          "DSO_1|trafo_2[0]",
+          1
+        ],
+        [
+          42740.0,
+          "DSO_4|trafo_10[0]",
+          1
+        ],
+        [
+          42980.0,
+          "DSO_2|trafo_4[0]",
+          1
+        ],
+        [
+          43020.0,
+          "3[1]",
+          -1
+        ]
+      ],
+      "events_s": [
+        17280.0,
+        20880.0
+      ],
+      "shunt_commits": 23,
+      "shunt_up": 12,
+      "shunt_down": 11,
+      "shunt_reversals": 6,
+      "shunt_max_level": 2.0,
+      "shunt_ops_max_bank": 8,
+      "n_shunt_hunting": 3,
+      "n_shunt_event_explained": 3,
+      "n_shunt_startup_exempt": 0,
+      "shunt_hunting_detail": [
+        {
+          "transformer": "z2[0]",
+          "t0_s": 4140.0,
+          "t1_s": 6480.0,
+          "dwell_s": 2340.0
+        },
+        {
+          "transformer": "z2[0]",
+          "t0_s": 14220.0,
+          "t1_s": 16740.0,
+          "dwell_s": 2520.0
+        },
+        {
+          "transformer": "z2[0]",
+          "t0_s": 40140.0,
+          "t1_s": 43020.0,
+          "dwell_s": 2880.0
+        }
+      ],
+      "shunt_startup_detail": [],
+      "shunt_moves": [
+        [
+          4140.0,
+          "z2[0]",
+          1
+        ],
+        [
+          6480.0,
+          "z2[0]",
+          -1
+        ],
+        [
+          7560.0,
+          "z2[4]",
+          -1
+        ],
+        [
+          8100.0,
+          "z2[2]",
+          -1
+        ],
+        [
+          8100.0,
+          "z2[5]",
+          1
+        ],
+        [
+          14220.0,
+          "z2[0]",
+          1
+        ],
+        [
+          16740.0,
+          "z2[0]",
+          -1
+        ],
+        [
+          17280.0,
+          "z2[2]",
+          1
+        ],
+        [
+          17280.0,
+          "z2[5]",
+          -1
+        ],
+        [
+          20880.0,
+          "z2[0]",
+          -1
+        ],
+        [
+          20880.0,
+          "z2[2]",
+          -1
+        ],
+        [
+          20880.0,
+          "z2[5]",
+          1
+        ],
+        [
+          21060.0,
+          "z2[3]",
+          1
+        ],
+        [
+          36900.0,
+          "z2[0]",
+          1
+        ],
+        [
+          40140.0,
+          "z2[0]",
+          1
+        ],
+        [
+          40680.0,
+          "z2[3]",
+          -1
+        ],
+        [
+          41040.0,
+          "z2[2]",
+          1
+        ],
+        [
+          41040.0,
+          "z2[5]",
+          -1
+        ],
+        [
+          41400.0,
+          "z2[4]",
+          1
+        ],
+        [
+          43020.0,
+          "z2[0]",
+          -1
+        ],
+        [
+          17280.0,
+          "z3[0]",
+          1
+        ],
+        [
+          20880.0,
+          "z3[0]",
+          -1
+        ],
+        [
+          40500.0,
+          "z3[0]",
+          1
+        ]
+      ],
+      "hunt_dwell_s": 3600.0,
+      "shunt_ops_per_h_bank": 0.6666666666666666
+    },
+    "selected_key": "061dadc05755",
+    "engagement_level": "sts+bank",
+    "max_hunting_applied": 0,
+    "n_feasible": 27,
+    "theta_sts_min_pu": 0.009999999999999998,
+    "theta_ts_min_pu": 0.005494646485870082,
+    "engagement": {
+      "sts_moves": {
+        "W1": 4,
+        "W3": 5,
+        "W4": 10,
+        "W6": 16
+      },
+      "sts_all": true,
+      "bank_after_windows": 2,
+      "bank": true
+    },
+    "failed_settling": [],
+    "aggregate_all_windows": {
+      "e_v_ts": 0.008022743492506153,
+      "e_v_ds": 0.005456540616089057,
+      "e_q": 132194.82238016807,
+      "worst_tap_ops_per_day_tso": 18.008337193144975,
+      "worst_tap_ops_per_day_dso": 8.003705419175546,
+      "worst_tap_rev_per_day_tso": 4.001852709587773,
+      "worst_tap_rev_per_day_dso": 2.0009263547938865,
+      "worst_avr_max_step_pu": 0.0018086467092370828,
+      "worst_v_band_excess_ts": 0.024467568778684865,
+      "worst_v_band_excess_ds": 4.272802346486156e-05,
+      "n_hunting": 0.0,
+      "n_hunting_1h": 0.0,
+      "n_event_explained": 2.0,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "worst_v_worst_ts": 0.06527589960022767,
+      "worst_v_worst_ds": 0.019840430852602578,
+      "pf_failures": 0.0,
+      "n_failed_windows": 0,
+      "has_shunt_wear": 1.0,
+      "worst_shunt_ops_per_day_bank": 4.0,
+      "n_shunt_hunting": 0.0,
+      "n_shunt_event_explained": 1.0,
+      "shunt_commits": 10.0
+    },
+    "baseline_aggregate": {
+      "e_v_ts": 0.008168190601261721,
+      "e_v_ds": 0.007556873280590413,
+      "e_q": 456997.06773889705,
+      "worst_tap_ops_per_day_tso": 16.007410838351092,
+      "worst_tap_ops_per_day_dso": 24.01111625752663,
+      "worst_tap_rev_per_day_tso": 4.001852709587773,
+      "worst_tap_rev_per_day_dso": 4.001852709587773,
+      "worst_avr_max_step_pu": 0.0005572007676581947,
+      "worst_v_band_excess_ts": 0.02549208692745797,
+      "worst_v_band_excess_ds": 0.004038339176186063,
+      "n_hunting": 3.0,
+      "n_hunting_1h": 3.0,
+      "n_event_explained": 2.0,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "worst_v_worst_ts": 0.06542918761895282,
+      "worst_v_worst_ds": 0.04723791488495591,
+      "pf_failures": 0.0,
+      "n_failed_windows": 0,
+      "has_shunt_wear": 1.0,
+      "worst_shunt_ops_per_day_bank": 4.0,
+      "n_shunt_hunting": 1.0,
+      "n_shunt_event_explained": 2.0,
+      "shunt_commits": 17.0
+    },
+    "settling": {
+      "run": "results\\ch_09_parameter_selection\\0008_2026-11-04_133847_ch_9_14_procedure_v4\\expC\\cand_061dadc05755\\20261105-083343",
+      "n_steps": 120,
+      "p95": 23.049999999999997,
+      "per_dso_p95": {
+        "DSO_1": 24.3,
+        "DSO_2": 16.0,
+        "DSO_3": 30.2,
+        "DSO_4": 13.75
+      },
+      "n_over": 3,
+      "censored": 0,
+      "max": 32,
+      "median_residual_mvar": 0.34391911590551594,
+      "pass": true,
+      "limit_p95": 27
+    },
+    "go_criteria": {
+      "go": true,
+      "checks": {
+        "e_v_ts": true,
+        "sts_couplers_every_search_window": true,
+        "banks_after_events_2_windows": true,
+        "all_limits_met": true
+      },
+      "e_v_ts": 0.008022743492506153,
+      "limit_e_v_ts": 0.01,
+      "engagement": {
+        "sts_moves": {
+          "W1": 4,
+          "W3": 5,
+          "W4": 10,
+          "W6": 16
+        },
+        "sts_all": true,
+        "bank_after_windows": 2,
+        "bank": true
+      },
+      "engagement_level": "sts+bank"
+    },
+    "amendment2": {
+      "startup_exempt_s": 900.0,
+      "stage2c": {
+        "leader": "061dadc05755",
+        "grid": [
+          4.266268642981685,
+          5.281772807063557,
+          6.538998436333535,
+          8.095482731326408,
+          10.022458529589597,
+          12.408114291769355,
+          15.361630065424231
+        ],
+        "e_v_ts_leader": 0.00871859425592442,
+        "rows": [
+          {
+            "key": "d3de439345ea",
+            "g_w_tso_shunt": 4.266268642981685,
+            "feasible": false,
+            "e_v_ts": 0.008699909370794217,
+            "e_v_ds": 0.0054895433195670095,
+            "n_hunting": 9.0,
+            "n_shunt_hunting": 15.0,
+            "bank_after_windows": 4,
+            "sts_all": true
+          },
+          {
+            "key": "0c69c73cf171",
+            "g_w_tso_shunt": 5.281772807063557,
+            "feasible": false,
+            "e_v_ts": 0.008693284901894072,
+            "e_v_ds": 0.005728642010641138,
+            "n_hunting": 14.0,
+            "n_shunt_hunting": 9.0,
+            "bank_after_windows": 4,
+            "sts_all": true
+          },
+          {
+            "key": "e7ad32997a84",
+            "g_w_tso_shunt": 6.538998436333535,
+            "feasible": false,
+            "e_v_ts": 0.008687669911250357,
+            "e_v_ds": 0.005418851024623972,
+            "n_hunting": 10.0,
+            "n_shunt_hunting": 4.0,
+            "bank_after_windows": 4,
+            "sts_all": true
+          },
+          {
+            "key": "3797728c615e",
+            "g_w_tso_shunt": 8.095482731326408,
+            "feasible": false,
+            "e_v_ts": 0.008684220153184896,
+            "e_v_ds": 0.005338247100449781,
+            "n_hunting": 6.0,
+            "n_shunt_hunting": 1.0,
+            "bank_after_windows": 4,
+            "sts_all": true
+          },
+          {
+            "key": "61419b4eeaa8",
+            "g_w_tso_shunt": 10.022458529589597,
+            "feasible": false,
+            "e_v_ts": 0.008688759064059118,
+            "e_v_ds": 0.005727737701560426,
+            "n_hunting": 7.0,
+            "n_shunt_hunting": 0.0,
+            "bank_after_windows": 4,
+            "sts_all": true
+          },
+          {
+            "key": "dab1c0153415",
+            "g_w_tso_shunt": 12.408114291769355,
+            "feasible": false,
+            "e_v_ts": 0.008685686694124362,
+            "e_v_ds": 0.0053980893593225535,
+            "n_hunting": 8.0,
+            "n_shunt_hunting": 0.0,
+            "bank_after_windows": 4,
+            "sts_all": true
+          },
+          {
+            "key": "0ed8bc1690fd",
+            "g_w_tso_shunt": 15.361630065424231,
+            "feasible": false,
+            "e_v_ts": 0.008686974765242139,
+            "e_v_ds": 0.005602252536932926,
+            "n_hunting": 2.0,
+            "n_shunt_hunting": 0.0,
+            "bank_after_windows": 3,
+            "sts_all": true
+          },
+          {
+            "key": "061dadc05755",
+            "g_w_tso_shunt": 19.018174133315103,
+            "feasible": true,
+            "e_v_ts": 0.00871859425592442,
+            "e_v_ds": 0.005561307303794815,
+            "n_hunting": 0.0,
+            "n_shunt_hunting": 0.0,
+            "bank_after_windows": 2,
+            "sts_all": true
+          }
+        ],
+        "pick": "061dadc05755",
+        "pick_g_w_tso_shunt": 19.018174133315103
+      }
+    },
+    "weight_fingerprint": "061dadc05755",
+    "design_rho": 25000.0,
+    "design_kappa": 0.2667863373570788,
+    "design_theta_sts_min": 0.009999999999999998,
+    "design_theta_ts_min": 0.005494646485870082,
+    "design_lambda_max_B": 1.4000000000417168,
+    "design_lambda_max_B_sts": 1.4000000000417168,
+    "v4": {
+      "hunting_tolerance": 0,
+      "hunt_dwell_s": 3600.0,
+      "settling_periods": 3,
+      "go_e_v_ts": 0.01,
+      "lambda_exclude": [
+        "shunt"
+      ],
+      "lambda_bank_points": 89,
+      "lambda_max_B_v4": 1.404769626437365,
+      "config_set": [
+        "sts_coupler_hold_after_bank=1"
+      ]
+    },
+    "lambda_max_B": 1.404769626437365,
+    "record_additions": {
+      "fields": {
+        "sts_coupler_hold_after_bank": 1
+      },
+      "provenance": {
+        "lambda_max_B": 1.404769626437365
+      },
+      "by": "experiments\\ch_09_parameter_selection\\ch_9_16_ref_after_v4.py",
+      "on": "2026-11-05 10:19:57",
+      "reason": "the selection ran with these config fields (--config-set); lambda_max_B is M's loop-gain ceiling in the REF variants (author B1b: banks excluded, as in variant M)"
+    }
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.4,
+    "dso_g_v": 10000.0,
+    "g_w_der": 0.014211188776637435,
+    "g_w_pcc": 0.8729582741905181,
+    "g_w_gen": 1701774.6318173753,
+    "g_w_tso_oltc": 15.61053974546674,
+    "g_w_tso_shunt": 19.018174133315103,
+    "g_w_dso_der": 1.499327154316085,
+    "g_w_dso_oltc": 10.839405936667927,
+    "sts_coupler_hold_after_bank": 1
+  }
+}

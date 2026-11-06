@@ -1213,6 +1213,15 @@ class MultiTSOConfig:
     the system (import / export).  ``False`` reproduces the earlier
     construction.  See :func:`network.ieee39.zonal_balancing.compute_merit_order_dispatch`."""
 
+    unit_commitment_window_s: Optional[float] = None
+    """Span from the start of the run over which :attr:`unit_commitment` decides
+    the commitment; ``None`` = the simulated window (as since 2026-10-31).  A run
+    that stands for a longer window sets that window here, so its machines are
+    the window's: the D1/D2 runs of ``ch_9_4_deadband`` (2 h and 1.5 h) stand for
+    the 12-h design windows, whose commitment their own span changed in W2 and
+    W6 (author 2026-11-05: "Yes, fix and rerun").  The dispatch between the
+    committed machines is per time step and is unaffected."""
+
     gen_min_stable_frac: Dict[str, float] = field(
         default_factory=lambda: {"Nuclear": 0.5, "Coal": 0.4, "Hydro": 0.1})
     """Technical minimum (minimum stable generation) per fuel type, as a
@@ -1646,6 +1655,17 @@ class MultiTSOConfig:
     The RVR integral state still advances only at ``tso_period_s``. False holds
     the complete RVR output between regional samples and preserves the matched
     S1/O1 supervisory cadence; True is a faster multirate PI experiment."""
+
+    fix_machine_taps: bool = False
+    """Hold the machine-transformer taps at their start position wherever they would
+    otherwise follow a local relay (``tso_mode='svr'``, ``tso_oltc_mode='local'``, LOC):
+    no TapRelay / DiscreteTapControl on the machine transformers; couplers, network
+    OLTCs and the banks keep their local rules.  An MIQP that dispatches the machine
+    taps (O2, O3, M) is unaffected.  The relay holds the HV side at 1.03 +/- 0.01 pu and
+    undoes every AVR set-point change the RPR makes, so the pilot error persists and
+    the regional integrator winds the set-points down to ``v_set_min_pu`` (scenario E,
+    run 0017: G10's machine tap +1 every 15 min, both area-1 machines at 0.95 pu).
+    Author 2026-11-05: "Keep fixed", and "use it in O1 also too keep it consistent"."""
 
     svr_rpr_voltage_priority: bool = False
     """Block machine RPR moves predicted to worsen the local pilot error.

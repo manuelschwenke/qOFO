@@ -50,7 +50,23 @@ _RUN_CASE1 = Path(__file__).with_name("run_case1.py")
 CM = 1 / 2.54
 WIDTH = 12.0 * CM
 PILOT_AREA1 = 25
+#: Transmission dispatch period (make_config tso_period_s).
+T_TS_S = 180.0
+#: The six make_config contingencies [min], for runs without a recorded scenario.
 EVENTS = [30, 120, 180, 210, 300, 330]
+
+
+def _events(run: Path):
+    """(minute, element_type, action) of the run's disturbances: its recorded scenario
+    (run_case1 --scenario, e.g. A since 2026-11-05), else the six make_config ones."""
+    import json
+    man = run / "run_manifest.json"
+    sc = (json.loads(man.read_text(encoding="utf-8")).get("parameters", {}).get("scenario")
+          if man.exists() else None)
+    from experiments.ch_11_case2_multisystem.ref import scenarios as _sc
+    if sc in _sc.SCENARIOS:
+        return [(e.effective_time_s / 60.0, e.element_type, e.action) for e in _sc.events(sc)]
+    return [(m, "line" if m == 210 else "other", "trip") for m in EVENTS]
 
 #: TU Darmstadt corporate colours, as defined in the thesis preamble
 #: (ClassicThesis.tex: tured, tuamber, tuteal, ...; qOFO configs/color_config.py).
@@ -104,7 +120,8 @@ def fig_equivalence(run: Path, out: Path) -> None:
     fig, ax = plt.subplots(2, 1, figsize=(WIDTH, 9.6 * CM),
                            gridspec_kw=dict(height_ratios=[1.0, 1.15]))
     vp = lambda log: np.array([r.bus_vm_pu[PILOT_AREA1] for r in log])
-    for e in EVENTS:
+    evs = _events(run)
+    for e, _, _ in evs:
         ax[0].axvline(e, color="0.88", lw=0.6, zorder=0)
     # Same hue for the pair that coincides: S1^- as a light, wide band, O0 as
     # a thin dashed line on top of it.
@@ -117,16 +134,31 @@ def fig_equivalence(run: Path, out: Path) -> None:
     ax[0].legend(loc="lower right", frameon=False, ncol=2)
     ax[0].set_title("(a) pilot node of area 1, whole reference run", loc="left")
 
-    win_lo, win_hi = 205.0, 225.0
+    # The disturbance and area with the largest growth until the next dispatch under S1^-
+    # (eq:case3:epost): the response panel (b) is about.
+    tt0 = t * 60.0
+    best = (-np.inf, None, None)
+    for m, kind, act in evs:
+        i0 = np.where(np.isclose(tt0, 60.0 * m))[0]
+        if not i0.size:
+            continue
+        win = (tt0 > 60.0 * m) & (tt0 <= 60.0 * m + T_TS_S)
+        for z in (1, 2, 3):
+            e = np.array([r.zone_v_rms_err_pu.get(z, np.nan) for r in s1m])
+            g = np.nanmax(e[win]) - e[i0[0]]
+            if g > best[0]:
+                best = (g, (m, kind, act), z)
+    (t_line, ev_kind, ev_act), zb = best[1], best[2]
+    win_lo, win_hi = t_line - 5.0, t_line + 15.0
     for k in range(int(win_lo * 60 // 180), int(win_hi * 60 // 180) + 1):
         ax[1].axvline(k * 3.0, color="0.9", lw=0.5, zorder=0)
-    ax[1].axvline(210, color="k", lw=0.7)
+    ax[1].axvline(t_line, color="k", lw=0.7)
     for name in ("S1m", "S1", "O1", "O2"):
         log = _load(run, name)
         if log is None:
             continue
         tt = np.array([r.time_s for r in log]) / 60.0
-        e = np.array([r.zone_v_rms_err_pu.get(1, np.nan) for r in log]) * 1e3
+        e = np.array([r.zone_v_rms_err_pu.get(zb, np.nan) for r in log]) * 1e3
         m = (tt >= win_lo) & (tt <= win_hi)
         ax[1].plot(tt[m], e[m], **STYLE[name])
     ax[1].set_xlim(win_lo, win_hi)
@@ -135,7 +167,11 @@ def fig_equivalence(run: Path, out: Path) -> None:
     # Below the axes: inside, the legend covers the S1 decay (2026-10-07).
     ax[1].legend(loc="upper center", bbox_to_anchor=(0.5, -0.30), ncol=2,
                  frameon=False, handlelength=1.8, columnspacing=1.0)
-    ax[1].set_title("(b) area 1 after the trip of tie line 17–27 at 210 min", loc="left")
+    what = {("line", "trip"): "the trip of tie line 17–27",
+            ("gen", "trip"): "the outage of G4", ("load", "connect"): "the load step"}.get(
+        (ev_kind, ev_act), f"{ev_kind} {ev_act}")
+    ax[1].set_title(f"(b) area {zb} after {what} at "
+                    f"{int(t_line)}:{round(60 * (t_line % 1)):02d}", loc="left")
     fig.tight_layout(h_pad=0.6)
     fig.savefig(out / "case_svr_equivalence.pdf")
     plt.close(fig)
@@ -149,7 +185,7 @@ def fig_pareto(run: Path, out: Path) -> None:
         avr=("avr_trav", "sum"))
     agg.to_csv(out / "case_svr_data.csv", float_format="%.6g")
     series = [
-        ("S1", ["S1_T112", "S1_T137", "S1", "S1_T600"], COLOR["S1"], "o", "S1"),
+        ("S1", ["S1_T112", "S1_T128", "S1", "S1_T600"], COLOR["S1"], "o", "S1"),
         ("O1", ["O1_gw0p01", "O1_gw0p1", "O1"], COLOR["O1"], "s", "O1"),
         ("O2", ["O2_gw0p01", "O2_gw0p1", "O2"], COLOR["O2"], "^", "O2"),
     ]

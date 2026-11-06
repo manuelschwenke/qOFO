@@ -34,6 +34,10 @@ from typing import Dict, List, Optional
 from experiments.helpers.records import ContingencyEvent
 
 T_TS = 180.0
+#: Simulation step (``dt_s``).  The runner fires an event only at a step whose
+#: time equals the event time (``multi_tso_dso``), so an event off this grid
+#: never fires -- F's second step at 271:10 did not (runs 0020/0021).
+DT_S = 20.0
 
 
 def _at(minute: int, offset_s: float) -> float:
@@ -41,6 +45,8 @@ def _at(minute: int, offset_s: float) -> float:
     phase = t % T_TS
     if not 0.0 < phase < T_TS:
         raise ValueError(f"event at {t} s lies on a dispatch instant")
+    if t % DT_S != 0.0:
+        raise ValueError(f"event at {t} s lies off the {DT_S:g}-s step grid and would never fire")
     return t
 
 
@@ -88,6 +94,40 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
               "600 Mvar at bus 4",
         events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
                         _load(3, 600.0, _at(210, 140))]),
+    # Declared 2026-11-05 before any run (docs/analysis/
+    # 2026-11-05_scenario_F_declaration.md; author: "two subsequent 400 Mvar
+    # steps", "a scenario where we see a huge difference and really need sts
+    # resources"): E's first two events, then two 400 Mvar steps -- IEEE 4 (the
+    # location rule) and IEEE 8 (B's load bus) -- 59 min apart.  After the first
+    # step area 2's own TS resources still restore the level (bound +12 mpu);
+    # after the second they leave it 90 mpu low, and restoring it takes ~55 % of
+    # the area-2 STS DER capability.  Two load buses, because connect events with
+    # equal (bus, P, Q) share one dormant load (contingency.py).  FM: the same with
+    # 2 x 350 Mvar, declared as F's fallback (~41 %).  Step 2 moved from 271:10
+    # (off the 20-s step grid, never fired in runs 0020/0021) to 271:00
+    # (amendment 2026-11-06 in the declaration).
+    "F": dict(
+        title="area-2 deficit far beyond own TS resources: G3 out, line 9-39 out, "
+              "400 Mvar at bus 4, then 400 Mvar at bus 8",
+        events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
+                        _load(3, 400.0, _at(210, 140)), _load(7, 400.0, _at(270, 60))]),
+    "FM": dict(
+        title="F's fallback: G3 out, line 9-39 out, 350 Mvar at bus 4, then 350 Mvar at bus 8",
+        events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
+                        _load(3, 350.0, _at(210, 140)), _load(7, 350.0, _at(270, 60))]),
+    # Declared 2026-11-06 before any run (docs/analysis/2026-11-06_scenario_E2_
+    # declaration.md; author: "with 9-39 in operation, and maybe G3 and load step
+    # overlapping, then G3 coming back, then a line drop later"): E without the
+    # 9-39 opening, which raised the controllers' mismatch loop gain most (CEN
+    # 3.1 at its former cap), and at most two disturbances at a time.  The line
+    # (3-4, line 4) is the area-2 line or tie other than 9-39 whose opening leaves
+    # the largest area-2 deficit at the TS-a2 bound, with every controller's
+    # mismatch loop gain < 2 and the frozen-control minimum >= 0.90 pu.
+    "E2": dict(
+        title="area-2 Q-scarce without 9-39: G3 out, 600 Mvar at bus 4, G3 back, "
+              "line 3-4 out",
+        events=lambda: [_gen(1, _at(30, 40)), _load(3, 600.0, _at(90, 100)),
+                        _gen(1, _at(150, 140), "restore"), _line(4, _at(240, 60))]),
     # Renewable-dominated period under unit commitment (author decision
     # 2026-10-31): the earliest 6-h window of the profile year, outside the
     # excluded days, starting at a full hour between 06:00 and 12:00, in which

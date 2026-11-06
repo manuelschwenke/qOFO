@@ -33,8 +33,9 @@ Campaigns
             illustration, NOT validation.
 ``K1-PAR``  error--effort front.  O1/O2 with the AVR movement weight scaled by
             0.1 and 0.01; S1 with T_RVR = 112.5 s (b = T_TS/T_RVR = 1.6, the
-            OFO's own budget ceiling), 137.4 s (b = 1.31, matched to the
-            selected OFO weights) and 600 s.  300 s (b = 0.6) is the deployed
+            OFO's own budget ceiling), 128.1 s (b = 1.405, matched to
+            lambda_max(B) of the selected weights ch9_selected_uc_2026_11_v4;
+            137.4 s for the 1.31 of the weights before 2026-11-04) and 600 s.  300 s (b = 0.6) is the deployed
             S1 in K1-REF.
 
 Configuration
@@ -68,7 +69,7 @@ import datetime as _dt
 import json
 import pickle
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from configs.config import MultiTSOConfig
 from configs.paramsets import apply_paramset
@@ -112,12 +113,17 @@ _SVR = dict(
     svr_pilot_buses=PILOT_BUSES, svr_t_rvr_s=300.0, svr_t_rpr_s=60.0,
     # No supervisory dead band: the OFO's tracking has none either.
     svr_deadband_pu=0.0,
+    # Machine taps held fixed: their local relay undoes the RPR's AVR set-point
+    # changes and winds the SVR to its floor (author 2026-11-05: "Keep fixed").
+    fix_machine_taps=True,
     **_LOCAL_STS, **_LOCAL_SHUNTS,
 )
 
 VARIANTS: Dict[str, Dict[str, Any]] = {
+    # Machine taps fixed in LOC too, for one rule: they move only when an MIQP
+    # dispatches them (author 2026-11-05: "Held fixed").
     "L2": dict(tso_mode="local", tso_local_mode="qv", tso_oltc_mode="local",
-               **_LOCAL_STS, **_LOCAL_SHUNTS),
+               fix_machine_taps=True, **_LOCAL_STS, **_LOCAL_SHUNTS),
     "S1m": dict(_SVR, svr_k_p_rvr=0.0, svr_k_p_rpr=0.0,
                 svr_rpr_voltage_priority=False),
     # Integral laws WITH the safeguard (author 2026-10-07; was "S1g" in the
@@ -127,7 +133,7 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
     "O0": dict(_SVR, svr_k_p_rvr=0.0, svr_k_p_rpr=0.0,
                svr_rpr_voltage_priority=False,
                svr_rvr_law="ofo", svr_rpr_law="ofo"),
-    "O1": dict(tso_mode="ofo", tso_oltc_mode="local",
+    "O1": dict(tso_mode="ofo", tso_oltc_mode="local", fix_machine_taps=True,
                **_LOCAL_STS, **_LOCAL_SHUNTS),
     "O2": dict(tso_mode="ofo", **_LOCAL_STS),
 }
@@ -140,7 +146,9 @@ PARETO: Dict[str, Tuple[str, Dict[str, Any], float]] = {
     "O2_gw0p01": ("O2", {}, 0.01),
     # Integral S1: b = T_TS/T_RVR = 180/T_RVR.
     "S1_T112": ("S1", {"svr_t_rvr_s": 112.5}, 1.0),   # b = 1.6, the ceiling
-    "S1_T137": ("S1", {"svr_t_rvr_s": 137.4}, 1.0),   # b = 1.31 = lambda_max(B)
+    # b = 1.405 = lambda_max(B) of the v4 weights (design_lambda_max_B of the paramset;
+    # S1_T137, b = 1.31, matched the weights before 2026-11-04).
+    "S1_T128": ("S1", {"svr_t_rvr_s": 128.1}, 1.0),
     "S1_T600": ("S1", {"svr_t_rvr_s": 600.0}, 1.0),   # b = 0.3
 }
 
@@ -165,14 +173,15 @@ K1_EXTRA = list(LEGACY)
 _SVR_FIELDS = {"tso_mode", "tso_local_mode", "svr_pilot_buses", "svr_t_rvr_s",
                "svr_t_rpr_s", "svr_k_p_rvr", "svr_k_p_rpr",
                "svr_rvr_p_every_step", "svr_deadband_pu",
-               "svr_rpr_voltage_priority", "svr_rvr_law", "svr_rpr_law"}
+               "svr_rpr_voltage_priority", "svr_rvr_law", "svr_rpr_law",
+               "fix_machine_taps"}
 STEP_ALLOWED: Dict[Tuple[str, str], set] = {
     ("L2", "S1m"): _SVR_FIELDS,
     ("S1m", "O0"): {"svr_rvr_law", "svr_rpr_law"},
     ("S1m", "S1"): {"svr_rpr_voltage_priority"},
     ("O0", "O1"): _SVR_FIELDS,
     ("O1", "O2"): {"tso_oltc_mode", "install_tso_tertiary_shunts",
-                   "shunt_dispatch"},
+                   "shunt_dispatch", "fix_machine_taps"},
 }
 
 
@@ -181,8 +190,12 @@ STEP_ALLOWED: Dict[Tuple[str, str], set] = {
 # ---------------------------------------------------------------------------
 
 
-def base_config(minutes: int = HORIZON_MIN) -> MultiTSOConfig:
-    """make_config + Chapter-8 batch network + Chapter-8 weights + horizon."""
+def base_config(minutes: int = HORIZON_MIN, scenario: Optional[str] = None) -> MultiTSOConfig:
+    """make_config + Chapter-8 batch network + Chapter-8 weights + horizon.
+
+    ``scenario`` (a key of ``ch_11_case2_multisystem/ref/scenarios.py``) replaces the six
+    make_config contingencies by that schedule, and its period if it names one (author
+    2026-11-05: Case 1 on scenario A, "It doesnt have to prove sts support")."""
     cfg = dataclasses.replace(
         make_config(),
         n_total_s=60.0 * minutes,
@@ -196,12 +209,18 @@ def base_config(minutes: int = HORIZON_MIN) -> MultiTSOConfig:
         live_plot_overview=False,
         live_plot_sbxv=False,
     )
+    if scenario is not None:
+        from experiments.ch_11_case2_multisystem.ref import scenarios as _sc
+        spec = _sc.SCENARIOS[scenario]
+        cfg = dataclasses.replace(cfg, contingencies=list(spec["events"]()))
+        if spec.get("start"):
+            cfg = dataclasses.replace(cfg, start_time=_dt.datetime.fromisoformat(str(spec["start"])))
     return apply_paramset(cfg, PARAMSET, verbose=False)
 
 
-def resolved(name: str, minutes: int = HORIZON_MIN) -> MultiTSOConfig:
+def resolved(name: str, minutes: int = HORIZON_MIN, scenario: Optional[str] = None) -> MultiTSOConfig:
     """The config the runner receives for a variant or a Pareto point."""
-    cfg = base_config(minutes)
+    cfg = base_config(minutes, scenario)
     if name in VARIANTS:
         return dataclasses.replace(cfg, **VARIANTS[name])
     if name in PARETO or name in LEGACY:
@@ -239,8 +258,8 @@ def assert_case1_controlled() -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_one(name: str, out: Path, minutes: int) -> int:
-    cfg = resolved(name, minutes)
+def run_one(name: str, out: Path, minutes: int, scenario: Optional[str] = None) -> int:
+    cfg = resolved(name, minutes, scenario)
     d = out / name
     d.mkdir(parents=True, exist_ok=True)
     cfg = dataclasses.replace(cfg, result_dir=str(d))
@@ -270,13 +289,13 @@ def run_one(name: str, out: Path, minutes: int) -> int:
     return len(log)
 
 
-def _run_one_logged(name: str, out: str, minutes: int) -> int:
+def _run_one_logged(name: str, out: str, minutes: int, scenario: Optional[str] = None) -> int:
     """:func:`run_one` in a worker process, its console into ``<variant>/``."""
     import contextlib
     d = Path(out) / name
     d.mkdir(parents=True, exist_ok=True)
     with open(d / "console.log", "w", encoding="utf-8") as fh,             contextlib.redirect_stdout(fh):
-        return run_one(name, Path(out), minutes)
+        return run_one(name, Path(out), minutes, scenario)
 
 
 def main() -> None:
@@ -289,6 +308,9 @@ def main() -> None:
                     help="add the variants to this existing run of run_case1 "
                          "(it must carry a run_manifest.json)")
     ap.add_argument("--minutes", type=int, default=HORIZON_MIN)
+    ap.add_argument("--scenario", default=None,
+                    help="event schedule of ch_11_case2_multisystem/ref/scenarios.py "
+                         "(e.g. A) instead of the six make_config contingencies")
     ap.add_argument("--list", action="store_true")
     add_run_arguments(ap)
     args = ap.parse_args()
@@ -315,21 +337,22 @@ def main() -> None:
     # that the variants differ from it only in their mechanism.
     with start_thesis_run(
             __file__, target=TARGET, feeds=FEEDS,
-            config=base_config(args.minutes), paramset=PARAMSET,
+            config=base_config(args.minutes, args.scenario), paramset=PARAMSET,
             parameters={"variants": sel, "horizon_min": args.minutes,
+                        "scenario": args.scenario or "make_config (six contingencies)",
                         "network": "DSO_3 x2 (load and DER)"},
             note=args.note, tag=args.tag, resume=args.run_dir) as run:
         out = run.root
-        print(f"run dir: {out}  |  horizon {args.minutes} min  |  {sel}")
+        print(f"run dir: {out}  |  horizon {args.minutes} min  |  scenario {args.scenario}  |  {sel}")
         failed = []
         if args.jobs > 1:
             from concurrent.futures import ProcessPoolExecutor
             with ProcessPoolExecutor(max_workers=args.jobs) as ex:
                 counts = dict(zip(sel, ex.map(
                     _run_one_logged, sel, [str(out)] * len(sel),
-                    [args.minutes] * len(sel))))
+                    [args.minutes] * len(sel), [args.scenario] * len(sel))))
         for s in sel:
-            n = (counts[s] if args.jobs > 1 else run_one(s, out, args.minutes))
+            n = (counts[s] if args.jobs > 1 else run_one(s, out, args.minutes, args.scenario))
             status = json.loads((out / s / "status.json").read_text(
                 encoding="utf-8"))["status"]
             if status != "ok":

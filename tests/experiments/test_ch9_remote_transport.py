@@ -20,6 +20,26 @@ def _fake_remote(monkeypatch, tmp_path, log_pull):
     monkeypatch.setattr(P, "pull_dir", pull_dir)
 
 
+def test_a_resume_keeps_the_split_of_the_earlier_invocation(tmp_path):
+    import json
+    cands = [{"g_w_der": float(i), "g_q": 1.0} for i in range(6)]
+    loc, rem = P.split(cands, 10, 36)
+    (tmp_path / "l.json").write_text(json.dumps(loc), "utf-8")
+    (tmp_path / "r.json").write_text(json.dumps(rem), "utf-8")
+    assert P.kept_split(cands, tmp_path / "l.json", tmp_path / "r.json") == (loc, rem)
+    assert P.split(cands, 20, 36) != (loc, rem)          # other workers, other split
+    assert P.kept_split(cands[:5], tmp_path / "l.json", tmp_path / "r.json") is None
+    assert P.kept_split(cands, tmp_path / "x.json", tmp_path / "r.json") is None
+
+
+def test_slower_local_workers_get_a_smaller_share():
+    cands = [{"g_w_der": float(i)} for i in range(54)]
+    by_workers, _ = P.split(cands, 20, 36)
+    by_speed, rest = P.split(cands, 20 * 0.75, 36)
+    assert len(by_workers) == 19 and len(by_speed) < len(by_workers)
+    assert len(by_speed) + len(rest) == 54
+
+
 def test_a_failed_shard_log_pull_does_not_end_the_run(monkeypatch, tmp_path):
     def locked():
         raise PermissionError(32, "The process cannot access the file")

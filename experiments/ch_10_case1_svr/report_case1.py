@@ -131,6 +131,21 @@ def area_metrics(log: list, z: int, ref: float, v_lo: float,
     return m
 
 
+def event_minutes(run_dir: Path, name: str, horizon: float) -> List[float]:
+    """Event instants [min] of a run: the schedule of its recorded scenario
+    (``run_case1 --scenario``), else the variant's ``make_config`` contingencies.
+    The variant's resolved config alone does not know the scenario (2026-11-06:
+    run 0001, scenario A, would have been read at the six old minutes)."""
+    man = run_dir / "run_manifest.json"
+    sc = None
+    if man.exists():
+        sc = json.loads(man.read_text(encoding="utf-8")).get("parameters", {}).get("scenario")
+    from experiments.ch_11_case2_multisystem.ref import scenarios as _sc
+    evs = _sc.events(sc) if sc in _sc.SCENARIOS else resolved(name).contingencies
+    return sorted(e.effective_time_s / 60.0 for e in evs
+                  if e.effective_time_s / 60.0 < horizon)
+
+
 def epost(log: list, z: int, events_min: List[float], t_ts: float) -> Dict[float, float]:
     t = np.array([r.time_s for r in log], dtype=float)
     e = np.array([r.zone_v_rms_err_pu.get(z, np.nan) for r in log], dtype=float)
@@ -208,7 +223,7 @@ def main() -> None:
         logs[name] = log
         c = resolved(name)
         horizon = len(log) * float(c.dt_s) / 60.0
-        events = sorted(e.minute for e in c.contingencies if e.minute < horizon)
+        events = event_minutes(run_dir, name, horizon)
         for z in zones:
             m = area_metrics(log, z, refs[z], args.v_lo, args.v_hi)
             rows.append(dict(variant=name, area=z, **m))

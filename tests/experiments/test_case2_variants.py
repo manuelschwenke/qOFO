@@ -75,6 +75,14 @@ def test_m_targets_the_selected_designs_loop_gain():
     assert 0.0 < m.central_lambda_target < 2.0
 
 
+def test_msel_is_m_and_m090_differs_only_in_the_fallback_ceiling():
+    m, ms, ml = v.resolved("M", 10), v.resolved("Msel", 10), v.resolved("M090", 10)
+    fields = [f.name for f in dataclasses.fields(m)]
+    assert {k for k in fields if getattr(m, k) != getattr(ms, k)} == set()
+    assert {k for k in fields if getattr(m, k) != getattr(ml, k)} == {"central_lambda_target"}
+    assert ml.central_lambda_target == pytest.approx(v.M_LAMBDA_FALLBACK) == pytest.approx(0.90)
+
+
 def test_s1_to_s2_changes_only_the_sts_controller_and_the_access():
     a, b = v.resolved("S1", 10), v.resolved("S2", 10)
     diff = {f.name for f in dataclasses.fields(a)

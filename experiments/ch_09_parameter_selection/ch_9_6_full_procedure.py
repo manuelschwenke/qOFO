@@ -284,6 +284,24 @@ def split(items: List[Any], w_local: int, w_remote: int) -> Tuple[List[Any], Lis
     return loc, rem
 
 
+def kept_split(cands: List[Dict[str, float]], cj_loc: Path, cj_rem: Path
+               ) -> Optional[Tuple[List[Any], List[Any]]]:
+    """The split an earlier invocation wrote, if it covers exactly ``cands``.
+
+    A resume with other worker counts must not move a candidate between the hosts
+    while a shard may still be working on it: the remote shard keeps its own list,
+    and the units it has finished are only here after its pull (2026-11-02).
+    """
+    from tuning.parameters import weight_fingerprint
+    if not (cj_loc.exists() and cj_rem.exists()):
+        return None
+    loc = json.loads(cj_loc.read_text("utf-8"))
+    rem = json.loads(cj_rem.read_text("utf-8"))
+    if sorted(map(weight_fingerprint, loc + rem)) != sorted(map(weight_fingerprint, cands)):
+        return None
+    return loc, rem
+
+
 # -- configuration and operating points ------------------------------------------------
 
 def base_config():
@@ -377,14 +395,23 @@ def screen_argv(out: Path, cj: Path, workers: int, windows: str = WINDOWS,
 
 
 def simulate(out: Path, cands: List[Dict[str, float]], w_local: int,
-             w_remote: int) -> None:
+             w_remote: int, split_local: Optional[float] = None) -> None:
     """Simulate the Stage-I point and ``cands`` in W1-W4, W6, split over the two
-    hosts, then assemble every candidate record here."""
+    hosts, then assemble every candidate record here.
+
+    ``split_local`` is the local host's weight in the split, in remote workers
+    (default ``w_local``); a host whose workers are slower gets a smaller share."""
     out.mkdir(parents=True, exist_ok=True)
     (out / "windows").mkdir(exist_ok=True)
-    loc, rem = split(cands, w_local, w_remote) if w_remote > 0 else (cands, [])
     cj_all, cj_loc, cj_rem = (out / "all_candidates.json", out / "shard_local.json",
                               out / "shard_remote.json")
+    kept = kept_split(cands, cj_loc, cj_rem) if w_remote > 0 else None
+    if kept is not None:
+        loc, rem = kept
+        log(f"{rel(out)}: split of the earlier invocation kept")
+    else:
+        w_split = float(split_local) if split_local is not None else float(w_local)
+        loc, rem = split(cands, w_split, w_remote) if w_remote > 0 else (cands, [])
     cj_all.write_text(json.dumps(cands, indent=1), "utf-8")
     cj_loc.write_text(json.dumps(loc, indent=1), "utf-8")
     cj_rem.write_text(json.dumps(rem, indent=1), "utf-8")

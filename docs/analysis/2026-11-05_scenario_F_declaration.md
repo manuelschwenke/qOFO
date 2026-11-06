@@ -104,3 +104,31 @@ If a result contradicts a hypothesis, that is reported as such.
 - **The bounds are static and optimistic for OFO** (one operating point, taps frozen).
 - **One period, one noise seed.** The cross-scenario statement is left to the Monte Carlo
   campaign.
+
+## Amendment 2026-11-06, 07:25: step 2 did not fire in runs 0020/0021; moved onto the step grid
+
+- **What happened.** Runs 0020 (F) and 0021 (FM) completed with all six variants "ok" (pulled
+  02:21–02:22). But step 2 never fired:
+  - The runner fires an event only at a step whose time equals the event time
+    (`experiments/runners/multi_tso_dso.py:3877`, tolerance 1e-9 s; step `dt_s` = 20 s).
+  - Step 2 was scheduled at 271:10 = 16270 s, which is not a multiple of 20 s. The first three
+    events are at 1840, 7300 and 12740 s, all on the grid.
+  - Evidence: every variant's `events_fired` lists only three events. The area-2 load Q is
+    558.9 Mvar at 268 min and 558.4 Mvar at 275 min (F, L2).
+- **What 0020/0021 are.** E's schedule with 400 Mvar (0020) or 350 Mvar (0021) at IEEE 4 instead
+  of 600 Mvar. They are not runs of F or FM and are not reported as such. They are kept as runs of
+  a single 400 / 350 Mvar step; a note in each run folder says so.
+- **What was seen before this amendment.** The windowed metrics of 0020/0021
+  (`sts_access_gain_scripts/F_windows.py/.out`), i.e. the behaviour after step 1 only.
+  - Hypothesis 1 can be read from them, because the rerun reproduces the first 271 min (same
+    seed, period, weights; the windows before step 1 equal E's run 0019 to 0.1 mpu):
+    O3 − O2 in area-2 e_v between the steps is +0.1 mpu (F) and +0.1 mpu (FM), within ±2 mpu.
+  - Hypotheses 2–5 concern the state after step 2, which no run has produced yet. They stand
+    unchanged.
+- **Change.** Step 2 moves from 271:10 to **271:00** (16260 s, phase 60 s): on the step grid,
+  10 s earlier, and still at a phase distinct from the other events. Loads, buses, weights, seed
+  and the FM fallback rule are unchanged. The static bounds do not depend on the 10-s shift.
+- **Guard.** `ref/scenarios._at` now rejects a time off the 20-s grid (`DT_S`), and a test checks
+  that every event of every scenario lies on it. The MC campaign's event phases (20–160 s in
+  20-s steps) are on the grid.
+- **Reruns.** F and FM again on e5power, tags v4_F_r2 and v4_FM_r2 (run numbers in the daily log).

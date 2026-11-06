@@ -12,6 +12,19 @@ def test_F_extends_E_with_two_distinct_steps():
         # connect events with equal (bus, P, Q) would share one dormant load
         assert len({(x.bus, x.p_mw, x.q_mvar) for x in steps}) == 2
         assert steps[0].effective_time_s == e[2].effective_time_s
-        assert steps[1].effective_time_s == 270 * 60 + 70
+        assert steps[1].effective_time_s == 270 * 60 + 60   # 271:10 was off the step grid
         assert len({x.effective_time_s % sc.T_TS for x in ev}) == len(ev)   # distinct offsets
         assert sc.start_time(name) is None                                   # reference period
+
+
+def test_every_scheduled_event_lies_on_the_step_grid():
+    # The runner fires an event only at a step time; an off-grid event is silently skipped.
+    for name in sc.SCENARIOS:
+        for ev in sc.events(name):
+            assert ev.effective_time_s % sc.DT_S == 0.0, (name, ev.effective_time_s)
+
+
+def test_at_rejects_off_grid_times():
+    import pytest
+    with pytest.raises(ValueError, match="step grid"):
+        sc._at(270, 70)

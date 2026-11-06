@@ -34,6 +34,10 @@ from typing import Dict, List, Optional
 from experiments.helpers.records import ContingencyEvent
 
 T_TS = 180.0
+#: Simulation step (``dt_s``).  The runner fires an event only at a step whose
+#: time equals the event time (``multi_tso_dso``), so an event off this grid
+#: never fires -- F's second step at 271:10 did not (runs 0020/0021).
+DT_S = 20.0
 
 
 def _at(minute: int, offset_s: float) -> float:
@@ -41,6 +45,8 @@ def _at(minute: int, offset_s: float) -> float:
     phase = t % T_TS
     if not 0.0 < phase < T_TS:
         raise ValueError(f"event at {t} s lies on a dispatch instant")
+    if t % DT_S != 0.0:
+        raise ValueError(f"event at {t} s lies off the {DT_S:g}-s step grid and would never fire")
     return t
 
 
@@ -97,16 +103,18 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
     # after the second they leave it 90 mpu low, and restoring it takes ~55 % of
     # the area-2 STS DER capability.  Two load buses, because connect events with
     # equal (bus, P, Q) share one dormant load (contingency.py).  FM: the same with
-    # 2 x 350 Mvar, declared as F's fallback (~41 %).
+    # 2 x 350 Mvar, declared as F's fallback (~41 %).  Step 2 moved from 271:10
+    # (off the 20-s step grid, never fired in runs 0020/0021) to 271:00
+    # (amendment 2026-11-06 in the declaration).
     "F": dict(
         title="area-2 deficit far beyond own TS resources: G3 out, line 9-39 out, "
               "400 Mvar at bus 4, then 400 Mvar at bus 8",
         events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
-                        _load(3, 400.0, _at(210, 140)), _load(7, 400.0, _at(270, 70))]),
+                        _load(3, 400.0, _at(210, 140)), _load(7, 400.0, _at(270, 60))]),
     "FM": dict(
         title="F's fallback: G3 out, line 9-39 out, 350 Mvar at bus 4, then 350 Mvar at bus 8",
         events=lambda: [_gen(1, _at(30, 40)), _line(14, _at(120, 100)),
-                        _load(3, 350.0, _at(210, 140)), _load(7, 350.0, _at(270, 70))]),
+                        _load(3, 350.0, _at(210, 140)), _load(7, 350.0, _at(270, 60))]),
     # Renewable-dominated period under unit commitment (author decision
     # 2026-10-31): the earliest 6-h window of the profile year, outside the
     # excluded days, starting at a full hour between 06:00 and 12:00, in which

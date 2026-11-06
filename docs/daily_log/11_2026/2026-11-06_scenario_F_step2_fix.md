@@ -367,3 +367,27 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
 - The run-level `metrics.csv`, `epost.csv`, `pareto.csv` and `equivalence.json` date from
   09:17 and cover the K1-REF variants only. Rerun `report_case1.py` on the run for the front.
   Per the author, another session does this.
+
+## 18:43–18:45: E2 complete; CEN rerun at 1.405 into run 0025
+
+- **Run 0025** pulled 17:13 (S1 done on e5power at 17:06), all six variants ok.
+  - S1 slowed to ~46 s/step in stage 2 (11–12 coupler tap requests blocked by the rate limit,
+    each followed by a second PF) and recovered after G3's return.
+- **E2 per stage** (`e2_windows_full.out`), area-2 e_v differences in mpu:
+
+  | stage | O3 − O2 | S2 − S1 |
+  |---|---|---|
+  | pre | −0.8 | +1.0 |
+  | 1 | −1.7 | −3.0 |
+  | 2 | −23.9 | −35.5 |
+  | 3 | −4.4 | −5.4 |
+  | 4 | −10.2 | −12.6 |
+
+  - Whole-run e_v over all areas, mpu: L2 24.95, S1 21.38, O2 16.20, S2 13.44, O3 9.88,
+    M(0.90) 9.21, Msel(1.405) 9.14.
+- **F/FM vs E2 comparison:** `sts_access_gain_scripts/cmp_F_FM_E2.py/.out`.
+- **CEN of record at 1.405:**
+  - 0025/M (run at 0.90) moved aside as `M_lambda090`, with a NOTE.
+  - M rerun into run 0025 locally: `run_ref --variants M --run-dir …0025…`, launched 18:44:29.
+    Console: κ 1.268 → λ 1.405.
+  - Expect ~1 h. It should equal 0026/Msel (same config).

@@ -437,3 +437,18 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
 - **Not touched:** main (169 commits behind). The default `make_config` contingencies (bus 13)
   now differ from the six of the old Case 1 K1-REF schedule; this matters only for
   `run_case1` without `--scenario` (Ch 9 uses scenario A).
+
+## 21:52–23:55: full test suite, push
+
+- **Full suite on the merged code:** 1008 passed, 19 skipped, 4 failed (1 h 39 min).
+  - Two failures were the old versions of `test_m_is_ready_and_has_the_cascade_timescale` and
+    `test_case2_configuration_and_noise_seed`; the run collected them before commit ec36288
+    fixed both (13 of 13 pass).
+  - The other two, `test_ch9_procedure_v2::test_engagement_bounds` and
+    `::test_the_largest_rho_within_the_margins_is_chosen`, pass alone and in the first-42
+    order. They fail whenever the whole suite is collected, on the pre-merge branch
+    (F:/qOFO_res) as well: another test module changes the v2 procedure's module-level
+    settings at import. Pre-existing, not caused by the merge; open.
+- **Pushed** minimal/thesis-core to origin (ac69918..ec36288).
+- Untracked files of another session that appeared meanwhile (2026-11-06c/d daily logs and
+  hold-test scripts) are not committed.

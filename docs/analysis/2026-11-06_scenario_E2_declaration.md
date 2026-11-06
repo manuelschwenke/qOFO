@@ -1,6 +1,6 @@
 # Declaration: Case-2 scenario E2, area-2 scarcity without the 9–39 opening (written before any run)
 
-Date: 2026-11-06, 10:40, before the first run of E2.
+Date: 2026-11-06, 10:39 (commit 0c80a62), before the first run of E2 (launched 10:39:41).
 
 ## Request (author, 2026-11-06)
 

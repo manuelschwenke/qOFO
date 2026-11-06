@@ -264,3 +264,39 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
   - At the 1.8 h of run 0019, expected around 11:40.
   - If the cycle is gone, M of run 0019 is replaced, and the Ch 10 CEN numbers and the sentence
     "CEN runs at the selected weights" (now × 1.979) are corrected.
+
+## 10:05–10:45: scenario E2 defined, declared and launched (author: "then do such a scenario as i described, with 9-39 in operation, and maybe G3 and load step overlapping, then G3 coming back, then a line drop later"; "I will be gone now for an hour. Please work autonomously")
+
+- **Plant-only candidates** (shared notes `candE.py/.out`, `candE_stage1.out`).
+  - First pass: the TS-a2 bound left G3's AVR at 1.03 pu in states with G3 back. Corrected:
+    G3's AVR at 1.05 pu counts as area 2's own resource. Output of the biased pass kept as
+    `candE_v1_G3avr_fixed.out`.
+  - The scarcity comes from G3 plus the load (TS-a2 −28.3 mpu without 9–39, −26.6 with it).
+    The 9–39 opening mainly raises the mismatch.
+- **Mismatch loop gain for all candidate states** (`cand_mismatch.py/.out`): CEN at 0.90, and
+  the TS-OFO of each area under O2/O3.
+  - Every E2 state is < 2: CEN ≤ 1.45, cascade ≤ 0.85.
+  - Old E's state: CEN 2.11, cascade area 2 1.33/1.37.
+- **E2:** G3 out 30:40, 600 Mvar at IEEE 4 91:40, G3 back 152:20, line 3–4 out 241:00.
+  - The line is picked by the declared rule (largest TS-a2 deficit in the end state, all
+    mismatch gains < 2, frozen minimum ≥ 0.90 pu).
+  - Stage bounds: TS-a2 +56.0 / −28.3 / −18.0 / −30.5 mpu; STS share — / 25 / 29 / 42 %.
+  - Declaration `docs/analysis/2026-11-06_scenario_E2_declaration.md`, commit 0c80a62.
+  - Runner check: dormant 600-Mvar load at bus 3, line 4 = IEEE 3–4, G3 committed, all four
+    events registered on the grid.
+- **Variant `Msel`** = M at the selected design's λ (1.405), run beside M (0.90).
+  - STEP_ALLOWED (M, Msel) = {central_lambda_target}.
+  - New test passes. The stale cooldown test still fails (unrelated).
+- **Launched on e5power** via `run_ref_remote`:
+  - E2: six variants, tag v4_E2, run 0025, remote launch 10:41:21.
+  - Msel: tag v4_E2_Msel, run 0026, remote launch 10:44:57.
+  - e5power got an empty 0024 (this host's CEN test).
+  - Local placeholder `ref/0026_2026-11-06_104449_run_ref_reserved_for_e5power_0025_0026`;
+    delete it after the pulls.
+- **Results to Z:** (author: "copy over also to Z:/ ... only latest results").
+  - `ref/0019_2026-11-05_215935_run_ref_v4_E_fixmt` copied to
+    `Z:\Python_Projekte\qOFO\results\ch_11_case2_multisystem\ref\` (robocopy, 10:34).
+  - Case 1 run 0001 follows once K1-PAR is done; E2 0025/0026 when back.
+- **qOFO_2027** (author asked): the seven mentions in Ch 9 are the October comments on the old
+  front and MC results, not written today. Today's runs use the worktree F:\qOFO_res of the qOFO
+  repository.

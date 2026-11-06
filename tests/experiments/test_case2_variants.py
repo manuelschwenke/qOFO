@@ -57,9 +57,12 @@ def test_m_is_ready_and_has_the_cascade_timescale():
     assert "M" in v.VARIANTS and "M" not in v.NOT_READY
     m = v.resolved("M", 10)
     n = m.central_ts_discrete_cooldown
-    # free again after the same time as a TS-OFO device: (1 + c) * T_TS
-    assert (1 + n) * m.dt_s == pytest.approx((1 + m.int_cooldown) * m.tso_period_s)
-    assert n == 53
+    # free again after the same time as a TS-OFO device: (1 + c) * T_TS, with the TS
+    # layer's own lock c (tso_int_cooldown since the harmonised device limits of
+    # 2026-10-30: 15 min, n = 44; before, int_cooldown: 18 min, n = 53)
+    c = m.int_cooldown if m.tso_int_cooldown is None else m.tso_int_cooldown
+    assert (1 + n) * m.dt_s == pytest.approx((1 + c) * m.tso_period_s)
+    assert n == 44
     assert m.central_lambda_rule == "continuous"
 
 

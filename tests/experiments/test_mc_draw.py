@@ -33,4 +33,7 @@ def test_case2_configuration_and_noise_seed():
     cfg = M._config("O3", M.PROFILE_START, [], M.Path("."), 10, noise_seed=123)
     assert cfg.measurement_noise.seed == 123
     assert cfg.measurement_noise.apply_to_svr and cfg.measurement_noise.apply_to_der_voltage
-    assert set(M.ALL_VARIANTS) == set(M.VARIANTS)
+    # The campaign runs the six thesis variants; the driver can run every registered
+    # Case-2 variant (since 2026-11-06 also Msel and M090, the CEN ceiling variants).
+    assert set(M.ALL_VARIANTS) == {"L2", "S1", "S2", "O2", "O3", "M"}
+    assert set(M.ALL_VARIANTS) <= set(M.VARIANTS)

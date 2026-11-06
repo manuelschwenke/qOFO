@@ -391,3 +391,15 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
   - M rerun into run 0025 locally: `run_ref --variants M --run-dir …0025…`, launched 18:44:29.
     Console: κ 1.268 → λ 1.405.
   - Expect ~1 h. It should equal 0026/Msel (same config).
+
+## 19:35–19:40: CEN of record for E2 done; E2 copied to Z:
+
+- **M (λ 1.405) rerun into run 0025:** finished 19:35, wall 3044 s, ok.
+  - It reproduces 0026/Msel to round-off (max |ΔV| 1.4e-12 pu, max |ΔAVR| 1.3e-13 pu): the runs
+    are deterministic.
+  - metrics.json/report.md rewritten at 19:35. Whole-run e_v over all areas, mpu: L2 24.95,
+    S1 21.38, O2 16.20, S2 13.44, O3 9.88, M 9.14, M_lambda090 9.21.
+- **Copy to Z:** the background job's robocopy (called from bash) copied nothing (quoting).
+  Redone with PowerShell at ~19:37. 0025: 39 files, 67 MB; 0026: 14 files, 10 MB; both equal to F:.
+  `Z:\Python_Projekte\qOFO\results\ch_11_case2_multisystem\ref\0025_2026-11-06_104140_run_ref_v4_E2\`
+  and `…\0026_2026-11-06_104505_run_ref_v4_E2_Msel\`.

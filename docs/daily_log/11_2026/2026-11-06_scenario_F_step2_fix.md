@@ -357,3 +357,13 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
 - **Plan for E2's CEN of record:** once 0025 is pulled, move 0025/M aside as `M_lambda090` and
   rerun M (1.405) into run 0025. The result should equal 0026/Msel (same config), which doubles
   as a determinism check.
+
+## 14:42: Case 1 front complete; run 0001 copied to Z: (author: "you dont have to update the report, another session will do so")
+
+- All 13 variants of `ch_10_case1_svr/0001_2026-11-05_215956_run_case1_v4_A` are ok
+  (K1-REF + K1-PAR), and the manifest is complete.
+- Copied to `Z:\Python_Projekte\qOFO\results\ch_10_case1_svr\0001_2026-11-05_215956_run_case1_v4_A\`
+  (robocopy 14:42, 61 files, 122 MB, equal to the source).
+- The run-level `metrics.csv`, `epost.csv`, `pareto.csv` and `equivalence.json` date from
+  09:17 and cover the K1-REF variants only. Rerun `report_case1.py` on the run for the front.
+  Per the author, another session does this.

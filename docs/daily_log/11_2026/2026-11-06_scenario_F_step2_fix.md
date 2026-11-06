@@ -403,3 +403,37 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
   Redone with PowerShell at ~19:37. 0025: 39 files, 67 MB; 0026: 14 files, 10 MB; both equal to F:.
   `Z:\Python_Projekte\qOFO\results\ch_11_case2_multisystem\ref\0025_2026-11-06_104140_run_ref_v4_E2\`
   and `…\0026_2026-11-06_104505_run_ref_v4_E2_Msel\`.
+
+## 21:24–21:45: shared checkout Z:\Python_Projekte\qOFO brought up to date (author: "please make Z:\Python_Projekte\qOFO up to date, commit and push"; "Pin runs to 08:00")
+
+- **State found** (branch minimal/thesis-core):
+  - HEAD f1f4a6c, not pushed.
+  - 22 staged files, not this session's: coupler hold after a bank (`ch_9_13_coupler_hold.py`,
+    its test, config field, base_controller, multi_tso_dso), live-plot overview, SCENARIO /
+    VARIANT / TRIAL_PARAMSET in `run_multi_system_ofo.py`, trial and stage-1 paramsets, daily
+    logs of 2026-11-02 to 2026-11-06.
+  - The res branch was 120 commits ahead of the merge base, minimal/thesis-core 10.
+  - The staged `make_config` moved the start to 06:00 and its default load events to bus 13
+    (−350 Mvar at 90/330 min). `run_case1.base_config` inherited the start from `make_config`,
+    so every Case 1/2 run of record would have moved to 06:00.
+- **Steps:**
+  1. Restored this session's own unstaged E2 entry in `scenarios.py` (the merge brings E2).
+  2. Committed the staged work as it stood (0bf35ad).
+  3. Merged `res/commitment-base-2026-10-31` (a383fe6). Two conflicts:
+     - `ch_9_3_stage2_screen.py`: the same `--config-set` port on both sides; the branch's
+       version, since dataclasses is imported at the top;
+     - `_multi_tso_helpers.py`: the overview observables kept; the branch added nothing there.
+  4. Pinned `run_case1.REFERENCE_START = 2016-01-05 08:00` in `base_config`. A scenario with its
+     own period (GA, RA, ...) still replaces it.
+- **Checks:**
+  - `make_config` keeps 06:00 for the live plots. Case 1 on A, Case 2 E and E2 (also through
+    `run_multi_system_ofo.scenario_config`) start at 08:00; GA at 2016-01-08 06:00.
+  - The resolved configs of E2 (L2, S1, S2, O2, O3, M) and Case 1 on A (S1m, O0, O2, S1_T128)
+    equal those of the runs of record (F:\qOFO_res code), field by field, apart from
+    live-plot fields.
+  - M at λ 1.405; fix_machine_taps in L2/S1.
+  - Ten run/report/figure scripts import. 26 of 27 targeted tests pass; the stale cooldown test
+    fails as before. Full suite: see the next entry.
+- **Not touched:** main (169 commits behind). The default `make_config` contingencies (bus 13)
+  now differ from the six of the old Case 1 K1-REF schedule; this matters only for
+  `run_case1` without `--scenario` (Ch 9 uses scenario A).

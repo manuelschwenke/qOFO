@@ -85,6 +85,11 @@ from experiments.ch_09_parameter_selection._ch9_selected_design import (
 #: keeps every run traceable without a second place to edit.
 PARAMSET = SELECTED_PARAMSET
 HORIZON_MIN = 360
+#: Start of the reference period (ch:setup:scenarios:reference), 5 Jan 2016 08:00.  Set
+#: here, not inherited from make_config, whose period is a live-plot setting of
+#: run_multi_system_ofo.py (author 2026-11-06: "Pin runs to 08:00"); a scenario with its
+#: own period (``scenarios.start_time``) still replaces it.
+REFERENCE_START = _dt.datetime(2016, 1, 5, 8, 0)
 
 #: Where the results are reported, and what they feed (thesis labels).
 TARGET = "ch:case_svr"
@@ -198,6 +203,7 @@ def base_config(minutes: int = HORIZON_MIN, scenario: Optional[str] = None) -> M
     2026-11-05: Case 1 on scenario A, "It doesnt have to prove sts support")."""
     cfg = dataclasses.replace(
         make_config(),
+        start_time=REFERENCE_START,
         n_total_s=60.0 * minutes,
         verbose=1,
         dso_der_scale={"DSO_3": 2.0},

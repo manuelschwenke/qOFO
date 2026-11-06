@@ -146,14 +146,14 @@ def resolved(name: str, minutes: int, events: Iterable[Any] = (),
     cfg = base_config(minutes, events, noise_seed)
     cfg = dataclasses.replace(cfg, **VARIANTS[name])
     if name == "M":
-        # "At the same weights": M weights the STS buses as the STS-OFOs do
-        # (the paramset's dso_g_v), not with the dataclass default 2e4, which
-        # was ~9x the selected value.  The target is a ceiling only: M's
-        # continuous loop gain (0.98) lies below it, so its weights stay as
-        # selected.
+        # M weights the STS buses as the STS-OFOs do (the paramset's dso_g_v),
+        # not with the dataclass default 2e4, which was ~9x the selected value.
+        # Its loop gain over the continuous actuators is capped at
+        # M_LAMBDA_TARGET: the runner scales all of M's g_w by
+        # kappa = lambda_max / target when it lies above (v4 weights: 1.781).
         cfg = dataclasses.replace(
             cfg, central_dso_g_v=float(cfg.dso_g_v),
-            central_lambda_target=selected_lambda_max(),
+            central_lambda_target=M_LAMBDA_TARGET,
             central_ts_discrete_cooldown=ts_equivalent_cooldown(cfg))
     return cfg
 
@@ -178,13 +178,19 @@ def ts_equivalent_cooldown(cfg: MultiTSOConfig) -> int:
     return int((1 + int(c)) * round(ratio) - 1)
 
 
+#: M's loop-gain ceiling over the continuous actuators (author 2026-11-06, "Use 0.90
+#: instead").  Until then M was capped at the selected design's lambda_max_B (1.405), and
+#: in REF E (run 0019) it ran a period-2 cycle of its TS-IBG and AVR set-points between the
+#: opening of 9-39 and the load step: with the plant's post-disturbance sensitivities its
+#: mismatch loop gain is 3.12 at that cap (shared notes cen_mismatch.py), and 0.90 brings it
+#: to 2.0.  Taps and banks are rate-limited instead (:func:`ts_equivalent_cooldown`).
+M_LAMBDA_TARGET = 0.90
+
+
 def selected_lambda_max() -> float:
     """``lambda_max_B`` of the selected design, from the paramset provenance.
 
-    M's loop-gain ceiling: the runner slows M's weights only if its loop gain
-    over the continuous actuators exceeded it (0.98 < 1.467, so they stay as
-    selected).  Taps and banks are rate-limited instead
-    (:func:`ts_equivalent_cooldown`).
+    M's loop-gain ceiling until 2026-11-06 (now :data:`M_LAMBDA_TARGET`, below it).
     """
     prov = load_paramset(PARAMSET).get("provenance") or {}
     lam = prov.get("lambda_max_B")

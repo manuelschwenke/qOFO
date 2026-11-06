@@ -69,10 +69,10 @@ def test_m_weights_the_sts_buses_like_the_sts_controllers():
     assert m.control_scope == "central"
 
 
-def test_m_targets_the_selected_designs_loop_gain():
+def test_m_targets_the_declared_loop_gain_below_the_selected_designs():
     m = v.resolved("M", 10)
-    assert m.central_lambda_target == pytest.approx(v.selected_lambda_max())
-    assert 0.0 < m.central_lambda_target < 2.0
+    assert m.central_lambda_target == pytest.approx(0.90)
+    assert 0.0 < m.central_lambda_target < v.selected_lambda_max() < 2.0
 
 
 def test_s1_to_s2_changes_only_the_sts_controller_and_the_access():

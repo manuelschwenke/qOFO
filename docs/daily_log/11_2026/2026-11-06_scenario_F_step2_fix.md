@@ -62,3 +62,11 @@ Area 2, after the load step (212:20–360):
 - S2 − S1 = −16.0 mpu and O3 − O2 = −3.8 mpu.
 - S1 reaches 0.868 pu and stays below 0.95 pu for 3.8 % of the window. This is to be examined in
   the Ch 10 evaluation, together with the tap analysis.
+
+## 07:25–07:30: F and FM relaunched on e5power (commit fb0010c)
+
+- F: tag v4_F_r2, e5power run 0022 (driver started 07:25:02, remote launch 07:26:30).
+- FM: tag v4_FM_r2, e5power run 0023 (driver started 07:26:42, remote launch 07:30:03).
+- Code copied over e5power's 3d98d31 (28 files, hashes equal; includes the new `scenarios.py`).
+- 6 jobs each. Last night's pair took 3 h 44 min, so both should be back around 11:10–11:20.
+- Driver logs: `results/ch_11_case2_multisystem/ref/_remote/v4_F_r2|v4_FM_r2/driver.log`.

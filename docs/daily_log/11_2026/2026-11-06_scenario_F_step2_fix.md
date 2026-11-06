@@ -300,3 +300,42 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
 - **qOFO_2027** (author asked): the seven mentions in Ch 9 are the October comments on the old
   front and MC results, not written today. Today's runs use the worktree F:\qOFO_res of the qOFO
   repository.
+
+## 11:57–12:07: interim results (author: "Progress?")
+
+- **Status:**
+  - E2 run 0025: O3, O2, M, S2 done; S1 and L2 still running on e5power.
+  - Msel run 0026: pulled 11:29, ok.
+  - CEN test 0024: ok (55 min).
+  - F/FM reruns 0022/0023: only S1 still running.
+  - Case 1 front: five variants still running.
+- **CEN λ 0.90 on old E** (run 0024 vs M of 0019):
+  - The period-2 cycle is gone. The reversal share of the TS-IBG movement in the 9–39 window
+    is 0.03 (was 1.00).
+  - e_v over all areas 7.20 mpu (was 7.64), AVR travel 0.094 pu (was 0.546).
+  - Still below O3 (8.47).
+- **E2, partial** (`sts_access_gain_scripts/e2_windows.py`, outputs
+  `e2_windows_partial_1157.out` and `e2_windows_partial_1205.out`; variants pulled early into
+  the scratchpad). Area-2 e_v per stage, mpu:
+
+  | stage | O2 | O3 | O3 − O2 | S2 | M (0.90) | Msel (1.405) |
+  |---|---|---|---|---|---|---|
+  | 1 G3 out | 8.8 | 7.1 | −1.7 | — | — | 6.1 |
+  | 2 +600 | 45.6 | 21.7 | −23.9 | 22.5 | 15.3 | 15.0 |
+  | 3 G3 back | 18.4 | 13.9 | −4.4 | 16.0 | 13.8 | 13.7 |
+  | 4 +3–4 | 27.0 | 16.8 | −10.2 | 16.8 | 17.3 | 17.3 |
+  | all areas, whole run | 16.20 | 9.88 | | 13.44 | 9.21 | 9.14 |
+
+  - **Hypotheses:**
+    - H1: stage 1 |Δ| ≤ 2 mpu holds (−1.7).
+    - H2: stages 2 and 4 strongly negative, holds; but stage 2 (−23.9) exceeds stage 4 (−10.2),
+      against the declared ordering.
+    - H3: stage 3 smaller, holds.
+    - H4: CEN lowest in stages 2–4 holds in stages 2 and 3; in stage 4 CEN is 0.5 mpu above O3.
+      CEN draws 2.5 % of the area-2 STS capability and leaves the level −5.6 mpu, while O3 draws
+      24 % and restores it (−0.4).
+    - H5: Msel shows no cycle while G3 is out (reversal share ≤ 0.17), against the static
+      warning of 2.17–2.26.
+  - Without access, O2's area-2 level falls to −30.9 mpu in stage 2 (bound −28.3).
+- **λ rule:** on E2, M (0.90) and Msel (1.405) differ by ≤ 0.4 mpu per stage. On old E only 0.90
+  is free of the cycle.

@@ -241,3 +241,26 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
   - The author has seen the cascade oscillate in other windows too: the same mismatch question
     applies to the per-area TS-OFOs. Not examined here.
 - **CEN wall time** in run 0019: 1.8 h (e5wimi).
+
+## 09:44–09:50: CEN ceiling 0.90 (author: "Use 0.90 instead"), test run launched
+
+- **Code** (commit aea9def):
+  - `variants.M_LAMBDA_TARGET = 0.90` replaces the selected design's λ_max_B (1.405) as M's
+    ceiling over the continuous actuators.
+  - The stale comments on M's loop gain ("0.98") are corrected.
+  - Test `test_m_targets_the_declared_loop_gain_below_the_selected_designs`.
+  - 13 of 14 Case 2 variant tests pass. The failing one, `test_m_is_ready_and_has_the_cascade_timescale`,
+    expects M's tap/bank lock at 18 min (n = 53). Since the device-limit harmonisation (c744d89)
+    the code uses `tso_int_cooldown` (15 min, n = 44). Stale test, unrelated, not changed.
+- **Static check at 0.90:** the largest eigenvalue scales to 3.117 × 0.90/1.405 = 2.00 after
+  G3 + 9–39, and to 2.11 after the load step (there no cycle was seen even at 3.29). The margin
+  is thin; the run decides.
+- **Run-number reservation:** e5power holds 0022/0023 (F/FM reruns, not yet pulled). The empty
+  local folder `ref/0023_2026-11-06_072958_run_ref_reserved_for_e5power_0022_0023` keeps a local
+  run from taking those numbers. Delete it after the pull.
+- **Test run:** REF E, M only, tag v4_E_M090 → `ref/0024_2026-11-06_094814_run_ref_v4_E_M090`,
+  launched 09:48:00 (local, pythonw).
+  - Console: `[central] g_w x kappa = 1.979 (target 0.9): lambda_max 1.781 -> 0.9`.
+  - At the 1.8 h of run 0019, expected around 11:40.
+  - If the cycle is gone, M of run 0019 is replaced, and the Ch 10 CEN numbers and the sentence
+    "CEN runs at the selected weights" (now × 1.979) are corrected.

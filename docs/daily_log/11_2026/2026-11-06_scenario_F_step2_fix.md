@@ -71,7 +71,7 @@ Area 2, after the load step (212:20–360):
 - 6 jobs each. Last night's pair took 3 h 44 min, so both should be back around 11:10–11:20.
 - Driver logs: `results/ch_11_case2_multisystem/ref/_remote/v4_F_r2|v4_FM_r2/driver.log`.
 
-## 07:45–08:20: machine-tap analysis on runs 0019 and 0001 (author: "Yes, both")
+## 08:45: machine-tap analysis on runs 0019 and 0001 (author: "Yes, both"; output written 08:45:30)
 
 Question (author 2026-11-05): "Keep fixed. Analyse afterwards if a tap change would have been
 needed." Script and output: shared notes `sts_access_gain_scripts/tap_analysis.py/.out` (logs
@@ -86,7 +86,8 @@ only, no new simulation).
   Only then would a tap add capability. Elsewhere the deviation is the controller's choice.
 - **Result, REF E run 0019 (L2, S1, S2):** 0.0 % of the time for every machine.
 - **Result, Case 1 run 0001 (L2, S1m, S1, O0, O1):** 0.0 %, except G3 under S1m/S1/O0 with
-  1.3–1.9 % (area 2, before G3 is used up by the AVR at 1.05).
+  1.3–1.9 % (area 2: HV side below 1.02 pu while its AVR sits at 1.05 pu or its Q near q_max;
+  scenario A does not trip G3).
 - **What a relay would have done.** An open-loop replay of the rule moves G10's tap 24 times
   upward under S1 and S2.
   - G10's HV side is below 1.02 pu for 99.6 % (S1) and 98.4 % (S2) of the run, min 0.957 pu.
@@ -102,7 +103,7 @@ only, no new simulation).
 - **Consistency with the thesis.** Ch 7 and `tab:case3:variants` already state "held" for LOC,
   SVR and SVR+. Run 0017 did not match this; run 0019 does.
 
-## 08:00–08:30: Ch 10 reference run moved to run 0019 (thesis clone, not committed)
+## 08:47–08:56: Ch 10 reference run moved to run 0019 (thesis clone, not committed)
 
 - **Figures.** `figures_ref.py 0019 --thesis Z:\latex_diss_clone --event 3`, then
   `make_tikz_tables.py`.

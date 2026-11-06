@@ -149,7 +149,7 @@ def fig_pareto(run: Path, out: Path) -> None:
         avr=("avr_trav", "sum"))
     agg.to_csv(out / "case_svr_data.csv", float_format="%.6g")
     series = [
-        ("S1", ["S1_T112", "S1_T137", "S1", "S1_T600"], COLOR["S1"], "o", "S1"),
+        ("S1", ["S1_T112", "S1_T128", "S1", "S1_T600"], COLOR["S1"], "o", "S1"),
         ("O1", ["O1_gw0p01", "O1_gw0p1", "O1"], COLOR["O1"], "s", "O1"),
         ("O2", ["O2_gw0p01", "O2_gw0p1", "O2"], COLOR["O2"], "^", "O2"),
     ]

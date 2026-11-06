@@ -33,8 +33,9 @@ Campaigns
             illustration, NOT validation.
 ``K1-PAR``  error--effort front.  O1/O2 with the AVR movement weight scaled by
             0.1 and 0.01; S1 with T_RVR = 112.5 s (b = T_TS/T_RVR = 1.6, the
-            OFO's own budget ceiling), 137.4 s (b = 1.31, matched to the
-            selected OFO weights) and 600 s.  300 s (b = 0.6) is the deployed
+            OFO's own budget ceiling), 128.1 s (b = 1.405, matched to
+            lambda_max(B) of the selected weights ch9_selected_uc_2026_11_v4;
+            137.4 s for the 1.31 of the weights before 2026-11-04) and 600 s.  300 s (b = 0.6) is the deployed
             S1 in K1-REF.
 
 Configuration
@@ -145,7 +146,9 @@ PARETO: Dict[str, Tuple[str, Dict[str, Any], float]] = {
     "O2_gw0p01": ("O2", {}, 0.01),
     # Integral S1: b = T_TS/T_RVR = 180/T_RVR.
     "S1_T112": ("S1", {"svr_t_rvr_s": 112.5}, 1.0),   # b = 1.6, the ceiling
-    "S1_T137": ("S1", {"svr_t_rvr_s": 137.4}, 1.0),   # b = 1.31 = lambda_max(B)
+    # b = 1.405 = lambda_max(B) of the v4 weights (design_lambda_max_B of the paramset;
+    # S1_T137, b = 1.31, matched the weights before 2026-11-04).
+    "S1_T128": ("S1", {"svr_t_rvr_s": 128.1}, 1.0),
     "S1_T600": ("S1", {"svr_t_rvr_s": 600.0}, 1.0),   # b = 0.3
 }
 

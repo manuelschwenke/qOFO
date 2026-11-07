@@ -499,3 +499,18 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
     coupler 5: −3 → … → −7).
   - S1 now runs ~3× faster (151 min simulated after 1.5 h), since the second PF per step for the
     blocked moves is gone.
+- **05:20–05:30: reruns done and copied to Z:.**
+  - Case 1 run 0003 (K1-REF) ended 04:07 (9688 s), E2 rerun into 0025 at 05:20 (14323 s);
+    all variants ok.
+  - The background copy failed (`powershell.exe` not on bash's PATH in the background job) and
+    was redone at ~05:25 with the PowerShell tool.
+    - 0025: 56 files, 109 MB; 0003: 29 files, 61 MB; Z: equal to F:.
+    - `Z:\Python_Projekte\qOFO\results\ch_11_case2_multisystem\ref\0025_2026-11-06_104140_run_ref_v4_E2\`
+      (the old four in `superseded_2026-11-07\`).
+    - `Z:\Python_Projekte\qOFO\results\ch_10_case1_svr\0003_2026-11-07_012602_run_case1_v4_A_fix\`.
+  - **E2 whole-run e_v over all areas, mpu** (before the fixes in brackets): L2 24.95 (24.95),
+    S1 21.35 (21.38), S2 13.51 (13.44), O2 16.22 (16.20), O3 9.88, M 9.14 (unchanged variants).
+  - **Case 1 run 0003:** S1m = O0 to 4.2e-10 pu (bus V) and 3.2e-12 pu (AVR).
+    - e_v over all areas, mpu: L2 16.95, S1m/O0 13.53, S1 13.47, O1 10.21, O2 7.12.
+    - Run 0001 had L2 16.96, S1m/O0 13.04, S1 12.91, O1 10.20, O2 7.18.
+  - `report_case1.py` was not run on 0003 (author: another session does the reports).

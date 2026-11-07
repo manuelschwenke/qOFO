@@ -1,0 +1,64 @@
+"""Scratch: the OLTC-limiter re-solve (run_control=False) freezes DER Q at the
+value the Q(V) loops settled to while the relays were free.  O2 config, E2
+start, G3 out + 600 Mvar at bus 3; three plant states compared per STS."""
+import sys, dataclasses, numpy as np, pandas as pd
+sys.path.insert(0, r"F:\qOFO_res")
+import pandapower as pp
+from pandapower.control import DiscreteTapControl
+from experiments.ch_11_case2_multisystem import variants as v
+from experiments.ch_11_case2_multisystem.ref import scenarios as sc
+from experiments.runners.multi_tso_dso import run_multi_tso_dso
+from core.plant import runpp_holding_taps
+
+VAR, OUT = sys.argv[1], sys.argv[2]
+cfg = v.resolved(VAR, 10, sc.events("E2"), 20261027)
+cfg = dataclasses.replace(cfg, result_dir=OUT, verbose=1)
+if sc.start_time("E2") is not None:
+    cfg = dataclasses.replace(cfg, start_time=sc.start_time("E2"))
+KW = dict(calculate_voltage_angles=True, distributed_slack=cfg.distributed_slack)
+
+def summary(net, meta, tag):
+    print(f"\n----- {tag} -----")
+    for hv in meta.hv_networks:
+        ders = [int(s) for s in hv.sgen_indices]
+        buses = sorted({int(net.sgen.at[s, "bus"]) for s in ders})
+        vd = net.res_bus.loc[buses, "vm_pu"]
+        q = float(net.res_sgen.loc[ders, "q_mvar"].sum())
+        qmax = 0.0
+        from controller.der_qv_local_loop import _qv_capability
+        for s in ders:
+            qmax += _qv_capability(float(net.sgen.at[s, "sn_mva"]),
+                                   str(net.sgen.at[s, "op_diagram"]),
+                                   float(net.res_sgen.at[s, "p_mw"]))[1]
+        qif = sum(float(net.res_trafo3w.at[t, "q_hv_mvar"]) for t in hv.coupling_trafo_indices)
+        taps = [int(net.trafo3w.at[t, "tap_pos"]) for t in hv.coupling_trafo_indices]
+        print(f"{hv.net_id}: V_DER bus min/mean {vd.min():.4f}/{vd.mean():.4f}  "
+              f"sum Q_DER {q:8.2f} Mvar (Qmax {qmax:6.1f})  Q_hv interface {qif:8.2f}  taps {taps}")
+
+def hook(st):
+    net, meta = st["net"], st["meta"]
+    relays = [i for i in net.controller.index
+              if isinstance(net.controller.at[i, "object"], DiscreteTapControl)]
+    snap = {int(t): int(net.trafo3w.at[t, "tap_pos"]) for t in net.trafo3w.index}
+    summary(net, meta, "init (seam)")
+    # disturbance: G3 = gen 1 out (E2 30:40) and 600 Mvar at bus 3 (E2 91:40)
+    net.gen.at[1, "in_service"] = False
+    pp.create_load(net, bus=3, p_mw=0.0, q_mvar=600.0, name="_REPRO_STEP")
+    # (A) plant.advance as in the runner: relays free inside run_control
+    runpp_holding_taps(net, run_control=True, max_iteration=50, max_iter=300, **KW)
+    summary(net, meta, "(A) run_control=True, relays free (runner's advance)")
+    free = {int(t): int(net.trafo3w.at[t, "tap_pos"]) for t in net.trafo3w.index}
+    # (B) limiter clamp to snapshot +-1, then run_control=False (runner's re-solve)
+    for t, p0 in snap.items():
+        d = free[t] - p0
+        net.trafo3w.at[t, "tap_pos"] = p0 + (int(np.sign(d)) if d else 0)
+    pp.runpp(net, run_control=False, max_iteration=100, **KW)
+    summary(net, meta, "(B) clamped taps, run_control=False (what the log records)")
+    # (C) same clamped taps, relays held, Q(V) loops iterate
+    net.controller.loc[relays, "in_service"] = False
+    pp.runpp(net, run_control=True, max_iteration=100, max_iter=300, **KW)
+    summary(net, meta, "(C) clamped taps held, run_control=True (Q(V) settled)")
+    net.controller.loc[relays, "in_service"] = True
+    return True
+
+run_multi_tso_dso(cfg, pre_loop_hook=hook)

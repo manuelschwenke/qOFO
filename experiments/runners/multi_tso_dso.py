@@ -135,6 +135,7 @@ from experiments.helpers import (
 from core.plant import (
     ActuatorWrites,
     runpp_holding_taps,
+    runpp_relays_held,
     PandapowerStaticPlant,
     Plant,
     shunt_steps_for_buses,
@@ -3805,12 +3806,14 @@ def _run_multi_tso_dso_impl(
                         )
                         print(
                             f"  [Step {step}] post-profile OLTC tap-rate limit "
-                            f"({len(_moved)}): {_pretty}; re-running PF "
-                            f"with run_control=False..."
+                            f"({len(_moved)}): {_pretty}; re-solving with "
+                            f"the relays held..."
                         )
-                    pp.runpp(
-                        net, run_control=False, calculate_voltage_angles=True,
-                        max_iteration=100,
+                    # Relays held, Q(V) loops active (fix 2026-11-07; was
+                    # run_control=False, which froze the DER droops).
+                    runpp_relays_held(
+                        net, calculate_voltage_angles=True,
+                        max_iteration=100, max_iter=300,
                         distributed_slack=config.distributed_slack,
                         enforce_q_lims=config.enforce_q_lims_plant,
                     )
@@ -3942,15 +3945,16 @@ def _run_multi_tso_dso_impl(
                             print(
                                 f"  [Step {step}] post-contingency OLTC "
                                 f"tap-rate limit ({len(_moved)}): {_pretty}; "
-                                f"re-running PF with run_control=False..."
+                                f"re-solving with the relays held..."
                             )
                         # Match the post-contingency PF's enforce_q_lims=False
                         # behaviour to keep convergence robust on the
-                        # transient post-trip operating point.
-                        pp.runpp(
-                            net, run_control=False,
-                            calculate_voltage_angles=True,
-                            max_iteration=200,
+                        # transient post-trip operating point.  Relays held,
+                        # Q(V) loops active (fix 2026-11-07; was
+                        # run_control=False, which froze the DER droops).
+                        runpp_relays_held(
+                            net, calculate_voltage_angles=True,
+                            max_iteration=200, max_iter=300,
                             distributed_slack=config.distributed_slack,
                             enforce_q_lims=False,
                         )
@@ -5242,12 +5246,14 @@ def _run_multi_tso_dso_impl(
                         )
                         print(
                             f"  [Step {step}] end-of-step OLTC tap-rate "
-                            f"limit ({len(_moved)}): {_pretty}; re-running "
-                            f"PF with run_control=False..."
+                            f"limit ({len(_moved)}): {_pretty}; re-solving "
+                            f"with the relays held..."
                         )
-                    pp.runpp(
-                        net, run_control=False, calculate_voltage_angles=True,
-                        max_iteration=100,
+                    # Relays held, Q(V) loops active (fix 2026-11-07; was
+                    # run_control=False, which froze the DER droops).
+                    runpp_relays_held(
+                        net, calculate_voltage_angles=True,
+                        max_iteration=100, max_iter=300,
                         distributed_slack=config.distributed_slack,
                         enforce_q_lims=config.enforce_q_lims_plant,
                     )

@@ -76,19 +76,44 @@ def runpp_holding_taps(net: pp.pandapowerNet, **kwargs) -> None:
     except ControllerNotConverged:
         if not kwargs.get("run_control") or not len(net.controller):
             raise
-        relays = [i for i in net.controller.index
-                  if isinstance(net.controller.at[i, "object"], DiscreteTapControl)
-                  and bool(net.controller.at[i, "in_service"])]
-        if not relays:
+        if not _tap_relays(net):
             raise
-    net.controller.loc[relays, "in_service"] = False
-    try:
-        pp.runpp(net, **kwargs)
-    finally:
-        net.controller.loc[relays, "in_service"] = True
+    runpp_relays_held(net, **kwargs)
     HELD_TAP_SOLVES += 1
     print(f"  [plant] tap relays held for one solve (hunting against the "
           f"Q(V) loops); {HELD_TAP_SOLVES} so far")
+
+
+def _tap_relays(net: pp.pandapowerNet) -> list:
+    """Indices of the in-service ``DiscreteTapControl`` relays of ``net``."""
+    if not hasattr(net, "controller") or not len(net.controller):
+        return []
+    return [i for i in net.controller.index
+            if isinstance(net.controller.at[i, "object"], DiscreteTapControl)
+            and bool(net.controller.at[i, "in_service"])]
+
+
+def runpp_relays_held(net: pp.pandapowerNet, **kwargs) -> None:
+    """``pp.runpp(run_control=True)`` with the tap relays held at their
+    current positions and every other plant-side controller active.
+
+    The re-solve after the OLTC rate limiter has moved relay taps back
+    (FIX 2026-11-07).  It used to be ``run_control=False``, which kept the DER
+    Q(V) loops (and the slack Q box) at the state they had reached with the
+    relays free: the relays had brought the voltage into their band, which is
+    also the droop's dead band, so the STS droops sat at Q ~ 0 while the
+    voltage fell back to 0.94-0.98 pu (no-access variants, E2 load step;
+    docs/daily_log/11_2026/2026-11-07b_sts_qv_frozen_by_oltc_limiter_resolve.md).
+    """
+    kwargs["run_control"] = True
+    relays = _tap_relays(net)
+    if relays:
+        net.controller.loc[relays, "in_service"] = False
+    try:
+        pp.runpp(net, **kwargs)
+    finally:
+        if relays:
+            net.controller.loc[relays, "in_service"] = True
 
 
 @dataclass(frozen=True)

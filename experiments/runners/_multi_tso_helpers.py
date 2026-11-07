@@ -205,7 +205,11 @@ class _OLTCRateLimiter:
      # after every pp.runpp(run_control=True):
      moved = limiter.clamp(net, time_s)
      if moved:
-    ...     pp.runpp(net, run_control=False, ...)
+    ...     core.plant.runpp_relays_held(net, ...)
+
+    The re-solve holds the relays and keeps the DER Q(V) loops active.  It
+    was ``run_control=False`` until 2026-11-07, which froze the droops at the
+    state they had reached with the relays free.
     """
 
     def __init__(self, max_step: int, cooldown_s: float,
@@ -270,7 +274,8 @@ class _OLTCRateLimiter:
 
         Returns the list of OLTCs whose ``tap_pos`` was modified by this
         call (whether by clamp or by cooldown revert), so the caller
-        can decide whether to re-run the PF with ``run_control=False``.
+        can decide whether to re-solve with the relays held
+        (``core.plant.runpp_relays_held``).
 
         Several clamps per step (post-profile, post-contingency, end-of-step
         PF) all compare against the same snapshot.  A move accepted by an

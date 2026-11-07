@@ -491,3 +491,11 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
   - Relaunched with K1-REF only (L2, S1m, S1, O0, O1, O2), 6 workers, at 01:25:34:
     `ch_10_case1_svr/0003_2026-11-07_012602_run_case1_v4_A_fix`.
   - With E2's 2 workers, 8 are used. The copy watcher and script now point to run 0003.
+- **02:48–02:55: smoke check of the limiter fix passed** (E2 S1, 91:40–112 min, from the
+  console's `requested->kept` clamp lines).
+  - Old run (superseded): every coupler's kept position flips between two values every 2 min
+    (accepted, then reverted at the end of the step); 20 flips in 20 min, relays stationary.
+  - Fixed run: kept positions step monotonically, one tap per 2-min lock (coupler 0: −2 → −3 → −4;
+    coupler 5: −3 → … → −7).
+  - S1 now runs ~3× faster (151 min simulated after 1.5 h), since the second PF per step for the
+    blocked moves is gone.

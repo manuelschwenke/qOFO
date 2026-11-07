@@ -51,6 +51,22 @@ ensemble run:
   Delta e_post and withdrawn support per event); the full log is kept
   (``runs/<seed>_<variant>.log.pkl``).
 
+Changes of 2026-11-07 (author-approved plan
+``docs/architecture/2026-11-07_case2_mc_new_base_plan.md``), before any
+ensemble run on the commitment base:
+
+* an outage event of a machine the unit commitment keeps off-line is void,
+  with its restore (``void_events``; the runner applies the same rule and
+  reports it in ``uc_offline_gens`` / ``uc_void_events`` of its first
+  record).  The draw is unchanged; the prescreen records the commitment, the
+  void events and the class counted on the events that apply (``class``;
+  ``class_drawn`` is the declared draw's);
+* ``--buffer K`` runs the variants of the call on the next K valid episodes
+  after the first N from the start, so the replacements the window rule may
+  need run in the first wave (scheduling only: window and counts unchanged);
+* a campaign may be split by variant over two hosts (``run_mc_remote.py``)
+  and merged (``merge_mc.py``) before the final invocation with all six.
+
 Declared campaign constants (do not change once results exist)
 --------------------------------------------------------------
 MASTER_SEED 20261007, episode k has seed MASTER_SEED + k; N_VALID 100;
@@ -446,6 +462,23 @@ def episode_class(events: List[ContingencyEvent]) -> str:
     return "undisturbed" if n == 0 else ("single" if n == 1 else "multiple")
 
 
+def void_events(events: List[ContingencyEvent], offline) -> Tuple[
+        List[ContingencyEvent], List[ContingencyEvent]]:
+    """(effective, void) events of an episode under its unit commitment.
+
+    A drawn outage of a machine the commitment keeps off-line is void, with
+    its restore (author 2026-11-07): the trip would change nothing and the
+    restore would start a machine the commitment keeps off.  The runner
+    applies the same rule (``uc_void_events`` of its first record); the draw
+    itself is unchanged, so the episodes stay those of the declared draw.
+    """
+    off = {int(g) for g in (offline or ())}
+    void = [e for e in events if e.element_type == "gen"
+            and getattr(e, "element_index", None) is not None
+            and int(e.element_index) in off]
+    return [e for e in events if e not in void], void
+
+
 # ---------------------------------------------------------------------------
 #  One task = one (seed, variant) run, or one prescreen
 # ---------------------------------------------------------------------------
@@ -499,8 +532,17 @@ def _prescreen(seed: int, out: str, minutes: int) -> Dict[str, Any]:
             contextlib.redirect_stdout(fh), contextlib.redirect_stderr(fh):
         log, exc = _run(cfg)
     ok = exc is None and log is not None and len(log) == n_steps
+    # The commitment of the episode (the prescreen spans the same window as
+    # the variant runs, so it is the same) and the events it voids; the
+    # class is counted on the events that apply.
+    offline = list(getattr(log[0], "uc_offline_gens", ()) or ()) if log else None
+    effective, void = void_events(events, offline or ())
     rec = {"seed": seed, "valid": bool(ok), "start_time": start.isoformat(),
-           "events": events_to_rows(events), "class": episode_class(events),
+           "events": events_to_rows(events),
+           "class": episode_class(effective if offline is not None else events),
+           "class_drawn": episode_class(events),
+           "uc_offline": offline,
+           "events_void": events_to_rows(void) if offline is not None else None,
            "reason": None if ok else (type(exc).__name__ if exc else
                                       f"short_log_{len(log or [])}of{n_steps}"),
            "wall_s": time.time() - t0}
@@ -618,6 +660,15 @@ def _variant(seed: int, name: str, out: str, minutes: int) -> Dict[str, Any]:
         log, exc = _run(cfg)
     wall = time.time() - t0
     outcome, diag = classify(log, exc, n_steps, float(cfg.dt_s))
+    if log:
+        # The runner's commitment and voided events; they must equal the
+        # prescreen's (same window), else the episode is not the screened one.
+        off = sorted(int(g) for g in getattr(log[0], "uc_offline_gens", ()) or ())
+        diag["uc_offline"] = off
+        diag["uc_void_events"] = [list(v) for v in
+                                  getattr(log[0], "uc_void_events", ()) or ()]
+        if pre.get("uc_offline") is not None and off != sorted(pre["uc_offline"]):
+            diag["uc_mismatch_prescreen"] = sorted(pre["uc_offline"])
     rec: Dict[str, Any] = {"seed": seed, "variant": name, "outcome": outcome,
                            "diag": diag, "wall_s": wall,
                            "n_records": len(log or []),
@@ -678,8 +729,16 @@ _RULE_TEXT = {
 }
 
 
+def applied_events(pre: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The drawn event rows of a prescreen record without the void ones
+    (``void_events``); older records have no ``events_void``."""
+    void = pre.get("events_void") or []
+    return [e for e in pre.get("events") or [] if e not in void]
+
+
 def _event_text(pre: Dict[str, Any]) -> str:
     parts = []
+    void = pre.get("events_void") or []
     for e in pre.get("events") or []:
         what = f"{e['element_type']} {e['action']}"
         if e["element_type"] == "load":
@@ -688,6 +747,8 @@ def _event_text(pre: Dict[str, Any]) -> str:
                 what += f" {e['q_mvar']:.0f} Mvar"
         else:
             what += f" {e['element_index']}"
+        if e in void:
+            what += " (void: off-line)"
         parts.append(f"{e['time_s'] / 60.0:.1f} min {what}")
     return "; ".join(parts)
 
@@ -707,7 +768,7 @@ def failure_row(rec: Dict[str, Any], pre: Dict[str, Any]) -> Dict[str, Any]:
     t_ts = float(rec.get("t_ts_s") or T_TS_S_CASE2)
     stopped = o in ("fail_abort", "fail_unreachable")
     t_fail = (int(rec.get("n_records") or 0) + 1) * dt if stopped else float("nan")
-    times = [float(e["time_s"]) for e in pre.get("events") or []]
+    times = [float(e["time_s"]) for e in applied_events(pre)]
     if o == "fail_unreachable":
         cause = "reachability guard"
     elif o == "fail_abort" and "single-slack" in exc:
@@ -1005,6 +1066,10 @@ def _campaign_parameters(args: argparse.Namespace) -> Dict[str, Any]:
             "window_rule": getattr(args, "rule", WINDOW_RULE),
             "n_valid_max": getattr(args, "max_valid", N_VALID_MAX),
             "v_end_is_failure": False,
+            "buffer": getattr(args, "buffer", 0),
+            "uc_void_rule": ("an outage event of a machine the unit commitment "
+                             "keeps off-line is void with its restore; class "
+                             "from the events that apply (2026-11-07)"),
             "n_valid_o3": getattr(args, "n_o3", N_VALID_O3),
             "event_phase_s": list(PHASE_GRID_S),
             "phase_stream": "default_rng([seed, 1]), one draw per event",
@@ -1115,6 +1180,13 @@ def main() -> None:
     ap.add_argument("--max-valid", type=int, default=N_VALID_MAX,
                     help="stop condition: the window uses at most this many valid "
                          "episodes")
+    ap.add_argument("--buffer", type=int, default=0,
+                    help="also run --variants on the next BUFFER valid episodes "
+                         "after the first --n from the start, so that the "
+                         "episodes the window rule may need as replacements run "
+                         "in the first wave (scheduling only: the window and the "
+                         "counts are unchanged; runs outside the window are "
+                         "listed, not counted)")
     add_run_arguments(ap)
     args = ap.parse_args()
     if args.no_top_up:
@@ -1210,7 +1282,8 @@ def _simulate(out: Path, args: argparse.Namespace, variants: List[str]) -> None:
     # Phase 1: prescreen in seed order until the first N valid seeds are known
     # (N_O3 when O3 is part of the call).
     n_o3 = getattr(args, "n_o3", 0) if "O3" in variants else 0
-    valid = _prescreen_until(d, out, args, max(args.n, n_o3))
+    n_buf = max(0, int(getattr(args, "buffer", 0) or 0))
+    valid = _prescreen_until(d, out, args, max(args.n + n_buf, n_o3))
 
     # Phase 2: variant runs, longest variant first; skip what exists (resume).
     # The comparison window moves past an episode once all six variants have
@@ -1235,8 +1308,13 @@ def _simulate(out: Path, args: argparse.Namespace, variants: List[str]) -> None:
         if set(also) - set(valid):
             raise SystemExit(f"--also-seeds not valid here: {sorted(set(also) - set(valid))}")
         o3_seeds = sorted(set(valid[:n_o3]) | set(window))
+        # The buffer: the next valid episodes after the declared first N,
+        # fixed in draw order (so it never moves with the window).
+        buf = valid[args.n:args.n + n_buf]
+        paired = sorted(set(window) | set(also) | set(buf))
         todo = [(s, v, str(out), args.minutes) for v in variants
-                for s in (o3_seeds if v == "O3" else window + also) if _missing(s, v)]
+                for s in (sorted(set(o3_seeds) | set(paired)) if v == "O3" else paired)
+                if _missing(s, v)]
         span = f"{window[0]}..{window[-1]}" if window else "empty"
         print(f"  [runs] {len(todo)} run(s) to go; comparison window {span} "
               f"({len(window)} episodes, {len(skipped)} replaced, rule {rule})",

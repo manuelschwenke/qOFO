@@ -470,6 +470,11 @@ class MultiTSOIterationRecord:
     zone_gen_idx: Dict[int, NDArray] = field(default_factory=dict)
     zone_gen_in_service: Dict[int, NDArray] = field(default_factory=dict)
     zone_gen_is_slack: Dict[int, NDArray] = field(default_factory=dict)
+    # Unit commitment of the run (set on step 1 only, 2026-11-07): the
+    # ``net.gen`` indices kept off-line, and the scheduled events voided
+    # because they act on one of them, as (time_s, gen index, action).
+    uc_offline_gens: Tuple[int, ...] = ()
+    uc_void_events: Tuple[Tuple[float, int, str], ...] = ()
     # Per-unit sub-transmission IBG data, every mode, with the capability of
     # the plant's own law (der_qv_local_loop._qv_capability), so u_q,STS is
     # computed with ONE capability function for every variant.  Keyed by

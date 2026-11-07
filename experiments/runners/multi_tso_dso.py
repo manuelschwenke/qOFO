@@ -1907,6 +1907,10 @@ def _run_multi_tso_dso_impl(
 
     profiles = None
     gen_dispatch = None
+    # Machines the unit commitment keeps off-line, and the drawn events that
+    # are void because they act on one of them (set in the commitment block).
+    _uc_offline: List[int] = []
+    _uc_void: List[ContingencyEvent] = []
 
     # Start the init-timing clock before the profile branch: the total is
     # reported unconditionally further down, but profiles are optional
@@ -2082,6 +2086,25 @@ def _run_multi_tso_dso_impl(
                 central_controller.invalidate_sensitivity_cache()
             print("  [9] unit commitment: off-line "
                   f"{[str(net.gen.at[g, 'name']) for g, on in sorted(_committed.items()) if not on]}")
+            # An outage event of a machine the commitment keeps off-line is
+            # void, together with its restore: the trip would change nothing,
+            # and the restore would start a machine the commitment keeps off
+            # (author 2026-11-07, Case-2 Monte-Carlo, whose catalogue draws
+            # from every machine).  In place, so every holder of the list
+            # sees the same schedule.
+            _uc_offline = sorted(int(g) for g, on in _committed.items() if not on)
+            _uc_void = [ev for ev in contingencies
+                        if ev.element_type == "gen"
+                        and ev.element_index is not None
+                        and int(ev.element_index) in _uc_offline]
+            if _uc_void:
+                _void_ids = {id(ev) for ev in _uc_void}
+                contingencies[:] = [ev for ev in contingencies
+                                    if id(ev) not in _void_ids]
+                for ev in _uc_void:
+                    print(f"  [9] VOID event t={ev.effective_time_s:.0f}s gen "
+                          f"{int(ev.element_index)} {ev.action}: machine off-line "
+                          f"by unit commitment")
             if verbose >= 1:
                 print(f"  [T] compute+apply merit-order dispatch: {perf_counter() - _t:.2f} s")
         elif config.use_zonal_gen_dispatch:
@@ -3726,6 +3749,11 @@ def _run_multi_tso_dso_impl(
             step=step, time_s=time_s, tso_active=run_tso, dso_active=run_dso
         )
         if step == 1:
+            # The commitment and the events it voids, for the producers.
+            rec.uc_offline_gens = tuple(_uc_offline)
+            rec.uc_void_events = tuple(
+                (float(ev.effective_time_s), int(ev.element_index), str(ev.action))
+                for ev in _uc_void)
             # Loop gain of every controller that acts in this variant.
             if _central:
                 rec.controller_lambda_max["central"] = central_lambda_max

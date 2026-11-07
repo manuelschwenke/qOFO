@@ -59,7 +59,8 @@ from scipy.stats import wilcoxon
 from experiments.ch_11_case2_multisystem import metrics_case2 as mc2
 from experiments.ch_11_case2_multisystem.mc.run_mc import (
     DELTA_MPU, MASTER_SEED, N_VALID_MAX, WINDOW_RULE, WINDOW_RULES,
-    _boot_upper_median, _cp_upper, comparison_window, effective_outcome,
+    _boot_upper_median, _cp_upper, applied_events, comparison_window,
+    effective_outcome,
 )
 
 V = ["L2", "S1", "S2", "O2", "O3", "M"]
@@ -181,7 +182,7 @@ def episodes(runs: Path, rule: str = WINDOW_RULE
             n = int(r.get("n_records") or 0)
             t_fail = (n + 1) * DT
             pre = json.loads((runs.parent / "prescreen" / f"{seed}.json").read_text(encoding="utf-8"))
-            times = [float(e["time_s"]) for e in pre["events"]]
+            times = [float(e["time_s"]) for e in applied_events(pre)]
             exc = str((r.get("diag") or {}).get("exception", ""))
             short = r["outcome"] == "fail_abort"
             fl.append({

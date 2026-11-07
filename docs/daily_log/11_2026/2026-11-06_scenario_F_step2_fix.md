@@ -482,3 +482,12 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
 - **Background watchers:** a smoke check when E2 S1 passes 112 min (couplers must now step after
   the load step at 91:40), and a copy of both runs to Z: when they end (PowerShell script
   `copy_reruns_to_Z.ps1`, file counts compared).
+- **Correction, 01:24–01:26** (author: "13 ch9 variants? so many? you know the pareto front is not
+  needeed anymore"):
+  - The Case 1 run with K1-ALL (0002) was stopped about two minutes after its start (only its own
+    process tree: launcher 109264, run_case1 160244, 8 workers). No variant was complete.
+  - It was moved to `_local_archive/results/ch_10_case1_svr/` with a NOTE, so the number stays
+    taken.
+  - Relaunched with K1-REF only (L2, S1m, S1, O0, O1, O2), 6 workers, at 01:25:34:
+    `ch_10_case1_svr/0003_2026-11-07_012602_run_case1_v4_A_fix`.
+  - With E2's 2 workers, 8 are used. The copy watcher and script now point to run 0003.

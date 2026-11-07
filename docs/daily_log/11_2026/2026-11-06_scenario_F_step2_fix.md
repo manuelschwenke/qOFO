@@ -452,3 +452,33 @@ Script and output: shared notes `sts_access_gain_scripts/cen_mismatch.py/.out/.p
 - **Pushed** minimal/thesis-core to origin (ac69918..ec36288).
 - Untracked files of another session that appeared meanwhile (2026-11-06c/d daily logs and
   hold-test scripts) are not committed.
+
+## 2026-11-07, 01:05–01:25: two fixes applied, affected variants relaunched on e5wimi (author: "respect this for the ref runs and relaunch them for tonight? just use 6-10 workers here"; "only the specific variants please that are affected")
+
+- **Read** the handovers in Z:\Python_Projekte\qOFO\docs\daily_log\11_2026:
+  `2026-11-06e_HANDOVER_sim_session.md` (limiter fix and option, rerun list) and
+  `2026-11-07_HANDOVER_svr_calibration.md` (SVR calibration fix).
+- **Worktree F:\qOFO_res fast-forwarded** to minimal/thesis-core (dad2c60).
+  - The untracked `configs/paramsets/stage1_v3_uc_2026_11_pq10.json` blocked it. It has the same
+    JSON content as the tracked one (only CRLF differs) and was moved to the scratchpad
+    `untracked_backup/`.
+- **Applied unchanged and committed (c643d83):**
+  - `2026-11-06d_limiter_fix_and_coupler_hold_area.patch` (rate limiter no longer reverts
+    same-step relay moves; option `sts_coupler_hold_scope`, default 'host' = unchanged);
+  - `2026-11-07_svr_calibration_qv_der.patch` (SVR calibration through the DER command path).
+  - Tests: 92 pass (limiter, hold, cooldown, banks, Case 2 variants, SVR calibration/controller/STS
+    access).
+- **Affected variants:**
+  - limiter: Case 2 L2, S1, O2; Case 1 all K1 variants (local coupler relays);
+  - SVR calibration: Case 2 S1, S2; Case 1 S1, S1m, O0 (and the S1 front tunings).
+  - O3 and M are not affected. Option A of the handover's O3 decision (no hold change) holds
+    until the author decides; then O3 needs no rerun.
+- **Relaunched** at 01:22:14 (pythonw, no console):
+  - E2: S1, S2, L2, O2 rerun into run 0025 (`run_ref --run-dir`, 2 workers). The old four moved
+    to `0025…/superseded_2026-11-07/` with a NOTE. O3, M and M_lambda090 stay.
+  - Case 1 on A, all 13 variants (K1-REF + K1-PAR), new run
+    `ch_10_case1_svr/0002_2026-11-07_012247_run_case1_v4_A_fix`, 8 workers.
+  - Expected done around 07:30–08:30 (S1-type legs ~5–6 h).
+- **Background watchers:** a smoke check when E2 S1 passes 112 min (couplers must now step after
+  the load step at 91:40), and a copy of both runs to Z: when they end (PowerShell script
+  `copy_reruns_to_Z.ps1`, file counts compared).

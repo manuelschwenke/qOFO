@@ -128,6 +128,32 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
               "line 3-4 out",
         events=lambda: [_gen(1, _at(30, 40)), _load(3, 600.0, _at(90, 100)),
                         _gen(1, _at(150, 140), "restore"), _line(4, _at(240, 60))]),
+    # Period II of ch:case3:nominal (author decision 2026-11-07: "6. Nov 08:00"):
+    # profile drift without disturbances, for the actuator time series.  Rule
+    # (applied to the exogenous profiles only, before any run; thesis repo
+    # 00_daily_log/2026-11-07_ch10_two_reference_periods_plan.md, section 3):
+    # 6-h windows starting at a full hour 05:00-14:00, outside the W1-W6 days
+    # and the step-test OP days, STS export <= 1300 MW, ranked by percentile
+    # ranks of the "up-and-down" (smaller of largest rise and largest fall) of
+    # TS wind and STS DER (weight 2), STS net exchange, residual load, STS PV
+    # (1), and TS load range and total variation of TS wind and STS DER (0.5).
+    # 6 Nov 08:00 ranks 1 of 3132.  First run: the LOC check (L2, no events).
+    "P2": dict(
+        title="Period II: profile drift (6 Nov 2016 08:00), no disturbances",
+        start="2016-11-06T08:00:00",
+        events=lambda: []),
+    # PROPOSED 2026-11-07, not run: P2 with one load ramp in area 2 at IEEE 12
+    # (pp bus 11, the step tests' area-2 ramp bus), +200 MW / +100 Mvar, up
+    # 110 -> 140 min, held to 170 min, down to 200 min -- inside the renewable
+    # trough of the period, so that the response can be attributed to it.
+    "P2R": dict(
+        title="Period II with a load ramp: 6 Nov 2016 08:00, +200 MW / +100 Mvar "
+              "at bus 12, 110-200 min",
+        start="2016-11-06T08:00:00",
+        events=lambda: [],
+        ramps=lambda: [dict(kind="bus", bus=11, p_mw=200.0, q_mvar=100.0,
+                            t0_s=110 * 60.0, ramp_s=30 * 60.0, hold_s=30 * 60.0,
+                            down=True)]),
     # Renewable-dominated period under unit commitment (author decision
     # 2026-10-31): the earliest 6-h window of the profile year, outside the
     # excluded days, starting at a full hour between 06:00 and 12:00, in which
@@ -187,6 +213,14 @@ def events(name: str) -> List[ContingencyEvent]:
     if name not in SCENARIOS:
         raise KeyError(f"unknown scenario {name!r}; valid: {sorted(SCENARIOS)}")
     return list(SCENARIOS[name]["events"]())
+
+
+def ramps(name: str) -> List[Dict[str, object]]:
+    """Load ramps of the scenario (``MultiTSOConfig.profile_ramps``), or []."""
+    if name not in SCENARIOS:
+        raise KeyError(f"unknown scenario {name!r}; valid: {sorted(SCENARIOS)}")
+    f = SCENARIOS[name].get("ramps")
+    return [] if f is None else [dict(r) for r in f()]
 
 
 def start_time(name: str) -> Optional[datetime]:

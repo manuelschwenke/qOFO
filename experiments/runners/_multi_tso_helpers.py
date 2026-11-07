@@ -152,6 +152,42 @@ def _clamp_oltc_taps(
     return moved
 
 
+def taps_changed(prev_taps, new_taps) -> bool:
+    """True if any machine-transformer tap of an area moved at this dispatch
+    (``new_taps`` as the TS-MIQP wrote them, possibly as floats)."""
+    return any(int(round(float(n))) != int(p) for n, p in zip(new_taps, prev_taps))
+
+
+def hold_area_couplers(
+    area_commit: Dict[int, bool],
+    area_dso_ids: Dict[int, List[str]],
+    dso_controllers: Dict[str, object],
+    n_iterations: int,
+) -> Dict[int, List[str]]:
+    """"Hold over dispatch" (``sts_coupler_hold_scope == 'area'``, 2026-11-06).
+
+    For every area with a TS discrete commit at this dispatch (bank or
+    machine-transformer tap), hold the coupler OLTCs of each of its STS
+    controllers for ``n_iterations`` STS steps via ``hold_oltcs`` (which keeps
+    a longer running lock).  Returns ``{area: [held STS ids]}``; areas without
+    a commit, STSs without a controller (local mode) and ``n_iterations <= 0``
+    hold nothing.
+    """
+    held: Dict[int, List[str]] = {}
+    if n_iterations <= 0:
+        return held
+    for z, hit in area_commit.items():
+        if not hit:
+            continue
+        for d in dict.fromkeys(area_dso_ids.get(z, ())):
+            ctrl = dso_controllers.get(d)
+            if ctrl is None:
+                continue
+            ctrl.hold_oltcs(int(n_iterations))
+            held.setdefault(z, []).append(str(d))
+    return held
+
+
 class _OLTCRateLimiter:
     """Per-step ``DiscreteTapControl`` rate limiter for local-mode OLTCs.
 
@@ -185,6 +221,12 @@ class _OLTCRateLimiter:
         }
         self._snapshot: Dict[Tuple[str, int], int] = {}
         self._last_change_time_s: Dict[Tuple[str, int], float] = {}
+        #: OLTCs whose move was accepted by a clamp since the last
+        #: :meth:`snapshot`, mapped to their ``last_change_time_s`` before
+        #: that move (``None`` if they had none).  A move accepted earlier in
+        #: the same step is not a second move: later clamps of the step must
+        #: not revert it under the cooldown gate (fix 2026-11-06).
+        self._accepted_this_step: Dict[Tuple[str, int], Optional[float]] = {}
 
     def _cooldown_for(self, table: str) -> float:
         """Resolve the cooldown (s) for an OLTC on ``table`` (per-table
@@ -206,6 +248,7 @@ class _OLTCRateLimiter:
         step.  Subsequent :meth:`clamp` calls within the same step
         reference this snapshot."""
         self._snapshot = _snapshot_oltc_taps(net)
+        self._accepted_this_step = {}
 
     def clamp(
         self,
@@ -228,6 +271,20 @@ class _OLTCRateLimiter:
         Returns the list of OLTCs whose ``tap_pos`` was modified by this
         call (whether by clamp or by cooldown revert), so the caller
         can decide whether to re-run the PF with ``run_control=False``.
+
+        Several clamps per step (post-profile, post-contingency, end-of-step
+        PF) all compare against the same snapshot.  A move accepted by an
+        earlier clamp of the step is exempt from the cooldown gate in the
+        later ones; the ``±max_step`` clamp against the snapshot still
+        applies.  If a later PF of the step returns the tap to its snapshot
+        position, the tap did not move in this step and its previous
+        ``last_change_time_s`` is restored.
+
+        FIX 2026-11-06: before, the cooldown gate also fired for a move
+        accepted earlier in the same step (``time_s - last_t == 0``), reverted
+        it and restarted the lock.  Under SVR, whose end-of-step PF runs every
+        step, the coupler relays could then move only when the move first
+        arose in the end-of-step PF (thesis ch:case3:nominal, run 0025).
         """
         from pandapower.control import DiscreteTapControl
         moved: List[Tuple[str, int, int, int]] = []
@@ -246,11 +303,20 @@ class _OLTCRateLimiter:
                 prev = self._snapshot[key]
                 curr = int(net[table].at[tid, "tap_pos"])
                 delta = curr - prev
+                moved_this_step = key in self._accepted_this_step
                 if delta == 0:
+                    if moved_this_step:
+                        # Accepted earlier in this step, undone by a later PF
+                        # of the same step: no move, so no lock.
+                        before = self._accepted_this_step.pop(key)
+                        if before is None:
+                            self._last_change_time_s.pop(key, None)
+                        else:
+                            self._last_change_time_s[key] = before
                     continue
                 last_t = self._last_change_time_s.get(key, float("-inf"))
                 cd = self._cooldown_for(table)
-                if cd > 0.0 and (time_s - last_t) < cd:
+                if cd > 0.0 and not moved_this_step and (time_s - last_t) < cd:
                     # Cooldown not elapsed: revert any tap movement.
                     net[table].at[tid, "tap_pos"] = int(prev)
                     moved.append((table, tid, curr, prev))
@@ -261,12 +327,19 @@ class _OLTCRateLimiter:
                     clamped = prev + (self.max_step if delta > 0 else -self.max_step)
                     net[table].at[tid, "tap_pos"] = int(clamped)
                     if clamped != prev:
-                        self._last_change_time_s[key] = time_s
+                        self._mark_moved(key, time_s, moved_this_step)
                     moved.append((table, tid, prev, int(clamped)))
                 else:
                     # The natural move (within ±max_step) is allowed.
-                    self._last_change_time_s[key] = time_s
+                    self._mark_moved(key, time_s, moved_this_step)
         return moved
+
+    def _mark_moved(self, key: Tuple[str, int], time_s: float,
+                    moved_this_step: bool) -> None:
+        """Record an accepted move; keep the pre-step lock time once per step."""
+        if not moved_this_step:
+            self._accepted_this_step[key] = self._last_change_time_s.get(key)
+        self._last_change_time_s[key] = time_s
 
 
 def _dump_contingency_diagnostics(

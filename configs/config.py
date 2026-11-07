@@ -2050,12 +2050,42 @@ class MultiTSOConfig:
     in every run before 2026-11-04.  Local bank relays send no message and
     trigger no hold."""
 
+    sts_coupler_hold_scope: str = "host"  # added 2026-11-06
+    """Which STSs :attr:`sts_coupler_hold_after_bank` holds, and on what.
+
+    * ``'host'`` -- the STS whose tertiary hosts the committed bank, on a bank
+      commit only (behaviour of every run before 2026-11-06).
+    * ``'area'`` -- "hold over dispatch" (author 2026-11-06): every STS of the
+      area whose TS-MIQP committed a discrete action at this dispatch, a bank
+      OR a machine-transformer tap.  With ``sts_coupler_hold_after_bank`` =
+      T_TS / T_STS (9) the couplers stay put until the next TS dispatch, so
+      the STS does not answer, with its taps, a voltage change the parent has
+      just caused for the whole area.  Motivation: Ch 10 scenario E2, run
+      0025, O3: after the load step the STS couplers stepped down three times
+      (91:40-95:40), the TS dispatch at 96:00 (export set-points, MSCs, TS
+      voltage) made the STS voltages overshoot and the couplers stepped back
+      (97:40-99:40); at 123:20 the couplers of STS 2 and 3 answered the MSC of
+      STS 1, which a host-only hold does not cover.
+    Local bank relays and the classical scheme send no commit and trigger no
+    hold under either scope."""
+
     def validate_integrator_mode(self) -> None:
         """Fail-fast consistency check for the switched-shunt dispatch mode.
 
         Raises ``ValueError`` on any inconsistent or out-of-range setting; the
         per-bank numeric guards are additionally enforced by
         :class:`controller.shunt_banks.ShuntBankConfig`."""
+        if self.sts_coupler_hold_scope not in ("host", "area"):
+            raise ValueError(
+                "sts_coupler_hold_scope must be 'host' or 'area', got "
+                f"{self.sts_coupler_hold_scope!r}"
+            )
+        if (not isinstance(self.sts_coupler_hold_after_bank, int)
+                or self.sts_coupler_hold_after_bank < 0):
+            raise ValueError(
+                "sts_coupler_hold_after_bank must be an int >= 0, got "
+                f"{self.sts_coupler_hold_after_bank!r}"
+            )
         if self.shunt_dispatch not in ("off", "miqp", "local"):
             raise ValueError(
                 f"shunt_dispatch must be 'off', 'miqp' or 'local', "

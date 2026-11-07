@@ -167,6 +167,8 @@ from controller.gw_precondition import curvature_spectrum, precondition_g_w
 # Helpers live in a sibling module; import at the top so callers (e.g.
 # ``tuning.ceilings``) can monkey-patch them on this module's namespace.
 from experiments.runners._multi_tso_helpers import (
+    hold_area_couplers,
+    taps_changed,
     _OLTCRateLimiter,
     _build_gen_mix_groups,
     _clamp_oltc_taps,
@@ -4485,10 +4487,18 @@ def _run_multi_tso_dso_impl(
             # Apply TSO controls to the plant.  The pre-write shunt steps
             # are captured first (apply_zone_tso_controls' legacy return
             # contract) so shunt switches can be detected below.
+            # Areas whose TS-MIQP committed a discrete action (bank or
+            # machine-transformer tap) at this dispatch, for the area-wide
+            # coupler hold (sts_coupler_hold_scope == 'area', 2026-11-06).
+            _area_discrete_commit: Dict[int, bool] = {}
             for z, tso_out in tso_outputs.items():
                 prev_shunt_steps = shunt_steps_for_buses(
                     plant.read_y(), zone_defs[z].shunt_bus_indices,
                 )
+                prev_mt_taps = [
+                    int(plant.read_y().trafo.at[int(_t), "tap_pos"])
+                    for _t in zone_defs[z].oltc_trafo_indices
+                ]
                 plant.apply_u(writes_from_zone_tso(
                     plant.read_y(), zone_defs[z], tso_out.u_new,
                 ))
@@ -4511,6 +4521,8 @@ def _run_multi_tso_dso_impl(
                     last_pcc_set_per_trafo[int(_t)] = float(rec.zone_q_pcc_set[z][_k])
                 rec.zone_v_gen[z]         = u[off:off+n_gen].copy(); off += n_gen
                 rec.zone_oltc_taps[z]     = u[off:off+n_oltc].copy(); off += n_oltc
+                _area_discrete_commit[z] = taps_changed(
+                    prev_mt_taps, rec.zone_oltc_taps[z])
                 rec.zone_tso_objective[z] = tso_out.objective_value
                 if getattr(tso_out, "objective_terms", None):
                     rec.zone_tso_cost_terms[z] = dict(tso_out.objective_terms)
@@ -4561,6 +4573,7 @@ def _run_multi_tso_dso_impl(
                         if s_new != s_prev
                     ]
                     if changed:
+                        _area_discrete_commit[z] = True
                         tso_ctrl_z = tso_controllers[z]
 
                         # ── Diagnostic: which gradient component drove the
@@ -4842,6 +4855,26 @@ def _run_multi_tso_dso_impl(
                                 dso_ctrl_aff.hold_oltcs(
                                     config.sts_coupler_hold_after_bank
                                 )
+
+            # "Hold over dispatch" (sts_coupler_hold_scope == 'area', author
+            # 2026-11-06): every STS of an area whose TS-MIQP committed a bank
+            # or a machine-transformer tap keeps its couplers for
+            # sts_coupler_hold_after_bank STS steps, starting with this
+            # instant's step (which reads the plant before the TS writes).
+            # The host-only hold above is kept; hold_oltcs keeps the longer lock.
+            if config.sts_coupler_hold_scope == "area":
+                _held_by_area = hold_area_couplers(
+                    _area_discrete_commit,
+                    {z: zone_defs[z].pcc_dso_ids for z in _area_discrete_commit},
+                    dso_controllers,
+                    config.sts_coupler_hold_after_bank,
+                )
+                if verbose >= 1:
+                    for z, _held in _held_by_area.items():
+                        print(f"  [coupler-hold z{z}] t={time_s:.0f}s: "
+                              f"{', '.join(_held)} held for "
+                              f"{config.sts_coupler_hold_after_bank} STS steps "
+                              f"(TS discrete commit in the area)")
 
             # The offset as it stands at dispatch, after this step's commits:
             # the setpoint the STS receives is u_pcc plus this.

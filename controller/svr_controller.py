@@ -418,15 +418,38 @@ class SVRZoneController:
             if vb:
                 dv_bus_dq[:, k] = dvb / dq if abs(dq) > 1e-9 else 0.0
 
-        # -- converter DER: perturb the reactive command directly ----------
+        # -- converter DER: perturb the reactive command ------------------
+        # FIX 2026-11-07: perturb the DER through the plant's command path.
+        # A DER with a plant-side Q(V) loop (q_mode "qv", every TS-DER) is
+        # commanded through ``q_set_mvar`` at a V_ref anchor reset to the
+        # measured voltage (core.plant.write_der_q_set).  Its loop rewrites
+        # ``q_mvar`` inside the run_control solve, so perturbing ``q_mvar``
+        # alone was undone and gave DER columns ~60x too small (step campaign
+        # 2026-11-06: S1 integral gain ~38 instead of 0.6 per update in area 2
+        # at OP-R, where no machine is committed).  Here the command and the
+        # output move together, with the anchor at the base-point voltage:
+        # the base operating point is unchanged, and a DER without a loop
+        # sees the same ``q_mvar`` perturbation as before.
+        from core.measurement_noise import measured_der_voltage
+        for col, fill in (("q_set_mvar", 0.0), ("qv_vref_anchor_pu", float("nan"))):
+            if col not in probe.sgen.columns:
+                probe.sgen[col] = fill
         for k, s in enumerate(self.der_indices):
             q0 = float(probe.sgen.at[s, "q_mvar"])
+            qset0 = probe.sgen.at[s, "q_set_mvar"]
+            anchor0 = probe.sgen.at[s, "qv_vref_anchor_pu"]
+            anchor = measured_der_voltage(probe, s, int(probe.sgen.at[s, "bus"]))
             readings = {}
             for sign in (+1.0, -1.0):
-                probe.sgen.at[s, "q_mvar"] = q0 + sign * self.cfg.calib_dq_mvar
+                q_cmd = q0 + sign * self.cfg.calib_dq_mvar
+                probe.sgen.at[s, "q_mvar"] = q_cmd
+                probe.sgen.at[s, "q_set_mvar"] = q_cmd
+                probe.sgen.at[s, "qv_vref_anchor_pu"] = anchor
                 _solve()
                 readings[sign] = (float(probe.res_bus.at[p, "vm_pu"]), _vbus())
             probe.sgen.at[s, "q_mvar"] = q0
+            probe.sgen.at[s, "q_set_mvar"] = qset0
+            probe.sgen.at[s, "qv_vref_anchor_pu"] = anchor0
             _solve()
             dv_pilot_dq[n_gen + k] = (
                 readings[+1.0][0] - readings[-1.0][0]

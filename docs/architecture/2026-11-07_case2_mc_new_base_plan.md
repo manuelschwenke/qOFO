@@ -135,6 +135,21 @@ These are the constants of 2026-10-07, with the changes of 2026-10-28 and 2026-1
 
 **Watching.** Per-run `wall_s` of the first SVR runs (e5power) and LOC runs (here) is in `runs/*.json` after about 1.5 h. The ETA is re-estimated from those, not from the README.
 
+**Amendment A1 (2026-11-07 ~18:05, author, before the launch): CEN moves to e5wimi.**
+- Load check at 18:00:
+  - e5power: another user's 30 processes on 29.8 of 36 cores;
+  - e5wimi: the other user's job ended, about 4 threads busy.
+- The agreed split would have taken about 15 h on e5power.
+- New split:
+
+| host | variants | CPU-h | wall time |
+|---|---|---|---|
+| e5power | SVR, OFO (`--variants S1,O2`) | ≈ 209 | ≈ 11.5 h at ≈ 18 core-equivalents |
+| e5wimi | LOC, CEN, SVR+, OFO+ and the prescreen (`--variants L2,M,S2,O3`) | ≈ 257 | ≈ 11.4 h at ≈ 22.6 core-equivalents |
+
+- ETA about 06:30–07:30 on 8 Nov.
+- E2 0029 on e5power (the fix over a full run) had the wall times SVR 141, LOC 91, OFO 61, CEN 44, OFO+ 25, SVR+ 23 min for 360 min. They are consistent with the per-episode estimates of the table above.
+
 ## 6. Commands (after the author's go)
 
 The numbering:

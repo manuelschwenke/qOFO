@@ -518,6 +518,11 @@ def sync_remote_code() -> None:
                                          text=True).split())
     files = sorted(n for n in names if n.endswith(".py") and (ROOT / n).exists()
                    and not n.startswith(("docs/", "tests/", "results/")))
+    if not files:
+        # e5power already runs this code; an empty list made Get-FileHash fail on an
+        # empty path and stop the driver (procedure v5, 2026-11-08).
+        P.log(f"{P.REMOTE}: no Python file differs from {rh[:7]}; nothing copied")
+        return
     for n in files:
         P.push(ROOT / n, P.REMOTE_ROOT + "\\" + n.replace("/", "\\"))
     local = {n: hashlib.sha256((ROOT / n).read_bytes()).hexdigest().upper() for n in files}

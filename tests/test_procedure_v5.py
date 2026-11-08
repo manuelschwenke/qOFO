@@ -73,6 +73,19 @@ def test_no_g3_off_point_is_an_error(v5):
         v5.compute_bounds(4.0e4)
 
 
+def test_sync_remote_code_with_nothing_to_copy(monkeypatch):
+    """No differing Python file: no remoting call (it failed on an empty path)."""
+    monkeypatch.setattr(P, "remote_head", lambda: "0123456789abcdef")
+    monkeypatch.setattr(V3.subprocess, "check_output", lambda *a, **k: "docs/x.md\n")
+    monkeypatch.setattr(P, "log", lambda msg: None)
+
+    def no_ps(*a, **k):
+        raise AssertionError("ps called with nothing to copy")
+    monkeypatch.setattr(P, "ps", no_ps)
+    monkeypatch.setattr(P, "push", no_ps)
+    V3.sync_remote_code()
+
+
 def test_bank_grid_has_both_horizons():
     names = [n for n, _, _ in V5.bank_conditions()]
     assert len(names) == 192 and len(set(names)) == 192

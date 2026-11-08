@@ -129,6 +129,8 @@ def _create_hv_subnetwork(
     wind_parks = capacity["wind_parks"]
     pv_plants = capacity["pv_plants"]
     coupling_wp_mva = capacity["coupling_wp_mva"]
+    coupling_wp_op_diagram = capacity.get("coupling_wp_op_diagram",
+                                          "VDE-AR-N-4120-v2")
 
     try:
         line_std_type = DSO_HV_LINE_STD_TYPES[net_id]
@@ -388,7 +390,7 @@ def _create_hv_subnetwork(
             type="WP", profile="WP10",
             name=f"{net_id}|WP_STATCOM_HV{hv_no}",
             subnet="DN",
-            op_diagram="VDE-AR-N-4120-v2",
+            op_diagram=coupling_wp_op_diagram,
         )
         sgen_indices.append(int(sidx))
 
@@ -527,6 +529,11 @@ def _compute_reference_loads(
 #  Internal: build-time power flow with a start-strategy ladder
 # =====================================================================
 
+#: Output levels of the last rung of :func:`_reinit_pf` (fractions of rated
+#: IBG active power), solved in order with a warm start.
+_P_CONTINUATION = (0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0)
+
+
 def _reinit_pf(
     net: pp.pandapowerNet,
     what: str,
@@ -550,6 +557,17 @@ def _reinit_pf(
 
     Only ``net.sgen.q_mvar`` (the seed) persists from here; ``gen.p_mw`` is not
     modified and the result tables are overwritten by the runner immediately.
+
+    Last rung (added 2026-11-08 for the ``*_north`` scenarios): with every IBG
+    at rated P the ``rural_700_north`` build state exports about 2.7 GW to the
+    equivalent and lies beyond its nose point (measured: solvable up to 95 %
+    of rated IBG output, from a warm start; ``init="dc"`` does not solve this
+    network at any output).  The rung scales the active power of every sgen
+    and of the temporary seed machines from 50 % upwards, warm-starting each
+    solve from the previous one, keeps the last solved state and restores
+    ``p_mw`` (later frozen as ``base_p_mw`` and read as P_max) afterwards.
+    Only the Q seed of that state persists.  The rung is reached only when the
+    three rungs above fail; scenarios that solve on them keep their seed.
     """
     attempts = (
         dict(init="auto"),
@@ -571,6 +589,30 @@ def _reinit_pf(
         except Exception as exc:            # pragma: no cover - solver-dependent
             last = exc
             continue
+    seed = net.gen["name"].astype(str).str.startswith("_TEMP_")
+    saved_sgen = net.sgen["p_mw"].copy()
+    saved_gen = net.gen.loc[seed, "p_mw"].copy()
+    solved = None
+    try:
+        for scale in _P_CONTINUATION:
+            net.sgen["p_mw"] = saved_sgen * scale
+            net.gen.loc[seed, "p_mw"] = saved_gen * scale
+            try:
+                pp.runpp(net, run_control=False, calculate_voltage_angles=True,
+                         max_iteration=100, enforce_q_lims=enforce_q_lims,
+                         init="auto" if solved is None else "results")
+            except Exception as exc:        # pragma: no cover - solver-dependent
+                last = exc
+                break
+            solved = scale
+    finally:
+        net.sgen["p_mw"] = saved_sgen
+        net.gen.loc[saved_gen.index, "p_mw"] = saved_gen
+    if solved is not None:
+        if solved < 1.0:
+            print(f"  [add_hv_networks] {what}: build-time seed taken at "
+                  f"{solved:.0%} of rated IBG output (no solution above)")
+        return
     raise RuntimeError(
         f"add_hv_networks: {what} did not converge under any start strategy "
         f"({len(attempts)} tried, last error: {type(last).__name__}: {last}). "

@@ -31,8 +31,20 @@ EXPECTED = {
 
 
 def test_public_registry_contains_only_capacity_named_scenarios():
-    assert set(SCENARIO_REGISTRY) == {"base_410", "rural_700"}
+    # 2026-11-08: the scarcity redesign candidates are registered too; the
+    # study default is rural_700_north_res.  Each name carries its capacity
+    # prefix and has a capacity entry, and nothing else is registered.
+    assert set(SCENARIO_REGISTRY) == {
+        "base_410", "rural_700", "rural_700_res", "rural_700_north",
+        "rural_700_north_res", "rural_700_res_no939", "rural_700_north_res_no939"}
     assert set(DSO_DER_CAPACITY_SCENARIOS) == set(SCENARIO_REGISTRY)
+    assert all(n.startswith(("base_410", "rural_700")) for n in SCENARIO_REGISTRY)
+
+
+def test_config_default_is_a_registered_scenario():
+    from configs.config import MultiTSOConfig
+    assert MultiTSOConfig.scenario == "rural_700_north_res"
+    assert MultiTSOConfig.scenario in SCENARIO_REGISTRY
 
 
 @pytest.mark.parametrize("scenario", ["base_410", "rural_700"])

@@ -74,6 +74,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, List
 
+from configs.config import MultiTSOConfig
 from tuning.scenarios import ContingencyEvent, ScenarioSpec, _load_ramp
 
 __all__ = [
@@ -87,7 +88,9 @@ __all__ = [
 
 #: One network, per the Stage-1 specification: the design is per-plant, and
 #: ``H`` -- hence every weight Stage 0 derives -- changes with the network.
-MC_NETWORK = "rural_700"
+#: The config default (``rural_700_north_res`` since 2026-11-08; every
+#: selection before that date ran on ``rural_700``).
+MC_NETWORK = MultiTSOConfig.scenario
 
 STABILISE_MIN = 15
 EVENT_MIN = 75

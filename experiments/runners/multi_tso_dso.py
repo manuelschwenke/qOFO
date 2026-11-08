@@ -1198,6 +1198,11 @@ def _run_multi_tso_dso_impl(
     # loops.
     _t_jac_initial = perf_counter()
     try:
+        # A build state left unconverged by the last build-time solve (the
+        # *_no939 scarcity candidates, 2026-11-08) takes the same fallback;
+        # JacobianSensitivities would raise ValueError on it.
+        if not net.converged:
+            raise LoadflowNotConverged("un-profiled build state not converged")
         shared_jac = JacobianSensitivities(net)
     except LoadflowNotConverged:
         # The un-profiled build state is only a bootstrap: this object is
@@ -1228,6 +1233,9 @@ def _run_multi_tso_dso_impl(
         )
         snapshot_base_values(_probe_net)
         apply_profiles(_probe_net, _probe_profiles, config.start_time)
+        if not _probe_net.converged:
+            pp.runpp(_probe_net, run_control=False, calculate_voltage_angles=True,
+                     max_iteration=100, distributed_slack=config.distributed_slack)
         shared_jac = JacobianSensitivities(_probe_net)
         del _probe_net, _probe_profiles
     if verbose >= 1:

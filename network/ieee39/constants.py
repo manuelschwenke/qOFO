@@ -257,6 +257,26 @@ DSO_DER_CAPACITY_SCENARIOS: Dict[str, dict] = {
     },
 }
 
+#: Operating diagram of the coupling-bus parks of every STS (the parks at the
+#: 110 kV side of each coupler).  ``"VDE-AR-N-4120-v2"`` is the grid-code box
+#: with its dead zone below P/S_n = 0.1; the ``*_res`` scenarios give these
+#: parks *reserved capability* (author 2026-11-08): the full-P range
+#: [-0.33, +0.41] S_n is held down to P = 0 (core.actuator_bounds).
+RESERVED_OP_DIAGRAM: str = "VDE-AR-N-4120-v2-reserved"
+for _cap in DSO_DER_CAPACITY_SCENARIOS.values():
+    _cap["coupling_wp_op_diagram"] = "VDE-AR-N-4120-v2"
+DSO_DER_CAPACITY_SCENARIOS["rural_700_res"] = dict(
+    DSO_DER_CAPACITY_SCENARIOS["rural_700"],
+    coupling_wp_op_diagram=RESERVED_OP_DIAGRAM)
+DSO_DER_CAPACITY_SCENARIOS["rural_700_north"] = dict(
+    DSO_DER_CAPACITY_SCENARIOS["rural_700"])
+DSO_DER_CAPACITY_SCENARIOS["rural_700_north_res"] = dict(
+    DSO_DER_CAPACITY_SCENARIOS["rural_700_res"])
+DSO_DER_CAPACITY_SCENARIOS["rural_700_res_no939"] = dict(
+    DSO_DER_CAPACITY_SCENARIOS["rural_700_res"])
+DSO_DER_CAPACITY_SCENARIOS["rural_700_north_res_no939"] = dict(
+    DSO_DER_CAPACITY_SCENARIOS["rural_700_res"])
+
 # HV buses with concentrated load (P and Q multiplied by the factor below).
 # Used to create an intentional load–generation asymmetry across the HV
 # sub-network: generation lives on HV buses 0–5 (wind + PV side) and load

@@ -4,14 +4,33 @@ Scenario registry for the IEEE 39-bus network.
 Each scenario is a function ``(net, meta, **kwargs) -> (net, meta)`` that
 modifies the base network in-place and returns updated metadata.
 """
+from functools import partial
+
+from network.ieee39.scenarios.scarcity import apply_scarcity
 from network.ieee39.scenarios.wind_replace import apply_wind_replace
 
 # Both study scenarios share the validated transmission-side wind replacement.
 # Their DSO installed capacities are selected later by ``add_hv_networks``
 # from ``network.ieee39.constants.DSO_DER_CAPACITY_SCENARIOS``.
+#
+# Scarcity redesign candidates (2026-11-08, screened before adoption):
+#   ``*_north`` -- transmission wind layout "north" (W1, W2, W4 concentrated
+#                  at IEEE bus 26; see wind_replace.py);
+#   ``*_res``   -- coupling-bus parks of every STS with reserved capability
+#                  (constants.RESERVED_OP_DIAGRAM);
+#   ``*_no939`` -- line 9-39 not built (scarcity.py).
+_north = partial(apply_wind_replace, ts_wind_layout="north")
+_no939 = partial(apply_scarcity, lines_not_built=((9, 39),))
+_north_no939 = partial(apply_scarcity, ts_wind_layout="north",
+                       lines_not_built=((9, 39),))
 SCENARIO_REGISTRY = {
     "base_410": apply_wind_replace,
     "rural_700": apply_wind_replace,
+    "rural_700_res": apply_wind_replace,
+    "rural_700_north": _north,
+    "rural_700_north_res": _north,
+    "rural_700_res_no939": _no939,
+    "rural_700_north_res_no939": _north_no939,
 }
 
 #: Non-study build target: the unmodified IEEE 39-bus case, with the full

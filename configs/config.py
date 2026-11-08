@@ -1246,10 +1246,17 @@ class MultiTSOConfig:
     unlimited, after drawing 1181 Mvar).  ``None`` reproduces the earlier
     unlimited equivalent."""
 
-    scenario: str = "rural_700"
+    scenario: str = "rural_700_north_res"
     """Network scenario registered in :mod:`network.ieee39.scenarios`.
     ``"base_410"`` and ``"rural_700"`` share the transmission-side wind
-    replacement and select 410 or 700 MW installed DER per DSO."""
+    replacement and select 410 or 700 MW installed DER per DSO.
+
+    Default since 2026-11-08 (author): ``"rural_700_north_res"`` -- 700 MW per
+    DSO, transmission wind layout "north" (W1, W2, W4 replaced by one 1.5 GW
+    park at IEEE bus 26; zone 2 without transmission IBG) and the coupling-bus
+    parks of every STS with reserved capability.  Selected by the scarcity
+    screen (``docs/daily_log/11_2026/2026-11-08b_network_scarcity_screen.md``).
+    Every result before that date ran on ``"rural_700"``."""
 
     dso_der_scale: Dict[str, float] = field(default_factory=dict)
     """Per-DSO installed-DER multiplier, e.g. ``{"DSO_3": 2.0}``.

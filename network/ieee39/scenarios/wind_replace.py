@@ -30,6 +30,14 @@ Each replacement wind park sgen is sized as:
     circular diagram collapses to Q = 0 at rated P.
   - profile = 'WP10'
 
+Layout ``"north"`` (``ts_wind_layout``, added 2026-11-08) removes the same
+machines but builds only the zone-3 park at grid bus 18 (W3, ex-G5).  The
+active power of W1 (ex-G8), W2 (ex-G2) and W4 (ex-G6) is concentrated in one
+park of ``NORTH_WIND_MW`` at IEEE bus 26 (grid bus 25, zone 1).  Purpose: zone
+2 keeps no transmission IBG, and at high wind the zone-1 surplus is carried
+towards zones 2/3 and to the equivalent, so the reactive losses of the
+corridor grow with the wind (author 2026-11-08, scarcity redesign).
+
 A temporary PV-generator trick seeds the STATCOM Q injection at the
 base (pre-profile) operating point so that the downstream base PF
 (``add_hv_networks`` verification run, etc.) converges from a physically
@@ -63,6 +71,21 @@ from network.ieee39.meta import IEEE39NetworkMeta
 # convention).  Increase to oversize wind parks for additional zonal
 # headroom; decrease to study under-replacement scenarios.
 WIND_REPLACE_SCALE: float = 1
+
+#: Transmission wind layouts: ``"replace"`` builds one park per removed
+#: machine (W1--W4); ``"north"`` keeps W3 only and adds the concentrated
+#: zone-1 park below.
+TS_WIND_LAYOUTS = ("replace", "north")
+#: Grid bus (0-indexed pandapower = IEEE 26 - 1) and rating of the
+#: concentrated zone-1 park of the ``"north"`` layout.
+NORTH_WIND_BUS: int = 25
+NORTH_WIND_MW: float = 1500.0
+#: Machines (terminal buses) whose replacement park the ``"north"`` layout
+#: does NOT build: G8 (W1), G2 (W2), G6 (W4).  The machines are removed in
+#: both layouts, so the synchronous fleet is the same.
+NORTH_DROPPED_TERMS = frozenset({36, 30, 34})
+
+
 def _separate_colocated_wind_and_tn_loads(
     net: pp.pandapowerNet,
     replacement_sgen_indices: List[int],
@@ -79,7 +102,8 @@ def _separate_colocated_wind_and_tn_loads(
         aux_subnet="TN_AUX",
     )
 
-def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
+def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03,
+                       ts_wind_layout="replace", **kwargs):
     """Apply the *wind_replace* scenario.
 
     Parameters
@@ -92,6 +116,10 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
         Voltage setpoint [pu] for the temporary PV-generator STATCOM
         **seed** (default 1.03).  Not the final operating point; the
         caller re-initialises Q + OLTCs after profiles are applied.
+    ts_wind_layout : str, optional
+        ``"replace"`` (default, W1--W4) or ``"north"`` (W3 plus one park of
+        :data:`NORTH_WIND_MW` at :data:`NORTH_WIND_BUS`); see the module
+        docstring.
 
     Returns
     -------
@@ -130,6 +158,7 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
             _gens_to_remove.append(g)
             _removed_gen_info.append((g, gb, p_mw, 3))
 
+    net_gen_term = {int(g): int(net.gen.at[g, "bus"]) for g in _gens_to_remove}
     meta = remove_generators(net, meta, _gens_to_remove)
 
     # Create replacement wind park sgens at the same grid buses.
@@ -146,11 +175,23 @@ def apply_wind_replace(net, meta, *, ext_grid_vm_pu=1.03, **kwargs):
     # box −0.33/+0.41·S_n is P-independent above P/S_n = 0.2 and therefore
     # well-defined at rated P.  See
     # docs/daily_log/07_2026/2026-07-21_rms_gate_e_qv_rollout_and_capability_finding.md
+    if ts_wind_layout not in TS_WIND_LAYOUTS:
+        raise ValueError(f"ts_wind_layout must be one of {TS_WIND_LAYOUTS}, "
+                         f"got {ts_wind_layout!r}")
+    # (grid bus, P_n) of every park to build
+    _parks: List[Tuple[int, float]] = []
+    for _g_idx, gb, gen_p, zone in _removed_gen_info:
+        if (ts_wind_layout == "north"
+                and int(net_gen_term[_g_idx]) in NORTH_DROPPED_TERMS):
+            continue
+        _parks.append((gb, gen_p * WIND_REPLACE_SCALE))
+    if ts_wind_layout == "north":
+        _parks.append((NORTH_WIND_BUS, float(NORTH_WIND_MW)))
+
     _wp_sgen_indices: List[int] = []
     _wp_sgen_buses: List[int] = []
     _wp_info: List[Tuple[int, int, float, float]] = []  # (sgen_idx, bus, p, sn)
-    for _g_idx, gb, gen_p, zone in _removed_gen_info:
-        wp_p = gen_p * WIND_REPLACE_SCALE
+    for gb, wp_p in _parks:
         wp_sn = wp_p * 1.0
         idx = pp.create_sgen(
             net,

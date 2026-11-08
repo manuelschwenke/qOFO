@@ -103,6 +103,9 @@ def _qv_capability(sn: float, op_diagram: str, p_mw: float) -> tuple[float, floa
         p_pu_sq = min((p_mw / sn) ** 2, 1.0)
         q_pu = math.sqrt(max(1.0 - p_pu_sq, 0.0))
         return -q_pu * sn, q_pu * sn
+    from core.actuator_bounds import RESERVED_OP_DIAGRAM
+    if op_diagram == RESERVED_OP_DIAGRAM:
+        return -0.33 * sn, 0.41 * sn
 
     # VDE-AR-N-4120-v2 (default for non-STATCOM): piecewise linear with
     # deadband below P/S_n = 0.1.

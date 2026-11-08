@@ -53,6 +53,13 @@ from numpy.typing import NDArray
 #: the exact failure mode that produced the Gate-E STATCOM bug.
 DER_Q_CAPABILITY_OVERRIDE_PU: Optional[float] = None
 
+#: Operating diagram of an IBG with *reserved capability* (author 2026-11-08):
+#: the VDE-AR-N 4120 variant-2 full-P range [-0.33, +0.41] S_n held for every
+#: P down to P = 0, i.e. without the dead zone and the ramp below P/S_n = 0.2.
+#: Used by the coupling-bus parks of the ``*_res`` network scenarios
+#: (``network.ieee39.constants.RESERVED_OP_DIAGRAM`` is the same string).
+RESERVED_OP_DIAGRAM: str = "VDE-AR-N-4120-v2-reserved"
+
 
 def set_der_q_capability_override(value: Optional[float]) -> None:
     """Set (or clear with ``None``) the global DER capability override."""
@@ -366,6 +373,8 @@ class ActuatorBounds:
             ``'STATCOM'`` — full circle diagram Q = ±sqrt(S_n² - P²),
             no dead zone at P = 0.  Models Type-4 wind parks with
             STATCOM-class full-converter capability.
+            ``'VDE-AR-N-4120-v2-reserved'`` — reserved capability:
+            [-0.33, +0.41]·S_n at every P (:data:`RESERVED_OP_DIAGRAM`).
         """
         self.der_indices = der_indices
         self.der_s_rated_mva = der_s_rated_mva
@@ -476,6 +485,9 @@ class ActuatorBounds:
         grid-forming inverters.  Full rated apparent power is available
         as reactive power when P = 0.
 
+        **VDE-AR-N-4120-v2-reserved** — reserved capability: the full-P
+        box [-0.33, +0.41]·S_n at every P, including P = 0.
+
         Parameters
         ----------
         p_ratio : float
@@ -504,6 +516,9 @@ class ActuatorBounds:
             q_max = q_pu * s_rated_mva
             q_min = -q_pu * s_rated_mva
             return q_min, q_max
+
+        if op_diagram == RESERVED_OP_DIAGRAM:
+            return -0.33 * s_rated_mva, 0.41 * s_rated_mva
 
         # VDE-AR-N 4120 Variant 2 breakpoints (p.u. of S_rated)
         #   P:     [0.0,  0.1,  0.2,  1.0]

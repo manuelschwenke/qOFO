@@ -333,6 +333,8 @@ class SVRZoneController:
         self.dq_dvset: Optional[NDArray[np.float64]] = None
         #: Aggregate pilot sensitivity s_p,a [pu per unit reactive level].
         self.pilot_sensitivity: float = float("nan")
+        #: No reactive resource in service at calibration (set there).
+        self.no_resources: bool = False
         #: Monitored buses of the zone (the TS-OFO's ``v_bus_indices``).  Only
         #: the OFO form of the RVR uses them, as soft voltage constraints.
         self.v_bus_indices: List[int] = [
@@ -492,7 +494,19 @@ class SVRZoneController:
             print(f"  [SVR z{self.zone_def.zone_id}] pilot bus {p}: "
                   f"s_p={self.pilot_sensitivity:+.5f} pu/level, "
                   f"{n_gen - self.n_gen_withheld} gen + {n_der} DER{_held}")
-        if abs(self.pilot_sensitivity) < 1e-9:
+        # A zone with no reactive resource in service at all (no committed
+        # machine, no TS IBG with capability; 2026-11-08: zone 2 of
+        # ``rural_700_north_res`` while unit commitment keeps G3 off) has
+        # nothing to dispatch: its SVR holds (``step`` skips the RVR while
+        # s_p = 0).  With STS access the couplers join s_p at the first
+        # capability message (``_add_coupler_term``).  An insensitive pilot
+        # in a zone that HAS resources is still a configuration error.
+        self.no_resources = float(np.sum(q_max)) < 1e-9
+        if self.no_resources:
+            print(f"  [SVR z{self.zone_def.zone_id}] no reactive resource in "
+                  f"service at calibration; the SVR holds"
+                  f"{' until the STS couplers join' if self.cfg.sts_access and self.n_pcc else ''}")
+        elif abs(self.pilot_sensitivity) < 1e-9:
             raise ValueError(
                 f"zone {self.zone_def.zone_id}: pilot bus {p} is insensitive to "
                 "the area's reactive resources -- the pilot bus is a poor choice."
@@ -704,7 +718,7 @@ class SVRZoneController:
         # operating point keeps this state inside the output limits; clipping is
         # retained as a defensive bound for pathological initial conditions.
         p0 = 0.0
-        if self.cfg.k_p_rvr > 0.0:
+        if self.cfg.k_p_rvr > 0.0 and not self._holding():
             sensitivity = float(self.pilot_sensitivity)
             if sensitivity <= 1e-9:
                 raise ValueError(
@@ -724,6 +738,12 @@ class SVRZoneController:
                   f"q_level={q0:+.3f} (Q_area={q_tot:+.1f} Mvar)")
 
     # -- control law -------------------------------------------------------
+
+    def _holding(self) -> bool:
+        """True while the zone has nothing to dispatch (``calibrate``): no
+        resource in service and, with STS access, no coupler term yet."""
+        return (self.no_resources
+                and abs(float(self.pilot_sensitivity)) < 1e-9)
 
     def _deadband(self, err: float) -> float:
         db = self.cfg.deadband_pu
@@ -783,7 +803,8 @@ class SVRZoneController:
 
         rvr_p_term = st.rvr_p_term
         ofo_rvr_n_active, ofo_rvr_box_active = 0, False
-        p_update = rvr_due or (cfg.rvr_p_every_step and cfg.k_p_rvr > 0.0)
+        p_update = (rvr_due or (cfg.rvr_p_every_step and cfg.k_p_rvr > 0.0)) \
+            and not self._holding()
         if p_update:
             # q_level -> V_pilot must have positive local gain for both terms
             # to provide negative feedback. The selected pilots satisfy this.

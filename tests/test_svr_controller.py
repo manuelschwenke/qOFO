@@ -375,3 +375,20 @@ def test_scalar_step_returns_the_unconstrained_step_exactly():
                                  np.array([-1.0]), np.array([1.0]), 1e9)
     assert w == 1.0 and n == 0 and box
 
+
+
+def test_zone_without_any_resource_holds_instead_of_raising():
+    """2026-11-08: zone 2 of ``rural_700_north_res`` with G3 decommitted has no
+    machine and no TS IBG.  The SVR holds (no RVR update, no AVR move) rather
+    than failing calibration or dividing by s_p = 0."""
+    ctrl, net = make_controller()
+    net.gen.loc[:, "in_service"] = False                # both machines off-line
+    ctrl.pilot_sensitivity = 0.0
+    ctrl.no_resources = True
+    ctrl.cfg = SVRZoneConfig(pilot_bus=5, deadband_pu=0.0, k_p_rvr=0.5)
+    net.res_bus.loc[5, "vm_pu"] = 0.95                  # a large pilot error
+    for _ in range(5):
+        result = ctrl.step(net, 20.0, rvr_due=True, dt_rvr_s=180.0)
+        assert np.isfinite(result.u_new).all()
+        np.testing.assert_allclose(result.u_new, net.gen["vm_pu"].to_numpy())
+    assert ctrl.state.integrator == pytest.approx(0.0)

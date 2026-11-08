@@ -1,0 +1,488 @@
+2026-11-08d Q_gen row check -- 2026-11-08 22:44:46
+code: F:\qOFO_qgen; pandapower 3.4.0; DV = 0.005 pu, DQ = 10.0 Mvar
+
+====================================================================================================
+W1: start 2016-01-05T08:00, 12 h  (runner built in 41 s)
+plant net: 118 buses, sn_mva = 100, local_sensitivities_tso = True, tie_boundary_equivalent = 'thevenin'
+config: g_z_q_gen = 100, tso_g_res_sg = 0, zone_tso_g_res_sg = None, g_z_q_pcc = 1e+06, enable_avr_saturation_mode = False, enforce_q_lims_plant = True
+plant FD base: max |dV| vs. the runner's plant solution after P freeze = 5.71e-10 pu
+
+--- W1 zone 1 ----------------------------------------------------------------------
+model net: 17 buses (plant 118), sn_mva = 100; model slack gens = [9], ext_grids = 0; re-solve max |dV| = 1.08e-10 pu; constant-PQ copy max |dV| = 4.44e-16 pu; loads: const_i_p = [100.0], const_z_q = [100.0] %
+layout: {'n_v': 8, 'n_pcc': 0, 'n_i': 8, 'n_gen': 3, 'n_der': 1, 'n_oltc': 2, 'n_shunt': 0, 'row_qgen': 16, 'row_qpcc': 8, 'col_pcc': 1, 'col_gen': 1, 'col_oltc': 4, 'col_shunt': 6}
+gens [0, 7, 9]: in_service(plant) = [True, False, True], oos_mask = [False, True, False], fixed_v_mask = [False, False, True], sat_mode = [0, 0, 0]
+oltc [0, 10]: oos_mask = [False, True]
+g_z on Q_gen rows = [100.0, 100.0, 100.0], alpha = 1.0, g_res_sg = 0.0, g_q_tso = 0.0
+capture pickle vs recomputed H: max |diff| whole H = 0.00e+00, Q_gen block = 0.00e+00
+  gen 0 (G10_bus29): bus 29 (10.5 kV), P = 862 MW, Q = 54.6 Mvar, V = 1.0300 pu, capability [-295, 506] Mvar, table [-500, 500]; machine trafo 0: 900 MVA, vk 16.29 %, x = 0.0181 pu(sys), V/x bound = 5691 Mvar/pu;
+  gen 9 (G1_bus38): bus 40 (10.5 kV), P = 123 MW, Q = 93.5 Mvar, V = 1.0300 pu, capability [-4225, 9556] Mvar, table [-1200, 1200]; machine trafo 12: 10000 MVA, vk 12 %, x = 0.0012 pu(sys), V/x bound = 85833 Mvar/pu;
+
+  rows: H as built | H x sn_mva (V_set/tap columns only) | FD model-PQ | FD model (ZIP) | FD plant | FD_model-PQ/H | FD_plant/H   [Mvar per unit input]
+  column  1: V_set gen 0 [pu]
+     dQ_gen0 (row 16)    :     23.446      2344.6      2344.6      2336.9      2114.0    100.00     90.16
+     dQ_gen9 (row 18)    :     -9.488      -948.8      -948.8     -1031.7     -1538.3    100.00    162.13
+     dQ_slack            :   (no row)                  -948.8     -1031.7     -1538.3
+     V rows: max|H| = 0.5717; max|H - FD|: model-PQ 9.32e-07 (bus 28: H 0.3919, FD 0.3919); model 4.52e-02 (bus 28: H 0.3919, FD 0.3467); plant 1.15e-01 (bus 26: H 0.2699, FD 0.3853)
+     dV_bus(gen terminal)/dV_set: model 1.0000, plant 1.0000
+  column  3: V_set gen 9 [pu]
+     dQ_gen0 (row 16)    :      0.000         0.0      -911.5      -901.8     -1229.4       n/a       n/a
+     dQ_gen9 (row 18)    :      0.000         0.0      1912.0      2233.5      1986.8       n/a       n/a
+     dQ_slack            :   (no row)                  1912.0      2233.5      1986.8
+     V rows: max|H| = 0; max|H - FD|: model-PQ 9.79e-01 (bus 38: H 0, FD 0.9792); model 9.75e-01 (bus 38: H 0, FD 0.9752); plant 9.78e-01 (bus 38: H 0, FD 0.9776)
+     dV_bus(gen terminal)/dV_set: model 1.0000, plant 1.0000
+  column  0: Q IBG sgen 1 (gen. conv.) [Mvar]
+     dQ_gen0 (row 16)    :     -0.364           -        -0.4        -0.4        -0.5      1.00      1.31
+     dQ_gen9 (row 18)    :     -0.107           -        -0.1        -0.2        -0.3      1.00      2.85
+     dQ_slack            :   (no row)                    -0.1        -0.2        -0.3
+     V rows: max|H| = 0.0003092; max|H - FD|: model-PQ 6.35e-09 (bus 28: H 0.0003092, FD 0.0003092); model 3.23e-05 (bus 28: H 0.0003092, FD 0.0002769); plant 1.98e-05 (bus 1: H 6.318e-05, FD 8.295e-05)
+  column  4: tap trafo 0 (hv 1, lv 29, side hv, 1.25 %/step) [step]
+     dQ_gen0 (row 16)    :      0.327        32.7        32.7        32.6        29.9     99.99     91.52
+     dQ_gen9 (row 18)    :     -0.119       -11.9       -11.9       -13.0       -19.4    100.01    163.01
+     dQ_slack            :   (no row)                   -11.9       -13.0       -19.4
+     V rows: max|H| = 0.007185; max|H - FD|: model-PQ 4.10e-07 (bus 24: H 0.006696, FD 0.006696); model 5.68e-04 (bus 28: H 0.004925, FD 0.004357); plant 1.48e-03 (bus 26: H 0.003393, FD 0.004869)
+  compute_dQgen_dVgen_matrix (direct call) = [[23.446, -9.115], [-9.488, 19.12]]  (x sn_mva = [[2344.6, -911.5], [-948.8, 1912.0]])
+  [z0 = 10 Mvar over Q_max of gen 0; g_z = 100; v4 (ch9_selected_uc_2026_11_v4)]
+     H as built: predicted dQ = -9.99, actual (fixed row) = -10.02 Mvar, dV_set = [-1e-05, -0.0, -0.0] pu, actual relief by class {'der': -9.99, 'pcc': 0.0, 'gen': -0.03}
+     H fixed: predicted dQ = -9.99, actual (fixed row) = -9.99 Mvar, dV_set = [-0.0011, -0.0, -0.0] pu, actual relief by class {'der': -7.42, 'pcc': 0.0, 'gen': -2.58}
+  [z0 = 10 Mvar over Q_max of gen 0; g_z = 100; v5 start (stage1_v5_nr_2026_11_pq10)]
+     H as built: predicted dQ = -9.93, actual (fixed row) = -10.01 Mvar, dV_set = [-3e-05, -0.0, -0.0] pu, actual relief by class {'der': -9.93, 'pcc': 0.0, 'gen': -0.07}
+     H fixed: predicted dQ = -9.96, actual (fixed row) = -9.96 Mvar, dV_set = [-0.00182, -0.0, -0.0] pu, actual relief by class {'der': -5.7, 'pcc': 0.0, 'gen': -4.26}
+  [z0 = 10 Mvar over Q_max of gen 9; g_z = 100; v4 (ch9_selected_uc_2026_11_v4)]
+     H as built: predicted dQ = -9.88, actual (fixed row) = -9.94 Mvar, dV_set = [7e-05, -0.0, -0.0] pu, actual relief by class {'der': -9.88, 'pcc': 0.0, 'gen': -0.06}
+     H fixed: predicted dQ = -9.93, actual (fixed row) = -9.93 Mvar, dV_set = [0.00413, -0.0, -0.0] pu, actual relief by class {'der': -6.01, 'pcc': 0.0, 'gen': -3.92}
+  [z0 = 10 Mvar over Q_max of gen 9; g_z = 100; v5 start (stage1_v5_nr_2026_11_pq10)]
+     H as built: predicted dQ = -9.28, actual (fixed row) = -9.41 Mvar, dV_set = [0.00014, -0.0, -0.0] pu, actual relief by class {'der': -9.28, 'pcc': 0.0, 'gen': -0.13}
+     H fixed: predicted dQ = -9.69, actual (fixed row) = -9.69 Mvar, dV_set = [0.00596, -0.0, -0.0] pu, actual relief by class {'der': -4.04, 'pcc': 0.0, 'gen': -5.65}
+
+--- W1 zone 2 ----------------------------------------------------------------------
+model net: 39 buses (plant 118), sn_mva = 100; model slack gens = [1], ext_grids = 0; re-solve max |dV| = 5.27e-11 pu; constant-PQ copy max |dV| = 6.66e-16 pu; loads: const_i_p = [0.0, 100.0], const_z_q = [0.0, 100.0] %
+layout: {'n_v': 12, 'n_pcc': 9, 'n_i': 12, 'n_gen': 1, 'n_der': 0, 'n_oltc': 3, 'n_shunt': 6, 'row_qgen': 33, 'row_qpcc': 12, 'col_pcc': 0, 'col_gen': 9, 'col_oltc': 10, 'col_shunt': 13}
+gens [1]: in_service(plant) = [True], oos_mask = [False], fixed_v_mask = [False], sat_mode = [0]
+oltc [2, 3, 4]: oos_mask = [True, False, False]
+g_z on Q_gen rows = [100.0], alpha = 1.0, g_res_sg = 0.0, g_q_tso = 0.0
+capture pickle vs recomputed H: max |diff| whole H = 0.00e+00, Q_gen block = 0.00e+00
+  gen 1 (G3_bus31): bus 31 (10.5 kV), P = 440 MW, Q = 36.2 Mvar, V = 1.0300 pu, capability [-273, 668] Mvar, table [-400, 400]; machine trafo 2: 900 MVA, vk 18 %, x = 0.0200 pu(sys), V/x bound = 5150 Mvar/pu;
+
+  rows: H as built | H x sn_mva (V_set/tap columns only) | FD model-PQ | FD model (ZIP) | FD plant | FD_model-PQ/H | FD_plant/H   [Mvar per unit input]
+  column  9: V_set gen 1 [pu]
+     dQ_gen1 (row 33)    :     22.030      2203.0      2203.0      2302.3      2035.9    100.00     92.42
+     dQ_slack            :   (no row)                  2203.0      2302.3     -1237.0
+     dQ_PCC7 (row 19)    :      0.018         1.8        -2.4        -2.4        20.4   -138.54   1165.08
+     dQ_PCC1 (row 13)    :      0.010         1.0        -1.2        -1.1       -30.2   -110.40  -2880.32
+     V rows: max|H| = 0.5701; max|H - FD|: model-PQ 4.69e-07 (bus 11: H 0.5264, FD 0.5264); model 2.49e-02 (bus 11: H 0.5264, FD 0.5016); plant 7.99e-02 (bus 2: H 0.1562, FD 0.2361)
+     dV_bus(gen terminal)/dV_set: model 1.0000, plant 1.0000
+  column  7: Q_PCC,set trafo3w 7 (load conv.) [Mvar]
+     dQ_gen1 (row 33)    :      0.572           -         0.6         0.6         0.6      1.00      1.06
+     dQ_slack            :   (no row)                     0.6         0.6         0.2
+     dQ_PCC1 (row 13)    :      0.000           -         0.0         0.0         0.0       n/a       n/a
+     dQ_PCC6 (row 18)    :      0.000           -         0.0         0.0         0.0       n/a       n/a
+     V rows: max|H| = 0.0001107; max|H - FD|: model-PQ 2.79e-10 (bus 9: H -0.0001107, FD -0.0001107); model 4.83e-06 (bus 11: H -0.0001022, FD -9.738e-05); plant 1.55e-05 (bus 2: H -3.032e-05, FD -4.584e-05)
+  column 11: tap trafo 3 (hv 11, lv 10, side hv, 1.25 %/step) [step]
+     dQ_gen1 (row 33)    :      0.001         0.1         0.1         0.3         0.4     98.66    497.94
+     dQ_slack            :   (no row)                     0.1         0.3         0.3
+     dQ_PCC6 (row 18)    :      0.000         0.0         0.0         0.0        -0.5       n/a       n/a
+     dQ_PCC1 (row 13)    :      0.000         0.0         0.0         0.0         0.0       n/a       n/a
+     V rows: max|H| = 0.006355; max|H - FD|: model-PQ 6.07e-07 (bus 11: H 0.006355, FD 0.006356); model 1.31e-04 (bus 11: H 0.006355, FD 0.006224); plant 5.54e-04 (bus 11: H 0.006355, FD 0.005801)
+  compute_dQgen_dVgen_matrix (direct call) = [[22.03]]  (x sn_mva = [[2203.0]])
+  Q_PCC x V_set(bus 31) [Mvar/pu]  as-built x sn_mva / full chain x sn_mva: 0: +0.40 / -0.08, 1: +1.05 / -1.19, 2: +0.04 / -0.01, 3: +0.24 / -0.00, 4: +0.87 / -0.73, 5: +0.43 / -0.17, 6: +1.15 / -0.91, 7: +1.75 / -2.48, 8: +1.01 / -0.72
+  [z0 = 10 Mvar over Q_max of gen 1; g_z = 100; v4 (ch9_selected_uc_2026_11_v4)]
+     H as built: predicted dQ = -9.96, actual (fixed row) = -10.08 Mvar, dV_set = [-6e-05] pu, actual relief by class {'der': 0.0, 'pcc': -9.95, 'gen': -0.13}
+     H fixed: predicted dQ = -9.98, actual (fixed row) = -9.98 Mvar, dV_set = [-0.00254] pu, actual relief by class {'der': 0.0, 'pcc': -4.39, 'gen': -5.59}
+  [z0 = 10 Mvar over Q_max of gen 1; g_z = 100; v5 start (stage1_v5_nr_2026_11_pq10)]
+     H as built: predicted dQ = -9.99, actual (fixed row) = -10.00 Mvar, dV_set = [-0.0] pu, actual relief by class {'der': 0.0, 'pcc': -9.99, 'gen': -0.01}
+     H fixed: predicted dQ = -9.99, actual (fixed row) = -9.99 Mvar, dV_set = [-0.00037] pu, actual relief by class {'der': 0.0, 'pcc': -9.18, 'gen': -0.81}
+
+--- W1 zone 3 ----------------------------------------------------------------------
+model net: 24 buses (plant 118), sn_mva = 100; model slack gens = [2], ext_grids = 0; re-solve max |dV| = 7.14e-11 pu; constant-PQ copy max |dV| = 4.44e-16 pu; loads: const_i_p = [0.0, 100.0], const_z_q = [0.0, 100.0] %
+layout: {'n_v': 10, 'n_pcc': 3, 'n_i': 10, 'n_gen': 2, 'n_der': 1, 'n_oltc': 2, 'n_shunt': 2, 'row_qgen': 23, 'row_qpcc': 10, 'col_pcc': 1, 'col_gen': 4, 'col_oltc': 6, 'col_shunt': 8}
+gens [2, 5]: in_service(plant) = [True, True], oos_mask = [False, False], fixed_v_mask = [False, False], sat_mode = [0, 0]
+oltc [6, 11]: oos_mask = [True, False]
+g_z on Q_gen rows = [100.0, 100.0], alpha = 1.0, g_res_sg = 0.0, g_q_tso = 0.0
+capture pickle vs recomputed H: max |diff| whole H = 0.00e+00, Q_gen block = 0.00e+00
+  gen 2 (G4_bus32): bus 32 (10.5 kV), P = 690 MW, Q = 91.5 Mvar, V = 1.0300 pu, capability [-236, 405] Mvar, table [-400, 400]; machine trafo 6: 900 MVA, vk 12.7955 %, x = 0.0142 pu(sys), V/x bound = 7245 Mvar/pu;
+  gen 5 (G7_bus35): bus 39 (10.5 kV), P = 604 MW, Q = 120.9 Mvar, V = 1.0300 pu, capability [-207, 354] Mvar, table [-350, 350]; machine trafo 11: 700 MVA, vk 12 %, x = 0.0171 pu(sys), V/x bound = 6008 Mvar/pu;
+
+  rows: H as built | H x sn_mva (V_set/tap columns only) | FD model-PQ | FD model (ZIP) | FD plant | FD_model-PQ/H | FD_plant/H   [Mvar per unit input]
+  column  4: V_set gen 2 [pu]
+     dQ_gen2 (row 23)    :     20.223      2022.3      2022.3      2061.7      1873.6    100.00     92.64
+     dQ_gen5 (row 24)    :     -5.743      -574.3      -574.3      -542.8      -678.1    100.00    118.08
+     dQ_slack            :   (no row)                  2022.3      2061.7      -796.4
+     dQ_PCC10 (row 11)   :      0.008         0.8        -0.9        -0.9        -8.6   -112.83  -1042.51
+     dQ_PCC9 (row 10)    :      0.004         0.4        -0.1        -0.1         2.7    -19.47    744.33
+     V rows: max|H| = 0.7189; max|H - FD|: model-PQ 1.79e-07 (bus 20: H 0.3007, FD 0.3007); model 1.74e-02 (bus 14: H 0.2736, FD 0.2562); plant 8.16e-02 (bus 17: H 0.1946, FD 0.2762)
+     dV_bus(gen terminal)/dV_set: model 1.0000, plant 1.0000
+  column  5: V_set gen 5 [pu]
+     dQ_gen2 (row 23)    :     -5.801      -580.1      -580.1      -550.6      -672.6    100.00    115.96
+     dQ_gen5 (row 24)    :     11.922      1192.2      1192.2      1222.3      1162.9    100.00     97.55
+     dQ_slack            :   (no row)                  -580.1      -550.6      -416.7
+     dQ_PCC10 (row 11)   :      0.008         0.8        -0.9        -0.9       -43.9   -112.83  -5416.75
+     dQ_PCC9 (row 10)    :      0.003         0.3        -0.1        -0.0       -32.8    -19.47 -12381.65
+     V rows: max|H| = 0.8178; max|H - FD|: model-PQ 1.59e-06 (bus 35: H 0.8178, FD 0.8178); model 1.35e-02 (bus 20: H 0.2946, FD 0.2811); plant 4.47e-02 (bus 17: H 0.1118, FD 0.1565)
+     dV_bus(gen terminal)/dV_set: model 1.0000, plant 1.0000
+  column  1: Q_PCC,set trafo3w 9 (load conv.) [Mvar]
+     dQ_gen2 (row 23)    :      0.316           -         0.3         0.3         0.4      1.00      1.17
+     dQ_gen5 (row 24)    :      0.227           -         0.2         0.2         0.3      1.00      1.15
+     dQ_slack            :   (no row)                     0.3         0.3         0.2
+     dQ_PCC10 (row 11)   :      0.000           -         0.0         0.0         0.0       n/a       n/a
+     dQ_PCC11 (row 12)   :      0.000           -         0.0         0.0         0.0       n/a       n/a
+     V rows: max|H| = 0.0001516; max|H - FD|: model-PQ 7.07e-10 (bus 23: H -0.0001516, FD -0.0001516); model 3.49e-06 (bus 14: H -8.563e-05, FD -8.214e-05); plant 2.51e-05 (bus 17: H -6.09e-05, FD -8.597e-05)
+  column  0: Q IBG sgen 0 (gen. conv.) [Mvar]
+     dQ_gen2 (row 23)    :     -0.717           -        -0.7        -0.7        -0.7      1.00      1.04
+     dQ_gen5 (row 24)    :     -0.079           -        -0.1        -0.1        -0.1      1.00      1.19
+     dQ_slack            :   (no row)                    -0.7        -0.7        -0.1
+     dQ_PCC10 (row 11)   :      0.000           -        -0.0        -0.0        -0.0     -1.13    -10.49
+     dQ_PCC9 (row 10)    :      0.000           -        -0.0        -0.0         0.0     -0.19      7.49
+     V rows: max|H| = 9.885e-05; max|H - FD|: model-PQ 1.85e-10 (bus 18: H 9.885e-05, FD 9.885e-05); model 2.40e-06 (bus 14: H 3.762e-05, FD 3.522e-05); plant 1.15e-05 (bus 17: H 2.676e-05, FD 3.821e-05)
+  column  7: tap trafo 11 (hv 35, lv 39, side hv, 1.25 %/step) [step]
+     dQ_gen2 (row 23)    :     -0.071        -7.1        -7.1        -6.7        -8.2    100.00    115.55
+     dQ_gen5 (row 24)    :      0.160        16.0        16.0        16.4        15.6     99.99     97.48
+     dQ_slack            :   (no row)                    -7.1        -6.7        -5.1
+     dQ_PCC10 (row 11)   :      0.000         0.0        -0.0        -0.0        -0.5       n/a       n/a
+     dQ_PCC9 (row 10)    :      0.000         0.0        -0.0        -0.0        -0.4       n/a       n/a
+     V rows: max|H| = 0.009983; max|H - FD|: model-PQ 5.12e-08 (bus 22: H 0.005712, FD 0.005713); model 1.65e-04 (bus 20: H 0.003597, FD 0.003432); plant 5.39e-04 (bus 17: H 0.001365, FD 0.001904)
+  compute_dQgen_dVgen_matrix (direct call) = [[20.223, -5.801], [-5.743, 11.922]]  (x sn_mva = [[2022.3, -580.1], [-574.3, 1192.2]])
+  Q_PCC x V_set(bus 32) [Mvar/pu]  as-built x sn_mva / full chain x sn_mva: 9: +0.37 / -0.10, 10: +0.83 / -0.96, 11: -0.10 / -0.03
+  [z0 = 10 Mvar over Q_max of gen 2; g_z = 100; v4 (ch9_selected_uc_2026_11_v4)]
+     H as built: predicted dQ = -10.00, actual (fixed row) = -10.00 Mvar, dV_set = [-0.0, 0.0] pu, actual relief by class {'der': -9.92, 'pcc': -0.08, 'gen': -0.01}
+     H fixed: predicted dQ = -10.00, actual (fixed row) = -10.00 Mvar, dV_set = [-0.0003, 9e-05] pu, actual relief by class {'der': -9.26, 'pcc': -0.07, 'gen': -0.67}
+  [z0 = 10 Mvar over Q_max of gen 2; g_z = 100; v5 start (stage1_v5_nr_2026_11_pq10)]
+     H as built: predicted dQ = -9.99, actual (fixed row) = -10.00 Mvar, dV_set = [-1e-05, 0.0] pu, actual relief by class {'der': -8.02, 'pcc': -1.97, 'gen': -0.01}
+     H fixed: predicted dQ = -9.99, actual (fixed row) = -9.99 Mvar, dV_set = [-0.0005, 0.00014] pu, actual relief by class {'der': -7.13, 'pcc': -1.75, 'gen': -1.1}
+  [z0 = 10 Mvar over Q_max of gen 5; g_z = 100; v4 (ch9_selected_uc_2026_11_v4)]
+     H as built: predicted dQ = -9.88, actual (fixed row) = -10.00 Mvar, dV_set = [4e-05, -8e-05] pu, actual relief by class {'der': -5.14, 'pcc': -4.74, 'gen': -0.12}
+     H fixed: predicted dQ = -9.95, actual (fixed row) = -9.95 Mvar, dV_set = [0.00179, -0.00372] pu, actual relief by class {'der': -2.33, 'pcc': -2.15, 'gen': -5.47}
+  [z0 = 10 Mvar over Q_max of gen 5; g_z = 100; v5 start (stage1_v5_nr_2026_11_pq10)]
+     H as built: predicted dQ = -9.95, actual (fixed row) = -9.97 Mvar, dV_set = [1e-05, -1e-05] pu, actual relief by class {'der': -0.33, 'pcc': -9.62, 'gen': -0.02}
+     H fixed: predicted dQ = -9.96, actual (fixed row) = -9.96 Mvar, dV_set = [0.00047, -0.00098] pu, actual relief by class {'der': -0.29, 'pcc': -8.23, 'gen': -1.44}
+
+--- W1 DSO interface-Q x OLTC tap (Layer 2, same base question) ------------------------------
+  rows: H as built | H x sn_mva | FD DSO model | FD plant | FD_DSO-model/H | FD_plant/H  [Mvar/step]
+  DSO_1: OLTC tap3w 0 (1.25 %/step, side hv); interface trafo3w [0, 1, 2]; sn_mva(model) = 100
+     dQ_iface0  :     -0.066        -6.6        -6.5        -6.2     98.52     94.69
+     dQ_iface1  :      0.040         4.0         4.0         3.9    100.39     97.09
+     dQ_iface2  :      0.027         2.7         2.7         2.5    100.31     95.84
+  DSO_2: OLTC tap3w 3 (1.25 %/step, side hv); interface trafo3w [3, 4, 5]; sn_mva(model) = 100
+     dQ_iface3  :     -0.044        -4.4        -4.3        -3.8     97.95     87.32
+     dQ_iface4  :      0.028         2.8         2.8         2.5    100.31     89.72
+     dQ_iface5  :      0.017         1.7         1.7         1.5    100.08     88.50
+  DSO_3: OLTC tap3w 6 (1.25 %/step, side hv); interface trafo3w [6, 7, 8]; sn_mva(model) = 100
+     dQ_iface6  :     -0.090        -9.0        -8.9        -8.7     98.34     95.92
+     dQ_iface7  :      0.053         5.3         5.3         5.2    100.46     99.32
+     dQ_iface8  :      0.038         3.8         3.8         3.7    100.21     96.13
+  DSO_4: OLTC tap3w 9 (1.25 %/step, side hv); interface trafo3w [9, 10, 11]; sn_mva(model) = 100
+     dQ_iface9  :     -0.028        -2.8        -2.7        -2.5     96.19     91.61
+     dQ_iface10 :      0.018         1.8         1.8         1.7    100.87     96.20
+     dQ_iface11 :      0.010         1.0         1.0         1.0    100.68     99.51
+
+W1: power flows so far: model 66, plant 33; elapsed 46 s
+
+====================================================================================================
+MC20261108: start 2016-01-12T09:00, 3 h  (runner built in 28 s)
+plant net: 118 buses, sn_mva = 100, local_sensitivities_tso = True, tie_boundary_equivalent = 'thevenin'
+config: g_z_q_gen = 100, tso_g_res_sg = 0, zone_tso_g_res_sg = None, g_z_q_pcc = 1e+06, enable_avr_saturation_mode = False, enforce_q_lims_plant = True
+plant FD base: max |dV| vs. the runner's plant solution after P freeze = 7.42e-11 pu
+
+--- MC20261108 zone 1 ----------------------------------------------------------------------
+model net: 17 buses (plant 118), sn_mva = 100; model slack gens = [9], ext_grids = 0; re-solve max |dV| = 2.67e-10 pu; constant-PQ copy max |dV| = 6.66e-16 pu; loads: const_i_p = [100.0], const_z_q = [100.0] %
+layout: {'n_v': 8, 'n_pcc': 0, 'n_i': 8, 'n_gen': 3, 'n_der': 1, 'n_oltc': 2, 'n_shunt': 0, 'row_qgen': 16, 'row_qpcc': 8, 'col_pcc': 1, 'col_gen': 1, 'col_oltc': 4, 'col_shunt': 6}
+gens [0, 7, 9]: in_service(plant) = [True, False, True], oos_mask = [False, True, False], fixed_v_mask = [False, False, True], sat_mode = [0, 0, 0]
+oltc [0, 10]: oos_mask = [False, True]
+g_z on Q_gen rows = [100.0, 100.0, 100.0], alpha = 1.0, g_res_sg = 0.0, g_q_tso = 0.0
+capture pickle vs recomputed H: max |diff| whole H = 0.00e+00, Q_gen block = 0.00e+00
+  gen 0 (G10_bus29): bus 29 (10.5 kV), P = 626 MW, Q = 59.2 Mvar, V = 1.0300 pu, capability [-331, 673] Mvar, table [-500, 500]; machine trafo 0: 900 MVA, vk 16.29 %, x = 0.0181 pu(sys), V/x bound = 5691 Mvar/pu;
+  gen 9 (G1_bus38): bus 40 (10.5 kV), P = -150 MW, Q = 208.7 Mvar, V = 1.0300 pu, capability [-4266, 9555] Mvar, table [-1200, 1200]; machine trafo 12: 10000 MVA, vk 12 %, x = 0.0012 pu(sys), V/x bound = 85833 Mvar/pu;
+
+  rows: H as built | H x sn_mva (V_set/tap columns only) | FD model-PQ | FD model (ZIP) | FD plant | FD_model-PQ/H | FD_plant/H   [Mvar per unit input]
+  column  1: V_set gen 0 [pu]
+     dQ_gen0 (row 16)    :     24.226      2422.6      2422.6      2390.6      2115.3    100.00     87.32
+     dQ_gen9 (row 18)    :     -9.892      -989.2      -989.2     -1102.5     -1770.2    100.00    178.96
+     dQ_slack            :   (no row)                  -989.2     -1102.5     -1770.2
+     V rows: max|H| = 0.574; max|H - FD|: model-PQ 8.99e-07 (bus 28: H 0.3955, FD 0.3955); model 4.09e-02 (bus 28: H 0.3955, FD 0.3545); plant 1.29e-01 (bus 26: H 0.2732, FD 0.4021)
+     dV_bus(gen terminal)/dV_set: model 1.0000, plant 1.0000
+  column  3: V_set gen 9 [pu]
+     dQ_gen0 (row 16)    :      0.000         0.0      -941.2      -938.2     -1320.5       n/a       n/a
+     dQ_gen9 (row 18)    :      0.000         0.0      1816.8      2128.4      1760.3       n/a       n/a
+     dQ_slack            :   (no row)                  1816.8      2128.4      1760.3
+     V rows: max|H| = 0; max|H - FD|: model-PQ 9.82e-01 (bus 38: H 0, FD 0.9817); model 9.78e-01 (bus 38: H 0, FD 0.9778); plant 9.81e-01 (bus 38: H 0, FD 0.9813)
+     dV_bus(gen terminal)/dV_set: model 1.0000, plant 1.0000
+  column  0: Q IBG sgen 1 (gen. conv.) [Mvar]
+     dQ_gen0 (row 16)    :     -0.381           -        -0.4        -0.4        -0.5      1.00      1.37
+     dQ_gen9 (row 18)    :     -0.115           -        -0.1        -0.2        -0.4      1.00      3.40
+     dQ_slack            :   (no row)                    -0.1        -0.2        -0.4
+     V rows: max|H| = 0.0003174; max|H - FD|: model-PQ 7.32e-09 (bus 28: H 0.0003174, FD 0.0003174); model 2.97e-05 (bus 28: H 0.0003174, FD 0.0002877); plant 2.49e-05 (bus 1: H 6.649e-05, FD 9.139e-05)
+  column  4: tap trafo 0 (hv 1, lv 29, side hv, 1.25 %/step) [step]
+     dQ_gen0 (row 16)    :      0.320        32.0        32.0        31.6        28.4     99.99     88.71
+     dQ_gen9 (row 18)    :     -0.124       -12.4       -12.4       -13.8       -22.3    100.01    180.67
+     dQ_slack            :   (no row)                   -12.4       -13.8       -22.3
+     V rows: max|H| = 0.007174; max|H - FD|: model-PQ 4.08e-07 (bus 1: H 0.007174, FD 0.007174); model 5.11e-04 (bus 28: H 0.004942, FD 0.004431); plant 1.66e-03 (bus 26: H 0.003414, FD 0.005073)
+  compute_dQgen_dVgen_matrix (direct call) = [[24.226, -9.412], [-9.892, 18.168]]  (x sn_mva = [[2422.6, -941.2], [-989.2, 1816.8]])
+  [z0 = 10 Mvar over Q_max of gen 0; g_z = 100; v4 (ch9_selected_uc_2026_11_v4)]
+     H as built: predicted dQ = -9.99, actual (fixed row) = -10.02 Mvar, dV_set = [-1e-05, -0.0, -0.0] pu, actual relief by class {'der': -9.99, 'pcc': 0.0, 'gen': -0.03}
+     H fixed: predicted dQ = -9.99, actual (fixed row) = -9.99 Mvar, dV_set = [-0.00104, -0.0, -0.0] pu, actual relief by class {'der': -7.47, 'pcc': 0.0, 'gen': -2.53}
+  [z0 = 10 Mvar over Q_max of gen 0; g_z = 100; v5 start (stage1_v5_nr_2026_11_pq10)]
+     H as built: predicted dQ = -9.94, actual (fixed row) = -10.01 Mvar, dV_set = [-3e-05, -0.0, -0.0] pu, actual relief by class {'der': -9.94, 'pcc': 0.0, 'gen': -0.07}
+     H fixed: predicted dQ = -9.96, actual (fixed row) = -9.96 Mvar, dV_set = [-0.00173, -0.0, -0.0] pu, actual relief by class {'der': -5.77, 'pcc': 0.0, 'gen': -4.19}
+  [z0 = 10 Mvar over Q_max of gen 9; g_z = 100; v4 (ch9_selected_uc_2026_11_v4)]
+     H as built: predicted dQ = -9.89, actual (fixed row) = -9.95 Mvar, dV_set = [6e-05, -0.0, -0.0] pu, actual relief by class {'der': -9.89, 'pcc': 0.0, 'gen': -0.06}
+     H fixed: predicted dQ = -9.93, actual (fixed row) = -9.93 Mvar, dV_set = [0.00385, -0.0, -0.0] pu, actual relief by class {'der': -6.12, 'pcc': 0.0, 'gen': -3.81}
+  [z0 = 10 Mvar over Q_max of gen 9; g_z = 100; v5 start (stage1_v5_nr_2026_11_pq10)]
+     H as built: predicted dQ = -9.36, actual (fixed row) = -9.48 Mvar, dV_set = [0.00013, -0.0, -0.0] pu, actual relief by class {'der': -9.36, 'pcc': 0.0, 'gen': -0.13}
+     H fixed: predicted dQ = -9.72, actual (fixed row) = -9.72 Mvar, dV_set = [0.00562, -0.0, -0.0] pu, actual relief by class {'der': -4.16, 'pcc': 0.0, 'gen': -5.56}
+
+--- MC20261108 zone 2 ----------------------------------------------------------------------
+model net: 39 buses (plant 118), sn_mva = 100; model slack gens = [1], ext_grids = 0; re-solve max |dV| = 5.41e-11 pu; constant-PQ copy max |dV| = 4.44e-16 pu; loads: const_i_p = [0.0, 100.0], const_z_q = [0.0, 100.0] %
+layout: {'n_v': 12, 'n_pcc': 9, 'n_i': 12, 'n_gen': 1, 'n_der': 0, 'n_oltc': 3, 'n_shunt': 6, 'row_qgen': 33, 'row_qpcc': 12, 'col_pcc': 0, 'col_gen': 9, 'col_oltc': 10, 'col_shunt': 13}
+gens [1]: in_service(plant) = [True], oos_mask = [False], fixed_v_mask = [False], sat_mode = [0]
+oltc [2, 3, 4]: oos_mask = [True, False, False]
+g_z on Q_gen rows = [100.0], alpha = 1.0, g_res_sg = 0.0, g_q_tso = 0.0
+capture pickle vs recomputed H: max |diff| whole H = 0.00e+00, Q_gen block = 0.00e+00
+  gen 1 (G3_bus31): bus 31 (10.5 kV), P = 410 MW, Q = 59.1 Mvar, V = 1.0300 pu, capability [-278, 687] Mvar, table [-400, 400]; machine trafo 2: 900 MVA, vk 18 %, x = 0.0200 pu(sys), V/x bound = 5150 Mvar/pu;
+
+  rows: H as built | H x sn_mva (V_set/tap columns only) | FD model-PQ | FD model (ZIP) | FD plant | FD_model-PQ/H | FD_plant/H   [Mvar per unit input]
+  column  9: V_set gen 1 [pu]
+     dQ_gen1 (row 33)    :     22.016      2201.6      2201.6      2305.6      1958.5    100.00     88.96
+     dQ_slack            :   (no row)                  2201.6      2305.6     -1493.1
+     dQ_PCC7 (row 19)    :      0.024         2.4        -5.8        -5.7         8.4   -247.94    359.20
+     dQ_PCC6 (row 18)    :      0.018         1.8        -2.8        -2.7       -34.7   -157.63  -1952.69
+     V rows: max|H| = 0.5757; max|H - FD|: model-PQ 6.71e-07 (bus 6: H 0.4229, FD 0.4229); model 2.66e-02 (bus 11: H 0.5398, FD 0.5131); plant 9.87e-02 (bus 2: H 0.1587, FD 0.2575)
+     dV_bus(gen terminal)/dV_set: model 1.0000, plant 1.0000
+  column  7: Q_PCC,set trafo3w 7 (load conv.) [Mvar]
+     dQ_gen1 (row 33)    :      0.581           -         0.6         0.6         0.6      1.00      1.08
+     dQ_slack            :   (no row)                     0.6         0.6         0.3
+     dQ_PCC6 (row 18)    :      0.000           -         0.0         0.0         0.0       n/a       n/a
+     dQ_PCC8 (row 20)    :      0.000           -         0.0         0.0         0.0       n/a       n/a
+     V rows: max|H| = 0.0001124; max|H - FD|: model-PQ 3.06e-10 (bus 9: H -0.0001124, FD -0.0001124); model 5.20e-06 (bus 11: H -0.0001053, FD -0.0001001); plant 1.93e-05 (bus 2: H -3.098e-05, FD -5.025e-05)
+  column 11: tap trafo 3 (hv 11, lv 10, side hv, 1.25 %/step) [step]
+     dQ_gen1 (row 33)    :      0.001         0.1         0.1         0.3         0.4     98.81    456.77
+     dQ_slack            :   (no row)                     0.1         0.3         0.3
+     dQ_PCC6 (row 18)    :      0.000         0.0         0.0         0.0        -0.5       n/a       n/a
+     dQ_PCC8 (row 20)    :      0.000         0.0        -0.0        -0.0         0.5       n/a       n/a
+     V rows: max|H| = 0.006318; max|H - FD|: model-PQ 5.91e-07 (bus 11: H 0.006318, FD 0.006319); model 1.34e-04 (bus 11: H 0.006318, FD 0.006184); plant 5.64e-04 (bus 11: H 0.006318, FD 0.005754)
+  compute_dQgen_dVgen_matrix (direct call) = [[22.016]]  (x sn_mva = [[2201.6]])
+  Q_PCC x V_set(bus 31) [Mvar/pu]  as-built x sn_mva / full chain x sn_mva: 0: +0.70 / -0.35, 1: +1.41 / -2.37, 2: +0.25 / -0.22, 3: +0.58 / -0.15, 4: +1.14 / -1.52, 5: +0.75 / -0.66, 6: +1.78 / -2.85, 7: +2.35 / -5.88, 8: +1.71 / -2.73
+  [z0 = 10 Mvar over Q_max of gen 1; g_z = 100; v4 (ch9_selected_uc_2026_11_v4)]
+     H as built: predicted dQ = -9.96, actual (fixed row) = -10.08 Mvar, dV_set = [-6e-05] pu, actual relief by class {'der': 0.0, 'pcc': -9.96, 'gen': -0.12}
+     H fixed: predicted dQ = -9.98, actual (fixed row) = -9.98 Mvar, dV_set = [-0.00249] pu, actual relief by class {'der': 0.0, 'pcc': -4.49, 'gen': -5.49}
+  [z0 = 10 Mvar over Q_max of gen 1; g_z = 100; v5 start (stage1_v5_nr_2026_11_pq10)]
+     H as built: predicted dQ = -9.99, actual (fixed row) = -10.00 Mvar, dV_set = [-0.0] pu, actual relief by class {'der': 0.0, 'pcc': -9.99, 'gen': -0.01}
+     H fixed: predicted dQ = -9.99, actual (fixed row) = -9.99 Mvar, dV_set = [-0.00035] pu, actual relief by class {'der': 0.0, 'pcc': -9.22, 'gen': -0.78}
+
+--- MC20261108 zone 3 ----------------------------------------------------------------------
+model net: 24 buses (plant 118), sn_mva = 100; model slack gens = [2], ext_grids = 0; re-solve max |dV| = 1.17e-10 pu; constant-PQ copy max |dV| = 2.22e-16 pu; loads: const_i_p = [0.0, 100.0], const_z_q = [0.0, 100.0] %
+layout: {'n_v': 10, 'n_pcc': 3, 'n_i': 10, 'n_gen': 2, 'n_der': 1, 'n_oltc': 2, 'n_shunt': 2, 'row_qgen': 23, 'row_qpcc': 10, 'col_pcc': 1, 'col_gen': 4, 'col_oltc': 6, 'col_shunt': 8}
+gens [2, 5]: in_service(plant) = [True, True], oos_mask = [False, False], fixed_v_mask = [False, False], sat_mode = [0, 0]
+oltc [6, 11]: oos_mask = [True, False]
+g_z on Q_gen rows = [100.0, 100.0], alpha = 1.0, g_res_sg = 0.0, g_q_tso = 0.0
+capture pickle vs recomputed H: max |diff| whole H = 0.00e+00, Q_gen block = 0.00e+00
+  gen 2 (G4_bus32): bus 32 (10.5 kV), P = 690 MW, Q = 99.6 Mvar, V = 1.0300 pu, capability [-236, 405] Mvar, table [-400, 400]; machine trafo 6: 900 MVA, vk 12.7955 %, x = 0.0142 pu(sys), V/x bound = 7245 Mvar/pu;
+  gen 5 (G7_bus35): bus 39 (10.5 kV), P = 558 MW, Q = 111.5 Mvar, V = 1.0300 pu, capability [-213, 423] Mvar, table [-350, 350]; machine trafo 11: 700 MVA, vk 12 %, x = 0.0171 pu(sys), V/x bound = 6008 Mvar/pu;
+
+  rows: H as built | H x sn_mva (V_set/tap columns only) | FD model-PQ | FD model (ZIP) | FD plant | FD_model-PQ/H | FD_plant/H   [Mvar per unit input]
+  column  4: V_set gen 2 [pu]
+     dQ_gen2 (row 23)    :     20.238      2023.8      2023.8      2066.5      1831.1    100.00     90.48
+     dQ_gen5 (row 24)    :     -5.715      -571.5      -571.5      -537.7      -703.6    100.00    123.10
+     dQ_slack            :   (no row)                  2023.8      2066.5     -1066.4
+     dQ_PCC10 (row 11)   :      0.010         1.0        -1.6        -1.5       -13.2   -162.19  -1306.65
+     dQ_PCC9 (row 10)    :      0.006         0.6        -0.3        -0.3         1.0    -52.89    177.20
+     V rows: max|H| = 0.719; max|H - FD|: model-PQ 2.02e-07 (bus 20: H 0.3014, FD 0.3014); model 1.92e-02 (bus 14: H 0.275, FD 0.2557); plant 1.03e-01 (bus 17: H 0.1958, FD 0.2984)
+     dV_bus(gen terminal)/dV_set: model 1.0000, plant 1.0000
+  column  5: V_set gen 5 [pu]
+     dQ_gen2 (row 23)    :     -5.759      -575.9      -575.9      -544.8      -690.6    100.00    119.92
+     dQ_gen5 (row 24)    :     12.208      1220.8      1220.8      1252.1      1177.9    100.00     96.49
+     dQ_slack            :   (no row)                  -575.9      -544.8      -539.5
+     dQ_PCC10 (row 11)   :      0.010         1.0        -1.6        -1.5       -48.6   -162.19  -4955.20
+     dQ_PCC9 (row 10)    :      0.004         0.4        -0.2        -0.2       -34.2    -52.89  -8426.61
+     V rows: max|H| = 0.8132; max|H - FD|: model-PQ 1.31e-06 (bus 35: H 0.8132, FD 0.8132); model 1.42e-02 (bus 20: H 0.2921, FD 0.2779); plant 5.43e-02 (bus 17: H 0.1113, FD 0.1656)
+     dV_bus(gen terminal)/dV_set: model 1.0000, plant 1.0000
+  column  1: Q_PCC,set trafo3w 9 (load conv.) [Mvar]
+     dQ_gen2 (row 23)    :      0.317           -         0.3         0.3         0.4      1.00      1.20
+     dQ_gen5 (row 24)    :      0.226           -         0.2         0.2         0.3      1.00      1.18
+     dQ_slack            :   (no row)                     0.3         0.3         0.3
+     dQ_PCC10 (row 11)   :      0.000           -         0.0         0.0         0.0       n/a       n/a
+     dQ_PCC11 (row 12)   :      0.000           -         0.0         0.0         0.0       n/a       n/a
+     V rows: max|H| = 0.0001521; max|H - FD|: model-PQ 7.18e-10 (bus 23: H -0.0001521, FD -0.0001521); model 4.24e-06 (bus 14: H -8.61e-05, FD -8.186e-05); plant 2.97e-05 (bus 17: H -6.132e-05, FD -9.106e-05)
+  column  0: Q IBG sgen 0 (gen. conv.) [Mvar]
+     dQ_gen2 (row 23)    :     -0.717           -        -0.7        -0.7        -0.8      1.00      1.05
+     dQ_gen5 (row 24)    :     -0.079           -        -0.1        -0.1        -0.1      1.00      1.24
+     dQ_slack            :   (no row)                    -0.7        -0.7        -0.1
+     dQ_PCC10 (row 11)   :      0.000           -        -0.0        -0.0        -0.0     -1.62    -13.15
+     dQ_PCC9 (row 10)    :      0.000           -        -0.0        -0.0         0.0     -0.53      1.78
+     V rows: max|H| = 9.891e-05; max|H - FD|: model-PQ 1.86e-10 (bus 18: H 9.891e-05, FD 9.891e-05); model 2.65e-06 (bus 14: H 3.782e-05, FD 3.518e-05); plant 1.44e-05 (bus 17: H 2.694e-05, FD 4.131e-05)
+  column  7: tap trafo 11 (hv 35, lv 39, side hv, 1.25 %/step) [step]
+     dQ_gen2 (row 23)    :     -0.071        -7.1        -7.1        -6.7        -8.4    100.00    119.47
+     dQ_gen5 (row 24)    :      0.162        16.2        16.2        16.6        15.6     99.99     96.44
+     dQ_slack            :   (no row)                    -7.1        -6.7        -6.6
+     dQ_PCC10 (row 11)   :      0.000         0.0        -0.0        -0.0        -0.6       n/a       n/a
+     dQ_PCC9 (row 10)    :      0.000         0.0        -0.0        -0.0        -0.4       n/a       n/a
+     V rows: max|H| = 0.009964; max|H - FD|: model-PQ 4.13e-08 (bus 22: H 0.00568, FD 0.00568); model 1.74e-04 (bus 20: H 0.003579, FD 0.003405); plant 6.58e-04 (bus 17: H 0.001364, FD 0.002022)
+  compute_dQgen_dVgen_matrix (direct call) = [[20.238, -5.759], [-5.715, 12.208]]  (x sn_mva = [[2023.8, -575.9], [-571.5, 1220.8]])
+  Q_PCC x V_set(bus 32) [Mvar/pu]  as-built x sn_mva / full chain x sn_mva: 9: +0.57 / -0.33, 10: +1.01 / -1.67, 11: +0.13 / -0.06
+  [z0 = 10 Mvar over Q_max of gen 2; g_z = 100; v4 (ch9_selected_uc_2026_11_v4)]
+     H as built: predicted dQ = -10.00, actual (fixed row) = -10.00 Mvar, dV_set = [-0.0, 0.0] pu, actual relief by class {'der': -9.92, 'pcc': -0.08, 'gen': -0.01}
+     H fixed: predicted dQ = -10.00, actual (fixed row) = -10.00 Mvar, dV_set = [-0.0003, 9e-05] pu, actual relief by class {'der': -9.26, 'pcc': -0.07, 'gen': -0.67}
+  [z0 = 10 Mvar over Q_max of gen 2; g_z = 100; v5 start (stage1_v5_nr_2026_11_pq10)]
+     H as built: predicted dQ = -9.99, actual (fixed row) = -10.00 Mvar, dV_set = [-1e-05, 0.0] pu, actual relief by class {'der': -8.01, 'pcc': -1.97, 'gen': -0.01}
+     H fixed: predicted dQ = -9.99, actual (fixed row) = -9.99 Mvar, dV_set = [-0.0005, 0.00014] pu, actual relief by class {'der': -7.13, 'pcc': -1.76, 'gen': -1.1}
+  [z0 = 10 Mvar over Q_max of gen 5; g_z = 100; v4 (ch9_selected_uc_2026_11_v4)]
+     H as built: predicted dQ = -9.88, actual (fixed row) = -10.01 Mvar, dV_set = [4e-05, -8e-05] pu, actual relief by class {'der': -5.15, 'pcc': -4.73, 'gen': -0.13}
+     H fixed: predicted dQ = -9.95, actual (fixed row) = -9.95 Mvar, dV_set = [0.00176, -0.00375] pu, actual relief by class {'der': -2.28, 'pcc': -2.09, 'gen': -5.59}
+  [z0 = 10 Mvar over Q_max of gen 5; g_z = 100; v5 start (stage1_v5_nr_2026_11_pq10)]
+     H as built: predicted dQ = -9.95, actual (fixed row) = -9.97 Mvar, dV_set = [1e-05, -1e-05] pu, actual relief by class {'der': -0.34, 'pcc': -9.62, 'gen': -0.02}
+     H fixed: predicted dQ = -9.96, actual (fixed row) = -9.96 Mvar, dV_set = [0.00047, -0.00101] pu, actual relief by class {'der': -0.29, 'pcc': -8.17, 'gen': -1.5}
+
+--- MC20261108 DSO interface-Q x OLTC tap (Layer 2, same base question) ------------------------------
+  rows: H as built | H x sn_mva | FD DSO model | FD plant | FD_DSO-model/H | FD_plant/H  [Mvar/step]
+  DSO_1: OLTC tap3w 0 (1.25 %/step, side hv); interface trafo3w [0, 1, 2]; sn_mva(model) = 100
+     dQ_iface0  :     -0.067        -6.7        -6.6        -6.4     98.19     94.49
+     dQ_iface1  :      0.041         4.1         4.1         3.9    100.65     97.29
+     dQ_iface2  :      0.027         2.7         2.7         2.6    100.72     96.57
+  DSO_2: OLTC tap3w 3 (1.25 %/step, side hv); interface trafo3w [3, 4, 5]; sn_mva(model) = 100
+     dQ_iface3  :     -0.045        -4.5        -4.3        -3.9     97.49     86.83
+     dQ_iface4  :      0.028         2.8         2.8         2.5    100.60     89.94
+     dQ_iface5  :      0.017         1.7         1.7         1.5    100.54     88.73
+  DSO_3: OLTC tap3w 6 (1.25 %/step, side hv); interface trafo3w [6, 7, 8]; sn_mva(model) = 100
+     dQ_iface6  :     -0.089        -8.9        -8.7        -8.5     97.79     95.90
+     dQ_iface7  :      0.052         5.2         5.3         5.2    100.77    100.08
+     dQ_iface8  :      0.038         3.8         3.8         3.7    100.62     97.16
+  DSO_4: OLTC tap3w 9 (1.25 %/step, side hv); interface trafo3w [9, 10, 11]; sn_mva(model) = 100
+     dQ_iface9  :     -0.027        -2.7        -2.6        -2.5     95.28     91.02
+     dQ_iface10 :      0.018         1.8         1.8         1.7    101.34     97.00
+     dQ_iface11 :      0.010         1.0         1.0         1.0    101.42    100.82
+
+MC20261108: power flows so far: model 132, plant 66; elapsed 33 s
+
+SUMMARY (Mvar per unit input)
+     point  zone                                            column      kind       row      H   H_x_sn  fd_model_pq  fd_model  fd_plant
+        W1     1                                       V_set gen 0       gen    Q_gen0 23.446 2344.635     2344.631  2336.910  2114.029
+        W1     1                                       V_set gen 0       gen    Q_gen9 -9.488 -948.782     -948.783 -1031.747 -1538.294
+        W1     1                                       V_set gen 9       gen    Q_gen0  0.000    0.000     -911.502  -901.815 -1229.401
+        W1     1                                       V_set gen 9       gen    Q_gen9  0.000    0.000     1912.010  2233.515  1986.773
+        W1     1                         Q IBG sgen 1 (gen. conv.)       der    Q_gen0 -0.364   -0.364       -0.364    -0.374    -0.477
+        W1     1                         Q IBG sgen 1 (gen. conv.)       der    Q_gen9 -0.107   -0.107       -0.107    -0.164    -0.306
+        W1     1   tap trafo 0 (hv 1, lv 29, side hv, 1.25 %/step)       tap    Q_gen0  0.327   32.661       32.658    32.561    29.892
+        W1     1   tap trafo 0 (hv 1, lv 29, side hv, 1.25 %/step)       tap    Q_gen9 -0.119  -11.925      -11.925   -12.969   -19.439
+        W1     2                                       V_set gen 1       gen    Q_gen1 22.030 2203.004     2203.002  2302.335  2035.947
+        W1     2                                       V_set gen 1       gen    Q_PCC7  0.018    1.752       -2.427    -2.360    20.411
+        W1     2                                       V_set gen 1       gen    Q_PCC1  0.010    1.049       -1.158    -1.088   -30.205
+        W1     2                  Q_PCC,set trafo3w 7 (load conv.)       pcc    Q_gen1  0.572    0.572        0.572     0.553     0.604
+        W1     2                  Q_PCC,set trafo3w 7 (load conv.)       pcc    Q_PCC1  0.000    0.000        0.000     0.000     0.006
+        W1     2                  Q_PCC,set trafo3w 7 (load conv.)       pcc    Q_PCC6  0.000    0.000        0.000     0.000     0.006
+        W1     2  tap trafo 3 (hv 11, lv 10, side hv, 1.25 %/step)       tap    Q_gen1  0.001    0.087        0.086     0.269     0.432
+        W1     2  tap trafo 3 (hv 11, lv 10, side hv, 1.25 %/step)       tap    Q_PCC6  0.000    0.000        0.001     0.001    -0.480
+        W1     2  tap trafo 3 (hv 11, lv 10, side hv, 1.25 %/step)       tap    Q_PCC1  0.000    0.000        0.001     0.001     0.012
+        W1     3                                       V_set gen 2       gen    Q_gen2 20.223 2022.327     2022.327  2061.667  1873.576
+        W1     3                                       V_set gen 2       gen    Q_gen5 -5.743 -574.268     -574.269  -542.847  -678.121
+        W1     3                                       V_set gen 2       gen   Q_PCC10  0.008    0.827       -0.934    -0.884    -8.626
+        W1     3                                       V_set gen 2       gen    Q_PCC9  0.004    0.365       -0.071    -0.068     2.719
+        W1     3                                       V_set gen 5       gen    Q_gen2 -5.801 -580.053     -580.055  -550.584  -672.634
+        W1     3                                       V_set gen 5       gen    Q_gen5 11.922 1192.163     1192.159  1222.318  1162.943
+        W1     3                                       V_set gen 5       gen   Q_PCC10  0.008    0.811       -0.915    -0.873   -43.907
+        W1     3                                       V_set gen 5       gen    Q_PCC9  0.003    0.265       -0.052    -0.049   -32.796
+        W1     3                  Q_PCC,set trafo3w 9 (load conv.)       pcc    Q_gen2  0.316    0.316        0.316     0.311     0.371
+        W1     3                  Q_PCC,set trafo3w 9 (load conv.)       pcc    Q_gen5  0.227    0.227        0.227     0.222     0.262
+        W1     3                  Q_PCC,set trafo3w 9 (load conv.)       pcc   Q_PCC10  0.000    0.000        0.000     0.000     0.012
+        W1     3                  Q_PCC,set trafo3w 9 (load conv.)       pcc   Q_PCC11  0.000    0.000        0.000     0.000     0.012
+        W1     3                         Q IBG sgen 0 (gen. conv.)       der    Q_gen2 -0.717   -0.717       -0.717    -0.711    -0.748
+        W1     3                         Q IBG sgen 0 (gen. conv.)       der    Q_gen5 -0.079   -0.079       -0.079    -0.075    -0.094
+        W1     3                         Q IBG sgen 0 (gen. conv.)       der   Q_PCC10  0.000    0.000       -0.000    -0.000    -0.001
+        W1     3                         Q IBG sgen 0 (gen. conv.)       der    Q_PCC9  0.000    0.000       -0.000    -0.000     0.000
+        W1     3 tap trafo 11 (hv 35, lv 39, side hv, 1.25 %/step)       tap    Q_gen2 -0.071   -7.082       -7.082    -6.722    -8.183
+        W1     3 tap trafo 11 (hv 35, lv 39, side hv, 1.25 %/step)       tap    Q_gen5  0.160   16.036       16.035    16.403    15.632
+        W1     3 tap trafo 11 (hv 35, lv 39, side hv, 1.25 %/step)       tap   Q_PCC10  0.000    0.000       -0.011    -0.011    -0.534
+        W1     3 tap trafo 11 (hv 35, lv 39, side hv, 1.25 %/step)       tap    Q_PCC9  0.000    0.000       -0.001    -0.001    -0.399
+        W1 DSO_1                                           tap3w 0 dso_tap3w  Q_iface0 -0.066   -6.589          NaN    -6.491    -6.239
+        W1 DSO_1                                           tap3w 0 dso_tap3w  Q_iface1  0.040    3.970          NaN     3.986     3.855
+        W1 DSO_1                                           tap3w 0 dso_tap3w  Q_iface2  0.027    2.659          NaN     2.668     2.549
+        W1 DSO_2                                           tap3w 3 dso_tap3w  Q_iface3 -0.044   -4.364          NaN    -4.274    -3.810
+        W1 DSO_2                                           tap3w 3 dso_tap3w  Q_iface4  0.028    2.776          NaN     2.785     2.491
+        W1 DSO_2                                           tap3w 3 dso_tap3w  Q_iface5  0.017    1.719          NaN     1.721     1.522
+        W1 DSO_3                                           tap3w 6 dso_tap3w  Q_iface6 -0.090   -9.045          NaN    -8.895    -8.676
+        W1 DSO_3                                           tap3w 6 dso_tap3w  Q_iface7  0.053    5.275          NaN     5.299     5.239
+        W1 DSO_3                                           tap3w 6 dso_tap3w  Q_iface8  0.038    3.835          NaN     3.844     3.687
+        W1 DSO_4                                           tap3w 9 dso_tap3w  Q_iface9 -0.028   -2.756          NaN    -2.651    -2.525
+        W1 DSO_4                                           tap3w 9 dso_tap3w Q_iface10  0.018    1.803          NaN     1.819     1.735
+        W1 DSO_4                                           tap3w 9 dso_tap3w Q_iface11  0.010    1.023          NaN     1.030     1.018
+MC20261108     1                                       V_set gen 0       gen    Q_gen0 24.226 2422.573     2422.571  2390.613  2115.316
+MC20261108     1                                       V_set gen 0       gen    Q_gen9 -9.892 -989.174     -989.175 -1102.534 -1770.177
+MC20261108     1                                       V_set gen 9       gen    Q_gen0  0.000    0.000     -941.208  -938.152 -1320.546
+MC20261108     1                                       V_set gen 9       gen    Q_gen9  0.000    0.000     1816.792  2128.367  1760.271
+MC20261108     1                         Q IBG sgen 1 (gen. conv.)       der    Q_gen0 -0.381   -0.381       -0.381    -0.407    -0.523
+MC20261108     1                         Q IBG sgen 1 (gen. conv.)       der    Q_gen9 -0.115   -0.115       -0.115    -0.192    -0.390
+MC20261108     1   tap trafo 0 (hv 1, lv 29, side hv, 1.25 %/step)       tap    Q_gen0  0.320   31.976       31.973    31.573    28.365
+MC20261108     1   tap trafo 0 (hv 1, lv 29, side hv, 1.25 %/step)       tap    Q_gen9 -0.124  -12.362      -12.362   -13.780   -22.334
+MC20261108     2                                       V_set gen 1       gen    Q_gen1 22.016 2201.645     2201.643  2305.567  1958.530
+MC20261108     2                                       V_set gen 1       gen    Q_PCC7  0.024    2.351       -5.829    -5.659     8.445
+MC20261108     2                                       V_set gen 1       gen    Q_PCC6  0.018    1.779       -2.805    -2.701   -34.743
+MC20261108     2                  Q_PCC,set trafo3w 7 (load conv.)       pcc    Q_gen1  0.581    0.581        0.581     0.560     0.628
+MC20261108     2                  Q_PCC,set trafo3w 7 (load conv.)       pcc    Q_PCC6  0.000    0.000        0.001     0.001     0.007
+MC20261108     2                  Q_PCC,set trafo3w 7 (load conv.)       pcc    Q_PCC8  0.000    0.000        0.001     0.001     0.011
+MC20261108     2  tap trafo 3 (hv 11, lv 10, side hv, 1.25 %/step)       tap    Q_gen1  0.001    0.094        0.093     0.279     0.430
+MC20261108     2  tap trafo 3 (hv 11, lv 10, side hv, 1.25 %/step)       tap    Q_PCC6  0.000    0.000        0.003     0.003    -0.468
+MC20261108     2  tap trafo 3 (hv 11, lv 10, side hv, 1.25 %/step)       tap    Q_PCC8  0.000    0.000       -0.002    -0.002     0.514
+MC20261108     3                                       V_set gen 2       gen    Q_gen2 20.238 2023.769     2023.769  2066.526  1831.079
+MC20261108     3                                       V_set gen 2       gen    Q_gen5 -5.715 -571.542     -571.542  -537.728  -703.556
+MC20261108     3                                       V_set gen 2       gen   Q_PCC10  0.010    1.012       -1.642    -1.547   -13.226
+MC20261108     3                                       V_set gen 2       gen    Q_PCC9  0.006    0.566       -0.299    -0.286     1.003
+MC20261108     3                                       V_set gen 5       gen    Q_gen2 -5.759 -575.926     -575.928  -544.767  -690.628
+MC20261108     3                                       V_set gen 5       gen    Q_gen5 12.208 1220.816     1220.812  1252.096  1177.929
+MC20261108     3                                       V_set gen 5       gen   Q_PCC10  0.010    0.981       -1.591    -1.514   -48.605
+MC20261108     3                                       V_set gen 5       gen    Q_PCC9  0.004    0.406       -0.215    -0.205   -34.232
+MC20261108     3                  Q_PCC,set trafo3w 9 (load conv.)       pcc    Q_gen2  0.317    0.317        0.317     0.311     0.382
+MC20261108     3                  Q_PCC,set trafo3w 9 (load conv.)       pcc    Q_gen5  0.226    0.226        0.226     0.220     0.267
+MC20261108     3                  Q_PCC,set trafo3w 9 (load conv.)       pcc   Q_PCC10  0.000    0.000        0.001     0.001     0.014
+MC20261108     3                  Q_PCC,set trafo3w 9 (load conv.)       pcc   Q_PCC11  0.000    0.000        0.000     0.000     0.014
+MC20261108     3                         Q IBG sgen 0 (gen. conv.)       der    Q_gen2 -0.717   -0.717       -0.717    -0.711    -0.756
+MC20261108     3                         Q IBG sgen 0 (gen. conv.)       der    Q_gen5 -0.079   -0.079       -0.079    -0.074    -0.097
+MC20261108     3                         Q IBG sgen 0 (gen. conv.)       der   Q_PCC10  0.000    0.000       -0.000    -0.000    -0.002
+MC20261108     3                         Q IBG sgen 0 (gen. conv.)       der    Q_PCC9  0.000    0.000       -0.000    -0.000     0.000
+MC20261108     3 tap trafo 11 (hv 35, lv 39, side hv, 1.25 %/step)       tap    Q_gen2 -0.071   -7.058       -7.058    -6.676    -8.432
+MC20261108     3 tap trafo 11 (hv 35, lv 39, side hv, 1.25 %/step)       tap    Q_gen5  0.162   16.224       16.222    16.606    15.647
+MC20261108     3 tap trafo 11 (hv 35, lv 39, side hv, 1.25 %/step)       tap   Q_PCC10  0.000    0.000       -0.019    -0.019    -0.593
+MC20261108     3 tap trafo 11 (hv 35, lv 39, side hv, 1.25 %/step)       tap    Q_PCC9  0.000    0.000       -0.003    -0.003    -0.418
+MC20261108 DSO_1                                           tap3w 0 dso_tap3w  Q_iface0 -0.067   -6.740          NaN    -6.618    -6.369
+MC20261108 DSO_1                                           tap3w 0 dso_tap3w  Q_iface1  0.041    4.051          NaN     4.077     3.941
+MC20261108 DSO_1                                           tap3w 0 dso_tap3w  Q_iface2  0.027    2.679          NaN     2.698     2.587
+MC20261108 DSO_2                                           tap3w 3 dso_tap3w  Q_iface3 -0.045   -4.458          NaN    -4.346    -3.871
+MC20261108 DSO_2                                           tap3w 3 dso_tap3w  Q_iface4  0.028    2.783          NaN     2.799     2.503
+MC20261108 DSO_2                                           tap3w 3 dso_tap3w  Q_iface5  0.017    1.725          NaN     1.734     1.531
+MC20261108 DSO_3                                           tap3w 6 dso_tap3w  Q_iface6 -0.089   -8.899          NaN    -8.703    -8.535
+MC20261108 DSO_3                                           tap3w 6 dso_tap3w  Q_iface7  0.052    5.231          NaN     5.271     5.235
+MC20261108 DSO_3                                           tap3w 6 dso_tap3w  Q_iface8  0.038    3.802          NaN     3.825     3.694
+MC20261108 DSO_4                                           tap3w 9 dso_tap3w  Q_iface9 -0.027   -2.728          NaN    -2.599    -2.483
+MC20261108 DSO_4                                           tap3w 9 dso_tap3w Q_iface10  0.018    1.800          NaN     1.824     1.746
+MC20261108 DSO_4                                           tap3w 9 dso_tap3w Q_iface11  0.010    1.025          NaN     1.039     1.033
+
+ratio FD/H by input kind, Q_gen rows (entries with |H| > 1e-6):
+     fd_model_pq/H                       fd_model/H                      fd_plant/H                     
+            median     min     max count     median    min     max count     median    min     max count
+kind                                                                                                    
+der          1.000   1.000   1.000     8      1.010  0.941   1.671     8      1.276  1.044   3.401     8
+gen        100.000 100.000 100.000    14    102.029 94.084 111.460    14     97.018 87.317 178.955    14
+pcc          1.000   1.000   1.000     6      0.975  0.965   0.985     6      1.164  1.057   1.204     6
+tap         99.991  98.663 100.006    10    102.320 94.591 310.734    10    117.508 88.707 497.945    10
+
+ratio FD/H by input kind, Q_PCC rows (physical entries only) (entries with |H| > 1e-6):
+     fd_model_pq/H                        fd_model/H                        fd_plant/H                          
+            median      min     max count     median      min     max count     median        min      max count
+kind                                                                                                            
+der         -0.829   -1.622  -0.195     4     -0.786   -1.528  -0.187     4     -4.353    -13.153    7.490     4
+gen       -112.828 -247.944 -19.471    12   -107.229 -240.704 -18.620    12  -1629.669 -12381.651 1165.080    12
+
+ratio FD/H by input kind, DSO interface-Q rows x OLTC (entries with |H| > 1e-6):
+          fd_model_pq/H               fd_model/H                      fd_plant/H                     
+                 median min max count     median    min     max count     median    min     max count
+kind                                                                                                 
+dso_tap3w           NaN NaN NaN     0    100.351 95.280 101.420    24     95.911 86.834 100.820    24
+
+total power flows: model 132, plant 66
+
+CONSEQUENCE for the stage-1 lambda screen (STS layers, banks excluded as in v4/v5), 35 captures; ceiling 1.546
+  layer       | weights  | lambda as built: median / max | DSO Q_iface x OLTC scaled by sn_mva: median / max | diag share of g_q S_Q on the OLTC column (corrected)
+  STS_DSO_1   | v4       |  1.037 /  1.179              |  7.469 / 10.510                         | 0.93
+  STS_DSO_2   | v4       |  1.132 /  1.316              |  4.004 /  5.382                         | 0.86
+  STS_DSO_3   | v4       |  0.991 /  1.124              | 12.484 / 16.396                         | 0.97
+  STS_DSO_4   | v4       |  1.325 /  1.585              |  2.066 /  2.527                         | 0.69
+  STS_DSO_1   | v5 start |  1.016 /  1.154              |  7.142 / 10.049                         | 0.93
+  STS_DSO_2   | v5 start |  1.109 /  1.288              |  3.834 /  5.151                         | 0.86
+  STS_DSO_3   | v5 start |  0.972 /  1.101              | 11.933 / 15.671                         | 0.97
+  STS_DSO_4   | v5 start |  1.297 /  1.552              |  1.987 /  2.428                         | 0.69

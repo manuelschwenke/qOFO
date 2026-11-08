@@ -85,3 +85,9 @@ Session "STS capabilities tuning analysis". Branch **`res/tuning-v5-2026-11-08`*
     λ_max(B) on W1–W6 1.400.
   - Verification shard on e5power (30 workers) started 18:57.
 - Queue for run 0002: pid 49828, armed 18:57:50.
+- **19:25 Stage-I verification PASS at the first rung** (θ_STS 0.01): p95 21.05 ≤ 25, median
+  residual 0.21 Mvar ≤ 0.8.
+- **19:36 Stage II-a started.**
+  - 238 / 512 draws pass the screen. The λ ceiling on the 192-point bank leaves 443, θ_TS ≤ 0.009
+    leaves 295, and λ_STS ≥ 0.5 holds for all 512 (the g_w_pcc box is the interval itself).
+  - Split: 68 candidates here (20 workers), 170 on e5power (30; remote pid 26772).

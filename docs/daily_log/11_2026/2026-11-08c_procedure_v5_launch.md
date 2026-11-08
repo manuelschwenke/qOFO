@@ -70,3 +70,18 @@ Session "STS capabilities tuning analysis". Branch **`res/tuning-v5-2026-11-08`*
   It reused the dry run's 192 captures and re-tried the 6 failed ones.
 - Follow-up queue `ch_9_18_followups_v5.py --run <that folder>` (detached, pythonw): pid 101548,
   log `<run>/followups_v5/driver.log`; it waits for DONE/FAILED and acts only on GO.json.
+
+### Restart as run 0002 (18:55)
+- Run 0001 stopped at 18:55 before Stage I: `V3.sync_remote_code` built an empty file list, because
+  e5power was at this checkout's commit, and Get-FileHash failed on an empty path.
+  - Fix b8f30f0: return early when no file differs; test added.
+  - e5power fast-forwarded to b8f30f0 by bundle.
+  - Run 0001 has `ABANDONED.txt`; its queue logged "campaign FAILED" and exited (SKIPPED.txt).
+- **Run `0002_2026-11-08_185554_ch_9_17_procedure_v5`**: driver pid 159568, same arguments, with
+  `--reuse-ops` of run 0001.
+  - Same bounds as the dry run: [0.1096, 0.2846], centre 0.1766.
+  - "e5power: no Python file differs from b8f30f0".
+  - Stage I `stage1_v5_nr_2026_11_pq10`: ρ 2.5e4, κ 0.262, θ_STS 0.0100, θ_TS 0.0076,
+    λ_max(B) on W1–W6 1.400.
+  - Verification shard on e5power (30 workers) started 18:57.
+- Queue for run 0002: pid 49828, armed 18:57:50.

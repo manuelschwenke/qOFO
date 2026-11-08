@@ -258,7 +258,20 @@ Reading: NR is more robust than the base in exactly the scarce episodes (fewer f
 variant), and the STS benefit there is an order of magnitude larger. OFO's failures are
 oscillations (`fail_osc`). Small sample, old weights.
 
-## 15. Open (author)
+## 15. Committed and handed off (author ~18:10)
+
+- Author asked whether a 200-300 MW park at W2's old bus would push G3 out more often:
+  - estimate with the runner's UC rule over the year: G3 off in 16.5 % of 180-min windows
+    → 19.6 / 20.1 / 20.9 % for 200 / 250 / 300 MW;
+  - G3 is off only in windy hours, so the park would have its full Q in every G3-off window
+    and remove the zero-resource state that carries the STS benefit;
+  - author: "keep it like this".
+- Commit **62c4944** on `res/network-north-2026-11-08` (fast-forward from
+  res/commitment-base-2026-10-31; a trial merge onto minimal/thesis-core is conflict-free; not
+  merged). The e5power worktree `F:\qOFO_runs\qOFO_net` was moved to the same commit.
+- Brief sent to the session "STS capabilities tuning analysis" (delivered 2026-11-08).
+
+## 16. Open (author)
 
 1. Adopt reserved capability for the coupling parks (`_res`)?
 2. Network lever for area 2: north layout, 9–39 not built, neither — after the full screen.

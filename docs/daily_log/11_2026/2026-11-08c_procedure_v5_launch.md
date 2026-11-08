@@ -91,3 +91,33 @@ Session "STS capabilities tuning analysis". Branch **`res/tuning-v5-2026-11-08`*
   - 238 / 512 draws pass the screen. The λ ceiling on the 192-point bank leaves 443, θ_TS ≤ 0.009
     leaves 295, and λ_STS ≥ 0.5 holds for all 512 (the g_w_pcc box is the interval itself).
   - Split: 68 candidates here (20 workers), 170 on e5power (30; remote pid 26772).
+
+### 21:00 progress check (no code change)
+- Driver (159568) and queue (49828) alive. e5wimi at 100 % CPU (other logon plus the 20 workers).
+- II-a windows done: 72 / 276 here, 163 / 680 on e5power. Rates 0.86 and 1.9 windows/min, so II-a
+  should end at about 01:00–01:30. v4 run 0008 needed 20.5 h in total, of which 3.8 h for II-a.
+- Of 244 window rows: 0 failed simulations. 212 rows were early-stopped.
+  - 53 of the 63 candidates touched so far were lost to the early stop.
+  - That rate is biased high, because stopped windows finish first. v4 II-a lost 166 of 177.
+- Stage-I point e5d47f3be21e: 0 tap and 0 bank reversals on W1/W3/W4/W6, mean e_v_ts 0.00590.
+  v4's Stage-I point had 3 tap and 1 bank reversals.
+- Losing a candidate does not correlate with g_w_pcc (Spearman +0.01). In v4 II-a, the lost
+  candidates had a median g_w_pcc of 0.173, against 0.322 for the feasible ones.
+- 6 candidates are feasible so far (tap 0, bank 0). This is a provisional view: mean e_v_ts over
+  the four windows, not the procedure's engagement-level selection.
+  - The leader is 6b1aacf04e8b: e_v_ts 0.00533, g_w_pcc 0.196, g_w_der 0.0178, ratio 11 (v4: 61).
+- σ_V, the STS voltage-effect share, uses the definition of `2026-11-08c_nr_gpcc.py` on the
+  35 pre-check captures. The last column is λ_pcc at the smallest κ.
+
+| set | g_w_pcc/g_w_der | σ_V z2 (G3 on) | σ_V z3 | λ_pcc z2 (G3 off) |
+|---|---|---|---|---|
+| v4 061d | 61 | 0.47 | 0.12 | 0.16 |
+| 6b1aacf04e8b (leader) | 11 | 0.61 | 0.27 | 0.73 |
+| 09690e55fa9f | 2.1 | 0.75 | 0.46 | 1.08 |
+| 498bb86f10fe | 1.1 | 0.66 | 0.38 | 0.83 |
+| e5d47f3be21e (Stage I) | 2.0 | 0.93 | 0.73 | 0.81 |
+| 53e4bbdb03b5 | 0.2 | 0.68 | 0.41 | 0.78 |
+| 33416077ca8e | 0.2 | 0.99 | 0.96 | 0.92 |
+
+- Open point: v5 bounds g_w_pcc absolutely, but not relative to g_w_der. The ratio to the TS IBG,
+  which matters in zone 3, is therefore left to the e_v_ts ranking.

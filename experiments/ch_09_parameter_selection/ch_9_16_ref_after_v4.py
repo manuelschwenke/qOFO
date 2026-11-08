@@ -261,10 +261,12 @@ def _pull(name: str, rc: Optional[int], synced: bool, rel: Path = DEADBAND_REL,
     return local if need is None or (local / need).exists() else None
 
 
-def deadband(key: str, dry_run: bool, smoke: bool = False) -> Optional[Path]:
-    """D1 + D2 on e5power at the weights selected there; the pulled run folder, or None."""
-    note = (f"D1/D2 at the procedure-v4 weights {RESULT} ({key}) on {P.REMOTE}; queued "
-            "behind the v4 campaign (author 2026-11-04)")
+def deadband(key: str, dry_run: bool, smoke: bool = False,
+             note: Optional[str] = None) -> Optional[Path]:
+    """D1 + D2 on e5power at the weights selected there; the pulled run folder, or None.
+    ``note`` replaces the v4 run note (procedure v5, 2026-11-08)."""
+    note = note or (f"D1/D2 at the procedure-v4 weights {RESULT} ({key}) on {P.REMOTE}; "
+                    "queued behind the v4 campaign (author 2026-11-04)")
     if smoke:
         note = (f"Smoke of D1/D2 on {P.REMOTE} (the path of {Path(__file__).name}), "
                 f"at the parameter set selected there")

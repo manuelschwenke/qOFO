@@ -175,3 +175,31 @@ DSO weights are equal in all rows (g_w_dso_der 1.528, g_w_dso_oltc 11.34).
 - **ETA** from v4 run 0008's stage durations (II-c 1.1 h, completion 2.9 h, settling 1.2 h, W5 + GO
   0.4 h): II-c ends ≈ 13:30–14:15, completion ≈ 17:00–17:45, settling ≈ 18:15–19:00 (20 CPUs
   here from 18:00), GO / NOGO ≈ 18:45–19:30.
+
+### 2026-11-09 13:31 Stage II-c result (bank price alone), completion on W2 started
+- Leader 55a1878c7730 had g_w_tso_shunt 19.93. Seven lower prices were run on W1, W3, W4 and W6
+  without the early stop. e5power finished at 13:18, the local shard at 13:30.
+
+| price | key | e_v_ts | hunting | bank hunting | bank after events | status |
+|---|---|---|---|---|---|---|
+| 4.72 | f44f0f26a03e | 0.00541 | 2 | 1 | 4 windows | rejected |
+| 5.80 | 3ed9c17d101b | 0.00540 | 1 | 0 | 4 | rejected |
+| 7.12 | d6639aa6fa69 | 0.00542 | 2 | 0 | 4 | rejected |
+| **8.75** | **45b169134c8c** | 0.00546 | 0 | 0 | 4 | **feasible, pick** |
+| 10.75 | 586e637a1c6f | 0.00548 | 0 | 0 | 4 | feasible |
+| 13.21 | 86ef9f91328e | 0.00550 | 0 | 0 | 3 | feasible |
+| 16.23 | 22ca384cc720 | 0.00551 | 1 | 0 | 3 | rejected |
+| 19.93 | 55a1878c7730 | 0.00552 | 0 | 0 | 3 | feasible (leader) |
+
+- **Pick:** 45b169134c8c, the lowest feasible price. Its e_v_ts lies inside the leader's 2 % band.
+  It joins the completion band.
+- **Observation 1: the pick sits one grid step from the hunting region.** 7.12 and every lower
+  price hunt.
+- **Observation 2: feasibility is not monotone in the price.** 16.23 hunts once, while 13.21 and
+  19.93 do not. A single hunting event decides feasibility at tolerance 0, so the label is
+  sensitive to individual events.
+- **Completion (13:31):** 21 band candidates plus the Stage-I point on W2; 6 run here, 15 on
+  e5power.
+- **ETA:** completion ≈ 15:30–16:30, settling ≈ 17:00–17:45, GO/NOGO ≈ 17:30–18:30.
+- The trial paramset `trial_55a1_v5_run0002` (branch `res/trial-v5-2026-11-09`, author's manual
+  check) carries the II-b leader's price 19.93, not the II-c pick.

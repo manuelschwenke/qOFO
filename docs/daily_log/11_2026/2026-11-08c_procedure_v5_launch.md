@@ -142,3 +142,36 @@ Session "STS capabilities tuning analysis". Branch **`res/tuning-v5-2026-11-08`*
 - 01:57 Stage II-b round 1: f 0.5, centred on 6b1aacf04e8b; 30 / 64 draws pass; 8 run here, 22 on e5power.
 - Pending, decision by the author: H sn_mva slip (fixes A/B, `2026-11-08d_qgen_row_check.md` on
   `res/qgen-row-check-2026-11-08`). v5 continues on the as-built H.
+
+### 2026-11-09 12:19 Stage II-b result (4 rounds), start of II-c
+- Rounds: 1 (f 0.5) → 158fdfc8e812; 2 unchanged → f 0.25; 3 → 74ef403199e5; 4 → **55a1878c7730**.
+  II-b stops at MAX_ROUNDS = 4. No driver error.
+- From 08:30 (round 3 onward) the local shards ran on 12 of 40 logical CPUs (affinity 0x555555, Normal
+  priority; colleagues work on e5wimi until 18:00). Round 4 here: 08:26–12:18; e5power: 08:27–10:51.
+- Selection 2b round 4:
+  - 372 / 372 inside the θ bounds; 190 at engagement level 'sts+bank';
+  - **78 feasible at hunting tolerance 0**.
+
+| key | e_v_ts | e_v_ds | g_w_pcc | g_w_der | ratio | g_w_tso_shunt | g_w_tso_oltc | g_w_gen |
+|---|---|---|---|---|---|---|---|---|
+| **55a1878c7730** (1st) | 0.00552 | 0.00647 | 0.203 | 0.0158 | 12.9 | 19.9 | 12.7 | 3.7e5 |
+| ae17a8cfdcce | 0.00549 | 0.00654 | 0.218 | 0.0225 | 9.7 | 20.1 | 8.9 | 4.0e5 |
+| 10cd507c196a | 0.00551 | 0.00658 | 0.186 | 0.0153 | 12.2 | 18.1 | 12.3 | 5.7e5 |
+| 74ef403199e5 (round-3 best) | 0.00550 | 0.00659 | 0.198 | 0.0181 | 10.9 | 18.1 | 11.1 | 3.8e5 |
+| 158fdfc8e812 (round-1 best) | 0.00547 | 0.00665 | 0.181 | 0.0275 | 6.6 | 20.0 | 10.0 | 3.7e5 |
+| Stage-I point e5d47f3be21e | 0.00611 | 0.00742 | 0.177 | 0.0897 | 2.0 | | | |
+
+DSO weights are equal in all rows (g_w_dso_der 1.528, g_w_dso_oltc 11.34).
+
+- **e_v_ts is flat across the band:** 0.00547–0.00552, a spread of 0.9 % inside the 2 % indifference
+  band. Rounds 2–4 moved only the tie-break e_v_ds, from 0.00665 to 0.00647 (−2.7 %).
+- **Against the Stage-I point:** e_v_ts −9.7 %, e_v_ds −12.8 %.
+- **The tie-break again prefers a large g_w_pcc / g_w_der ratio** (12.9 for the leader). This is the
+  direction already noted at II-a. g_w_pcc stays inside the v5 bound (≤ 0.285).
+- **Stage II-c** (12:19):
+  - leader 55a1878c7730, g_w_tso_shunt 19.93;
+  - grid of 7 prices [4.72, 5.80, 7.12, 8.75, 10.75, 13.21, 16.23], all 7 pass the screen;
+  - 2 run here (8 window runs, 12 CPUs) and 5 on e5power (20 window runs); no early stop.
+- **ETA** from v4 run 0008's stage durations (II-c 1.1 h, completion 2.9 h, settling 1.2 h, W5 + GO
+  0.4 h): II-c ends ≈ 13:30–14:15, completion ≈ 17:00–17:45, settling ≈ 18:15–19:00 (20 CPUs
+  here from 18:00), GO / NOGO ≈ 18:45–19:30.

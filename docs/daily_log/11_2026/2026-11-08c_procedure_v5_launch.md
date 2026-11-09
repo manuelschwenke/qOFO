@@ -236,3 +236,32 @@ DSO weights are equal in all rows (g_w_dso_der 1.528, g_w_dso_oltc 11.34).
   e_v_ds, which differs by 0.9 % between ranks 1 and 2.
 - **Settling confirmation** of ae17a8cfdcce started 15:34 on e5power (30 workers). In v4 it took
   72 min and W5 + go criteria 24 min, so GO/NOGO ≈ 17:10.
+
+### 2026-11-09 16:37 Settling confirmation PASS, W5 report, **GO**: ch9_selected_nr_2026_11_v5 = ae17a8cfdcce
+- **Settling confirmation** (e5power, 30 workers, 15:34–16:09). 120 periods: 5 windows × 4 DSOs
+  × 3 interfaces × up/down, 10-Mvar steps. W5 is excluded (VDE dead zone).
+  - **p95 N_inner 20.05** (limit 27); max 24; 0 periods above the limit; 0 censored.
+  - p95 per DSO: DSO_1 17.6, DSO_2 12.0, DSO_3 22.6, DSO_4 10.0.
+  - Median residual 0.25 Mvar.
+  - `expC/criterion_results.json`.
+- **W5 (report only, not ranked):**
+
+  | key | e_v_ts | e_v_ds | hunting | bank commits | AVR max step | V violations |
+  |---|---|---|---|---|---|---|
+  | ae17a8cfdcce | 0.00493 | 0.00630 | 0 | 8 | **0.00764 pu** | 0 / 0 |
+  | Stage-I point e5d47f3be21e | 0.00554 | 0.00636 | 2 | 10 | 0.00058 pu | 0 / 0 |
+
+  - **The AVR step of the winner exceeds the 0.005 pu limit in W5.** The limit is checked on the
+    ranked windows only, where the worst step was 0.00426. W5 is the window in which the IBG
+    reactive capability is zero (VDE dead zone), so the AVR setpoints carry more of the
+    adjustment.
+- **Go criteria: GO.**
+  - e_v_ts 0.00551 ≤ 0.01.
+  - STS couplers move in every search window: W1 5, W3 3, W4 9, W6 20 moves.
+  - Banks act after events in 3 windows (≥ 2 required).
+  - All limits are met.
+  - Engagement level sts+bank.
+- **Written:** `configs/paramsets/ch9_selected_nr_2026_11_v5.json`. Its fields equal the trial
+  `trial_ae17_v5_run0002` on `res/trial-v5-2026-11-09`.
+- The driver finished rc 0 after 21.68 h. The follow-up queue (record, switch, C, D1+D2,
+  G3-off report) polls every 5 min.

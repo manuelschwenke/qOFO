@@ -62,8 +62,17 @@ Run 0002's λ bank (6 design + 186 grid points), banks excluded; worst λ per la
   (`g_z_q_gen = 100`). It acts only when a machine is predicted past its capability bound; it was
   inactive at the two FD points. Whether W1–W6 or the MC episodes reach a bound has not been checked.
 
+## Full test suite (2026-11-09, single core, 10-core cap on e5wimi)
+- 1,100 tests collected. The full run stopped at its 50-min timeout after 1,071; the 29 left were
+  run separately (`tests/tuning/*`, `test_uc_void_events.py`: 51 passed incl. their siblings).
+- 2 failures, both pre-existing and unrelated to the fix:
+  `test_ch9_procedure_v2.py::test_engagement_bounds` and
+  `::test_the_largest_rho_within_the_margins_is_chosen`. They pass when their file runs alone and
+  fail identically on the as-built v5 code (583c24c) whenever the whole suite is collected:
+  `ch_9_11_procedure_v3.py:100` overwrites `V2.THETA_STS`, `V2.D_ENGAGE` and `V2.PI_Q_VARIANTS` at
+  import time (since 065c3e9, procedure v3). Test-isolation issue; not changed here.
+
 ## Open
-- Full test suite on this branch (running at the time of writing).
 - Q_PCC × IBG entries (`compute_dQtrafo3w_hv_dQ_der`) use the decoupled ∂V/∂Q chain without θ
   terms; FD/H −0.2…−1.6 on the 4 TS entries (small). Not changed: it is the same construction the
   DSO uses for its own interface-Q × IBG rows, which needs its own check.

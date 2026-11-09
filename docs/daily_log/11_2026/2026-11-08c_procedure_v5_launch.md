@@ -203,3 +203,36 @@ DSO weights are equal in all rows (g_w_dso_der 1.528, g_w_dso_oltc 11.34).
 - **ETA:** completion ≈ 15:30–16:30, settling ≈ 17:00–17:45, GO/NOGO ≈ 17:30–18:30.
 - The trial paramset `trial_55a1_v5_run0002` (branch `res/trial-v5-2026-11-09`, author's manual
   check) carries the II-b leader's price 19.93, not the II-c pick.
+
+### 2026-11-09 15:34 Completion result (21 band candidates + Stage-I point, ranking on W1–W4, W6)
+- e5power finished at 15:30 (75 window runs: its checkout reran all 5 windows per candidate). The
+  local shard finished at 14:09 (7 W2 runs). Selection `selection/selection_complete_sts+bank.json`.
+- 22/22 inside the theta bounds, 22 feasible at hunting tolerance 0. Engagement level `sts+bank`
+  holds 21 candidates; only the Stage-I point is outside it.
+- Band: best e_v_ts 0.00546 (f54bd61bcbbc), 2 % → ≤ 0.00557. Ranks 1–13 lie inside the band and
+  are ordered by e_v_ds. Ranks 14 and up lie outside it and are ordered by e_v_ts.
+
+| rank | key | e_v_ts | e_v_ds | g_w_pcc | g_w_der | ratio | g_w_tso_shunt | bank commits | AVR max step |
+|---|---|---|---|---|---|---|---|---|---|
+| **1** | **ae17a8cfdcce** | 0.00551 | **0.00675** | 0.218 | 0.0225 | 9.7 | 20.09 | 6 | 0.00426 |
+| 2 | 45b169134c8c (II-c pick) | 0.00553 | 0.00681 | 0.203 | 0.0158 | 12.9 | 8.75 | 20 | 0.00468 |
+| 3 | 74ef403199e5 | 0.00556 | 0.00687 | 0.198 | 0.0181 | 10.9 | 18.08 | – | 0.00450 |
+| 4 | f54bd61bcbbc | **0.00546** | 0.00695 | 0.169 | 0.0359 | 4.7 | 18.83 | – | 0.00477 |
+| 15 | 55a1878c7730 (II-b leader, trial) | 0.00558 | 0.00677 | 0.203 | 0.0158 | 12.9 | 19.93 | 6 | 0.00468 |
+| 22 | e5d47f3be21e (Stage-I point) | 0.00617 | 0.00751 | 0.177 | 0.0897 | 2.0 | 14.92 | 12 | 0.00035 |
+
+- **Selected: ae17a8cfdcce**, λ_max(B) 1.530. The Pareto set on (e_v_ts, e_v_ds) is
+  {f54bd61bcbbc, ae17a8cfdcce}.
+  - Weights: g_w_der 0.02253, g_w_pcc 0.21849, g_w_gen 404118, g_w_tso_oltc 8.930,
+    g_w_tso_shunt 20.09. The rest is as in Stage I (g_v 4e4, g_q 0.4, dso_g_v 1e4,
+    g_w_dso_der 1.528, g_w_dso_oltc 11.34).
+- **The II-b leader 55a1878c7730 falls out of the band** (0.00558 / 0.00546 = 1.022). The W2 runs
+  shifted the aggregate: on W2 it reaches 0.00582, f54bd61bcbbc 0.00543.
+- **The II-c price is not adopted.** The II-c pick (8.75, the leader's weights) ranks 2nd on e_v_ds.
+  The winner is another candidate, at its own price 20.09. This follows the procedure as written:
+  II-c adds a candidate to the band and does not set the price of the eventual winner. At the lower
+  price, the bank switches 20 times instead of 6.
+- e_v_ts across the whole band varies by only 2.7 % (0.00546–0.00561). The pick is decided by
+  e_v_ds, which differs by 0.9 % between ranks 1 and 2.
+- **Settling confirmation** of ae17a8cfdcce started 15:34 on e5power (30 workers). In v4 it took
+  72 min and W5 + go criteria 24 min, so GO/NOGO ≈ 17:10.

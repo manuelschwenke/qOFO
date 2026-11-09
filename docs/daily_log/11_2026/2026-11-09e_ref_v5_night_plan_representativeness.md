@@ -323,6 +323,58 @@ on on `rural_700`.
     After 08:00 it runs at 10 CPUs.
 - **Later, the second 50:** the same two calls with `--n 100` (local `--n-o3 300`, no `--new`).
   Then `merge_mc.py` and the final invocation with all six variants, as on 11-07/08.
+  Superseded by § 5e.
+
+## 5e. Status 21:35 and the full N = 100 tonight (author ~21:40)
+- **Status 21:35.**
+  - REF 0004 (E2): 6/6 ok, 1080 records each.
+  - REF 0005 and 0006: 5/6 ok each; the CEN (Msel) runs at t = 272 and 327 min.
+  - Case 1 (`ch_10_case1_svr/0001_2026-11-09_185947_run_case1_v5_A`): 6/6 ok, pulled 21:00.
+  - e5power MC (S1, O2): started 21:03, prescreen done 21:17.
+  - Console zone minima, first look only (the 3-min console samples; not the evaluation):
+    - E2: M 0.970, O3 0.936, S2 0.925, O2 0.912, L2 0.895, S1 0.894.
+    - P2R_B03B05: O3 1.001, S2 0.991, O2 0.987, S1 0.975, L2 0.967.
+    - Case 1: O2 0.965; O0/O1/S1/S1m 0.939; L2 0.931.
+- **Correction of the 21:35 speed statement.** "e5power ends before midnight" rested on the first
+  S1 results (405–1368 s). Those were the earliest finishers of a pool of 30, so the sample is
+  biased towards short episodes. At 21:42 only 8 of the ≈ 30 S1 episodes started at 21:17 had
+  ended.
+  - Calibration on the 11-07 campaign (rural_700, v4):
+    - e5power share S1 + O2, 130 seeds: 143 CPU-h in 6.5 h, ≈ 22 effective workers.
+    - e5wimi share L2 + M + S2 + O3: 344 CPU-h in 13.6 h, ≈ 25 effective workers.
+  - Medians per episode (s): L2 2605, M 2564, O2 1284, O3 836, S1 2834, S2 1065.
+- **Author ~21:40:** "If it is faster then expected, we can run 50 additional MC runs overnight in
+  queue, mainly on e5power."
+  - The second 50 complete the N = 100 fixed in advance. The timing is decided on throughput
+    only; no result of the first 50 was evaluated.
+  - The e5wimi share had not started, so the split was changed by variant. The declared protocol
+    allows that (A1 of 11-07; `merge_mc` copies per (seed, variant)).
+  - A split by seed would rerun episodes 1–56 of a moved variant, since `run_mc` has no seed
+    offset. So L2 moves to e5power for all 106 episodes.
+- **Queue v2** `mc_queue2.py` (copy alongside: `2026-11-09e_mc_queue2.py`). Detached pythonw,
+  pid in `mc_queue2.pid`, same log `mc_queue.log`.
+  - `mc_queue.py` was stopped at 21:46. Its running child, the first e5power call (wrapper pid
+    103212), was left alone.
+  - **e5power** (tag `v5nr_e5power`, the same campaign): after the first call has ended and been
+    pulled back, it runs `mc_remote_wrapper.py 100 --variants S1,L2,O2 --jobs 30 --buffer 6`.
+    - S1 and O2 get seeds 57–106; L2 gets all 106.
+  - **e5wimi** (tag `v5nr`, new campaign): after REF 0004–0006, it runs
+    `run_mc --new --variants M,S2,O3 --n 100 --n-o3 100 --buffer 6 --jobs 30`, with the same
+    pinning rule.
+    - OFO+'s further 200 episodes (`--n-o3 300`) stay for later.
+  - **Run number.** The e5power campaign is `0001_2026-11-09_210315_run_mc_v5nr_e5power` there.
+    An empty local folder of that exact name reserves 0001 here, so the local campaign becomes
+    0002 and the pull later lands in the reserved folder. `run_mc_remote`'s `reserve_number`
+    only guards the reverse order.
+- **Estimate at the 11-07 rates:**
+  - e5power: 62 CPU-h (first call) + 121 CPU-h (second) at ≈ 22 effective workers, ending
+    ≈ 05:30 (range 04:30–07:00).
+  - e5wimi: 173 CPU-h at ≈ 25, from ≈ 22:20, ending ≈ 05:15 (range 04:00–07:30; M's tail reaches
+    2.5 h per episode).
+- **Morning:**
+  - `merge_mc.py` from the e5power folder into the local `v5nr` campaign.
+  - Then the final invocation with all six variants for the replacements under rule (b).
+  - Then `--report` and `evaluate_mc`.
 
 ## 6. Open / pending
 - G1, the weights: resolved (§ 5b).

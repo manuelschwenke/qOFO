@@ -109,7 +109,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: amendment1).  Rank 1 of that procedure, 301c285ee52b, failed the settling
 #: requirement (p95 31.0 > 27); it was used for a few hours as the provisional
 #: set ``ch9_candidate_301c285ee52b`` (withdrawn).  Was "ch9_selected_band_2026_10".
-SELECTED_PARAMSET = "ch9_selected_uc_2026_11_v4"
+SELECTED_PARAMSET = "ch9_selected_nr_2026_11_v5"
 
 #: The Stage-I analytic design point, for the initial-weight legs (B and C).
 #: 2026-10-25: the Stage-I point of that procedure (was "stage1_start", which

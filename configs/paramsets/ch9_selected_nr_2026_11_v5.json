@@ -1,0 +1,561 @@
+{
+  "name": "ch9_selected_nr_2026_11_v5",
+  "title": "Controller weights selected by procedure v5 on rural_700_north_res",
+  "description": [
+    "Selected by docs/tuning/2026-11-08_weight_selection_procedure_v5.md: v4 on the study network rural_700_north_res, lambda bank W1-W6 plus the ch_9_13 grid at 12 h and 3 h with both G3 states, and g_w_pcc bounded by the STS responsiveness lambda_pcc >= 0.5 at every G3-off point and the lambda ceiling 1.546; config sts_coupler_hold_after_bank=1."
+  ],
+  "provenance": {
+    "producer": "experiments\\ch_09_parameter_selection\\ch_9_17_procedure_v5.py",
+    "run_dir": "results\\ch_09_parameter_selection\\0002_2026-11-08_185554_ch_9_17_procedure_v5",
+    "procedure": "docs/tuning/2026-11-08_weight_selection_procedure_v5.md",
+    "starting_paramset": "stage1_v5_nr_2026_11_pq10",
+    "stage1_verification": {
+      "0.01": {
+        "run": "results\\ch_09_parameter_selection\\0002_2026-11-08_185554_ch_9_17_procedure_v5\\stage1\\verification\\v2_pq10\\20261108-185744",
+        "n_steps": 120,
+        "p95": 21.049999999999997,
+        "per_dso_p95": {
+          "DSO_1": 16.0,
+          "DSO_2": 12.0,
+          "DSO_3": 24.0,
+          "DSO_4": 9.55
+        },
+        "n_over": 1,
+        "censored": 0,
+        "max": 29,
+        "median_residual_mvar": 0.21054039332300314,
+        "pass": true,
+        "limit_p95": 27,
+        "label": "v2_pq10",
+        "paramset": "stage1_v5_nr_2026_11_pq10",
+        "verified": true,
+        "margin_v4": {
+          "p95": 25.0,
+          "median_residual_mvar": 0.8
+        }
+      }
+    },
+    "dso_voltage_band_pu": [
+      0.92,
+      1.08
+    ],
+    "search_windows": [
+      "W1",
+      "W3",
+      "W4",
+      "W6"
+    ],
+    "ranked_windows": "W1,W2,W3,W4,W6",
+    "w5_report": {
+      "e_v_ts": 0.004927537576940068,
+      "e_v_ds": 0.0063012318959110546,
+      "v_metric": "bus",
+      "e_v_ts_areamean": 0.0013268909741510691,
+      "e_v_ds_areamean": 0.0037139834915556453,
+      "e_v_ts_bus": 0.004927537576940068,
+      "e_v_ds_bus": 0.0063012318959110546,
+      "e_q": 163788.08705405355,
+      "v_band_excess_ts": 0.0017181164199073845,
+      "v_band_excess_ds": 0.0004855027536463101,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "v_worst_ts": 0.0399393304954341,
+      "v_worst_ds": 0.023938978810932255,
+      "tap_ops_per_h_tso": 0.16674386289949053,
+      "tap_ops_per_h_dso": 0.5836035201482168,
+      "tap_rev_per_h_tso": 0.08337193144974527,
+      "tap_rev_per_h_dso": 0.08337193144974527,
+      "pf_failures": 0.0,
+      "wall_s": 1424.106835797429,
+      "failed": 0.0,
+      "failure_reason": "",
+      "early_abort": 0.0,
+      "avr_max_step_pu": 0.007640219595638653,
+      "avr_total_variation_pu": 0.2339289834895062,
+      "n_hunting": 0,
+      "n_hunting_1h": 0,
+      "n_event_explained": 3,
+      "n_startup_exempt": 0,
+      "startup_detail": [],
+      "n_moves": 27,
+      "hunting_detail": [],
+      "moves": [
+        [
+          40.0,
+          "DSO_1|trafo_1[0]",
+          1
+        ],
+        [
+          40.0,
+          "DSO_1|trafo_2[0]",
+          1
+        ],
+        [
+          60.0,
+          "DSO_4|trafo_10[0]",
+          1
+        ],
+        [
+          180.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          6340.0,
+          "DSO_4|trafo_10[0]",
+          1
+        ],
+        [
+          7320.0,
+          "DSO_2|trafo_5[0]",
+          1
+        ],
+        [
+          7620.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          10740.0,
+          "DSO_4|trafo_10[0]",
+          1
+        ],
+        [
+          17280.0,
+          "1[0]",
+          1
+        ],
+        [
+          17280.0,
+          "1[1]",
+          1
+        ],
+        [
+          17280.0,
+          "3[1]",
+          1
+        ],
+        [
+          17320.0,
+          "DSO_1|trafo_1[0]",
+          1
+        ],
+        [
+          17320.0,
+          "DSO_2|trafo_4[0]",
+          1
+        ],
+        [
+          17340.0,
+          "DSO_3|trafo_8[0]",
+          1
+        ],
+        [
+          17580.0,
+          "DSO_1|trafo_2[0]",
+          1
+        ],
+        [
+          18400.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          19380.0,
+          "DSO_4|trafo_10[0]",
+          1
+        ],
+        [
+          20880.0,
+          "1[0]",
+          -1
+        ],
+        [
+          20880.0,
+          "1[1]",
+          -1
+        ],
+        [
+          20880.0,
+          "2[2]",
+          -1
+        ],
+        [
+          20880.0,
+          "3[1]",
+          -1
+        ],
+        [
+          20900.0,
+          "DSO_4|trafo_11[0]",
+          1
+        ],
+        [
+          27140.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          40420.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          41100.0,
+          "DSO_4|trafo_10[0]",
+          -1
+        ],
+        [
+          41100.0,
+          "DSO_4|trafo_11[0]",
+          -1
+        ],
+        [
+          41300.0,
+          "DSO_1|trafo_2[0]",
+          -1
+        ]
+      ],
+      "events_s": [
+        17280.0,
+        20880.0
+      ],
+      "shunt_commits": 8,
+      "shunt_up": 4,
+      "shunt_down": 4,
+      "shunt_reversals": 4,
+      "shunt_max_level": 2.0,
+      "shunt_ops_max_bank": 2,
+      "n_shunt_hunting": 0,
+      "n_shunt_event_explained": 4,
+      "n_shunt_startup_exempt": 0,
+      "shunt_hunting_detail": [],
+      "shunt_startup_detail": [],
+      "shunt_moves": [
+        [
+          17280.0,
+          "z2[0]",
+          1
+        ],
+        [
+          17280.0,
+          "z2[2]",
+          1
+        ],
+        [
+          17280.0,
+          "z2[4]",
+          1
+        ],
+        [
+          20880.0,
+          "z2[0]",
+          -1
+        ],
+        [
+          20880.0,
+          "z2[2]",
+          -1
+        ],
+        [
+          20880.0,
+          "z2[4]",
+          -1
+        ],
+        [
+          17280.0,
+          "z3[0]",
+          1
+        ],
+        [
+          20880.0,
+          "z3[0]",
+          -1
+        ]
+      ],
+      "hunt_dwell_s": 3600.0,
+      "shunt_ops_per_h_bank": 0.16666666666666666
+    },
+    "selected_key": "ae17a8cfdcce",
+    "engagement_level": "sts+bank",
+    "max_hunting_applied": 0,
+    "n_feasible": 22,
+    "theta_sts_min_pu": 0.01,
+    "theta_ts_min_pu": 0.0031649653580720057,
+    "engagement": {
+      "sts_moves": {
+        "W1": 5,
+        "W3": 3,
+        "W4": 9,
+        "W6": 20
+      },
+      "sts_all": true,
+      "bank_after_windows": 3,
+      "bank": true
+    },
+    "failed_settling": [],
+    "aggregate_all_windows": {
+      "e_v_ts": 0.005509690395688099,
+      "e_v_ds": 0.00675421398342051,
+      "e_q": 219689.7750158967,
+      "worst_tap_ops_per_day_tso": 10.004631773969432,
+      "worst_tap_ops_per_day_dso": 8.003705419175546,
+      "worst_tap_rev_per_day_tso": 4.001852709587773,
+      "worst_tap_rev_per_day_dso": 2.0009263547938865,
+      "worst_avr_max_step_pu": 0.00425994501554805,
+      "worst_v_band_excess_ts": 0.0022398686689912967,
+      "worst_v_band_excess_ds": 0.0017233293871466277,
+      "n_hunting": 0.0,
+      "n_hunting_1h": 0.0,
+      "n_event_explained": 5.0,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "worst_v_worst_ts": 0.03013342723743724,
+      "worst_v_worst_ds": 0.031138937552163466,
+      "pf_failures": 0.0,
+      "n_failed_windows": 0,
+      "has_shunt_wear": 1.0,
+      "worst_shunt_ops_per_day_bank": 4.0,
+      "n_shunt_hunting": 0.0,
+      "n_shunt_event_explained": 2.0,
+      "shunt_commits": 6.0
+    },
+    "baseline_aggregate": {
+      "e_v_ts": 0.006166313520823841,
+      "e_v_ds": 0.007512810105956451,
+      "e_q": 384762.41188578896,
+      "worst_tap_ops_per_day_tso": 12.005558128763315,
+      "worst_tap_ops_per_day_dso": 12.005558128763315,
+      "worst_tap_rev_per_day_tso": 4.001852709587773,
+      "worst_tap_rev_per_day_dso": 4.001852709587773,
+      "worst_avr_max_step_pu": 0.0003496351859340052,
+      "worst_v_band_excess_ts": 0.0035044657935265405,
+      "worst_v_band_excess_ds": 0.0024307078816642696,
+      "n_hunting": 0.0,
+      "n_hunting_1h": 0.0,
+      "n_event_explained": 2.0,
+      "n_viol_v_ts": 0.0,
+      "n_viol_v_ds": 0.0,
+      "worst_v_worst_ts": 0.03442397553506057,
+      "worst_v_worst_ds": 0.04717502713507961,
+      "pf_failures": 0.0,
+      "n_failed_windows": 0,
+      "has_shunt_wear": 1.0,
+      "worst_shunt_ops_per_day_bank": 4.0,
+      "n_shunt_hunting": 0.0,
+      "n_shunt_event_explained": 2.0,
+      "shunt_commits": 12.0
+    },
+    "settling": {
+      "run": "results\\ch_09_parameter_selection\\0002_2026-11-08_185554_ch_9_17_procedure_v5\\expC\\cand_ae17a8cfdcce\\20261109-153422",
+      "n_steps": 120,
+      "p95": 20.049999999999997,
+      "per_dso_p95": {
+        "DSO_1": 17.55,
+        "DSO_2": 12.0,
+        "DSO_3": 22.55,
+        "DSO_4": 10.0
+      },
+      "n_over": 0,
+      "censored": 0,
+      "max": 24,
+      "median_residual_mvar": 0.24705532036268615,
+      "pass": true,
+      "limit_p95": 27
+    },
+    "go_criteria": {
+      "go": true,
+      "checks": {
+        "e_v_ts": true,
+        "sts_couplers_every_search_window": true,
+        "banks_after_events_2_windows": true,
+        "all_limits_met": true
+      },
+      "e_v_ts": 0.005509690395688099,
+      "limit_e_v_ts": 0.01,
+      "engagement": {
+        "sts_moves": {
+          "W1": 5,
+          "W3": 3,
+          "W4": 9,
+          "W6": 20
+        },
+        "sts_all": true,
+        "bank_after_windows": 3,
+        "bank": true
+      },
+      "engagement_level": "sts+bank"
+    },
+    "amendment2": {
+      "startup_exempt_s": 900.0,
+      "stage2c": {
+        "leader": "55a1878c7730",
+        "grid": [
+          4.719167579861026,
+          5.7977146716936545,
+          7.122759437028034,
+          8.750637944545714,
+          10.750561648685071,
+          13.207560008149594,
+          16.226095628241755
+        ],
+        "e_v_ts_leader": 0.005522379070496098,
+        "rows": [
+          {
+            "key": "f44f0f26a03e",
+            "g_w_tso_shunt": 4.719167579861026,
+            "feasible": false,
+            "e_v_ts": 0.005406335990375504,
+            "e_v_ds": 0.006225257388271317,
+            "n_hunting": 2.0,
+            "n_shunt_hunting": 1.0,
+            "bank_after_windows": 4,
+            "sts_all": true
+          },
+          {
+            "key": "3ed9c17d101b",
+            "g_w_tso_shunt": 5.7977146716936545,
+            "feasible": false,
+            "e_v_ts": 0.005397412250234763,
+            "e_v_ds": 0.00651878265456465,
+            "n_hunting": 1.0,
+            "n_shunt_hunting": 0.0,
+            "bank_after_windows": 4,
+            "sts_all": true
+          },
+          {
+            "key": "d6639aa6fa69",
+            "g_w_tso_shunt": 7.122759437028034,
+            "feasible": false,
+            "e_v_ts": 0.0054224125713488655,
+            "e_v_ds": 0.006361298208884565,
+            "n_hunting": 2.0,
+            "n_shunt_hunting": 0.0,
+            "bank_after_windows": 4,
+            "sts_all": true
+          },
+          {
+            "key": "45b169134c8c",
+            "g_w_tso_shunt": 8.750637944545714,
+            "feasible": true,
+            "e_v_ts": 0.005456304716620504,
+            "e_v_ds": 0.006489496653691347,
+            "n_hunting": 0.0,
+            "n_shunt_hunting": 0.0,
+            "bank_after_windows": 4,
+            "sts_all": true
+          },
+          {
+            "key": "586e637a1c6f",
+            "g_w_tso_shunt": 10.750561648685071,
+            "feasible": true,
+            "e_v_ts": 0.005484630088595043,
+            "e_v_ds": 0.006504472284835851,
+            "n_hunting": 0.0,
+            "n_shunt_hunting": 0.0,
+            "bank_after_windows": 4,
+            "sts_all": true
+          },
+          {
+            "key": "86ef9f91328e",
+            "g_w_tso_shunt": 13.207560008149594,
+            "feasible": true,
+            "e_v_ts": 0.0055024317061643305,
+            "e_v_ds": 0.006558810620471138,
+            "n_hunting": 0.0,
+            "n_shunt_hunting": 0.0,
+            "bank_after_windows": 3,
+            "sts_all": true
+          },
+          {
+            "key": "22ca384cc720",
+            "g_w_tso_shunt": 16.226095628241755,
+            "feasible": false,
+            "e_v_ts": 0.005512780836850943,
+            "e_v_ds": 0.006602909206007703,
+            "n_hunting": 1.0,
+            "n_shunt_hunting": 0.0,
+            "bank_after_windows": 3,
+            "sts_all": true
+          },
+          {
+            "key": "55a1878c7730",
+            "g_w_tso_shunt": 19.934505629683937,
+            "feasible": true,
+            "e_v_ts": 0.005522379070496098,
+            "e_v_ds": 0.0064672900867031174,
+            "n_hunting": 0.0,
+            "n_shunt_hunting": 0.0,
+            "bank_after_windows": 3,
+            "sts_all": true
+          }
+        ],
+        "pick": "45b169134c8c",
+        "pick_g_w_tso_shunt": 8.750637944545714
+      }
+    },
+    "weight_fingerprint": "ae17a8cfdcce",
+    "design_rho": 25000.0,
+    "design_kappa": 0.2617713541492602,
+    "design_theta_sts_min": 0.01,
+    "design_theta_ts_min": 0.0031649653580720057,
+    "design_lambda_max_B": 1.5108583605208925,
+    "design_lambda_max_B_sts": 1.4000000000273802,
+    "v4": {
+      "hunting_tolerance": 0,
+      "hunt_dwell_s": 3600.0,
+      "settling_periods": 3,
+      "go_e_v_ts": 0.01,
+      "lambda_exclude": [
+        "shunt"
+      ],
+      "lambda_bank_points": 192,
+      "lambda_max_B_v4": 1.5301274819867694,
+      "config_set": [
+        "sts_coupler_hold_after_bank=1"
+      ]
+    },
+    "network": "rural_700_north_res",
+    "v5": {
+      "lambda_sts_min": 0.5,
+      "lambda_sts_selected": 0.6512893516609053,
+      "g_w_pcc_interval": [
+        0.1095611430441905,
+        0.2845982475010034
+      ],
+      "n_scarce_points": 16,
+      "kappa_min": 0.1422991237505017,
+      "kappa_max": 0.16936988296686456,
+      "lambda_bank_points": 192,
+      "bank_hours": [
+        12.0,
+        3.0
+      ]
+    },
+    "lambda_max_B": 1.5301274819867694,
+    "record_additions": {
+      "fields": {
+        "sts_coupler_hold_after_bank": 1
+      },
+      "provenance": {
+        "lambda_max_B": 1.5301274819867694
+      },
+      "by": "experiments\\ch_09_parameter_selection\\ch_9_16_ref_after_v4.py",
+      "on": "2026-11-09 16:37:53",
+      "reason": "the selection ran with these config fields (--config-set); lambda_max_B is M's loop-gain ceiling in the REF variants (author B1b: banks excluded, as in variant M)"
+    }
+  },
+  "fields": {
+    "g_v": 40000.0,
+    "g_q": 0.4,
+    "dso_g_v": 10000.0,
+    "g_w_der": 0.022532398905707126,
+    "g_w_pcc": 0.21848833147296706,
+    "g_w_gen": 404117.9872875563,
+    "g_w_tso_oltc": 8.93028702303999,
+    "g_w_tso_shunt": 20.0910287552004,
+    "g_w_dso_der": 1.5280510783923393,
+    "g_w_dso_oltc": 11.342714141101698,
+    "sts_coupler_hold_after_bank": 1
+  }
+}

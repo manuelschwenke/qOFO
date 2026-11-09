@@ -264,6 +264,30 @@ on on `rural_700`.
   - case1/0004 (F:\qOFO_res);
   - the server-mirror run ref_from_server/0001 (two-ramp).
 
+## 5c. LOC screens: result (19:12)
+- All three runs are `ok`: 1080 records = 360 min. Every step converges under LOC on north_res.
+  - E2 took 2.14 h, P2 1.80 h and P2R_B03B05 1.82 h. They ran on 2 shared CPUs until 18:03.
+- Area-2 minimum per stage under L2:
+
+| E2 stage | north_res min / median | old ref/0029 L2 min / median |
+|---|---|---|
+| G3 out + 600, 91:40–100 | 0.906 / 0.920 | 0.929 / 0.935 |
+| same, 100–152:20 | **0.893** / 0.905 | 0.928 / 0.942 |
+| 3-4 open, 241–250 | 0.917 / 0.917 | 0.945 / 0.945 |
+| same, 250–360 | 0.906 / 0.912 | 0.935 / 0.943 |
+
+- **Under LOC, area 2 falls below 0.90 pu for about 10 min.** That is 29 samples, between 101:40
+  and 110:40, plus one at 114:40, while G3 is out with the 600 Mvar load.
+  - This is not a run failure: the MC rule does not count a voltage outside 0.90 as a failure
+    either.
+  - It is the uncoordinated baseline, 25–35 mpu lower than on `rural_700`. That is consistent with
+    the scarcer bounds of § 3.4.
+  - Hypothesis 6 ("LOC near 0.92 pu after the line trip") becomes 0.906–0.917 after the trip, and
+    0.893 at the low point in stage 2.
+  - The declared static frozen-control criterion (≥ 0.90) still holds at 0.957. That check
+    includes the relays and IBG Q(V) loops at equilibrium, not the transient after the step.
+- P2: area-2 min 1.010 pu, no excursion. P2R_B03B05: area-2 min 0.966 pu at the ramp hold.
+
 ## 6. Open / pending
 - G1, the weights: resolved (§ 5b).
 - The dead band: decided (§ 4).

@@ -1416,11 +1416,12 @@ class TestThreeWindingQSensitivityOLTC:
         Perturbs the OLTC tap position by ±1 and compares the resulting
         change in HV-side reactive power flow.
 
-        Note: ``compute_dQtrafo3w_hv_ds`` internally multiplies the
-        sensitivity by ``delta_tau = tap_step_percent / 100``, so its
-        output is in [Mvar · delta_tau / step].  The finite-difference
-        result ``(Q+ − Q−) / 2`` is in [Mvar / step].  We therefore
-        scale the numerical value by ``delta_tau`` before comparison.
+        Both sides are in [Mvar / step]: ``compute_dQtrafo3w_hv_ds`` applies
+        ``delta_tau`` and ``sn_mva`` itself, and ``(Q+ − Q−) / 2`` is the
+        central difference per tap step.  Until 2026-11-09 the analytical
+        value lacked ``sn_mva`` and the numerical one was multiplied by
+        ``delta_tau``; with this fixture's 1.2 %/step the two errors nearly
+        cancelled, so the test passed with the wrong unit.
         """
         sens = JacobianSensitivities(trafo3w_network)
 
@@ -1440,12 +1441,11 @@ class TestThreeWindingQSensitivityOLTC:
         pp.runpp(net_minus, calculate_voltage_angles=True)
         Q_hv_minus = net_minus.res_trafo3w.at[0, 'q_hv_mvar']
 
-        delta_tau = trafo3w_network.trafo3w.at[0, 'tap_step_percent'] / 100.0
-        dQhv_ds_numerical = (Q_hv_plus - Q_hv_minus) / 2.0 * delta_tau
+        dQhv_ds_numerical = (Q_hv_plus - Q_hv_minus) / 2.0
 
         np.testing.assert_allclose(
             val_analytical, dQhv_ds_numerical,
-            rtol=0.20,
+            rtol=0.02,
             err_msg=(
                 f"3W HV-Q/OLTC sensitivity mismatch: "
                 f"analytical={val_analytical:.6f}, "

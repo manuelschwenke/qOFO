@@ -1318,8 +1318,11 @@ class JacobianSensitivities:
                               g_meas * V_i_meas * V_j_meas * np.sin(theta_i_meas - theta_j_meas) / tau_meas**2)
             direct_effect = dQ_dtau_direct * delta_tau_chg
 
-        # Total sensitivity (Equation 17), scaled from per-unit to Mvar
-        sensitivity = (indirect_effect + direct_effect)
+        # Total sensitivity (Equation 17), scaled from per-unit to Mvar.
+        # dQ_dx, dg_dtau and the direct term are per unit on the system base,
+        # so the result is pu per tap step until multiplied by sn_mva
+        # (sn_mva slip, 2026-11-09; FD check 2026-11-08d_qgen_row_check).
+        sensitivity = (indirect_effect + direct_effect) * float(self.net.sn_mva)
 
         return sensitivity
 
@@ -2463,7 +2466,9 @@ class JacobianSensitivities:
             )
             direct = dQ_dtau_direct * d_meas['delta_tau']
 
-        return (indirect + direct)
+        # Per unit on the system base until multiplied by sn_mva (sn_mva slip,
+        # 2026-11-09): returns Mvar per tap step as documented.
+        return (indirect + direct) * float(self.net.sn_mva)
 
     def compute_dQtrafo3w_hv_ds_matrix(
         self,
@@ -2548,14 +2553,16 @@ class JacobianSensitivities:
         Compute HV-side Q sensitivity of a 3W transformer to a PV
         generator voltage setpoint change.
 
-        Uses the chain rule:
+        Uses the full chain rule over the state x = [θ_PV, θ_PQ, V_PQ]:
 
-            ∂Q_HV/∂V_gen = ∂Q_HV/∂V_hv · ∂V_hv/∂V_gen
-                          + ∂Q_HV/∂V_star · ∂V_star/∂V_gen
+            ∂Q_HV/∂V_gen = ∂Q_HV/∂x · ∂x/∂V_gen  (+ ∂Q_HV/∂V_hv if the HV bus
+                                                  is the generator bus)
 
-        where ``∂Q_HV/∂V_hv`` and ``∂Q_HV/∂V_star`` are the branch-
-        level partial derivatives (same as in ``compute_dQtrafo3w_hv_dQ_der``)
-        and ``∂V_bus/∂V_gen`` comes from ``compute_dV_dVgen``.
+        with ``∂x/∂V_gen = -J⁻¹ ∂g/∂V_gen`` (same ∂g/∂V_k as
+        ``compute_dQgen_dVgen_matrix``).  Until 2026-11-09 only the V terms
+        were kept (``∂Q_HV/∂V_hv · ∂V_hv/∂V_gen + ∂Q_HV/∂V_star · ∂V_star/∂V_gen``);
+        a V_set move also shifts the angles, and the omitted θ terms flipped
+        the sign of these small entries against finite differences.
 
         Parameters
         ----------
@@ -2579,88 +2586,26 @@ class JacobianSensitivities:
         g_val = d['g']
         b_val = d['b']
 
-        # ∂Q_HV/∂V_hv and ∂Q_HV/∂V_star (identical to compute_dQtrafo3w_hv_dQ_der)
+        # ∂Q_HV/∂V_hv, needed for the direct term when V_hv is the setpoint itself
         dQ_dV_hv = (
             b_val * (-2.0 * U_i / tau**2
                      + U_j * np.cos(theta_i - theta_j) / tau)
             - g_val * U_j * np.sin(theta_i - theta_j) / tau
         )
-        dQ_dV_star = (
-            b_val * U_i * np.cos(theta_i - theta_j) / tau
-            - g_val * U_i * np.sin(theta_i - theta_j) / tau
-        )
 
-        # ∂V/∂V_gen at hv_bus and aux_bus
-        hv_bus_pp = int(self.net.trafo3w.at[trafo3w_idx, 'hv_bus'])
-        # The aux bus is internal to pandapower (not in net.bus), so we
-        # need to use the ppc bus index directly and extract from dx/dVk.
-        # Re-use the full dV_dVgen computation and request both buses.
-        #
-        # For the HV bus: use compute_dV_dVgen with [hv_bus_pp]
-        # For the aux bus: extract from the state vector directly
-        v_hv_jac = d['v_hv_jac']
-        v_aux_jac = d['v_aux_jac']
+        # Indirect effect over all state variables (θ and V), as in
+        # compute_dQtrafo3w_hv_ds and compute_dQgen_dVgen_matrix.
+        dQ_dx = self._compute_dQhv_dx_3w(d)
+        dg_dVk, _ = self._compute_dg_dVk(gen_bus_ppc)
+        sensitivity = float(dQ_dx @ (-self.J_inv @ dg_dVk))
 
-        # Run full sensitivity computation for this generator
-        bus_data = self.net._ppc['bus']
-        Ybus = np.array(self.net._ppc['internal']['Ybus'].todense())
-        n_bus = min(bus_data.shape[0], Ybus.shape[0])
-        V_complex = bus_data[:n_bus, 7] * np.exp(1j * np.deg2rad(bus_data[:n_bus, 8]))
+        # Direct effect: the HV bus is the generator bus (V_hv not in x).
+        if d['v_hv_jac'] is None and d['hv_bus_ppc'] == gen_bus_ppc:
+            sensitivity += dQ_dV_hv
 
-        k = gen_bus_ppc
-        V_k = V_complex[k]
-        Vm = np.abs(V_complex)
-        theta = np.angle(V_complex)
-        G = np.real(Ybus)
-        B = np.imag(Ybus)
-
-        dP_dVk = np.zeros(n_bus)
-        dQ_dVk = np.zeros(n_bus)
-        for i in range(n_bus):
-            cos_ik = np.cos(theta[i] - theta[k])
-            sin_ik = np.sin(theta[i] - theta[k])
-            if i == k:
-                dP_dVk[i] = 2 * Vm[k] * G[k, k]
-                dQ_dVk[i] = -2 * Vm[k] * B[k, k]
-                for j_bus in range(n_bus):
-                    if j_bus != k:
-                        cos_kj = np.cos(theta[k] - theta[j_bus])
-                        sin_kj = np.sin(theta[k] - theta[j_bus])
-                        dP_dVk[i] += Vm[j_bus] * (G[k, j_bus] * cos_kj + B[k, j_bus] * sin_kj)
-                        dQ_dVk[i] += Vm[j_bus] * (G[k, j_bus] * sin_kj - B[k, j_bus] * cos_kj)
-            else:
-                dP_dVk[i] = Vm[i] * (G[i, k] * cos_ik + B[i, k] * sin_ik)
-                dQ_dVk[i] = Vm[i] * (G[i, k] * sin_ik - B[i, k] * cos_ik)
-
-        pv_list = list(self.pv_buses)
-        pq_list = list(self.pq_buses)
-        dg_dVk = np.zeros(self.x_size)
-        for idx_pv, bus_pv in enumerate(pv_list):
-            dg_dVk[idx_pv] = dP_dVk[bus_pv]
-        n_pv = len(pv_list)
-        for idx_pq, bus_pq in enumerate(pq_list):
-            dg_dVk[n_pv + idx_pq] = dP_dVk[bus_pq]
-            dg_dVk[self.n_theta + idx_pq] = dQ_dVk[bus_pq]
-
-        dx_dVk = -self.J_inv @ dg_dVk
-        dV_full = dx_dVk[self.n_theta:]   # V_PQ part
-
-        sensitivity = 0.0
-
-        if v_hv_jac is not None and v_hv_jac < len(dV_full):
-            dV_hv_dVgen = dV_full[v_hv_jac]
-            sensitivity += dQ_dV_hv * dV_hv_dVgen
-        else:
-            # HV bus is a PV bus (generator bus itself) — dV/dVgen = 1
-            # if it IS the generator, else check if slack
-            if d['hv_bus_ppc'] == gen_bus_ppc:
-                sensitivity += dQ_dV_hv * 1.0
-
-        if v_aux_jac is not None and v_aux_jac < len(dV_full):
-            dV_star_dVgen = dV_full[v_aux_jac]
-            sensitivity += dQ_dV_star * dV_star_dVgen
-
-        return sensitivity
+        # Per unit on the system base until multiplied by sn_mva (sn_mva slip,
+        # 2026-11-09): returns Mvar / p.u. as documented.
+        return sensitivity * float(self.net.sn_mva)
 
     def compute_dQtrafo3w_hv_dVgen_matrix(
         self,
@@ -3006,6 +2951,9 @@ class JacobianSensitivities:
                 if meas == chg_ppc:
                     matrix[i, j] += dQl_dVl
 
+        # ∂Q[pu]/∂V[pu] on the system base -> Mvar / p.u. (sn_mva slip,
+        # 2026-11-09; FD check 2026-11-08d_qgen_row_check).
+        matrix *= float(self.net.sn_mva)
         return matrix, list(gen_bus_indices_pp_meas), list(gen_bus_indices_pp_chg)
 
     def compute_dQgen_ds_2w_matrix(
@@ -3051,6 +2999,9 @@ class JacobianSensitivities:
                 if int(gb) in dQ_direct:
                     matrix[i, j] += dQ_direct[int(gb)] * delta_tau
 
+        # pu per tap step on the system base -> Mvar per tap step (sn_mva slip,
+        # 2026-11-09).
+        matrix *= float(self.net.sn_mva)
         return matrix, list(gen_bus_indices_pp), list(oltc_trafo_indices)
 
     def compute_dQgen_ds_3w_matrix(
@@ -3090,6 +3041,9 @@ class JacobianSensitivities:
             dx_ds = -self.J_inv @ dg_dtau * delta_tau
             matrix[:, j] = dQgen_dx_cache @ dx_ds
 
+        # pu per tap step on the system base -> Mvar per tap step (sn_mva slip,
+        # 2026-11-09).
+        matrix *= float(self.net.sn_mva)
         return matrix, list(gen_bus_indices_pp), list(oltc_trafo3w_indices)
 
     def compute_dQgen_dQ_shunt_matrix(

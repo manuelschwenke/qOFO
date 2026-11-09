@@ -141,13 +141,18 @@ class TestComputeDQgenDQder:
 
 class TestComputeDQgenDVgen:
     def test_direct_term_matches_numerical(self, pv_gen_network):
-        """Self-sensitivity ∂Q_gen_k/∂V_gen_k should match numerical."""
+        """Self-sensitivity ∂Q_gen_k/∂V_gen_k should match numerical.
+
+        Both sides in [Mvar / p.u.].  Until 2026-11-09 the analytical matrix
+        was per unit on the system base and this test multiplied it by
+        ``sn_mva`` itself, which hid the missing scaling from the controller.
+        """
         sens = JacobianSensitivities(pv_gen_network)
         mat, _, _ = sens.compute_dQgen_dVgen_matrix(
             gen_bus_indices_pp_meas=[1],
             gen_bus_indices_pp_chg=[1],
         )
-        analytical = float(mat[0, 0]) * pv_gen_network.sn_mva
+        analytical = float(mat[0, 0])
         numerical = _numerical_dQgen_dVgen(
             pv_gen_network, meas_gen_bus=1, chg_gen_bus=1, delta_v=1e-3,
         )
@@ -155,7 +160,7 @@ class TestComputeDQgenDVgen:
         assert np.sign(analytical) == np.sign(numerical) or abs(numerical) < 1e-3
         if abs(numerical) > 1e-3:
             ratio = analytical / numerical
-            assert 0.3 < ratio < 3.0, f"ratio={ratio}"
+            assert 0.95 < ratio < 1.05, f"ratio={ratio}"
 
 
 class TestPQModeVariants:

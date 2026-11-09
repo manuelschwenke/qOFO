@@ -154,6 +154,24 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
         ramps=lambda: [dict(kind="bus", bus=11, p_mw=200.0, q_mvar=100.0,
                             t0_s=110 * 60.0, ramp_s=30 * 60.0, hold_s=30 * 60.0,
                             down=True)]),
+    # Added 2026-11-08: two independent +300 MW / +300 Mvar ramps at B03
+    # (pandapower bus 2) and B05 (pandapower bus 4), using P2R's original
+    # 110-140 min rise, 140-170 min hold, and 170-200 min return to baseline.
+    # (Author's entry in ref/ref_from_server/ref/scenarios.py, run 0001 of
+    # 2026-11-08 = tab:case3:r3:b03b05; ported verbatim 2026-11-09 so that the
+    # canonical runner reproduces it.)
+    "P2R_B03B05": dict(
+        title="Period II with two load ramps: 6 Nov 2016 08:00, +300 MW / +300 Mvar each at B03 and B05",
+        start="2016-11-06T08:00:00",
+        events=lambda: [],
+        ramps=lambda: [
+            dict(kind="bus", bus=2, p_mw=300.0, q_mvar=300.0,
+                 t0_s=110 * 60.0, ramp_s=30 * 60.0, hold_s=30 * 60.0,
+                 down=True),
+            dict(kind="bus", bus=4, p_mw=300.0, q_mvar=300.0,
+                 t0_s=110 * 60.0, ramp_s=30 * 60.0, hold_s=30 * 60.0,
+                 down=True),
+        ]),
     # Renewable-dominated period under unit commitment (author decision
     # 2026-10-31): the earliest 6-h window of the profile year, outside the
     # excluded days, starting at a full hour between 06:00 and 12:00, in which

@@ -288,6 +288,42 @@ on on `rural_700`.
     includes the relays and IBG Q(V) loops at equilibrium, not the transient after the step.
 - P2: area-2 min 1.010 pu, no excursion. P2R_B03B05: area-2 min 0.966 pu at the ramp hold.
 
+## 5d. Ch 10 MC queued behind the reference runs (author ~19:20)
+- **Author:** "(a), then only queue 50 mc runs tonight. I can add another 50 later, correct? Queue
+  them, to only start after the ref runs."
+  - (a) means the declared protocol of 2026-11-07, with G3-off episodes in their drawn
+    proportion. No G3-on filter: the 11-04 scope filter was tied to v4's design envelope, and v5's
+    λ bank contains G3-off states.
+  - **50 + 50: yes.**
+    - `run_mc` continues the newest campaign of the same `--tag` and skips every run that has its
+      JSON. Re-running with `--n 100` later adds exactly the missing episodes. The OFO+ extension
+      uses `--n-o3 300`.
+    - Statistically this is execution in two batches, not an extension: N = 100 stays fixed in
+      advance, and the second 50 run whatever the first 50 show.
+    - Tests and intervals are computed only on the full window. Looking at the first 50 is
+      allowed, but not a decision on whether to continue.
+- **Queue** `mc_queue.py`, detached pythonw in this session's scratchpad (pid in `mc_queue.pid`,
+  log `mc_queue.log`). No repository code change.
+  - **e5power: S1, O2.** Starts when the Ch 9 run there has ended, through `mc_remote_wrapper.py`.
+    - The wrapper sets the remote root to `F:\qOFO_runs\qOFO_ref` and adds `--n 50`; the module
+      default root is `qOFO_res`, and its remote call has no `--n`.
+    - Call: `run_mc_remote --variants S1,O2 --jobs 30 --buffer 6 --tag v5nr_e5power`, pulled back
+      into `results/ch_11_case2_multisystem/mc/`.
+    - Dry run 19:25: e5power at bfae475; no Python file differs.
+  - **e5wimi: L2, M, S2, O3 and the prescreen.** Starts when REF 0004–0006 have all 18 status
+    files and their launchers have exited.
+    - Call: `run_mc --new --variants L2,M,S2,O3 --n 50 --n-o3 50 --buffer 6 --jobs 30 --tag v5nr`.
+    - 30 CPUs at night, 10 from 08:00 (e5wimi day rule), 20 from 18:00. Only its own process tree
+      is re-pinned.
+  - The split follows amendment A1 of 11-07.
+- **Estimate**, old-base minutes per episode × 56 episodes, × 1.0–1.6 for the new network:
+  - e5power: ≈ 90–140 CPU-h at ≈ 18 core-equivalents (another user runs ≈ 34 Python processes
+    there). From ≈ 22:00 it ends ≈ 03:00–06:00.
+  - e5wimi: ≈ 95–150 CPU-h at ≈ 19.5. From the REF end (≈ 00:30–02:00) it ends ≈ 05:30–09:30.
+    After 08:00 it runs at 10 CPUs.
+- **Later, the second 50:** the same two calls with `--n 100` (local `--n-o3 300`, no `--new`).
+  Then `merge_mc.py` and the final invocation with all six variants, as on 11-07/08.
+
 ## 6. Open / pending
 - G1, the weights: resolved (§ 5b).
 - The dead band: decided (§ 4).

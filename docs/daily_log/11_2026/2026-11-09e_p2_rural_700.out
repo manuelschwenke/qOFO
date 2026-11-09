@@ -1,0 +1,7 @@
+network rural_700 | start 2016-11-06 08:00:00 | committed: ['G10_bus29', 'G3_bus31', 'G4_bus32', 'G7_bus35', 'G9_bus37', 'G1_bus38'] | off: []
+P2 t = 0 (6 Nov 08:00)             | frozen  -16.1 min 1.003 (IEEE 8)   | TS-a2  +27.0 | TS-all  +56.3 | STS share not scarce
+network rural_700 | start 2016-11-06 10:35:00 | committed: ['G10_bus29', 'G3_bus31', 'G4_bus32', 'G7_bus35', 'G9_bus37', 'G1_bus38'] | off: []
+P2R hold (10:35, +200/+100 @ 12)   | frozen  -12.6 min 0.990 (IEEE 12)  | TS-a2  +16.0 | TS-all  +31.0 | STS share not scarce
+network rural_700 | start 2016-11-06 10:35:00 | committed: ['G10_bus29', 'G3_bus31', 'G4_bus32', 'G7_bus35', 'G9_bus37', 'G1_bus38'] | off: []
+B03B05 hold (10:35, 2x300/300)     | frozen  -27.8 min 0.985 (IEEE 3)   | TS-a2  -19.0 | TS-all   -6.9 | STS share 27 %
+[303 s]

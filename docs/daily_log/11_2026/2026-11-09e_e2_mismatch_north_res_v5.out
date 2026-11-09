@@ -1,0 +1,14 @@
+network rural_700_north_res | paramset ch9_selected_nr_2026_11_v5 | variants ['O2', 'O3']
+== O2: zones [1, 2, 3] | columns [{'der': 1, 'pcc': 0, 'gen': 3}, {'der': 0, 'pcc': 9, 'gen': 1}, {'der': 1, 'pcc': 3, 'gen': 2}]
+   0: t = 0             | z1 0.75 (dH 0.28, gen [7] out) | z2 0.43 (dH 1.44) | z3 0.30 (dH 1.31)
+   1: G3 out            | z1 0.81 (dH 0.41, gen [7] out) | z2 0.39 (dH 0.31, gen [1] out) | z3 0.34 (dH 1.36)
+   2: G3 out + 600      | z1 0.84 (dH 0.47, gen [7] out) | z2 0.49 (dH 0.32, gen [1] out) | z3 0.36 (dH 1.45)
+   3: G3 back + 600     | z1 0.76 (dH 0.29, gen [7] out) | z2 0.47 (dH 1.40) | z3 0.31 (dH 1.30)
+   4: + 3-4 open        | z1 0.79 (dH 0.38, gen [7] out) | z2 0.59 (dH 2.32) | z3 0.31 (dH 1.30)
+== O3: zones [1, 2, 3] | columns [{'der': 1, 'pcc': 0, 'gen': 3}, {'der': 0, 'pcc': 9, 'gen': 1}, {'der': 1, 'pcc': 3, 'gen': 2}]
+   0: t = 0             | z1 0.75 (dH 0.28, gen [7] out) | z2 0.43 (dH 1.44) | z3 0.30 (dH 1.40)
+   1: G3 out            | z1 0.81 (dH 0.41, gen [7] out) | z2 0.39 (dH 0.31, gen [1] out) | z3 0.34 (dH 1.34)
+   2: G3 out + 600      | z1 0.81 (dH 0.43, gen [7] out) | z2 0.43 (dH 0.35, gen [1] out) | z3 0.35 (dH 1.33)
+   3: G3 back + 600     | z1 0.75 (dH 0.28, gen [7] out) | z2 0.45 (dH 1.38) | z3 0.31 (dH 1.39)
+   4: + 3-4 open        | z1 0.79 (dH 0.38, gen [7] out) | z2 0.55 (dH 1.31) | z3 0.31 (dH 1.39)
+[153 s]

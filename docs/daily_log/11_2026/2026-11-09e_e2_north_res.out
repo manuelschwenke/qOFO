@@ -1,0 +1,15 @@
+network rural_700_north_res | start 2016-01-05 08:00:00 | committed: ['G10_bus29', 'G3_bus31', 'G4_bus32', 'G7_bus35', 'G1_bus38'] | off: ['G9_bus37']
+area-2 STS ['DSO_1', 'DSO_2', 'DSO_3'] (30 IBG) | TS IBG 2 (area 2: 0) | op_diagram column: op_diagram
+0: t = 0                           | frozen   -5.5 min 1.019 (IEEE 12)  | TS-a2  +18.1 | TS-all  +56.4 | STS share not scarce
+1: G3 out                          | frozen   -2.5 min 1.021 (IEEE 12)  | TS-a2  +26.8 | TS-all  +92.1 | STS share not scarce
+2: G3 out + 600                    | frozen  -39.6 min 0.957 (IEEE 4)   | TS-a2  -68.5 | TS-all   -7.2 | STS share 50 %
+3: G3 back + 600                   | frozen  -35.2 min 0.960 (IEEE 4)   | TS-a2  -34.6 | TS-all   +0.6 | STS share 51 %
+4: + 3-4 open                      | frozen  -42.6 min 0.937 (IEEE 4)   | TS-a2  -53.9 | TS-all  -24.9 | STS share 64 %
+-- end states of the line candidates (G3 back + 600, line open)
+end: 2-3 open                      | frozen  -41.5 min 0.950 (IEEE 4)   | TS-a2  -47.4 | TS-all  -12.6 | STS share 59 %
+end: 4-14 open                     | frozen  -38.8 min 0.934 (IEEE 4)   | TS-a2  -39.8 | TS-all   -3.7 | STS share 58 %
+end: 3-18 open                     | frozen  -36.8 min 0.958 (IEEE 4)   | TS-a2  -37.0 | TS-all   -4.2 | STS share 53 %
+end: 17-27 open                    | frozen  -37.2 min 0.958 (IEEE 4)   | TS-a2  -38.9 | TS-all   -8.8 | STS share 55 %
+end: 14-15 open                    | frozen  -37.2 min 0.958 (IEEE 4)   | TS-a2  -38.5 | TS-all  -10.0 | STS share 47 %
+end: 9-39 open                     | frozen  -38.3 min 0.957 (IEEE 4)   | TS-a2  -40.4 | TS-all   +3.8 | STS share 43 %
+[5270 s]

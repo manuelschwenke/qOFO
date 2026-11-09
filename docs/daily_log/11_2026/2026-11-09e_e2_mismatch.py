@@ -40,9 +40,13 @@ CONT = ("der", "pcc", "gen")
 LINES = {"3-4": 4}
 
 
+PF = {}
+
+
 def solve(n):
-    pp.runpp(n, numba=False, enforce_q_lims=True, distributed_slack=True,
-             calculate_voltage_angles=True, max_iteration=50, max_iter=300, run_control=True)
+    """The runner's plant settings (config.distributed_slack, config.enforce_q_lims_plant)."""
+    pp.runpp(n, numba=False, calculate_voltage_angles=True, max_iteration=100, run_control=True,
+             distributed_slack=PF["distributed_slack"], enforce_q_lims=PF["enforce_q_lims"])
 
 
 def ev_gen(i, on=False):
@@ -124,16 +128,20 @@ if __name__ == "__main__":
     print(f"network {NETWORK} | paramset {PSET} | variants {VARIANTS}", flush=True)
     for var in VARIANTS:
         st = capture(var)
+        PF.update(distributed_slack=bool(st["config"].distributed_slack),
+                  enforce_q_lims=bool(st["config"].enforce_q_lims_plant))
         tso = st["tso_controllers"]
         Hm = {z: H_of(tso[z]) for z in sorted(tso)}
         print(f"== {var}: zones {sorted(tso)} | columns {[mu(tso[z], Hm[z], Hm[z])[1] for z in sorted(tso)]}",
               flush=True)
-        for tag, evs in stages:
+        print(f"   plant PF settings {PF}", flush=True)
+        for tag, evs in [("-: as captured", None)] + stages:
             n = copy.deepcopy(st["net"])
-            for e in evs:
+            for e in evs or []:
                 e(n)
             try:
-                solve(n)
+                if evs is not None:
+                    solve(n)
                 jac = JacobianSensitivities(n)
             except Exception as exc:  # noqa: BLE001
                 print(f"   {tag:20s} | plant PF/J failed: {type(exc).__name__}: {exc}", flush=True)

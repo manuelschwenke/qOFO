@@ -157,9 +157,26 @@ End states with G3 back and 600 Mvar at IEEE 4, on north_res:
 | + 3-4 open | 0.79 / 0.59 / 0.31 | 0.79 / 0.55 / 0.31 |
 
 - **All TS-OFO states are below 2, at 0.84 at most.**
-- Side finding: the cached model differs from the t = 0 plant by about 14 % (max |ΔH| / max |H|)
-  even before any event. The controllers' H is taken at the bootstrap operating point, not at the
-  period start.
+- ~~Side finding: the controllers' H is taken at the bootstrap operating point, not at the period
+  start.~~ **Corrected 18:55:**
+  - The runner rebuilds the models after initialisation, at t = 0 of the period, with the run's
+    own unit commitment (`multi_tso_dso.py` ≈ l. 2519). Checked with `model_vs_start` (scratchpad):
+    `shared_jac.net` equals the loop-start plant (|ΔV| ≤ 4e-10 pu; commitment, taps, banks, IBG and
+    loads identical).
+  - The models are never refreshed in the run: `sensitivity_update_interval` = 10⁶ and
+    `refresh_shared_jac_on_tso` = False. Banks enter as rank-1 updates.
+  - What differs from the plant is the **structure**. `local_sensitivities_tso` = True, so each
+    TSO-OFO uses a reduced zone net: Ward/Thevenin tie sources (`WARD_TIE_TH_SRC_*`), with the STS
+    as PQ loads at the MV bus.
+  - On common buses that net differs from the plant by up to 0.011 / 0.043 / 0.015 pu (zones
+    1/2/3).
+  - The t = 0 row of μ (0.75 against the model's own λ of 0.68 in zone 1) is therefore the
+    reduced-model error. It is exactly the mismatch the criterion is meant to measure.
+  - The author asked (18:5x) whether the model should always be built from the REF start point. It
+    already is, and the v5 tuning ran the same way, so nothing changes.
+  - A second variant with the runner's PF settings for the post-event plants (max_iteration 100)
+    failed with ControllerNotConverged in the event states. The table above uses the declaration's
+    settings (max_iter 300).
 - **Not evaluated:** CEN (variant M at λ_sel = 1.530). In the declaration Msel was marginal while
   G3 was out (2.17 / 2.26 at λ 1.405), which is hypothesis 5. Open.
 - The values must be recomputed if the final weights differ from ae17a8cfdcce. It is one run of
@@ -215,9 +232,41 @@ on on `rural_700`.
 - `F:\qOFO_runs\qOFO_ref` was cloned from a bundle of `res/ref-v5-2026-11-09` at bfae475.
 - The final paramset still has to be fetched there before Case 1 starts.
 
+## 5b. Launch (author 18:5x: "tuning is through, start the REF runs and the chapter 9 run")
+- **Weights:** the tuning session confirms GO 16:37 with ae17a8cfdcce, i.e.
+  `ch9_selected_nr_2026_11_v5`, with λ_max(B) 1.530 in its provenance. `SELECTED_PARAMSET` on this
+  branch points to it.
+- The tuning session's latest note: in the G3-off report, v5 shows "more oscillation aborts".
+  That is relevant to R2's 61 min with G3 out, and is reported, not a gate.
+- **e5wimi, F:\qOFO_ref, code 27f0651.** Launched with `launch_night.ps1` (pythonw,
+  Win32_Process.Create), 18 processes on CPUs 0–22, 30–38 even, plus CPU 1:
+
+| run | scenario | variants | started |
+|---|---|---|---|
+| ref/0004_2026-11-09_185815_run_ref_v5_E2 | E2 | S1, L2, O2, M, S2, O3 | 18:58 |
+| ref/0005_2026-11-09_185843_run_ref_v5_P2R | P2R | S1, L2, O2, Msel, S2, O3 | 18:58 |
+| ref/0006_2026-11-09_185912_run_ref_v5_P2R_B03B05 | P2R_B03B05 | S1, L2, O2, Msel, S2, O3 | 18:59 |
+
+  - Checked in `config_repr.txt`: scenario `rural_700_north_res`; dead band 0.01/0.01;
+    `local_sensitivities_tso` True; M `central_lambda_target` 1.5301.
+- **e5power, F:\qOFO_runs\qOFO_ref, code bfae475.** The later commits on the branch are docs only.
+  - `run_case1 --only L2,S1m,S1,O0,O1,O2 --jobs 6 --scenario A --tag v5_A`.
+  - Run `ch_10_case1_svr/0001_2026-11-09_185947_run_case1_v5_A`, started 18:59.
+  - Driver console: `results\_case1_v5_A_console.log` there.
+  - The detached watcher `pull_case1.py` (scratchpad) pulls the run into F:\qOFO_ref under the same
+    path when it ends.
+- **Expected end** (S1 is the bottleneck; new-network factor 1.0–1.6):
+  - Case 1 ≈ 21:00–22:00;
+  - R3 and R3-two-ramp ≈ 21:30–23:00;
+  - R2 ≈ 22:00–00:30, worst case ≈ 02:00.
+- **Supersedes, after the result** (`thesis_runs archive`, never delete): the v4 runs on rural_700.
+  - ref/0028 and ref/0029 (F:\qOFO_res);
+  - case1/0004 (F:\qOFO_res);
+  - the server-mirror run ref_from_server/0001 (two-ramp).
+
 ## 6. Open / pending
-- G1: final weights from "STS capabilities tuning analysis". Nothing new committed as of 18:40.
-- The dead-band decision (§ 4).
+- G1, the weights: resolved (§ 5b).
+- The dead band: decided (§ 4).
 - The LOC screens (§ 3.8).
 - CEN's mismatch gain (§ 3.6).
 - The thesis text of R2 (stages, hypotheses 2/4) and R3 (commitment without G9, TS wind

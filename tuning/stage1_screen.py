@@ -523,7 +523,16 @@ def _dso_curvature(area: str, ctrl: Any) -> LayerCurvature:
             f"interface + {n_v} voltage rows the layout implies.")
 
     # Row layout: [ Q_interface | V_bus | I_line | Q_real ]
-    H_Q = np.ascontiguousarray(H[:n_if, :])
+    H_Q = np.array(H[:n_if, :], dtype=float)
+    # The OLTC columns of the interface-Q rows reach the step only through
+    # gamma_oltc_q (DSOController._compute_objective_gradient), so they enter
+    # the curvature with the same factor, as in the controller's own
+    # objective_curvature_inputs.  Before the sn_mva fix (2026-11-09) these
+    # entries were 100x too small, so ignoring gamma = 0 here was harmless.
+    gamma = float(getattr(cfg, "gamma_oltc_q", 1.0))
+    if gamma != 1.0:
+        H_Q[:, n_der:n_der + n_oltc] *= gamma
+    H_Q = np.ascontiguousarray(H_Q)
     H_V = np.ascontiguousarray(H[n_if:n_if + n_v, :])
     S_V, S_Q, colsum, maxabs = _grams(H_V, H_Q)
     return LayerCurvature(

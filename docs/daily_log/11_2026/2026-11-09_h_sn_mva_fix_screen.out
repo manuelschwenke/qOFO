@@ -1,0 +1,11 @@
+192 operating points; ceiling 1.5459; excluded ('shunt', 'dso_shunt')
+weights          variant           worst TS  worst STS             STS layer, condition
+v4 (061d)        as built            1.4604     1.4389           STS_DSO_4 F0822_08_12h   (STS vs as built +0.00e+00)
+v4 (061d)        fixed, gamma 0      1.4604     1.4390           STS_DSO_4 F0822_08_12h   (STS vs as built +7.15e-05)
+v4 (061d)        fixed, gamma 1      1.4604    13.5952                     STS_DSO_3 W2   (STS vs as built +1.22e+01)
+v5 Stage I       as built            0.9838     1.4092           STS_DSO_4 F0822_08_12h   (STS vs as built +0.00e+00)
+v5 Stage I       fixed, gamma 0      0.9838     1.4093           STS_DSO_4 F0822_08_12h   (STS vs as built +7.05e-05)
+v5 Stage I       fixed, gamma 1      0.9838    12.9949                     STS_DSO_3 W2   (STS vs as built +1.16e+01)
+v5 II-a leader   as built            1.3737     1.4092           STS_DSO_4 F0822_08_12h   (STS vs as built +0.00e+00)
+v5 II-a leader   fixed, gamma 0      1.3737     1.4093           STS_DSO_4 F0822_08_12h   (STS vs as built +7.05e-05)
+v5 II-a leader   fixed, gamma 1      1.3737    12.9949                     STS_DSO_3 W2   (STS vs as built +1.16e+01)

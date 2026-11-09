@@ -199,7 +199,9 @@ class TestComputeDQgenDs2WDirectTerm:
             gen_bus_indices_pp=[gen_bus],
             oltc_trafo_indices=[t_idx],
         )
-        analytical = float(mat[0, 0]) * net.sn_mva
+        # [Mvar / step] on both sides (the matrix carries sn_mva since
+        # 2026-11-09; this test used to apply it itself).
+        analytical = float(mat[0, 0])
         numerical = _numerical_dQgen_ds_2w(net, trafo_idx=t_idx, gen_bus=gen_bus)
 
         # Physics: raising HV-side tap pushes V_HV up; gen must inject more Q

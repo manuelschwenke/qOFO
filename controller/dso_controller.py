@@ -820,7 +820,19 @@ class DSOController(BaseOFOController):
         blocks: list[NDArray[np.float64]] = []
         weights: list[NDArray[np.float64]] = []
         if use_q:
-            blocks.append(np.asarray(H[:n_interfaces, :], dtype=np.float64))
+            H_q = np.array(H[:n_interfaces, :], dtype=np.float64)
+            # The step sees the OLTC columns of the interface-Q rows only
+            # through gamma_oltc_q (see _compute_objective_gradient), so the
+            # curvature carries them with the same factor (gamma² ‖a_q‖² in the
+            # engage formula).  Without it, correct Q-per-tap entries (sn_mva
+            # fix 2026-11-09) would enter a curvature the step never has.
+            gamma = float(self.config.gamma_oltc_q)
+            if gamma != 1.0:
+                mapping = self.config.der_mapping
+                n_der = mapping.n_der if mapping is not None else len(self.config.der_indices)
+                n_oltc = len(self.config.oltc_trafo_indices)
+                H_q[:, n_der:n_der + n_oltc] *= gamma
+            blocks.append(H_q)
             weights.append(np.full(n_interfaces, g_q, dtype=np.float64))
         if use_v:
             blocks.append(

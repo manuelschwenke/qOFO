@@ -197,6 +197,18 @@ on on `rural_700`.
 - **Author decision needed:**
   - keep 0.010 (as tuned; it is ≥ Δ*), or
   - run REF and Case 1 at 0.0075 (D1's design width, not the tuning condition).
+- **Decision (author, 2026-11-09 ~18:50):** "We will use 0.01 width and argue again with one value
+  higher for margin reasons."
+  - REF and Case 1 run at `tso_qv_deadband_pu` = `dso_qv_deadband_pu` = 0.010, the configuration
+    default. No code change is needed.
+  - Argument in the thesis: the design width is D1's Δ* = 0.0075 plus one candidate step for
+    margin, which gives 0.010.
+    - This reinstates the design-margin step that was dropped on 2026-11-05 (DESIGN_STEPS = 0,
+      97e5a12).
+    - On `rural_700` the step was dropped because Δ* already equalled 0.010.
+  - The D1 run of record, `F:\qOFO_v5` 0003, records `design_margin_steps = 0` with
+    Δ* = 0.0075. The "+1 step" is an argument on top of that record. D1 is not re-run.
+  - Ch 8's D1 paragraph (thesis) has to state it; that is not done here.
 
 ## 5. e5power
 - D1+D2 ended 17:14, so e5power is free.

@@ -121,3 +121,24 @@ Session "STS capabilities tuning analysis". Branch **`res/tuning-v5-2026-11-08`*
 
 - Open point: v5 bounds g_w_pcc absolutely, but not relative to g_w_der. The ratio to the TS IBG,
   which matters in zone 3, is therefore left to the e_v_ts ranking.
+
+### 2026-11-09 01:57 Stage II-a selection
+- The local shard finished at 23:50 and e5power at 01:52; 680 files were pulled. No driver error.
+- Selection 2a:
+  - 239 / 239 candidates lie inside the θ bounds; 86 reach engagement level 'sts+bank';
+  - **40 are feasible at hunting tolerance 0** (v4 run 0008 II-a: 3).
+- Ranking: e_v_ts, 2 % band, then e_v_ds as the tie-break.
+
+| key | e_v_ts | e_v_ds | g_w_pcc | g_w_der | ratio | σ_V z2 (G3 on) | σ_V z3 | λ_pcc z2 (G3 off) |
+|---|---|---|---|---|---|---|---|---|
+| **6b1aacf04e8b** (1st) | 0.00556 | 0.00672 | 0.196 | 0.0178 | 11.0 | 0.61 | 0.27 | 0.73 |
+| 1504773ceeba | 0.00555 | 0.00681 | 0.142 | 0.0164 | 8.7 | 0.72 | 0.36 | 1.00 |
+| 56d48f30f188 | 0.00556 | 0.00688 | 0.117 | 0.0229 | 5.1 | 0.66 | 0.35 | 1.22 |
+| 6f8b5f488e13 | 0.00566 | 0.00676 | 0.155 | 0.0305 | 5.1 | 0.75 | 0.42 | 0.92 |
+| Stage-I point e5d47f3be21e | 0.00611 | 0.00742 | 0.177 | 0.0897 | 2.0 | 0.93 | 0.73 | 0.81 |
+
+- Observation: the e_v_ds tie-break again picks the band member with the largest g_w_pcc and the lowest
+  σ_V, the same direction as in v4. The v5 bound now limits it to g_w_pcc ≤ 0.285.
+- 01:57 Stage II-b round 1: f 0.5, centred on 6b1aacf04e8b; 30 / 64 draws pass; 8 run here, 22 on e5power.
+- Pending, decision by the author: H sn_mva slip (fixes A/B, `2026-11-08d_qgen_row_check.md` on
+  `res/qgen-row-check-2026-11-08`). v5 continues on the as-built H.

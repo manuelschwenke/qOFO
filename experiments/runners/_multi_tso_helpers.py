@@ -158,6 +158,29 @@ def taps_changed(prev_taps, new_taps) -> bool:
     return any(int(round(float(n))) != int(p) for n, p in zip(new_taps, prev_taps))
 
 
+def set_coupler_relay_band(net, coupler_indices, v_target_pu: float, tol_pu: float) -> int:
+    """Set the band of the coupler relays (``DiscreteTapControl`` on ``trafo3w``)
+    to ``v_target_pu`` +/- ``tol_pu`` (``coupler_relay_tol_pu``, 2026-11-10).
+
+    Only the relays of the listed couplers change; any other controller (machine
+    transformers, Q(V) loops) is left as it is.  Returns the number of relays set.
+    """
+    from pandapower.control import DiscreteTapControl
+    idx = {int(t) for t in coupler_indices}
+    n = 0
+    if not hasattr(net, "controller"):
+        return n
+    for _, row in net.controller.iterrows():
+        c = row["object"]
+        if (isinstance(c, DiscreteTapControl)
+                and getattr(c, "element", None) == "trafo3w"
+                and int(np.atleast_1d(c.element_index)[0]) in idx):
+            c.vm_lower_pu = float(v_target_pu) - float(tol_pu)
+            c.vm_upper_pu = float(v_target_pu) + float(tol_pu)
+            n += 1
+    return n
+
+
 def hold_area_couplers(
     area_commit: Dict[int, bool],
     area_dso_ids: Dict[int, List[str]],

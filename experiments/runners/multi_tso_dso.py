@@ -169,6 +169,7 @@ from controller.gw_precondition import curvature_spectrum, precondition_g_w
 # ``tuning.ceilings``) can monkey-patch them on this module's namespace.
 from experiments.runners._multi_tso_helpers import (
     hold_area_couplers,
+    set_coupler_relay_band,
     taps_changed,
     _OLTCRateLimiter,
     _build_gen_mix_groups,
@@ -2348,6 +2349,25 @@ def _run_multi_tso_dso_impl(
     elif verbose >= 1:
         print(f"  [local DSO] Kept {len(net.controller)} coupler OLTC "
               f"DiscreteTapControl(s) active for simulation.")
+
+    # Run-time band of the kept coupler relays (author decision 2026-11-10): the
+    # start taps above come from the +/- dso_oltc_init_tol_pu initialisation, the
+    # same for every variant; from here on the relays hold the 110 kV side at
+    # v_init_dso +/- coupler_relay_tol_pu, wider than the IBG Q(V) dead band.
+    _cpl_tol = getattr(config, "coupler_relay_tol_pu", None)
+    if _local_dso and not _central and _cpl_tol is not None:
+        _cpl_tol = float(_cpl_tol)
+        if not 0.0 < _cpl_tol < 0.1:
+            raise ValueError(f"coupler_relay_tol_pu must lie in (0, 0.1), got {_cpl_tol}")
+        _cpl_idx = {int(t) for hv in meta.hv_networks for t in hv.coupling_trafo_indices}
+        _n_cpl = set_coupler_relay_band(net, _cpl_idx, v_init_dso, _cpl_tol)
+        if _n_cpl != len(_cpl_idx):
+            raise RuntimeError(
+                f"coupler_relay_tol_pu: {_n_cpl} coupler relays found, "
+                f"{len(_cpl_idx)} couplers in the network")
+        if verbose >= 1:
+            print(f"  [local DSO] coupler relay band {v_init_dso:.3f} +-{_cpl_tol:.3f} p.u. "
+                  f"on {_n_cpl} couplers (start taps from +-{tol_pu:.3f})")
 
     # ── Phase 3 (DER): install plant-side q_mode loops ──
     # Phase 1/2 init has settled; now install QVLocalLoop / CosPhiConstLoop

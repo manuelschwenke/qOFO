@@ -296,6 +296,10 @@ def make_config() -> MultiTSOConfig:
         # [0.95, 1.05]; the machine-transformer taps of the initialisation keep the
         # grid side at 1.03 pu (author decision 2026-11-10).
         gen_vm_init_pu=1.00,
+        # Local coupler relays (variants with the STSs in local mode) hold the 110 kV
+        # side at 1.03 +/- 0.02 pu after the initialisation, wider than the IBG Q(V)
+        # dead band of +/- 0.01 (author decision 2026-11-10).
+        coupler_relay_tol_pu=0.02,
         # -- DSO operating band: 0.02 pu margin to the grid-code limits ------
         # (author decision 2026-10-25; the DSO controllers held 0.90..1.10).
         dso_v_min_pu=0.92,

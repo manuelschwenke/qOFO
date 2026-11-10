@@ -588,6 +588,18 @@ class MultiTSOConfig:
     # -- DSO OLTC initialisation -----------------------------------------------
     oltc_init_v_target_pu: float = 1.03
     dso_oltc_init_tol_pu: float = 0.01
+    coupler_relay_tol_pu: Optional[float] = None  # added 2026-11-10
+    """Run-time band of the local coupler relays (the coupler DiscreteTapControls
+    kept in local DSO mode, i.e. L2, S1, O2 and every Case-1 variant).  The
+    initialisation (Phase 2) sets the start taps with ``dso_oltc_init_tol_pu``, so
+    all variants start from the same taps; afterwards the relays hold the 110 kV
+    side at ``oltc_init_v_target_pu`` +/- this value.  ``None`` keeps
+    ``dso_oltc_init_tol_pu`` (behaviour before 2026-11-10).  Author decision
+    2026-11-10: 0.02, wider than the IBG Q(V) dead band (``dso_qv_deadband_pu``
+    0.01), so that the droop acts before the tap changer; with +/- 0.01 the relay
+    band coincided with the dead band and the relays withdrew the droop support
+    (screen F:\\qOFO_screens\\2026-11-10_relay_band_pm002, daily log
+    2026-11-10e)."""
 
     # -- Zone partitioning -----------------------------------------------------
     use_fixed_zones:    bool  = True

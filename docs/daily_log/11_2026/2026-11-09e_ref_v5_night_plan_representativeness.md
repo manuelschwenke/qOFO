@@ -467,6 +467,46 @@ on on `rural_700`.
 - Not copied: `F:\qOFO_v5\results\ch_08_setup\network_scarcity\0001_2026-11-09_163850_mini_mc_v5_g3off`
   and the procedure-v5 run 0001 (the operating points that 0002 reuses).
 
+## 5i. MC campaign v5nr complete; evaluation (2026-11-10 11:33-11:37)
+- **Closing pass** `mcFinal` (10 CPUs, e5wimi day rule): exit 0 at 11:32:55 after 14634 s.
+  It made 54 runs: 48 on the window seeds 20261117-124, then one more round of 6, because
+  O2 failed on 20261119 (`fail_osc`). The window was then extended to 20261125.
+- **Comparison window** (rule 2026-11-01):
+  - 100 episodes, 20261007-20261125; 15 replaced (list in `failures.md`); none incomplete.
+  - Classes: single 45, multiple 35, undisturbed 20.
+  - Prescreen: 144 drawn, 140 valid, 4 discarded before the last used seed.
+  - Infeasible (all six failed): 20261079.
+- `report.md` and `failures.md` are written by run_mc. `evaluate_mc --n 100 --jobs 10` (11:36,
+  59 s) wrote `evaluation/` (episodes, events, failures, paired, recruited, summary.json, tikz).
+- **Failures** (evaluate_mc; 114 episodes, infeasible excluded; one-sided Clopper-Pearson 95 %):
+
+  | variant | failed | CP upper | cause |
+  |---|---|---|---|
+  | L2 | 1 | 0.041 | tap hunting |
+  | M | 2 | 0.054 | power flow |
+  | S2 | 3 | 0.067 | 2 tap hunting, 1 power flow |
+  | O3 | 4 | 0.078 | 3 tap hunting, 1 power flow |
+  | S1 | 6 | 0.101 | tap hunting |
+  | O2 | 10 | 0.144 | tap hunting |
+
+- **Paired family** (`paired.csv`; NI margin 1.0 mpu on e_vp per area, intersection-union;
+  superiority on e_v, worst, t_out with Holm over the whole family):
+  - O3 vs O2, O3 vs S2, S2 vs S1: e_vp non-inferior in all three areas, so the claim holds.
+    e_v is superior in every area for all three pairs.
+  - O2 vs S1 and O3 vs S1: e_vp non-inferiority **not shown in area 1** (median +0.55 and
+    +0.72 mpu, upper bound 1.09 and 1.17 > 1.0). The claim over the areas fails. e_v and worst
+    bus are superior in every area.
+  - O3 vs O2: worst bus and t_out are superior in areas 2 and 3, not shown in area 1.
+  - S2 vs S1: worst bus superior in area 3, t_out in area 1.
+- **Observations, not yet analysed (hypotheses):**
+  - (i) Tap hunting at the horizon end is more frequent without STS help (O2 10, S1 6) than
+    with it (O3 3, S2 2). Whether it concentrates in the G3-off hours is open.
+  - (ii) OFO's area-1 pilot error exceeds SVR's by more than the margin. Possible reason: OFO's
+    objective weights all buses, while SVR tracks the pilot bus directly. Not checked.
+- **Copy to Z:** robocopy to `Z:\Python_Projekte\qOFOesults\ch_11_case2_multisystem\mc\0002_2026-11-09_221649_run_mc_v5nr` (11:43-12:06): 2745 files, 3 754 061 767 B, equal to F:.
+  Includes `evaluation/` and the full run logs, as in the October campaign on Z:. The counter
+  0002 is unique in Z:'s mc folder (only 0003_2026-10-29 there).
+
 ## 6. Open / pending
 - G1, the weights: resolved (§ 5b).
 - The dead band: decided (§ 4).

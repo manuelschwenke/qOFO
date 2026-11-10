@@ -50,7 +50,7 @@ continuous actuator to tame a mode the taps and banks of all areas create when
 they may move every 20 s, and left M worse than O3.
 
 Weights of M since 2026-11-10 (author; screen and evaluation in the daily log
-2026-11-10g), two construction rules and one tuned factor:
+2026-11-10g_cen_rule_screen.md), two construction rules and one tuned factor:
 
 * block-wise loop gain (``central_kappa_scope="blocks"``): the continuous TS
   block (AVRs, TS-IBGs) to the selected ``lambda_max_B``, the STS block (STS
@@ -221,9 +221,10 @@ M_LAMBDA_FALLBACK = 0.90
 #: the one tuned weight of M (author 2026-11-10: "manually tune ... a little to
 #: have less weight on the STS voltages"): the largest of {1, 0.5, 0.25} at
 #: which M's e_v in R2 lies below that of every other variant, fixed before the
-#: screen; held fixed in every other scenario.  Screen and choice: daily log
-#: 2026-11-10g.
-M_STS_G_V_FACTOR = 1.0
+#: screen; held fixed in every other scenario.  R2 screen at the final rule
+#: (daily log 2026-11-10g_cen_rule_screen.md): e_v 11.23 / 10.26 / 9.37 mpu at
+#: 1 / 0.5 / 0.25, O3 9.84 on the same code, so 0.25.
+M_STS_G_V_FACTOR = 0.25
 
 
 #: ``lambda_max_B`` of the selected weights at the 1.00 pu terminal start of the

@@ -157,18 +157,38 @@ def runpp_warm_staged(net: pp.pandapowerNet, snap: dict, **kwargs) -> str:
     q_lims = bool(kwargs.pop("enforce_q_lims", True))
     for k in ("init", "run_control"):
         kwargs.pop(k, None)
+    fails = (LoadflowNotConverged, ControllerNotConverged)
+    # A stressed point needs more Newton iterations than the plant's normal budget
+    # (50): the step-366 state converges with 100, not with 50 (2026-11-10).
+    kwargs["max_iteration"] = max(int(kwargs.get("max_iteration", 50) or 50), 200)
     _restore_results(net, snap)
-    runpp_relays_held(net, init="results", enforce_q_lims=False, **kwargs)
     if not q_lims:
+        runpp_relays_held(net, init="results", enforce_q_lims=False, **kwargs)
         return "warm, no Q limits"
-    snap1 = snapshot_results(net)
+    # (a) directly with the Q limits.  With a machine just above its limit the
+    # unconstrained Q(V) iteration may not settle while the constrained one does
+    # (Case 1 SVR, step 366, 2026-11-10: fix v4).
     try:
         runpp_relays_held(net, init="results", enforce_q_lims=True, **kwargs)
         return "warm, Q limits, Q(V) loops active"
-    except (LoadflowNotConverged, ControllerNotConverged):
-        _restore_results(net, snap1)
-        pp.runpp(net, init="results", enforce_q_lims=True, run_control=False, **kwargs)
-        return "warm, Q limits, Q(V) loops at their stage-1 output"
+    except fails:
+        _restore_results(net, snap)
+    # (b) through the unconstrained solve (stages 1 and 2 of the docstring)
+    try:
+        runpp_relays_held(net, init="results", enforce_q_lims=False, **kwargs)
+        snap1 = snapshot_results(net)
+        try:
+            runpp_relays_held(net, init="results", enforce_q_lims=True, **kwargs)
+            return "warm via no Q limits, Q limits, Q(V) loops active"
+        except fails:
+            _restore_results(net, snap1)
+            pp.runpp(net, init="results", enforce_q_lims=True, run_control=False, **kwargs)
+            return "warm, Q limits, Q(V) loops at their stage-1 output"
+    except fails:
+        _restore_results(net, snap)
+    # (c) the Q limits with the Q(V) loops held at the snapshot's DER outputs
+    pp.runpp(net, init="results", enforce_q_lims=True, run_control=False, **kwargs)
+    return "warm, Q limits, Q(V) loops held at the last converged output"
 
 
 @dataclass(frozen=True)

@@ -382,6 +382,7 @@ class PandapowerStaticPlant:
         self.max_iter = max_iter
         self.distributed_slack = distributed_slack
         self.enforce_q_lims = enforce_q_lims
+        self.warm_resolves = 0          # diverged solves rescued by runpp_warm_staged
 
     # ── Plant protocol ───────────────────────────────────────────────────
     def apply_u(self, writes: ActuatorWrites) -> None:
@@ -404,16 +405,33 @@ class PandapowerStaticPlant:
 
     def advance(self, duration_s: float = 0.0) -> None:
         """One converged power flow; ``duration_s`` is ignored (the
-        quasi-static plant settles instantly within a dispatch interval)."""
-        runpp_holding_taps(
-            self.net,
-            run_control=self.run_control,
-            calculate_voltage_angles=self.calculate_voltage_angles,
-            max_iteration=self.max_iteration,
-            max_iter=self.max_iter,
-            distributed_slack=self.distributed_slack,
-            enforce_q_lims=self.enforce_q_lims,
-        )
+        quasi-static plant settles instantly within a dispatch interval).
+
+        If the solve diverges, a warm staged re-solve from the state before it
+        (:func:`runpp_warm_staged`, FIX 2026-11-10): pandapower starts every
+        solve from a DC estimate ("auto" init), which fails on the stressed
+        point after the 250 Mvar connection of Case 1 SVR although the plant
+        has a solution next to the previous one.  A solve that converges is
+        untouched; if the re-solve fails too, the original exception is raised.
+        """
+        snap = snapshot_results(self.net)
+        kw = dict(calculate_voltage_angles=self.calculate_voltage_angles,
+                  max_iteration=self.max_iteration, max_iter=self.max_iter,
+                  distributed_slack=self.distributed_slack,
+                  enforce_q_lims=self.enforce_q_lims)
+        try:
+            runpp_holding_taps(self.net, run_control=self.run_control, **kw)
+        except LoadflowNotConverged as exc:
+            if not self.run_control:
+                raise
+            try:
+                how = runpp_warm_staged(self.net, snap, **kw)
+            except (LoadflowNotConverged, ControllerNotConverged):
+                _restore_results(self.net, snap)
+                raise exc
+            self.warm_resolves += 1
+            print(f"  [plant] power flow diverged; warm re-solve converged ({how}); "
+                  f"{self.warm_resolves} so far")
 
     def read_y(self) -> pp.pandapowerNet:
         return self.net

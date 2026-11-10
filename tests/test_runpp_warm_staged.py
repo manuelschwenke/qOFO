@@ -46,3 +46,34 @@ def test_snapshot_restores_every_result_table_and_the_der_outputs():
     net.sgen["q_mvar"] = 99.0
     runpp_warm_staged(net, snap, enforce_q_lims=False, calculate_voltage_angles=True)
     assert abs(float(net.sgen.q_mvar.iloc[0]) - q0) < 1e-9
+
+
+def test_static_plant_rescues_a_diverged_solve(monkeypatch):
+    """PandapowerStaticPlant.advance: a diverged solve is re-solved warm from the state before it."""
+    import core.plant as cp
+    from pandapower.auxiliary import LoadflowNotConverged
+    net = _net()
+    plant = cp.PandapowerStaticPlant(net, enforce_q_lims=True)
+    calls = {"n": 0}
+    real = cp.runpp_holding_taps
+
+    def fail_once(n, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise LoadflowNotConverged("forced")
+        real(n, **kw)
+
+    monkeypatch.setattr(cp, "runpp_holding_taps", fail_once)
+    plant.advance()
+    assert plant.warm_resolves == 1 and net.converged
+    assert net.res_gen.q_mvar.iloc[0] <= 10.0 + 1e-6
+    plant.advance()                      # converges normally: no rescue
+    assert plant.warm_resolves == 1
+
+
+def test_static_plant_converging_solve_is_unchanged():
+    import core.plant as cp
+    a, b = _net(), _net()
+    cp.PandapowerStaticPlant(a, enforce_q_lims=True).advance()
+    pp.runpp(b, enforce_q_lims=True, calculate_voltage_angles=True, run_control=True)
+    assert abs(a.res_bus.vm_pu - b.res_bus.vm_pu).max() < 1e-9

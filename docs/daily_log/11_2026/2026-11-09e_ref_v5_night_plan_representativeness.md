@@ -507,6 +507,21 @@ on on `rural_700`.
   Includes `evaluation/` and the full run logs, as in the October campaign on Z:. The counter
   0002 is unique in Z:'s mc folder (only 0003_2026-10-29 there).
 
+## 5j. Fig. 10.15 (fig:case3:mc) on the v5 MC (2026-11-10 ~13:05, author: "shortly update figure 10.15")
+- New data folder `Z:\latex_diss_clone\graphics\Ch10\data\2026-11-10_case3_mc` (README there):
+  evaluate_mc output, report, failures, provenance header and `make_tikz_tables.py` (copied from
+  the 2026-11-08 folder), run once, `tikz/*.dat`.
+- `graphics/Ch10/case3_mc.tex`:
+  - the data path points to the new folder;
+  - panel (b) is now -12...8 (was -8...8), with the legend north east (was south west, which hid
+    the area-2 whisker at -10.2);
+  - panel (c) goes up to 0.42 (was 0.36).
+  - Built `ext-tikz/ch10-case3-mc.pdf` with lualatex.
+  - The previous file is saved as `case3_mc.tex.bak_2026-11-08` in this session's scratchpad.
+- Not changed: Fig. 10.16 (`case3_mc_detail.tex`, still the 11-08 data) and the Ch 10 text.
+- Author ~13:05: wait. Another session discusses the dead-band width of the machine
+  transformers and the network coupling transformers, which may require resimulations.
+
 ## 6. Open / pending
 - G1, the weights: resolved (§ 5b).
 - The dead band: decided (§ 4).

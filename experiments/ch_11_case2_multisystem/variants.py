@@ -226,17 +226,31 @@ M_LAMBDA_FALLBACK = 0.90
 M_STS_G_V_FACTOR = 1.0
 
 
+#: ``lambda_max_B`` of the selected weights at the 1.00 pu terminal start of the
+#: rerun base: the v5 lambda bank (192 points) re-evaluated with the weights
+#: unchanged (gate 2026-11-10 15:41, daily log 2026-11-10f "Gate result",
+#: F:\qOFO_screens\2026-11-10_lambda_gate_new_start\lambda_gate.json).  The
+#: paramset's ``provenance.lambda_max_B`` (1.5301) is the selection-time value at
+#: the former 1.03 pu start and stays as that record; the file is not edited, so
+#: every rerun of the campaign records the same paramset (author 2026-11-10: "we
+#: should have a uniform 1.452 now").
+LAMBDA_MAX_B_GATED = {"ch9_selected_nr_2026_11_v5": 1.4523628862957012}
+
+
 def selected_lambda_max() -> float:
-    """``lambda_max_B`` of the selected design, from the paramset provenance.
+    """``lambda_max_B`` of the selected design on the code of record: the gated
+    value of :data:`LAMBDA_MAX_B_GATED`.
 
     M's loop-gain ceiling (the cascade's own); :data:`M_LAMBDA_FALLBACK` for M090.
     """
+    if PARAMSET not in LAMBDA_MAX_B_GATED:
+        raise KeyError(f"paramset {PARAMSET!r} has no lambda_max_B at the 1.00 pu "
+                       f"start; re-run the lambda gate (daily log 2026-11-10f)")
     prov = load_paramset(PARAMSET).get("provenance") or {}
-    lam = prov.get("lambda_max_B")
-    if lam is None:
+    if prov.get("lambda_max_B") is None:
         raise KeyError(f"paramset {PARAMSET!r} records no lambda_max_B; "
                        f"M has no loop gain to match")
-    return float(lam)
+    return float(LAMBDA_MAX_B_GATED[PARAMSET])
 
 
 def selected_lambda_max_sts() -> float:

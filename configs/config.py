@@ -568,6 +568,17 @@ class MultiTSOConfig:
     2026-10-30 (author decision).  Until then the TS-OFO and the central
     controller used [0.95, 1.07] (class default) and SVR [0.95, 1.05]."""
 
+    gen_vm_init_pu: Optional[float] = None  # added 2026-11-10
+    """AVR set-point (machine terminal voltage) at the start of a run.  ``None``
+    keeps the previous behaviour: the machines start at the voltage set-point
+    (``zone_v_setpoints_pu`` or ``v_setpoint_pu``, 1.03 pu).  With a value, every
+    synchronous machine starts there, and the machine-transformer taps of the
+    initialisation (Phase 1) still bring the grid side to ``v_setpoint_pu`` +/- the
+    tolerance, so the grid-side operating point is unchanged up to the tap step.
+    Author decision 2026-11-10: 1.00 pu, centred in [gen_vm_min_pu, gen_vm_max_pu],
+    so that the AVRs have 0.05 pu of set-point range in both directions instead of
+    +0.02 / -0.08 pu (Ch 9 v5 run: G3 and G7 held at 1.05 after the events)."""
+
     # -- AVR saturation handling (Feature B) -----------------------------------
     enable_avr_saturation_mode: bool = False
     """When True, enable the hysteretic AVR saturation classifier, the
@@ -1672,7 +1683,58 @@ class MultiTSOConfig:
     undoes every AVR set-point change the RPR makes, so the pilot error persists and
     the regional integrator winds the set-points down to ``v_set_min_pu`` (scenario E,
     run 0017: G10's machine tap +1 every 15 min, both area-1 machines at 0.95 pu).
-    Author 2026-11-05: "Keep fixed", and "use it in O1 also too keep it consistent"."""
+    Author 2026-11-05: "Keep fixed", and "use it in O1 also too keep it consistent".
+    With ``mt_setpoint_relay`` the machine transformers move by that rule instead
+    (the HV-voltage relay above stays off), with ``mt_hv_relay`` (LOC) by a 345 kV
+    relay.  NOTE (2026-11-10): the code holds the two network OLTCs at IEEE 12 as well,
+    not only the machine transformers ("couplers, network OLTCs ... keep their local
+    rules" above is not what the runner did); ``network_oltc_relay`` gives them
+    their local relay."""
+
+    mt_setpoint_relay: bool = False  # added 2026-11-10
+    """Local re-centring rule on the machine transformers of the variants whose machine
+    taps no MIQP dispatches (S1m, S1, O0, O1; in Case 2 S1 and S2).  It reads the AVR
+    set-point of the machine: at or above ``mt_relay_v_high_pu`` for
+    ``mt_relay_confirm_steps`` consecutive steps, one tap step raises the grid side
+    against the terminal, so the controller above can lower the set-point again;
+    at or below ``mt_relay_v_low_pu`` the opposite step.  One step per action, at most
+    one action per ``oltc_cooldown_s_mt`` (900 s, the TS-OFO lock).  It does not act
+    while the machine's reactive output is beyond ``mt_relay_q_util_max`` of its
+    capability in the direction of the step.  Unlike the HV-voltage relay of
+    ``fix_machine_taps`` it has no voltage target of its own, so it does not fight the
+    AVR loop: it acts only near the set-point bound (author decision 2026-11-10,
+    together with ``gen_vm_init_pu`` = 1.00 pu)."""
+    mt_relay_v_low_pu: float = 0.96
+    mt_relay_v_high_pu: float = 1.04
+    mt_relay_confirm_steps: int = 3
+    mt_relay_q_util_max: Optional[float] = 0.8
+    """Reserve condition of ``mt_setpoint_relay``: no raising step while
+    Q >= mt_relay_q_util_max * Q_max, no lowering step while
+    Q <= mt_relay_q_util_max * Q_min (capability curve of the controllers).  None
+    switches the condition off."""
+
+    mt_hv_relay: bool = False  # added 2026-11-10
+    """345 kV-side voltage relay on the machine transformers of the dispatchable
+    machines, for LOC only (``tso_mode='local'``, AVR set-points pinned): the
+    grid side is held at ``oltc_init_v_target_pu`` +/- ``mt_hv_relay_tol_pu``, one
+    tap per action, at most one action per ``oltc_cooldown_s_mt``.  With the AVRs
+    pinned the relay has a fixed target and does not fight the AVR loop, unlike
+    under SVR or a TS-OFO (author decision 2026-11-10: "if we have local control, we
+    would assume that ... controlling the 345 [kV side] to 1.03 per unit with a
+    +- 0.02 band would be an approach").  Needs ``fix_machine_taps=True`` (which
+    switches off the generic relay of all TS taps)."""
+    mt_hv_relay_tol_pu: float = 0.02
+
+    network_oltc_relay: bool = False  # added 2026-11-10
+    """Local relay on the two network OLTCs at IEEE 12 (12-11, 12-13, 345/345 kV, taps
+    on the bus-12 side) where no MIQP dispatches them: the bus-12 voltage is held at
+    ``oltc_init_v_target_pu`` +/- ``network_oltc_relay_tol_pu``, one tap per action,
+    15-min holding time.  O2, O3 and M dispatch these taps in their MIQP, so every
+    other variant gets this local law (author decision 2026-11-10).
+    ``fix_machine_taps=True`` holds them as well, contrary to its docstring before
+    2026-11-10; this switch gives them their local rule independently of the machine
+    transformers.  Needs ``fix_machine_taps=True``."""
+    network_oltc_relay_tol_pu: float = 0.02
 
     svr_rpr_voltage_priority: bool = False
     """Block machine RPR moves predicted to worsen the local pilot error.

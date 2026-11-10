@@ -103,6 +103,11 @@ FEEDS = ("tab:case_svr:reference", "fig:case_svr:equivalence",
 #: thesis ``tab:svr:pilots``.
 PILOT_BUSES: Dict[int, int] = {1: 25, 2: 7, 3: 20}
 
+#: Network OLTCs at IEEE 12 (12-11, 12-13): O2, O3 and M dispatch them in the MIQP;
+#: every other variant holds bus 12 at 1.03 +/- 0.02 pu by a local relay (author
+#: decision 2026-11-10; until then they were held by ``fix_machine_taps``).
+_NETWORK_OLTC_LOCAL = dict(network_oltc_relay=True)
+
 #: Below O2 the banks are installed and follow the classical local rule
 #: (MSC in below 1.01 pu, MSR in above 1.05 pu on the coupler's primary side,
 #: 30-min holding time), and the TS taps follow local relays (1.03 +/- 0.01 pu,
@@ -121,14 +126,20 @@ _SVR = dict(
     # Machine taps held fixed: their local relay undoes the RPR's AVR set-point
     # changes and winds the SVR to its floor (author 2026-11-05: "Keep fixed").
     fix_machine_taps=True,
-    **_LOCAL_STS, **_LOCAL_SHUNTS,
+    # ... except for the set-point re-centring rule (AVR set-point beyond 1.04 /
+    # 0.96 pu -> one machine tap step), author decision 2026-11-10.
+    mt_setpoint_relay=True,
+    **_LOCAL_STS, **_LOCAL_SHUNTS, **_NETWORK_OLTC_LOCAL,
 )
 
 VARIANTS: Dict[str, Dict[str, Any]] = {
     # Machine taps fixed in LOC too, for one rule: they move only when an MIQP
     # dispatches them (author 2026-11-05: "Held fixed").
+    # Since 2026-11-10 LOC holds the 345 kV side of its machine transformers at
+    # 1.03 +/- 0.02 pu by a local relay (the AVR set-points stay pinned).
     "L2": dict(tso_mode="local", tso_local_mode="qv", tso_oltc_mode="local",
-               fix_machine_taps=True, **_LOCAL_STS, **_LOCAL_SHUNTS),
+               fix_machine_taps=True, mt_hv_relay=True,
+               **_LOCAL_STS, **_LOCAL_SHUNTS, **_NETWORK_OLTC_LOCAL),
     "S1m": dict(_SVR, svr_k_p_rvr=0.0, svr_k_p_rpr=0.0,
                 svr_rpr_voltage_priority=False),
     # Integral laws WITH the safeguard (author 2026-10-07; was "S1g" in the
@@ -139,7 +150,8 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
                svr_rpr_voltage_priority=False,
                svr_rvr_law="ofo", svr_rpr_law="ofo"),
     "O1": dict(tso_mode="ofo", tso_oltc_mode="local", fix_machine_taps=True,
-               **_LOCAL_STS, **_LOCAL_SHUNTS),
+               mt_setpoint_relay=True, **_LOCAL_STS, **_LOCAL_SHUNTS,
+               **_NETWORK_OLTC_LOCAL),
     "O2": dict(tso_mode="ofo", **_LOCAL_STS),
 }
 
@@ -179,14 +191,16 @@ _SVR_FIELDS = {"tso_mode", "tso_local_mode", "svr_pilot_buses", "svr_t_rvr_s",
                "svr_t_rpr_s", "svr_k_p_rvr", "svr_k_p_rpr",
                "svr_rvr_p_every_step", "svr_deadband_pu",
                "svr_rpr_voltage_priority", "svr_rvr_law", "svr_rpr_law",
-               "fix_machine_taps"}
+               "fix_machine_taps", "mt_setpoint_relay", "mt_hv_relay",
+               "network_oltc_relay"}
 STEP_ALLOWED: Dict[Tuple[str, str], set] = {
     ("L2", "S1m"): _SVR_FIELDS,
     ("S1m", "O0"): {"svr_rvr_law", "svr_rpr_law"},
     ("S1m", "S1"): {"svr_rpr_voltage_priority"},
     ("O0", "O1"): _SVR_FIELDS,
     ("O1", "O2"): {"tso_oltc_mode", "install_tso_tertiary_shunts",
-                   "shunt_dispatch", "fix_machine_taps"},
+                   "shunt_dispatch", "fix_machine_taps", "mt_setpoint_relay",
+                   "network_oltc_relay"},
 }
 
 

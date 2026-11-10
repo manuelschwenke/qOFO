@@ -926,6 +926,11 @@ def _run_multi_tso_dso_impl(
                 if z in _sched:
                     for s in ss:
                         net.sgen.at[s, "qv_vref_pu"] = float(_sched[z])
+    # Machine terminals at ``gen_vm_init_pu`` (author decision 2026-11-10).  They
+    # are moved there at the end of Phase 1 (step [10.1], terminal ramp), where the
+    # machine-transformer taps keep the grid side at v_setpoint_pu +/- tol.  Until
+    # then the machines stay at the voltage set-point as before.
+    _gen_vm_init = getattr(config, "gen_vm_init_pu", None)
 
     # ── Partition machine-transformer OLTCs per zone ───────────────────────────
     # Exclude the slack gen's machine trafo from the controllable OLTC set.
@@ -2222,6 +2227,50 @@ def _run_multi_tso_dso_impl(
     if verbose >= 1:
         print(f"  [T] Phase 1 pp.runpp(run_control=True): {perf_counter() - _t:.2f} s")
 
+    # -- Phase 1b: machine terminals to gen_vm_init_pu (2026-11-10) -------------
+    # Homotopy in steps of at most 0.005 pu from the converged Phase-1 point, each
+    # step solved from the previous result with the machine-transformer tap
+    # controllers above active, so the grid (345 kV) side stays at v_init_mt +/-
+    # tol_pu.  Before each step the machine taps are moved at least to the ratio
+    # v_init_mt / V_terminal: a grid side held by a temporary PV unit (G4 and W3 at
+    # IEEE 19) never leaves the band, and its tap would otherwise stay at 0 while the
+    # machine absorbs the difference.  A direct start at the final terminal voltage
+    # did not converge from the DC start (2026-11-10).
+    if _gen_vm_init is not None and abs(float(_gen_vm_init) - float(v_init_mt)) > 1e-9:
+        _v0, _v1 = float(v_init_mt), float(_gen_vm_init)
+        _mach = [g for g in net.gen.index if str(net.gen.at[g, "name"]) != "_TEMP_INIT"]
+        _mts = [int(t) for t, g in zip(meta.machine_trafo_indices,
+                                       meta.machine_trafo_gen_map) if int(g) >= 0]
+        _n_ramp = int(np.ceil(abs(_v0 - _v1) / 0.005 - 1e-9))
+        for _v in np.linspace(_v0, _v1, _n_ramp + 1)[1:]:
+            net.gen.loc[_mach, "vm_pu"] = float(_v)
+            for _t in _mts:
+                if not bool(net.trafo.at[_t, "in_service"]):
+                    continue
+                _st = float(net.trafo.at[_t, "tap_step_percent"]) / 100.0
+                if _st == 0.0:
+                    continue
+                _sg = 1 if str(net.trafo.at[_t, "tap_side"]) == "hv" else -1
+                _pre = int(net.trafo.at[_t, "tap_neutral"]) + _sg * int(
+                    round((_v0 / float(_v) - 1.0) / _st))
+                _pre = max(int(net.trafo.at[_t, "tap_min"]),
+                           min(int(net.trafo.at[_t, "tap_max"]), _pre))
+                _cur = int(net.trafo.at[_t, "tap_pos"])
+                # move toward the ratio only, never back past it
+                if (_pre - _cur) * _sg * np.sign(_v0 - _v1) > 0:
+                    net.trafo.at[_t, "tap_pos"] = _pre
+            pp.runpp(net, run_control=True, calculate_voltage_angles=True,
+                     init="results", max_iteration=50,
+                     distributed_slack=config.distributed_slack,
+                     enforce_q_lims=config.enforce_q_lims_plant)
+        if verbose >= 1:
+            _hv = {int(t): round(float(net.res_bus.at[int(net.trafo.at[t, "hv_bus"]), "vm_pu"]), 4)
+                   for t in _mts if bool(net.trafo.at[t, "in_service"])}
+            print(f"[10.1b] machine terminals ramped {_v0:.3f} -> {_v1:.3f} pu in "
+                  f"{_n_ramp} steps (gen_vm_init_pu); machine taps "
+                  f"{ {t: int(net.trafo.at[t, 'tap_pos']) for t in _mts} }, "
+                  f"grid-side V {_hv}")
+
     # Transfer Q from temp-PV-gens to STATCOM sgens, then drop temp gens.
     for gi, si in _tmp_map.items():
         net.sgen.at[si, "q_mvar"] = float(net.res_gen.at[gi, "q_mvar"])
@@ -3163,9 +3212,13 @@ def _run_multi_tso_dso_impl(
     if _local_tso:
         # (1) Pin generator AVR setpoints.  Under SVR this is only the starting
         # point: the RPR writes net.gen.vm_pu from the first dispatch onward.
-        net.gen.loc[:, "vm_pu"] = float(config.v_setpoint_pu)
+        # The pin is the start value of the terminals (gen_vm_init_pu, 2026-11-10),
+        # which the Phase-1 taps were set for; without it the voltage set-point.
+        _vm_pin = (float(_gen_vm_init) if _gen_vm_init is not None
+                   else float(config.v_setpoint_pu))
+        net.gen.loc[:, "vm_pu"] = _vm_pin
         if verbose >= 1:
-            print(f"  [local TSO] Pinned net.gen.vm_pu = {config.v_setpoint_pu:.3f} "
+            print(f"  [local TSO] Pinned net.gen.vm_pu = {_vm_pin:.3f} "
                   f"on {len(net.gen)} synchronous machines")
 
     if _install_local_taps:
@@ -3228,7 +3281,8 @@ def _run_multi_tso_dso_impl(
     # :mod:`controller.local_rules` for the divergence that rules out the
     # latter on machine transformers under SVR.  The slack machine's
     # transformer stays held, as it is excluded from the MIQP too.
-    from controller.local_rules import BankRelay, LocalDiscreteRules, TapRelay
+    from controller.local_rules import (BankRelay, LocalDiscreteRules,
+                                        SetpointTapRelay, TapRelay)
     _tap_relays: List[TapRelay] = []
     # With ``fix_machine_taps`` the machine taps stay at their start position: under SVR
     # (and a TS-OFO on the AVRs) the relay undoes the AVR set-point changes (author
@@ -3278,14 +3332,106 @@ def _run_multi_tso_dso_impl(
                 v_high_pu=config.shunt_local_v_ref_pu + config.shunt_local_dv_pu,
                 confirm_steps=int(config.shunt_local_confirm_steps),
             ))
+    # Set-point re-centring rule on the machine transformers (2026-11-10, see
+    # MultiTSOConfig.mt_setpoint_relay).  Only where no MIQP dispatches the
+    # machine taps and the HV-voltage relay is off; dispatchable machines only
+    # (not the slack / network equivalent, whose AVR reference is withheld).
+    _sp_relays: List[SetpointTapRelay] = []
+    if bool(getattr(config, "mt_setpoint_relay", False)):
+        if _central or not (_svr_tso or _tso_oltc_local):
+            raise ValueError(
+                "mt_setpoint_relay needs machine taps outside the MIQP "
+                "(tso_mode='svr' or tso_oltc_mode='local'), not central mode")
+        if not _fix_mt:
+            raise ValueError(
+                "mt_setpoint_relay replaces the HV-voltage relay of the machine "
+                "transformers: set fix_machine_taps=True")
+        _hold_sp = (config.oltc_cooldown_s_mt
+                    if config.oltc_cooldown_s_mt is not None
+                    else config.oltc_cooldown_s)
+        _gen_zone = {int(g): (z, k) for z, zd_ in zone_defs.items()
+                     for k, g in enumerate(zd_.gen_indices)}
+
+        def _q_limits_of(z_: int, k_: int):
+            _ab = tso_controllers[z_].actuator_bounds
+            _gens = [int(g) for g in zone_defs[z_].gen_indices]
+
+            def _lim(net_):
+                _p = np.array([float(net_.res_gen.at[g, "p_mw"]) for g in _gens])
+                _v = np.array([float(net_.gen.at[g, "vm_pu"]) for g in _gens])
+                _lo, _hi = _ab.compute_gen_q_bounds(np.nan_to_num(_p), _v)
+                return float(_lo[k_]), float(_hi[k_])
+            return _lim
+
+        for _tidx, _gidx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+            _gidx = int(_gidx)
+            if (_gidx < 0 or _gidx in _non_dispatchable_gens
+                    or _gidx not in _gen_zone
+                    or int(net.trafo.at[_tidx, "lv_bus"]) in slack_gen_term_buses):
+                continue
+            _z, _k = _gen_zone[_gidx]
+            _qmax = getattr(config, "mt_relay_q_util_max", None)
+            _sp_relays.append(SetpointTapRelay(
+                trafo_idx=int(_tidx), gen_idx=_gidx,
+                v_low_pu=float(config.mt_relay_v_low_pu),
+                v_high_pu=float(config.mt_relay_v_high_pu),
+                hold_s=float(_hold_sp),
+                confirm_steps=int(config.mt_relay_confirm_steps),
+                q_util_max=(float(_qmax) if _qmax is not None else None),
+                q_limits=_q_limits_of(_z, _k),
+            ))
+    # 345 kV-side relays added 2026-11-10 (MultiTSOConfig.mt_hv_relay for LOC,
+    # network_oltc_relay for the two OLTCs at IEEE 12).  Both need the generic
+    # relay of all TS taps above to be off (fix_machine_taps=True).
+    _mt_hv = bool(getattr(config, "mt_hv_relay", False))
+    _nw_hv = bool(getattr(config, "network_oltc_relay", False))
+    if (_mt_hv or _nw_hv) and not _central:
+        if not _fix_mt:
+            raise ValueError("mt_hv_relay / network_oltc_relay need fix_machine_taps=True")
+        if _mt_hv and config.tso_mode != "local":
+            raise ValueError("mt_hv_relay is for LOC only (pinned AVR set-points): "
+                             "under SVR or a TS-OFO it fights the AVR loop")
+        if not (_local_tso or _svr_tso or _tso_oltc_local):
+            raise ValueError("mt_hv_relay / network_oltc_relay need the TS taps "
+                             "outside the MIQP")
+        _hold_hv = (config.oltc_cooldown_s_mt
+                    if config.oltc_cooldown_s_mt is not None
+                    else config.oltc_cooldown_s)
+        for _tidx, _gidx in zip(meta.machine_trafo_indices, meta.machine_trafo_gen_map):
+            _gidx = int(_gidx)
+            if int(net.trafo.at[_tidx, "lv_bus"]) in slack_gen_term_buses:
+                continue
+            if _gidx < 0 and _nw_hv:
+                _tol = float(config.network_oltc_relay_tol_pu)
+            elif (_gidx >= 0 and _mt_hv and _gidx not in _non_dispatchable_gens):
+                _tol = float(config.mt_hv_relay_tol_pu)
+            else:
+                continue
+            _tap_relays.append(TapRelay(
+                trafo_idx=int(_tidx),
+                v_ref_pu=float(config.oltc_init_v_target_pu),
+                tol_pu=_tol, hold_s=float(_hold_hv)))
+        if verbose >= 1:
+            print(f"  [local rules] 345 kV relays: machine transformers "
+                  f"{'+/- %.3f pu' % config.mt_hv_relay_tol_pu if _mt_hv else 'off'}, "
+                  f"network OLTCs at IEEE 12 "
+                  f"{'+/- %.3f pu' % config.network_oltc_relay_tol_pu if _nw_hv else 'off'} "
+                  f"-> {[r.trafo_idx for r in _tap_relays]}")
     _local_rules = LocalDiscreteRules(
         _tap_relays, _bank_relays,
-        mutual_exclusion=config.shunt_sts_mutual_exclusion)
+        mutual_exclusion=config.shunt_sts_mutual_exclusion,
+        setpoint_taps=_sp_relays)
     if verbose >= 1 and _local_rules:
         print(f"  [local rules] {len(_tap_relays)} TS tap relay(s) "
               f"(HV side {config.oltc_init_v_target_pu:.3f} +/- "
-              f"{config.dso_oltc_init_tol_pu:.3f} pu), "
+              f"{sorted({round(r.tol_pu, 4) for r in _tap_relays}) or config.dso_oltc_init_tol_pu} pu), "
               f"{len(_bank_relays)} bank relay(s)")
+    if verbose >= 1 and _sp_relays:
+        print(f"  [local rules] {len(_sp_relays)} machine-transformer set-point "
+              f"relay(s) on gen(s) {[r.gen_idx for r in _sp_relays]} "
+              f"(AVR set-point {config.mt_relay_v_low_pu:.2f} / "
+              f"{config.mt_relay_v_high_pu:.2f} pu, {config.mt_relay_confirm_steps} steps, "
+              f"hold {_hold_sp:.0f} s, reserve {config.mt_relay_q_util_max})")
 
     # ── SVR reference construction (thesis variant S1) ────────────────────
     # Built AFTER the local tap controls are installed and the plant has been

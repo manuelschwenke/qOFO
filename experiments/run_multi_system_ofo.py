@@ -292,6 +292,10 @@ def make_config() -> MultiTSOConfig:
         dt_s=20.0,
         dso_gamma_oltc_q=0.0,
         zone_v_setpoints_pu={1: 1.03, 2: 1.03, 3: 1.03},
+        # Machine terminals start at 1.00 pu, centred in the AVR set-point range
+        # [0.95, 1.05]; the machine-transformer taps of the initialisation keep the
+        # grid side at 1.03 pu (author decision 2026-11-10).
+        gen_vm_init_pu=1.00,
         # -- DSO operating band: 0.02 pu margin to the grid-code limits ------
         # (author decision 2026-10-25; the DSO controllers held 0.90..1.10).
         dso_v_min_pu=0.92,

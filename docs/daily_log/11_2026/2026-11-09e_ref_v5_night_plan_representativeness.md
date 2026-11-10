@@ -414,6 +414,31 @@ on on `rural_700`.
   - A failure among the 8 triggers a further replacement round in the same call.
   - Estimate: 27 CPU-h at 10 workers, ≈ 10:30–11:00. With one more round, ≈ 12:00–14:00.
 
+## 5g. Copy to Z: for the thesis session (2026-11-10, author: "copy them into the dissertation text then")
+- Robocopy (full path `C:\Windows\System32\Robocopy.exe`; not on PATH in this shell). Same
+  relative path under `Z:\Python_Projekte\qOFO\results\`, none existed before. File count and
+  bytes are equal to F: for every run.
+
+  | run | files | MB |
+  |---|---|---|
+  | `ch_11_case2_multisystem/ref/0004_2026-11-09_185815_run_ref_v5_E2` | 32 | 62.6 |
+  | `ch_11_case2_multisystem/ref/0005_2026-11-09_185843_run_ref_v5_P2R` | 31 | 62.4 |
+  | `ch_11_case2_multisystem/ref/0006_2026-11-09_185912_run_ref_v5_P2R_B03B05` | 31 | 62.4 |
+  | `ch_10_case1_svr/0001_2026-11-09_185947_run_case1_v5_A` | 29 | 60.3 |
+
+- Not copied:
+  - the LOC screens ref/0001–0003 (screens, not thesis results);
+  - the MC, which is still in its closing pass.
+- **Run numbers.** `qOFO_ref` is a fresh tree, so its counters start at 0001. On Z:,
+  `ch_10_case1_svr/0001_...` now exists twice (v4_A of 11-05 and v5_A of 11-09), and ref `0006`
+  repeats the counter of the archived `0006_2026-10-27_181840_run_ref`. The full folder names
+  are unique; cite runs by full name.
+- **State of the runs:**
+  - The REF runs carry `metrics.json` and `report.md`.
+  - The Case 1 run has no run-level report yet. `report_case1.py` is needed for
+    `tab:case_svr:reference` and the equivalence and Pareto figures.
+  - The superseded v4 runs on Z: and F:\qOFO_res are not yet archived.
+
 ## 6. Open / pending
 - G1, the weights: resolved (§ 5b).
 - The dead band: decided (§ 4).

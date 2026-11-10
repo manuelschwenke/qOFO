@@ -68,6 +68,26 @@ unsupervised"). Launch and result in the section below.
 - A numbering placeholder `0001_2026-11-10_160316_run_case1_v5rb_A` puts it after the Case 1 run of 16:03.
 - Tooling: `F:\qOFO_screens\2026-11-10_rerun_launch_fix` (`launch_svr.ps1`).
 
+## Attempt 1 failed, fix v2 (af5b010)
+
+- 3bc50ba in the rerun (case1/0002_2026-11-10_193505_run_case1_v5rb_A_svrfix): at step 365 the warm re-solve diverged
+  too ("invalid value encountered in divide", V / |V| in the Jacobian, i.e. a zero voltage in the warm start). The
+  flat-start fallback failed; the run failed as before (kept as the record of the attempt).
+- Cause (reasoned, not reproduced offline): the snapshot was taken after `seed_qv_equilibrium`, which writes the DER
+  outputs of a linearised closed-loop equilibrium (from the shared Jacobian) and can be far off on the stressed point
+  after the connection. The offline check on the capture had no seed, so it passed. A diverged solve that clears
+  `res_trafo3w` was a second candidate; the offline test did not reproduce it.
+- v2 (af5b010):
+  - the snapshot, now `core.plant.snapshot_results` with every `res_*` table and the DER outputs, is taken BEFORE
+    the seed;
+  - `runpp_warm_staged` restores all of it;
+  - unit test with a far-off seed. 15 tests pass.
+- Rerun of record `case1/0003_..._run_case1_v5rb_A_svrfix2` (e5wimi, CPU 39, started 20:18) and a diagnostic copy
+  (`F:\qOFO_screens\2026-11-10_svr_case1_diag\diag_v2.py`, stops at 7400 s).
+- **Result at step 365 (both runs):**
+  - "end-of-step PF with enforce_q_lims=True diverged; retrying warm from the last converged state..."
+  - "warm re-solve converged (warm, Q limits, Q(V) loops active)". The run continues.
+
 ## Open
 - The MC campaign running on 5c2d8b0 has the old fallback. An episode that reaches it can still fail there; check
   its failures for "retrying flat-start unclipped" after the campaign.

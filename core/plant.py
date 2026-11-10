@@ -116,7 +116,26 @@ def runpp_relays_held(net: pp.pandapowerNet, **kwargs) -> None:
             net.controller.loc[relays, "in_service"] = True
 
 
-def runpp_warm_staged(net: pp.pandapowerNet, res_bus, sgen_q_mvar, **kwargs) -> str:
+def snapshot_results(net: pp.pandapowerNet) -> dict:
+    """Copies of every result table (``res_*``) and of the DER outputs, the warm
+    start of :func:`runpp_warm_staged`.  All tables, not only ``res_bus``: a warm
+    start also reads the star-point voltages of the three-winding transformers
+    from ``res_trafo3w``, and a diverged solve clears them (2026-11-10)."""
+    snap = {k: net[k].copy() for k in list(net.keys())
+            if k.startswith("res_") and hasattr(net[k], "copy")}
+    snap["_sgen_q_mvar"] = net.sgen["q_mvar"].copy()
+    return snap
+
+
+def _restore_results(net: pp.pandapowerNet, snap: dict) -> None:
+    for k, v in snap.items():
+        if k == "_sgen_q_mvar":
+            net.sgen["q_mvar"] = v.copy()
+        else:
+            net[k] = v.copy()
+
+
+def runpp_warm_staged(net: pp.pandapowerNet, snap: dict, **kwargs) -> str:
     """Warm, staged re-solve after a diverged end-of-step power flow, tried before
     the flat-start fallback (FIX 2026-11-10).
 
@@ -124,7 +143,7 @@ def runpp_warm_staged(net: pp.pandapowerNet, res_bus, sgen_q_mvar, **kwargs) -> 
     PF with Q limits and every local loop active diverged, and so did the
     flat-start retry without Q limits, although the plant has a solution there
     (G3 at its 400 Mvar limit; daily log 2026-11-10h).  Starting from the last
-    converged bus voltages ``res_bus`` and DER outputs ``sgen_q_mvar``:
+    converged state ``snap`` (:func:`snapshot_results`):
 
     1. relays held, Q(V) loops active, no Q limits -- the post-contingency
        re-solve that converged in that step;
@@ -138,18 +157,16 @@ def runpp_warm_staged(net: pp.pandapowerNet, res_bus, sgen_q_mvar, **kwargs) -> 
     q_lims = bool(kwargs.pop("enforce_q_lims", True))
     for k in ("init", "run_control"):
         kwargs.pop(k, None)
-    net.res_bus = res_bus.copy()
-    net.sgen["q_mvar"] = sgen_q_mvar
+    _restore_results(net, snap)
     runpp_relays_held(net, init="results", enforce_q_lims=False, **kwargs)
     if not q_lims:
         return "warm, no Q limits"
-    res1, q1 = net.res_bus.copy(), net.sgen["q_mvar"].copy()
+    snap1 = snapshot_results(net)
     try:
         runpp_relays_held(net, init="results", enforce_q_lims=True, **kwargs)
         return "warm, Q limits, Q(V) loops active"
     except (LoadflowNotConverged, ControllerNotConverged):
-        net.res_bus = res1
-        net.sgen["q_mvar"] = q1
+        _restore_results(net, snap1)
         pp.runpp(net, init="results", enforce_q_lims=True, run_control=False, **kwargs)
         return "warm, Q limits, Q(V) loops at their stage-1 output"
 

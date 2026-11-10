@@ -137,6 +137,7 @@ from core.plant import (
     runpp_holding_taps,
     runpp_relays_held,
     runpp_warm_staged,
+    snapshot_results,
     PandapowerStaticPlant,
     Plant,
     shunt_steps_for_buses,
@@ -5523,6 +5524,12 @@ def _run_multi_tso_dso_impl(
             _local_acted = bool(_local_actions)
         _needs_end_pf = (_miqp_acted or _contingency_fired_this_step
                          or _local_acted)
+        # The last converged state, for the warm re-solve of a diverged
+        # end-of-step PF below: taken BEFORE the Q(V) seed, which writes the
+        # DER outputs of a linearised equilibrium that can be far off on a
+        # stressed post-event point (2026-11-10, Case 1 SVR).
+        _end_snap = (snapshot_results(net)
+                     if _needs_end_pf and isinstance(plant, PandapowerStaticPlant) else None)
         if (_needs_end_pf and isinstance(plant, PandapowerStaticPlant)
                 and not config.disable_qv_seed):
             # Warm-start QVLocalLoops from the linear closed-loop
@@ -5543,9 +5550,6 @@ def _run_multi_tso_dso_impl(
                     # plant advances real time -- ``dt_s`` minus whatever the
                     # profile pre-settle already consumed, so the interval
                     # totals dt_s and the clock stays 1x.
-                    # The last converged state, for the warm re-solve below.
-                    _end_snap = ((net.res_bus.copy(), net.sgen["q_mvar"].copy())
-                                 if isinstance(plant, PandapowerStaticPlant) else None)
                     plant.advance(config.dt_s - _profile_settle_s)
                     plant.read_y()
                 except LoadflowNotConverged:
@@ -5574,7 +5578,7 @@ def _run_multi_tso_dso_impl(
                               f"converged state...")
                     try:
                         _how = runpp_warm_staged(
-                            net, _end_snap[0], _end_snap[1],
+                            net, _end_snap,
                             calculate_voltage_angles=True,
                             max_iteration=100,
                             max_iter=300,

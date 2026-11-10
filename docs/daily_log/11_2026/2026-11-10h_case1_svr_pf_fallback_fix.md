@@ -62,6 +62,12 @@ out a fix for case 1 svr failure, you can try to rerun it with the fix, unsuperv
 Case 1 SVR alone with this commit, scenario A, as its own run folder (author: "rerun it with the fix,
 unsupervised"). Launch and result in the section below.
 
+- Launched 19:35 on e5wimi (one process, pinned to logical CPU 39; the author's limit of 20 workers holds: MC 16 +
+  CEN session 1 + this 1). Run folder `ch_10_case1_svr/0002_2026-11-10_193505_run_case1_v5rb_A_svrfix` in
+  `F:\qOFO_fix`, tag v5rb_A_svrfix, code 3bc50ba (clean).
+- A numbering placeholder `0001_2026-11-10_160316_run_case1_v5rb_A` puts it after the Case 1 run of 16:03.
+- Tooling: `F:\qOFO_screens\2026-11-10_rerun_launch_fix` (`launch_svr.ps1`).
+
 ## Open
 - The MC campaign running on 5c2d8b0 has the old fallback. An episode that reaches it can still fail there; check
   its failures for "retrying flat-start unclipped" after the campaign.

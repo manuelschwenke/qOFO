@@ -2,7 +2,7 @@
 
 import pandapower as pp
 
-from core.plant import runpp_warm_staged
+from core.plant import runpp_warm_staged, snapshot_results
 
 
 def _net():
@@ -21,9 +21,10 @@ def _net():
 
 def test_q_limits_enforced_from_the_snapshot():
     net = _net()
-    snap = (net.res_bus.copy(), net.sgen["q_mvar"].copy())
+    snap = snapshot_results(net)
     net.res_bus = net.res_bus.iloc[0:0]          # as if the diverged solve had cleared the results
-    how = runpp_warm_staged(net, *snap, enforce_q_lims=True, calculate_voltage_angles=True)
+    net.sgen["q_mvar"] = 1e3                     # and a Q(V) seed far off
+    how = runpp_warm_staged(net, snap, enforce_q_lims=True, calculate_voltage_angles=True)
     assert how.startswith("warm, Q limits")
     assert net.res_gen.q_mvar.iloc[0] <= 10.0 + 1e-6
     assert net.converged
@@ -31,7 +32,17 @@ def test_q_limits_enforced_from_the_snapshot():
 
 def test_without_q_limits_the_machine_exceeds_them():
     net = _net()
-    snap = (net.res_bus.copy(), net.sgen["q_mvar"].copy())
-    how = runpp_warm_staged(net, *snap, enforce_q_lims=False, calculate_voltage_angles=True)
+    snap = snapshot_results(net)
+    how = runpp_warm_staged(net, snap, enforce_q_lims=False, calculate_voltage_angles=True)
     assert how == "warm, no Q limits"
     assert net.res_gen.q_mvar.iloc[0] > 10.0
+
+
+def test_snapshot_restores_every_result_table_and_the_der_outputs():
+    net = _net()
+    snap = snapshot_results(net)
+    assert {"res_bus", "res_gen", "res_line", "_sgen_q_mvar"} <= set(snap)
+    q0 = float(net.sgen.q_mvar.iloc[0])
+    net.sgen["q_mvar"] = 99.0
+    runpp_warm_staged(net, snap, enforce_q_lims=False, calculate_voltage_angles=True)
+    assert abs(float(net.sgen.q_mvar.iloc[0]) - q0) < 1e-9

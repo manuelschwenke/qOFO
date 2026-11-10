@@ -503,7 +503,7 @@ on on `rural_700`.
     with it (O3 3, S2 2). Whether it concentrates in the G3-off hours is open.
   - (ii) OFO's area-1 pilot error exceeds SVR's by more than the margin. Possible reason: OFO's
     objective weights all buses, while SVR tracks the pilot bus directly. Not checked.
-- **Copy to Z:** robocopy to `Z:\Python_Projekte\qOFOesults\ch_11_case2_multisystem\mc\0002_2026-11-09_221649_run_mc_v5nr` (11:43-12:06): 2745 files, 3 754 061 767 B, equal to F:.
+- **Copy to Z:** robocopy to `Z:\Python_Projekte\qOFO\results\ch_11_case2_multisystem\mc\0002_2026-11-09_221649_run_mc_v5nr` (11:43-12:06): 2745 files, 3 754 061 767 B, equal to F:.
   Includes `evaluation/` and the full run logs, as in the October campaign on Z:. The counter
   0002 is unique in Z:'s mc folder (only 0003_2026-10-29 there).
 

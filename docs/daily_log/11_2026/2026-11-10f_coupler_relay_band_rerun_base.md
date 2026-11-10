@@ -62,6 +62,38 @@ the lambda_max(B) re-evaluation.
 Gate before the reruns (from the handover): re-evaluate lambda_max(B) of `ch9_selected_nr_2026_11_v5` on the Ch 8
 design points with the new 1.00 pu start (first check: zone 2 +4.9 %); keep the weights if clearly below 2.
 
+## Gate result: lambda_max(B) at the new start (2026-11-10 15:41, author: "Yes, run the check")
+
+Method (`2026-11-10f_lambda_gate.py`; outputs in `F:\qOFO_screens\2026-11-10_lambda_gate_new_start`: points,
+`capture.log`, `capture_failures.json`, `lambda_gate.json`):
+- The lambda bank of procedure v5, unchanged: W1-W6 (12 h) plus the ch_9_13 grid at 12 h and 3 h, both G3 states,
+  banks excluded, `tuning.stage1_screen.screen_weights` + `worst`, as `ch_9_14_procedure_v4.lam_v4`.
+- Weights: the selected paramset, not re-selected.
+- Captured on this base with the procedure's own `_capture_config()` (scenario rural_700_north_res,
+  gen_vm_init_pu 1.00, coupler_relay_tol_pu 0.02), 8 single-threaded workers pinned to `AFFINITY_MASK` 0x55555,
+  483 s.
+- The same 6 conditions as in v5 fail to converge (F0408/F0622/F0822 at 14:00, 12 h and 3 h), so the two point sets
+  are identical (192 points each).
+- Control: the stored points of F:\qOFO_v5 run 0002 give 1.5301, the paramset value.
+
+| layer | old start (1.03 pu terminals) | new start (1.00 pu) |
+|---|---|---|
+| TS_1 | 1.5301 (worst, F0808_02_12h) | **1.4524** (worst, same point) |
+| TS_2 | 0.8532 | 0.8577 |
+| TS_3 | 1.0921 | 1.0243 |
+| STS_DSO_1 / 2 / 3 / 4 | 1.0649 / 1.1670 / 1.0143 / 1.4092 | 1.0655 / 1.1632 / 1.0147 / 1.4043 |
+
+Paired (condition, layer) values, 1344: new - old mean -0.018, range -0.093 ... +0.017.
+
+**Gate passed.** 1.4524 < selection ceiling 1.5459 < 2. Keep the weights. The value to report in Ch 8 for the new
+start is lambda_max(B) = 1.452; the design value 1.530 stands for the old start.
+
+The handover's "zone 2 +4.9 %" was the TS-OFO's own lambda at step 1 of an O2 run; on the bank, TS_2 rises 0.5 %.
+
+Consequence for CEN: `variants.selected_lambda_max()` reads `provenance.lambda_max_B` (1.5301) as M's loop-gain
+target. On this base the cascade's own lambda_max(B) is 1.4524. Whether M's target follows the new value is part of
+the CEN rule (session cen-tuning-2); the paramset is not edited here.
+
 ## Open
 - CEN rule (session cen-tuning-2): its variant change is to branch from this base.
 - Commit of this branch (author).

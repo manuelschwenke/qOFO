@@ -442,6 +442,31 @@ on on `rural_700`.
   `0001_2026-11-09_185947_run_case1_v5_A` is left to the thesis session; this session does not
   write into the Z: copy of that run.
 
+## 5h. Ch 8 (weights, dead band) v5 runs copied to Z: (2026-11-10 ~09:45)
+- Reason: a thesis session without access to F: updates Ch 8 and Appendix D
+  (author: "another session with out access to this computers F:/ needs it").
+- Copied with robocopy from `F:\qOFO_v5\results\ch_09_parameter_selection\` to
+  `Z:\Python_Projekte\qOFO\results\ch_09_parameter_selection\`. Neither name existed on Z:.
+  File count and bytes are equal to F:.
+
+  | run | files | MB | header target |
+  |---|---|---|---|
+  | `0002_2026-11-08_185554_ch_9_17_procedure_v5` | 3561 | 29.6 | `ch:timescales:weights` |
+  | `0003_2026-11-09_163808_ch_9_4_deadband` | 536 | 143.6 | `ch:timescales:deadband` |
+
+- The selected weights and lambda_max_B = 1.5301 sit in the paramset
+  `configs/paramsets/ch9_selected_nr_2026_11_v5.json`. It is committed in fdacdda
+  (branches res/tuning-v5-2026-11-08, res/ref-v5-2026-11-09, res/ch11-k3-2026-11-09), not in
+  the branch checked out on Z: (res/trial-v5-2026-11-09). Read it with
+  `git show res/tuning-v5-2026-11-08:configs/paramsets/ch9_selected_nr_2026_11_v5.json`.
+- The headers' Run lines read `qOFO_v5/results/...`. The counters 0002 and 0003 are below the
+  existing Z: counters 0008-0014 of that folder; cite runs by full folder name.
+- The D1/D2 run carries `design_margin_steps = 0`. Its D1 width is Delta* = 0.0075. The thesis
+  uses 0.010 = Delta* + one candidate step (author decision 2026-11-09, § 4); the run itself
+  does not report 0.010.
+- Not copied: `F:\qOFO_v5\results\ch_08_setup\network_scarcity\0001_2026-11-09_163850_mini_mc_v5_g3off`
+  and the procedure-v5 run 0001 (the operating points that 0002 reuses).
+
 ## 6. Open / pending
 - G1, the weights: resolved (§ 5b).
 - The dead band: decided (§ 4).

@@ -1484,7 +1484,25 @@ class MultiTSOConfig:
     central_kappa_scope: str = "all"
     """Which actuator classes the factor kappa scales: ``"all"`` the whole
     ``g_w`` block; ``"discrete"`` only taps and banks (the continuous
-    actuators keep the selected weights)."""
+    actuators keep the selected weights); ``"blocks"`` the continuous TS block
+    (TS-connected IBGs, AVRs) to :attr:`central_lambda_target` and the STS
+    block (STS IBGs) to :attr:`central_lambda_target_sts`, then both by one
+    common factor so that the joint continuous loop gain does not exceed
+    :attr:`central_lambda_target`; taps, banks and couplers by the factor of
+    ``"all"`` (author decision 2026-11-10, screen 2026-11-10d)."""
+
+    central_lambda_target_sts: Optional[float] = None
+    """Loop-gain target of the STS block under ``central_kappa_scope =
+    "blocks"`` (Case 2: the paramset's ``design_lambda_max_B_sts``, the STS
+    layer's ceiling)."""
+
+    central_switch_g_w_rule: str = "kappa"
+    """``g_w`` of the transmission taps and banks of the central controller:
+    ``"kappa"`` the selected weights times the scope's kappa; ``"owner"`` the
+    per-switch curvature of the owning TS-OFO (``g_w,j = g_w,own,j *
+    h_j / h_own,j`` with ``h_j = sum_i g_v,i H_ij^2``), so that one switch
+    costs the central controller as much, relative to its voltage effect, as
+    its owner in the cascade (author decision 2026-11-10, rule C2)."""
 
     central_ts_discrete_cooldown: Optional[int] = None
     """Lock, in central steps, of a transmission tap or bank after it moved

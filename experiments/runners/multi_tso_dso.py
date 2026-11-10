@@ -264,6 +264,102 @@ def _central_lambda(central_controller, central_cfg, meta, rule: str,
     return float(np.linalg.eigvalsh(0.5 * (Cs + Cs.T))[-1])
 
 
+def _central_column_groups(central_cfg, meta) -> Dict[str, List[int]]:
+    """Column groups of the central control vector
+    ``[Q_DER | V_gen | s_OLTC2w | s_shunt | s_OLTC3w]``.
+
+    ``ts``: TS-connected IBGs and AVRs; ``sts``: STS IBGs; ``switch``: the
+    transmission taps and banks; ``coupler``: the 3W coupler taps.
+    """
+    ts_der = {int(s) for s in meta.tso_der_indices}
+    n_der = len(central_cfg.der_indices)
+    k0 = n_der + len(central_cfg.gen_indices)
+    n_sw = len(central_cfg.oltc_trafo_indices) + len(central_cfg.shunt_bus_indices)
+    n_cpl = len(central_cfg.oltc_trafo3w_indices)
+    return {
+        "ts": ([k for k, d in enumerate(central_cfg.der_indices) if int(d) in ts_der]
+               + list(range(n_der, k0))),
+        "sts": [k for k, d in enumerate(central_cfg.der_indices) if int(d) not in ts_der],
+        "switch": list(range(k0, k0 + n_sw)),
+        "coupler": list(range(k0 + n_sw, k0 + n_sw + n_cpl)),
+    }
+
+
+def _block_lambda(H_v, g_v, g_w, cols) -> float:
+    """``lambda_max`` of the voltage-objective curvature over the columns ``cols``."""
+    A = np.sqrt(g_v)[:, None] * H_v[:, cols] / np.sqrt(g_w[cols])[None, :]
+    return float(np.linalg.eigvalsh(A.T @ A)[-1])
+
+
+def _central_block_g_w(H_v, g_v, g_w0, groups, target: float,
+                       target_sts: float) -> Tuple[NDArray[np.float64], Dict[str, float]]:
+    """``g_w`` of the central controller under ``central_kappa_scope='blocks'``.
+
+    Continuous columns: the TS block to ``target`` and the STS block to
+    ``target_sts`` (the ceilings of the two cascade layers), then both by one
+    common factor so that the joint continuous loop gain does not exceed
+    ``target``.  The blocks act on the same voltages, so the block targets
+    alone give a joint gain above 2 (2.64 at the R2 start, 2026-11-10d).
+    Taps, banks and couplers are scaled by ``kappa_all = max(lambda_joint /
+    target, 1)``, the factor of scope ``"all"``.
+    """
+    ts, sts = groups["ts"], groups["sts"]
+    cont = sorted(ts + sts)
+    g_w = np.asarray(g_w0, dtype=np.float64).copy()
+    kappa_all = max(_block_lambda(H_v, g_v, g_w, cont) / target, 1.0)
+    f_ts = _block_lambda(H_v, g_v, g_w, ts) / target if ts else 1.0
+    g_w[ts] *= f_ts
+    f_sts = _block_lambda(H_v, g_v, g_w, sts) / target_sts if sts else 1.0
+    g_w[sts] *= f_sts
+    common = max(_block_lambda(H_v, g_v, g_w, cont) / target, 1.0)
+    g_w[cont] *= common
+    disc = groups["switch"] + groups["coupler"]
+    g_w[disc] *= kappa_all
+    return g_w, {"kappa_all": kappa_all, "ts": f_ts * common,
+                 "sts": f_sts * common, "common": common}
+
+
+def _central_owner_switch_g_w(H_v, g_v, g_w, central_cfg, zone_defs,
+                              g_w_tap_owner: float, g_w_bank_owner: float
+                              ) -> Tuple[NDArray[np.float64], Dict[str, float]]:
+    """``g_w`` of the transmission taps and banks under
+    ``central_switch_g_w_rule='owner'`` (rule C2, author 2026-11-10).
+
+    One switch of device j costs the central controller as much, relative to
+    its voltage effect, as it costs its owner, the TS-OFO of its zone:
+    ``g_w,j = g_w,own,j * h_j / h_own,j`` with ``h_j = sum_i g_v,i H_ij^2``
+    over the central controller's rows and ``h_own,j`` over the owner zone's
+    TS buses, both on the central controller's full-network ``H`` (the zone
+    models of the cascade have no column for the tap of a zone's promoted
+    slack machine).  Since the central rows contain the owner's,
+    ``h_j >= h_own,j``: no switch is cheaper than in the cascade.  A device
+    with ``h_own,j = 0`` (out of service at the start) keeps its ``g_w``.
+    """
+    row_of = {int(b): i for i, b in enumerate(central_cfg.voltage_bus_indices)}
+    owner_rows: Dict[Tuple[str, int], List[int]] = {}
+    for zd in zone_defs.values():
+        rows = [row_of[int(b)] for b in zd.v_bus_indices if int(b) in row_of]
+        for t in zd.oltc_trafo_indices:
+            owner_rows[("tap", int(t))] = rows
+        for b in zd.shunt_bus_indices:
+            owner_rows[("bank", int(b))] = rows
+    devices = ([("tap", int(t), g_w_tap_owner) for t in central_cfg.oltc_trafo_indices]
+               + [("bank", int(b), g_w_bank_owner) for b in central_cfg.shunt_bus_indices])
+    k0 = len(central_cfg.der_indices) + len(central_cfg.gen_indices)
+    g_w = np.asarray(g_w, dtype=np.float64).copy()
+    factors: Dict[str, float] = {}
+    for k, (kind, idx, gw_own) in enumerate(devices):
+        j = k0 + k
+        rows = owner_rows[(kind, idx)]
+        h_own = float(np.sum(g_v[rows] * H_v[rows, j] ** 2))
+        if h_own <= 0.0:
+            continue
+        ratio = float(np.sum(g_v * H_v[:, j] ** 2)) / h_own
+        g_w[j] = float(gw_own) * ratio
+        factors[f"{kind} {idx}"] = ratio
+    return g_w, factors
+
+
 def _central_curvature_spectrum(central_controller, central_cfg):
     """Curvature spectrum of the central controller's voltage objective.
 
@@ -2776,9 +2872,39 @@ def _run_multi_tso_dso_impl(
                     np.asarray(central_controller.params.g_w, dtype=np.float64),
                     (central_controller.n_controls,))
             _gw0 = np.asarray(_gw0, dtype=np.float64).copy()
+            _gw_new = None
+            _switch_rule = config.central_switch_g_w_rule
+            if _switch_rule not in ("kappa", "owner"):
+                raise ValueError("central_switch_g_w_rule must be kappa|owner")
+            if _switch_rule == "owner" and (
+                    _rule != "continuous" or config.central_kappa_scope == "discrete"):
+                raise ValueError(
+                    "central_switch_g_w_rule='owner' sets the g_w of the taps and "
+                    "banks outside the loop gain; it requires central_lambda_rule="
+                    "'continuous' and a kappa scope other than 'discrete'")
+            if config.central_kappa_scope == "blocks":
+                # The continuous TS and STS blocks get the ceilings of their
+                # cascade layers, then one common factor caps the joint gain.
+                if _rule != "continuous":
+                    raise ValueError("central_kappa_scope='blocks' requires "
+                                     "central_lambda_rule='continuous'")
+                if config.central_lambda_target_sts is None:
+                    raise ValueError("central_kappa_scope='blocks' requires "
+                                     "central_lambda_target_sts")
+                _Hv_c, _gv_c = central_controller.voltage_curvature_inputs()
+                _gw_new, _blk = _central_block_g_w(
+                    _Hv_c, _gv_c, _gw0, _central_column_groups(central_cfg, meta),
+                    _target, float(config.central_lambda_target_sts))
+                central_gw_kappa = _blk["kappa_all"]
+                print(f"  [central] blocks: g_w TS x {_blk['ts']:.4g}, STS x "
+                      f"{_blk['sts']:.4g} (common factor {_blk['common']:.4g}; "
+                      f"targets TS {_target:.4g}, STS "
+                      f"{float(config.central_lambda_target_sts):.4g}); taps, "
+                      f"banks, couplers x kappa_all {central_gw_kappa:.4g}",
+                      flush=True)
             # kappa only ever slows M down: a loop gain below the target is
             # left as it is (the selected weights).
-            if _lam_c > _target:
+            elif _lam_c > _target:
                 if config.central_kappa_scope == "all":
                     central_gw_kappa = _lam_c / _target
                     _gw_new = _gw0 * central_gw_kappa
@@ -2805,7 +2931,17 @@ def _run_multi_tso_dso_impl(
                                + len(central_cfg.gen_indices))
                     _gw_new[_n_cont:] *= central_gw_kappa
                 else:
-                    raise ValueError("central_kappa_scope must be all|discrete")
+                    raise ValueError("central_kappa_scope must be all|discrete|blocks")
+            if _switch_rule == "owner":
+                _Hv_c, _gv_c = central_controller.voltage_curvature_inputs()
+                _gw_new, _own = _central_owner_switch_g_w(
+                    _Hv_c, _gv_c, _gw0 if _gw_new is None else _gw_new,
+                    central_cfg, zone_defs, float(config.g_w_tso_oltc),
+                    float(config.g_w_tso_shunt))
+                print("  [central] switch g_w from the owner's curvature (x g_w "
+                      "of the owning TS-OFO): " + ", ".join(
+                          f"{k} {v:.3g}" for k, v in _own.items()), flush=True)
+            if _gw_new is not None:
                 central_controller.apply_preconditioned_g_w(_gw_new)
             _lam_new = _central_lambda(central_controller, central_cfg, meta, _rule)
             print(f"  [central] rule {_rule}, scope {config.central_kappa_scope}: "

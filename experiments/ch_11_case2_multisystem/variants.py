@@ -36,18 +36,32 @@ O3   TS-OFO + interface set-points + STS-OFO         proposed cascade
 M    one OFO on the coupled model, every step        centralised reference
 ==== ============================================== =====================
 
-``M`` runs at the selected weights, unscaled, with the paramset's ``dso_g_v``
-on the STS buses, and dispatches the banks through the same holding-time /
-mutual-exclusion / rank-1 machinery as the zones.  Its transmission taps and
-banks keep the cascade's timescale: after a switch they are locked as long as
-in the cascade (:func:`ts_equivalent_cooldown`, 15 min), the banks' own
-30-min holding time on top.  The loop gain is checked over the continuous
-actuators (0.98 < 2), the discrete ones being rate-limited.  Adopted
+``M`` runs at the selected weights, with :data:`M_STS_G_V_FACTOR` times the
+paramset's ``dso_g_v`` on the STS buses, and dispatches the banks through the
+same holding-time / mutual-exclusion / rank-1 machinery as the zones.  Its
+transmission taps and banks keep the cascade's timescale: after a switch they
+are locked as long as in the cascade (:func:`ts_equivalent_cooldown`, 15 min),
+the banks' own 30-min holding time on top.  The loop gain is counted over the
+continuous actuators, the discrete ones being rate-limited.  Adopted
 2026-10-28 (author) after the comparison of four tunings in
 ``results/ch_11_case2_multisystem/ref/0007_*_m_tuning`` -- the earlier uniform
 scaling of all weights to the design's loop gain (kappa 2.42) slowed every
 continuous actuator to tame a mode the taps and banks of all areas create when
 they may move every 20 s, and left M worse than O3.
+
+Weights of M since 2026-11-10 (author; screen and evaluation in the daily log
+2026-11-10g), two construction rules and one tuned factor:
+
+* block-wise loop gain (``central_kappa_scope="blocks"``): the continuous TS
+  block (AVRs, TS-IBGs) to the selected ``lambda_max_B``, the STS block (STS
+  IBGs) to the STS layer's ``design_lambda_max_B_sts``, then one common factor
+  back to the joint ``lambda_max_B``;
+* per-switch weight of the owner (``central_switch_g_w_rule="owner"``): a tap
+  or bank costs M as much, relative to its voltage effect, as it costs the
+  TS-OFO of its zone (both evaluated on M's full-network model);
+* the STS voltage weight :data:`M_STS_G_V_FACTOR` (tuned on R2, held fixed in
+  every other scenario).  The TS : STS weight ratio has no counterpart in the
+  cascade, whose TS and STS voltage weights are selected in different layers.
 
 Author: Manuel Schwenke / Claude Code (2026-10-27)
 """
@@ -90,6 +104,7 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
     "M": dict(control_scope="central", tso_mode="ofo", dso_mode="local",
               local_sensitivities_tso=False, local_sensitivities_dso=False,
               central_period_s=None, central_lambda_rule="continuous",
+              central_kappa_scope="blocks", central_switch_g_w_rule="owner",
               **_O_STS_LABELS),
 }
 #: Msel: run 0026 (E2) under this name, when M was capped at 0.90 and Msel at the
@@ -128,7 +143,9 @@ STEP_ALLOWED: Dict[Tuple[str, str], set] = {
     ("O3", "M"): {"control_scope", "dso_mode", "local_sensitivities_tso",
                   "local_sensitivities_dso", "central_period_s",
                   "central_dso_g_v", "central_lambda_target",
-                  "central_lambda_rule", "central_ts_discrete_cooldown"},
+                  "central_lambda_rule", "central_ts_discrete_cooldown",
+                  "central_kappa_scope", "central_lambda_target_sts",
+                  "central_switch_g_w_rule"},
     # The two loop-gain rules for the centralised reference.
     ("M", "Msel"): set(),
     ("M", "M090"): {"central_lambda_target"},
@@ -156,16 +173,17 @@ def resolved(name: str, minutes: int, events: Iterable[Any] = (),
     cfg = base_config(minutes, events, noise_seed)
     cfg = dataclasses.replace(cfg, **VARIANTS[name])
     if name in ("M", "Msel", "M090"):
-        # M weights the STS buses as the STS-OFOs do (the paramset's dso_g_v),
-        # not with the dataclass default 2e4, which was ~9x the selected value.
-        # Its loop gain over the continuous actuators is capped at the selected
-        # design's lambda_max_B, the cascade's own ceiling (M090: at
-        # M_LAMBDA_FALLBACK): the runner scales all of M's g_w by
-        # kappa = lambda_max / target when it lies above (v4 weights: 1.781).
+        # M weights the STS buses with M_STS_G_V_FACTOR times the STS-OFOs'
+        # weight (the paramset's dso_g_v), not with the dataclass default 2e4,
+        # which was ~9x the selected value.  Its continuous TS block and joint
+        # loop gain are capped at the selected design's lambda_max_B, the
+        # cascade's own ceiling (M090: at M_LAMBDA_FALLBACK), its STS block at
+        # the STS layer's design ceiling (runner, central_kappa_scope="blocks").
         cfg = dataclasses.replace(
-            cfg, central_dso_g_v=float(cfg.dso_g_v),
+            cfg, central_dso_g_v=M_STS_G_V_FACTOR * float(cfg.dso_g_v),
             central_lambda_target=(M_LAMBDA_FALLBACK if name == "M090"
                                    else selected_lambda_max()),
+            central_lambda_target_sts=selected_lambda_max_sts(),
             central_ts_discrete_cooldown=ts_equivalent_cooldown(cfg))
     return cfg
 
@@ -199,6 +217,14 @@ def ts_equivalent_cooldown(cfg: MultiTSOConfig) -> int:
 #: <= 0.4 mpu per stage, and the selected lambda is the better argument (author).
 M_LAMBDA_FALLBACK = 0.90
 
+#: Factor on M's STS voltage weight (``central_dso_g_v = factor * dso_g_v``),
+#: the one tuned weight of M (author 2026-11-10: "manually tune ... a little to
+#: have less weight on the STS voltages"): the largest of {1, 0.5, 0.25} at
+#: which M's e_v in R2 lies below that of every other variant, fixed before the
+#: screen; held fixed in every other scenario.  Screen and choice: daily log
+#: 2026-11-10g.
+M_STS_G_V_FACTOR = 1.0
+
 
 def selected_lambda_max() -> float:
     """``lambda_max_B`` of the selected design, from the paramset provenance.
@@ -210,6 +236,17 @@ def selected_lambda_max() -> float:
     if lam is None:
         raise KeyError(f"paramset {PARAMSET!r} records no lambda_max_B; "
                        f"M has no loop gain to match")
+    return float(lam)
+
+
+def selected_lambda_max_sts() -> float:
+    """``design_lambda_max_B_sts`` of the selected design (paramset provenance):
+    the STS layer's ceiling, the target of M's STS block."""
+    prov = load_paramset(PARAMSET).get("provenance") or {}
+    lam = prov.get("design_lambda_max_B_sts")
+    if lam is None:
+        raise KeyError(f"paramset {PARAMSET!r} records no design_lambda_max_B_sts; "
+                       f"M's STS block has no loop gain to match")
     return float(lam)
 
 

@@ -88,6 +88,50 @@ unsupervised"). Launch and result in the section below.
   - "end-of-step PF with enforce_q_lims=True diverged; retrying warm from the last converged state..."
   - "warm re-solve converged (warm, Q limits, Q(V) loops active)". The run continues.
 
+- But the rerun failed one step later: the next step's profile re-solve (`plant.advance`, runner line 4132) raised
+  LoadflowNotConverged (50 iterations) in `run_control`'s initial power flow. Same in the diagnostic copy
+  (traceback). 0 records saved (case1/0003 kept as the record of the attempt).
+
+## Fix v3 (04c8124)
+
+- Cause: pandapower starts each solve from a DC estimate ("auto" init with `calculate_voltage_angles`). On the
+  stressed post-event point that start diverges, although a converged state lies right next to it.
+- `PandapowerStaticPlant.advance` now:
+  - snapshots the result tables before every solve;
+  - if the solve diverges (run_control plants only), re-solves warm with `runpp_warm_staged`;
+  - if that fails too, restores the snapshot and raises the original LoadflowNotConverged, so the runner's
+    end-of-step fallback (pre-seed snapshot) runs as before.
+  - A converging solve is untouched: test against plain `pp.runpp`, max |dV| < 1e-9.
+  - A counter `warm_resolves` and a log line `[plant] power flow diverged; warm re-solve converged (...)`.
+- Tests: 2 new plant tests (forced divergence rescued; converging solve identical). 33 plant / relay / CEN tests
+  pass.
+- Rerun of record `case1/0004_..._run_case1_v5rb_A_svrfix3` (e5wimi CPU 39, 20:59) plus a full-horizon
+  diagnostic copy (`diag_v3.py`, pickles the net if the run fails). The finisher waits for it.
+
+- Result: failed again at step 366. The plant-level warm re-solve ran and failed too (no "[plant]" line); 0 records.
+  The diagnostic copy saved the state the failing solve tried (`v3_failed_net.pkl`, 365 records).
+
+## Fix v4 (af3f5e9)
+
+Offline on that state (`2026-11-10h_analyse_v3.py`), warm start:
+
+| solve | result |
+|---|---|
+| relays held, Q(V) on, Q limits | converges: V_min 0.9736 pu (bus 11), G3 400 Mvar (at limit), IBG 172 Mvar |
+| relays held, Q(V) on, no Q limits | ControllerNotConverged |
+| no control, Q limits | converges |
+| no control, no Q limits | converges: G3 would need 417 Mvar |
+
+- The re-solve had started with the unconstrained Q(V) solve and given up. The Q-limited solve converges directly,
+  but only with 100 Newton iterations; the plant's budget is 50.
+- `runpp_warm_staged` now tries, each with at least 200 Newton iterations:
+  1. the Q-limited solve, Q(V) loops active;
+  2. the route through the unconstrained solve;
+  3. the Q limits with the loops held.
+- It converges on the saved states of steps 365 and 366 (`2026-11-10h_test_fix_v4_on_capture.py`): G3 at
+  397 / 400 Mvar, V_min 0.972 / 0.974 pu. 33 tests pass.
+- Rerun of record with af3f5e9 (tag v5rb_A_svrfix4) plus a diagnostic copy; see the next section.
+
 ## Open
 - The MC campaign running on 5c2d8b0 has the old fallback. An episode that reaches it can still fail there; check
   its failures for "retrying flat-start unclipped" after the campaign.

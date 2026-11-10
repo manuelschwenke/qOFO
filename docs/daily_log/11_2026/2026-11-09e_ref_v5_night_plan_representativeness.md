@@ -438,6 +438,9 @@ on on `rural_700`.
   - The Case 1 run has no run-level report yet. `report_case1.py` is needed for
     `tab:case_svr:reference` and the equivalence and Pareto figures.
   - The superseded v4 runs on Z: and F:\qOFO_res are not yet archived.
+- **Case 1 report (author 2026-11-10 09:2x: "thesis session does it").** `report_case1.py` on
+  `0001_2026-11-09_185947_run_case1_v5_A` is left to the thesis session; this session does not
+  write into the Z: copy of that run.
 
 ## 6. Open / pending
 - G1, the weights: resolved (§ 5b).

@@ -61,7 +61,7 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pandapower as pp
-from pandapower.auxiliary import LoadflowNotConverged
+from pandapower.auxiliary import ControllerNotConverged, LoadflowNotConverged
 from numpy.typing import NDArray
 
 # ── Ensure project root is on sys.path when imported as a package module ─────
@@ -136,6 +136,7 @@ from core.plant import (
     ActuatorWrites,
     runpp_holding_taps,
     runpp_relays_held,
+    runpp_warm_staged,
     PandapowerStaticPlant,
     Plant,
     shunt_steps_for_buses,
@@ -5542,6 +5543,9 @@ def _run_multi_tso_dso_impl(
                     # plant advances real time -- ``dt_s`` minus whatever the
                     # profile pre-settle already consumed, so the interval
                     # totals dt_s and the clock stays 1x.
+                    # The last converged state, for the warm re-solve below.
+                    _end_snap = ((net.res_bus.copy(), net.sgen["q_mvar"].copy())
+                                 if isinstance(plant, PandapowerStaticPlant) else None)
                     plant.advance(config.dt_s - _profile_settle_s)
                     plant.read_y()
                 except LoadflowNotConverged:
@@ -5550,8 +5554,13 @@ def _run_multi_tso_dso_impl(
                     # connect) when run_control=True is also active: the
                     # local Q(V) droop and the PV→PQ flips from
                     # enforce_q_lims interact and oscillate within the 50-NR
-                    # iteration budget.  Fall back to a flat-start retry
-                    # without Q-limit enforcement so the timestep still
+                    # iteration budget.  First a warm, staged re-solve from
+                    # the last converged state that keeps the Q limits
+                    # (runpp_warm_staged, 2026-11-10: Case 1 SVR at the
+                    # 250 Mvar connection, where the flat start below
+                    # diverged although the plant has a solution).  Only if
+                    # that fails too, the old fallback: a flat-start retry
+                    # without Q-limit enforcement, so the timestep still
                     # records a converged state; the next step's PFs (post-
                     # profile, post-contingency, or the next end-of-step PF
                     # itself) re-attempt with the clamp on a more relaxed
@@ -5561,14 +5570,29 @@ def _run_multi_tso_dso_impl(
                     if verbose >= 1:
                         print(f"  [Step {step}] end-of-step PF with "
                               f"enforce_q_lims={config.enforce_q_lims_plant} "
-                              f"diverged; retrying flat-start unclipped...")
-                    runpp_holding_taps(net, run_control=_run_control,
-                             calculate_voltage_angles=True,
-                             max_iteration=100,
-                             max_iter=300,
-                             distributed_slack=config.distributed_slack,
-                             enforce_q_lims=False,
-                             init='flat')
+                              f"diverged; retrying warm from the last "
+                              f"converged state...")
+                    try:
+                        _how = runpp_warm_staged(
+                            net, _end_snap[0], _end_snap[1],
+                            calculate_voltage_angles=True,
+                            max_iteration=100,
+                            max_iter=300,
+                            distributed_slack=config.distributed_slack,
+                            enforce_q_lims=config.enforce_q_lims_plant)
+                        if verbose >= 1:
+                            print(f"  [Step {step}] warm re-solve converged ({_how})")
+                    except (LoadflowNotConverged, ControllerNotConverged):
+                        if verbose >= 1:
+                            print(f"  [Step {step}] warm re-solve diverged too; "
+                                  f"retrying flat-start unclipped...")
+                        runpp_holding_taps(net, run_control=_run_control,
+                                 calculate_voltage_angles=True,
+                                 max_iteration=100,
+                                 max_iter=300,
+                                 distributed_slack=config.distributed_slack,
+                                 enforce_q_lims=False,
+                                 init='flat')
             elif not isinstance(plant, PandapowerStaticPlant):
                 # No MIQP acted this step, but RMS time must still flow
                 # (the static plant's operating point is already final).

@@ -48,7 +48,7 @@ from typing import Dict, Protocol, runtime_checkable
 
 import pandapower as pp
 from pandapower.control import DiscreteTapControl
-from pandapower.auxiliary import ControllerNotConverged
+from pandapower.auxiliary import ControllerNotConverged, LoadflowNotConverged
 
 from core.measurement_noise import measured_der_voltage
 
@@ -114,6 +114,44 @@ def runpp_relays_held(net: pp.pandapowerNet, **kwargs) -> None:
     finally:
         if relays:
             net.controller.loc[relays, "in_service"] = True
+
+
+def runpp_warm_staged(net: pp.pandapowerNet, res_bus, sgen_q_mvar, **kwargs) -> str:
+    """Warm, staged re-solve after a diverged end-of-step power flow, tried before
+    the flat-start fallback (FIX 2026-11-10).
+
+    Case 1 SVR, scenario A, at the 250 Mvar connection at bus 11: the end-of-step
+    PF with Q limits and every local loop active diverged, and so did the
+    flat-start retry without Q limits, although the plant has a solution there
+    (G3 at its 400 Mvar limit; daily log 2026-11-10h).  Starting from the last
+    converged bus voltages ``res_bus`` and DER outputs ``sgen_q_mvar``:
+
+    1. relays held, Q(V) loops active, no Q limits -- the post-contingency
+       re-solve that converged in that step;
+    2. from that solution, the Q limits as requested, Q(V) loops active;
+    3. if 2 fails: the Q limits with the Q(V) loops held at their stage-1 output
+       for this one solve.
+
+    Returns the stage that gave the result; raises if stage 1 fails.  Only the
+    failure path calls it, so every solve that converges stays bit-identical.
+    """
+    q_lims = bool(kwargs.pop("enforce_q_lims", True))
+    for k in ("init", "run_control"):
+        kwargs.pop(k, None)
+    net.res_bus = res_bus.copy()
+    net.sgen["q_mvar"] = sgen_q_mvar
+    runpp_relays_held(net, init="results", enforce_q_lims=False, **kwargs)
+    if not q_lims:
+        return "warm, no Q limits"
+    res1, q1 = net.res_bus.copy(), net.sgen["q_mvar"].copy()
+    try:
+        runpp_relays_held(net, init="results", enforce_q_lims=True, **kwargs)
+        return "warm, Q limits, Q(V) loops active"
+    except (LoadflowNotConverged, ControllerNotConverged):
+        net.res_bus = res1
+        net.sgen["q_mvar"] = q1
+        pp.runpp(net, init="results", enforce_q_lims=True, run_control=False, **kwargs)
+        return "warm, Q limits, Q(V) loops at their stage-1 output"
 
 
 @dataclass(frozen=True)

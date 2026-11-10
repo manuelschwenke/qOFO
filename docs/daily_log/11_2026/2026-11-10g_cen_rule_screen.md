@@ -143,14 +143,16 @@ STS voltage deviation f_V^STS (+3.1 mpu) and no coupler operations.
 
 ## 7. Code of the selection
 
-`M_STS_G_V_FACTOR = 0.25` in `variants.py` (commit after a45e22a, section "Branch"). 19 tests pass; resolved M:
+`M_STS_G_V_FACTOR = 0.25` in `variants.py`, commit **65d00a9** (branch tip: 0332a82 rule, a45e22a cap, 65d00a9
+gamma, on 5c2d8b0; this log and the scripts are in the commit too). 17 + 2 tests pass; resolved M:
 `central_dso_g_v` 2500, `central_lambda_target` 1.4524, `central_lambda_target_sts` 1.40, scope "blocks", switch
 rule "owner".
 
 ## Open points
 
-- **Author:** gamma = 0.25 is the edge of the agreed grid and a factor of 4, not "a little"; the margin over O3 on R2 is
-  0.47 mpu. The rule gives it; whether the dissertation wording "tuned" is sufficient is the author's call.
+- ~~Author: gamma = 0.25 is the edge of the agreed grid and a factor of 4, not "a little"; margin over O3 on R2
+  0.47 mpu.~~ **Decided 2026-11-10 ~18:05: author accepted gamma = 0.25 and the wording of section 6** (question:
+  "Accept gamma = 0.25 (a factor 4) and the proposed thesis wording for the CEN reruns?" -> "Accept gamma = 0.25").
 - R3 / R3b: out of sample in the reruns of record (on 27f0651 M at gamma 1 without blocks/C2 trailed O3 by 0.08 on R3
   and led by 0.14 on R3b). If M loses there, report it; do not re-tune.
 - S1 (1.530 cap) sensitivity: append when the e5wimi runs end (~18:30-20:00).

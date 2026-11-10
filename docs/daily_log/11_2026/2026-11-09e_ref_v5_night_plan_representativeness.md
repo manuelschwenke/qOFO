@@ -376,6 +376,44 @@ on on `rural_700`.
   - Then the final invocation with all six variants for the replacements under rule (b).
   - Then `--report` and `evaluate_mc`.
 
+## 5f. Night result and the closing pass (2026-11-10, 07:26–07:36)
+- **Night.**
+  - REF 0005 and 0006 Msel ok; queue v2 started the e5wimi share at 22:16.
+  - e5power first call ended 23:47, pulled 23:52. Second call (S1, L2, O2, --n 100) 23:55–04:05,
+    pulled 04:08 into the reserved `mc/0001_2026-11-09_210315_run_mc_v5nr_e5power`.
+  - e5wimi `run_mc` (M, S2, O3) exit 0 at 05:56 after 27 606 s, as `mc/0002_2026-11-09_221649_run_mc_v5nr`.
+  - Every share ran 106 episodes per variant. Wall medians (s): M 4697, S1 3055, L2 1724,
+    O2 1355, S2 813, O3 594.
+  - e5power side note: `reserve_number` created an empty `0002_..._run_mc_v5nr` there and logged
+    "numbers the run 0003". The remote run continued 0001, so the empty folder is only a number
+    placeholder.
+- **Merge 07:28.** `merge_mc` 0001 → 0002: 318 runs (S1, L2, O2) copied, no prescreen mismatch
+  (dry run first).
+- **`run_mc --report` 07:28** (all six variants, rule (b)):
+  - 14 episodes replaced. The window reaches seed 20261124; the 8 seeds 20261117–20261124 have not
+    yet been run by all six.
+  - Infeasible: 20261079.
+  - Failures per variant (105 episodes each; cause):
+
+    | variant | failed | cause |
+    |---|---|---|
+    | O2 | 9 | tap hunting |
+    | S1 | 6 | tap hunting |
+    | O3 | 4 | 3 tap hunting, 1 PF |
+    | S2 | 3 | 2 tap hunting, 1 PF |
+    | M | 2 | PF |
+    | L2 | 1 | tap hunting |
+
+  - The paired comparisons in this report are on 92 complete episodes, not the final window; not
+    to be used.
+- **Closing pass, launched 07:33** (detached via `launch_ref.py mcFinal`, CPUs 0,2,…,18,
+  `--jobs 10`, the e5wimi day rule):
+  `run_mc --variants M,S1,L2,O2,S2,O3 --n 100 --n-o3 100 --buffer 6 --tag v5nr`.
+  - It prescreened 10 further draws (the batch overshoot of `_prescreen_until`; 114 valid of 143)
+    and scheduled 48 runs.
+  - A failure among the 8 triggers a further replacement round in the same call.
+  - Estimate: 27 CPU-h at 10 workers, ≈ 10:30–11:00. With one more round, ≈ 12:00–14:00.
+
 ## 6. Open / pending
 - G1, the weights: resolved (§ 5b).
 - The dead band: decided (§ 4).

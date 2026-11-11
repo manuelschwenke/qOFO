@@ -190,6 +190,19 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
                  t0_s=110 * 60.0, ramp_s=30 * 60.0, hold_s=30 * 60.0,
                  down=True),
         ]),
+    "P2R_B03B15_L": dict(
+        title="Period II with two long load ramps: 6 Nov 2016 08:00, +300 MW / +150 Mvar each at "
+              "B03 (area 2) and B15 (area 3), up 60-120 min, held to 180, down by 240",
+        start="2016-11-06T08:00:00",
+        events=lambda: [],
+        ramps=lambda: [
+            dict(kind="bus", bus=2, p_mw=300.0, q_mvar=150.0,
+                 t0_s=60 * 60.0, ramp_s=60 * 60.0, hold_s=60 * 60.0,
+                 down=True),
+            dict(kind="bus", bus=14, p_mw=300.0, q_mvar=150.0,
+                 t0_s=60 * 60.0, ramp_s=60 * 60.0, hold_s=60 * 60.0,
+                 down=True),
+        ]),
     # Renewable-dominated period under unit commitment (author decision
     # 2026-10-31): the earliest 6-h window of the profile year, outside the
     # excluded days, starting at a full hour between 06:00 and 12:00, in which

@@ -172,6 +172,24 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
                  t0_s=110 * 60.0, ramp_s=30 * 60.0, hold_s=30 * 60.0,
                  down=True),
         ]),
+    # ADDED 2026-11-11 (author): R3 with two smaller, distributed load ramps, one per area with
+    # STSs: IEEE bus 3 (pp 2, area 2) and IEEE bus 15 (pp 14, area 3), +200 MW / +100 Mvar each
+    # (the size of P2R's bus-12 ramp), same timing as P2R. Replaces P2R_B03B05 (+300 MW / +300 Mvar
+    # at B03 and B05, both area 2) as R3: its voltages showed a sawtooth of ~4 mpu per dispatch
+    # interval in area 2 while the 600 Mvar ramped (thesis 00_daily_log/2026-11-11_ch10_vband_vbox.md).
+    "P2R_B03B15": dict(
+        title="Period II with two load ramps: 6 Nov 2016 08:00, +200 MW / +100 Mvar each at B03 "
+              "(area 2) and B15 (area 3)",
+        start="2016-11-06T08:00:00",
+        events=lambda: [],
+        ramps=lambda: [
+            dict(kind="bus", bus=2, p_mw=200.0, q_mvar=100.0,
+                 t0_s=110 * 60.0, ramp_s=30 * 60.0, hold_s=30 * 60.0,
+                 down=True),
+            dict(kind="bus", bus=14, p_mw=200.0, q_mvar=100.0,
+                 t0_s=110 * 60.0, ramp_s=30 * 60.0, hold_s=30 * 60.0,
+                 down=True),
+        ]),
     # Renewable-dominated period under unit commitment (author decision
     # 2026-10-31): the earliest 6-h window of the profile year, outside the
     # excluded days, starting at a full hour between 06:00 and 12:00, in which

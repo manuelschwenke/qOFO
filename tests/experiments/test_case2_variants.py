@@ -66,9 +66,10 @@ def test_m_is_ready_and_has_the_cascade_timescale():
     assert m.central_lambda_rule == "continuous"
 
 
-def test_m_weights_the_sts_buses_like_the_sts_controllers():
+def test_m_weights_the_sts_buses_with_the_tuned_factor():
     m = v.resolved("M", 10)
-    assert m.central_dso_g_v == pytest.approx(m.dso_g_v)
+    assert m.central_dso_g_v == pytest.approx(v.M_STS_G_V_FACTOR * m.dso_g_v)
+    assert 0.0 < v.M_STS_G_V_FACTOR <= 1.0
     assert m.control_scope == "central"
 
 
@@ -76,6 +77,22 @@ def test_m_targets_the_selected_designs_loop_gain():
     m = v.resolved("M", 10)
     assert m.central_lambda_target == pytest.approx(v.selected_lambda_max())
     assert 0.0 < m.central_lambda_target < 2.0
+
+
+def test_m_cap_is_the_gated_value_at_the_new_start():
+    # 1.4524 at the 1.00 pu terminal start (gate 2026-11-10); the paramset keeps
+    # its selection-time 1.5301.
+    assert v.selected_lambda_max() == pytest.approx(1.45236, abs=1e-5)
+    prov = v.load_paramset(v.PARAMSET)["provenance"]
+    assert prov["lambda_max_B"] == pytest.approx(1.53013, abs=1e-5)
+
+
+def test_m_uses_the_block_rule_and_the_owners_switch_weights():
+    m = v.resolved("M", 10)
+    assert m.central_kappa_scope == "blocks"
+    assert m.central_switch_g_w_rule == "owner"
+    assert m.central_lambda_target_sts == pytest.approx(v.selected_lambda_max_sts())
+    assert m.central_lambda_target_sts == pytest.approx(1.40)
 
 
 def test_msel_is_m_and_m090_differs_only_in_the_fallback_ceiling():

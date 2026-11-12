@@ -48,7 +48,7 @@ from typing import Dict, Protocol, runtime_checkable
 
 import pandapower as pp
 from pandapower.control import DiscreteTapControl
-from pandapower.auxiliary import ControllerNotConverged
+from pandapower.auxiliary import ControllerNotConverged, LoadflowNotConverged
 
 from core.measurement_noise import measured_der_voltage
 
@@ -114,6 +114,81 @@ def runpp_relays_held(net: pp.pandapowerNet, **kwargs) -> None:
     finally:
         if relays:
             net.controller.loc[relays, "in_service"] = True
+
+
+def snapshot_results(net: pp.pandapowerNet) -> dict:
+    """Copies of every result table (``res_*``) and of the DER outputs, the warm
+    start of :func:`runpp_warm_staged`.  All tables, not only ``res_bus``: a warm
+    start also reads the star-point voltages of the three-winding transformers
+    from ``res_trafo3w``, and a diverged solve clears them (2026-11-10)."""
+    snap = {k: net[k].copy() for k in list(net.keys())
+            if k.startswith("res_") and hasattr(net[k], "copy")}
+    snap["_sgen_q_mvar"] = net.sgen["q_mvar"].copy()
+    return snap
+
+
+def _restore_results(net: pp.pandapowerNet, snap: dict) -> None:
+    for k, v in snap.items():
+        if k == "_sgen_q_mvar":
+            net.sgen["q_mvar"] = v.copy()
+        else:
+            net[k] = v.copy()
+
+
+def runpp_warm_staged(net: pp.pandapowerNet, snap: dict, **kwargs) -> str:
+    """Warm, staged re-solve after a diverged end-of-step power flow, tried before
+    the flat-start fallback (FIX 2026-11-10).
+
+    Case 1 SVR, scenario A, at the 250 Mvar connection at bus 11: the end-of-step
+    PF with Q limits and every local loop active diverged, and so did the
+    flat-start retry without Q limits, although the plant has a solution there
+    (G3 at its 400 Mvar limit; daily log 2026-11-10h).  Starting from the last
+    converged state ``snap`` (:func:`snapshot_results`):
+
+    1. relays held, Q(V) loops active, no Q limits -- the post-contingency
+       re-solve that converged in that step;
+    2. from that solution, the Q limits as requested, Q(V) loops active;
+    3. if 2 fails: the Q limits with the Q(V) loops held at their stage-1 output
+       for this one solve.
+
+    Returns the stage that gave the result; raises if stage 1 fails.  Only the
+    failure path calls it, so every solve that converges stays bit-identical.
+    """
+    q_lims = bool(kwargs.pop("enforce_q_lims", True))
+    for k in ("init", "run_control"):
+        kwargs.pop(k, None)
+    fails = (LoadflowNotConverged, ControllerNotConverged)
+    # A stressed point needs more Newton iterations than the plant's normal budget
+    # (50): the step-366 state converges with 100, not with 50 (2026-11-10).
+    kwargs["max_iteration"] = max(int(kwargs.get("max_iteration", 50) or 50), 200)
+    _restore_results(net, snap)
+    if not q_lims:
+        runpp_relays_held(net, init="results", enforce_q_lims=False, **kwargs)
+        return "warm, no Q limits"
+    # (a) directly with the Q limits.  With a machine just above its limit the
+    # unconstrained Q(V) iteration may not settle while the constrained one does
+    # (Case 1 SVR, step 366, 2026-11-10: fix v4).
+    try:
+        runpp_relays_held(net, init="results", enforce_q_lims=True, **kwargs)
+        return "warm, Q limits, Q(V) loops active"
+    except fails:
+        _restore_results(net, snap)
+    # (b) through the unconstrained solve (stages 1 and 2 of the docstring)
+    try:
+        runpp_relays_held(net, init="results", enforce_q_lims=False, **kwargs)
+        snap1 = snapshot_results(net)
+        try:
+            runpp_relays_held(net, init="results", enforce_q_lims=True, **kwargs)
+            return "warm via no Q limits, Q limits, Q(V) loops active"
+        except fails:
+            _restore_results(net, snap1)
+            pp.runpp(net, init="results", enforce_q_lims=True, run_control=False, **kwargs)
+            return "warm, Q limits, Q(V) loops at their stage-1 output"
+    except fails:
+        _restore_results(net, snap)
+    # (c) the Q limits with the Q(V) loops held at the snapshot's DER outputs
+    pp.runpp(net, init="results", enforce_q_lims=True, run_control=False, **kwargs)
+    return "warm, Q limits, Q(V) loops held at the last converged output"
 
 
 @dataclass(frozen=True)
@@ -327,6 +402,7 @@ class PandapowerStaticPlant:
         self.max_iter = max_iter
         self.distributed_slack = distributed_slack
         self.enforce_q_lims = enforce_q_lims
+        self.warm_resolves = 0          # diverged solves rescued by runpp_warm_staged
 
     # ── Plant protocol ───────────────────────────────────────────────────
     def apply_u(self, writes: ActuatorWrites) -> None:
@@ -349,16 +425,33 @@ class PandapowerStaticPlant:
 
     def advance(self, duration_s: float = 0.0) -> None:
         """One converged power flow; ``duration_s`` is ignored (the
-        quasi-static plant settles instantly within a dispatch interval)."""
-        runpp_holding_taps(
-            self.net,
-            run_control=self.run_control,
-            calculate_voltage_angles=self.calculate_voltage_angles,
-            max_iteration=self.max_iteration,
-            max_iter=self.max_iter,
-            distributed_slack=self.distributed_slack,
-            enforce_q_lims=self.enforce_q_lims,
-        )
+        quasi-static plant settles instantly within a dispatch interval).
+
+        If the solve diverges, a warm staged re-solve from the state before it
+        (:func:`runpp_warm_staged`, FIX 2026-11-10): pandapower starts every
+        solve from a DC estimate ("auto" init), which fails on the stressed
+        point after the 250 Mvar connection of Case 1 SVR although the plant
+        has a solution next to the previous one.  A solve that converges is
+        untouched; if the re-solve fails too, the original exception is raised.
+        """
+        snap = snapshot_results(self.net)
+        kw = dict(calculate_voltage_angles=self.calculate_voltage_angles,
+                  max_iteration=self.max_iteration, max_iter=self.max_iter,
+                  distributed_slack=self.distributed_slack,
+                  enforce_q_lims=self.enforce_q_lims)
+        try:
+            runpp_holding_taps(self.net, run_control=self.run_control, **kw)
+        except LoadflowNotConverged as exc:
+            if not self.run_control:
+                raise
+            try:
+                how = runpp_warm_staged(self.net, snap, **kw)
+            except (LoadflowNotConverged, ControllerNotConverged):
+                _restore_results(self.net, snap)
+                raise exc
+            self.warm_resolves += 1
+            print(f"  [plant] power flow diverged; warm re-solve converged ({how}); "
+                  f"{self.warm_resolves} so far")
 
     def read_y(self) -> pp.pandapowerNet:
         return self.net

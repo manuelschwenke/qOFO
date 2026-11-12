@@ -23,6 +23,16 @@ things are then fixed here rather than inherited:
   reads plant truth.  ``noise_seed`` selects the realisation, so a campaign can
   give every episode its own realisation while all variants of that episode
   share it (author decision 2026-10-27).
+* **Coupler hold after a sudden dip** (author decision 2026-11-12).  Every
+  STS-OFO holds its couplers for :data:`DIP_HOLD_STEPS` STS steps (three TS
+  periods) when the mean measured TS-side voltage of its couplers falls by
+  more than :data:`DIP_HOLD_MPU` in one STS step, released early if an STS
+  voltage leaves its band or the upward DER headroom falls below 5 % of the
+  range (``MultiTSOConfig.sts_coupler_dip_hold_*``).  It acts only where an
+  STS-OFO exists (S2, O3); the local relays of L2, S1, O2 and the central M
+  are unaffected.  Being in the base, S2 and O3 keep one STS layer, as the
+  2x2 design needs.  Tested on R2 (E2) in qOFO_rerun_dip runs 0002-0004
+  (hold 9/18/27): coupler operations 75 -> 39, reversals 17 -> 5 at 27.
 
 Variants
 --------
@@ -62,6 +72,11 @@ from configs.paramsets import load_paramset
 from experiments.ch_10_case1_svr import run_case1 as _rc1
 
 PARAMSET = _rc1.PARAMSET
+
+#: Coupler hold after a sudden dip (2026-11-12): trigger [mpu per STS step]
+#: and length [STS steps = 3 TS periods]; see the module docstring.
+DIP_HOLD_MPU = 20.0
+DIP_HOLD_STEPS = 27
 
 #: Thesis labels the Case-2 producers report under.
 TARGET = "ch:case3"
@@ -144,7 +159,9 @@ def base_config(minutes: int, events: Iterable[Any] = (),
     if noise_seed is not None:
         noise = dataclasses.replace(noise, seed=int(noise_seed))
     return dataclasses.replace(cfg, contingencies=list(events),
-                               measurement_noise=noise)
+                               measurement_noise=noise,
+                               sts_coupler_dip_hold_mpu=DIP_HOLD_MPU,
+                               sts_coupler_dip_hold_steps=DIP_HOLD_STEPS)
 
 
 def resolved(name: str, minutes: int, events: Iterable[Any] = (),

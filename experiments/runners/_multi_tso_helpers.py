@@ -211,6 +211,59 @@ def hold_area_couplers(
     return held
 
 
+def measured_vm(meas: Measurement, buses: List[int]) -> NDArray[np.float64]:
+    """Measured voltages [pu] of ``buses`` in a DSO ``Measurement``, whose
+    ``bus_indices`` span the whole plant in ascending order."""
+    bi = np.asarray(meas.bus_indices)
+    want = np.asarray(buses, dtype=bi.dtype)
+    pos = np.searchsorted(bi, want)
+    if np.any(pos >= bi.size) or np.any(bi[np.minimum(pos, bi.size - 1)] != want):
+        raise KeyError(f"buses {list(buses)} not in the DSO measurement")
+    return np.asarray(meas.voltage_magnitudes_pu, dtype=np.float64)[pos]
+
+
+def coupler_bus_mean_vm(meas: Measurement, hv_buses: List[int]) -> float:
+    """Mean measured voltage [pu] of ``hv_buses`` (the TS-side buses of an
+    STS's interface couplers)."""
+    return float(np.mean(measured_vm(meas, hv_buses)))
+
+
+def dip_hold_release_reason(
+    v_sts: NDArray[np.float64], v_min: float, v_max: float, v_margin: float,
+    q_now: NDArray[np.float64], q_min: NDArray[np.float64],
+    q_max: NDArray[np.float64], headroom_share: float,
+) -> Optional[str]:
+    """Safeguards of the dip hold (2026-11-12).  Returns why a running hold
+    must end now, or ``None`` to keep it:
+
+    * ``'v_band'`` -- a measured STS voltage lies outside
+      ``[v_min + v_margin, v_max - v_margin]``;
+    * ``'der_headroom'`` -- the upward DER reactive headroom
+      ``sum(max(q_max - q_now, 0))`` is below ``headroom_share`` times the DER
+      reactive range ``sum(q_max - q_min)`` (skipped for a zero range)."""
+    v = np.asarray(v_sts, dtype=float)
+    if v.size and (np.min(v) < v_min + v_margin or np.max(v) > v_max - v_margin):
+        return "v_band"
+    rng = float(np.sum(np.asarray(q_max, float) - np.asarray(q_min, float)))
+    if rng > 0.0:
+        head = float(np.sum(np.maximum(np.asarray(q_max, float) - np.asarray(q_now, float), 0.0)))
+        if head < headroom_share * rng:
+            return "der_headroom"
+    return None
+
+
+def coupler_dip_trigger(v_prev: Optional[float], v_now: float,
+                        threshold_mpu: float) -> Optional[float]:
+    """Rate trigger of the STS coupler hold (``sts_coupler_dip_hold_mpu``,
+    2026-11-12).  Returns the change ``(v_now - v_prev)`` in mpu if it is a
+    DIP larger than ``threshold_mpu``, else ``None``.  No previous value or a
+    threshold <= 0 never fires; voltage rises never fire."""
+    if v_prev is None or threshold_mpu <= 0.0:
+        return None
+    dv_mpu = (float(v_now) - float(v_prev)) * 1e3
+    return dv_mpu if dv_mpu < -float(threshold_mpu) else None
+
+
 class _OLTCRateLimiter:
     """Per-step ``DiscreteTapControl`` rate limiter for local-mode OLTCs.
 

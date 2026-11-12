@@ -168,7 +168,11 @@ from controller.gw_precondition import curvature_spectrum, precondition_g_w
 # Helpers live in a sibling module; import at the top so callers (e.g.
 # ``tuning.ceilings``) can monkey-patch them on this module's namespace.
 from experiments.runners._multi_tso_helpers import (
+    coupler_bus_mean_vm,
+    coupler_dip_trigger,
+    dip_hold_release_reason,
     hold_area_couplers,
+    measured_vm,
     set_coupler_relay_band,
     taps_changed,
     _OLTCRateLimiter,
@@ -1692,6 +1696,12 @@ def _run_multi_tso_dso_impl(
     # same per-trafo interface setpoint field as the cascaded OFO path so the
     # CIGRE interface-tracking-error figure can overlay both uniformly.
     last_pcc_set_per_trafo: Dict[int, float] = {}
+    # Coupler hold after a sudden voltage dip (sts_coupler_dip_hold_mpu,
+    # 2026-11-12): TS-side buses of each STS's couplers and the mean measured
+    # voltage there at the previous STS step.
+    _dip_hv_buses: Dict[str, List[int]] = {}
+    _dip_v_prev: Dict[str, float] = {}
+    _dip_hold_left: Dict[str, int] = {}    # STS steps of a running dip hold
 
     # =========================================================================
     # STEP 8: Initialise MultiTSOCoordinator
@@ -5204,6 +5214,54 @@ def _run_multi_tso_dso_impl(
                     sample_id=("control", step),
                 )
                 dso_plot_measurements[dso_id] = meas_dso
+
+                # ── Coupler hold after a sudden voltage dip (2026-11-12) ──
+                # Rate trigger on the mean MEASURED voltage of the TS-side
+                # buses of this STS's couplers, against the previous STS
+                # step.  A dip larger than sts_coupler_dip_hold_mpu holds all
+                # couplers of this STS for sts_coupler_dip_hold_steps STS
+                # steps, starting with this one; the STS DER stay free.  The
+                # hold is applied step by step (hold_oltcs(1)), so the two
+                # safeguards can end it early: an STS voltage outside its band
+                # (minus a margin) or nearly exhausted upward DER headroom.
+                if config.sts_coupler_dip_hold_mpu > 0.0:
+                    if dso_id not in _dip_hv_buses:
+                        _dip_hv_buses[dso_id] = [
+                            int(net.trafo3w.at[int(_t), "hv_bus"])
+                            for _t in dso_ctrl.config.interface_trafo_indices
+                        ]
+                    _v_cpl = coupler_bus_mean_vm(meas_dso, _dip_hv_buses[dso_id])
+                    _dv = coupler_dip_trigger(
+                        _dip_v_prev.get(dso_id), _v_cpl,
+                        float(config.sts_coupler_dip_hold_mpu))
+                    _dip_v_prev[dso_id] = _v_cpl
+                    if _dv is not None:
+                        _dip_hold_left[dso_id] = int(config.sts_coupler_dip_hold_steps)
+                        rec.dso_coupler_dip_hold[dso_id] = float(_dv)
+                        if verbose >= 1:
+                            print(f"  [coupler-dip-hold {dso_id}] t={time_s:.0f}s: "
+                                  f"coupler-bus V {_dv:+.1f} mpu in one STS step, "
+                                  f"couplers held for up to "
+                                  f"{config.sts_coupler_dip_hold_steps} STS steps",
+                                  flush=True)
+                    if _dip_hold_left.get(dso_id, 0) > 0:
+                        _der_p = dso_ctrl._extract_der_active_power(meas_dso)
+                        _q_lo, _q_hi = dso_ctrl.actuator_bounds.compute_der_q_bounds(_der_p)
+                        _why = dip_hold_release_reason(
+                            measured_vm(meas_dso, list(dso_ctrl.config.voltage_bus_indices)),
+                            float(dso_ctrl.config.v_min_pu), float(dso_ctrl.config.v_max_pu),
+                            float(config.sts_coupler_dip_hold_release_v_margin_pu),
+                            meas_dso.der_q_mvar, _q_lo, _q_hi,
+                            float(config.sts_coupler_dip_hold_release_headroom))
+                        if _why is None:
+                            dso_ctrl.hold_oltcs(1)
+                            _dip_hold_left[dso_id] -= 1
+                        else:
+                            _dip_hold_left[dso_id] = 0
+                            rec.dso_coupler_dip_release[dso_id] = _why
+                            if verbose >= 1:
+                                print(f"  [coupler-dip-hold {dso_id}] t={time_s:.0f}s: "
+                                      f"hold released early ({_why})", flush=True)
 
                 # --- Capability message: DSO → TSO (must precede TSO solve) ----------
                 tso_id = dso_to_tso_id[dso_id]

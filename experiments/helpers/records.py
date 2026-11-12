@@ -372,6 +372,13 @@ class MultiTSOIterationRecord:
     local_tap_moves: List[Dict[str, Any]] = field(default_factory=list)
     """Tap moves of the local TS tap relays (``trafo_idx``, ``direction``,
     ``new_pos``; :mod:`controller.local_rules`, 2026-10-30)."""
+    dso_coupler_dip_hold: Dict[str, float] = field(default_factory=dict)
+    """STSs whose couplers the dip trigger held at this step, with the measured
+    change of the mean TS-side coupler-bus voltage [mpu] that triggered it
+    (``sts_coupler_dip_hold_mpu``, 2026-11-12).  Empty when nothing fired."""
+    dso_coupler_dip_release: Dict[str, str] = field(default_factory=dict)
+    """STSs whose running dip hold a safeguard ended at this step, with the
+    reason (``'v_band'`` or ``'der_headroom'``, 2026-11-12)."""
 
     # Per-HV-group line loading stats and balance aggregates.
     dso_group_i_max_pct:    Dict[str, float] = field(default_factory=dict)

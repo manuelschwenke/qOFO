@@ -71,15 +71,36 @@ HORIZON_MIN = 360
 NOISE_SEED = 20261027
 
 
+def _parse_config_set(items: Optional[List[str]]) -> Dict[str, object]:
+    """``KEY=VALUE`` pairs of ``--config-set`` (2026-11-12); VALUE is read as a
+    Python literal when it is one (``18``, ``20.0``, ``'area'``), else kept as
+    a string."""
+    import ast
+    out: Dict[str, object] = {}
+    for it in items or []:
+        if "=" not in it:
+            raise SystemExit(f"--config-set expects KEY=VALUE, got {it!r}")
+        k, val = it.split("=", 1)
+        try:
+            out[k.strip()] = ast.literal_eval(val.strip())
+        except (ValueError, SyntaxError):
+            out[k.strip()] = val.strip()
+    return out
+
+
 def _run_variant(name: str, out: str, minutes: int, scenario: str,
-                 noise_seed: int) -> Dict[str, object]:
-    """Worker: one variant, its full log and status (a failure is a result)."""
+                 noise_seed: int,
+                 config_set: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+    """Worker: one variant, its full log and status (a failure is a result).
+    ``config_set`` overrides config fields of every variant (``--config-set``)."""
     from experiments.runners.multi_tso_dso import run_multi_tso_dso
 
     d = Path(out) / name
     d.mkdir(parents=True, exist_ok=True)
     cfg = v.resolved(name, minutes, sc.events(scenario), noise_seed)
     cfg = dataclasses.replace(cfg, result_dir=str(d), verbose=1)
+    if config_set:
+        cfg = dataclasses.replace(cfg, **config_set)
     if sc.start_time(scenario) is not None:
         cfg = dataclasses.replace(cfg, start_time=sc.start_time(scenario))
     if sc.ramps(scenario):
@@ -237,8 +258,13 @@ def main() -> None:
                     help="permit variants listed in variants.NOT_READY")
     ap.add_argument("--report", default=None, metavar="RUN",
                     help="only (re)compute the tables of an existing run")
+    ap.add_argument("--config-set", action="append", default=None,
+                    metavar="KEY=VALUE",
+                    help="override a MultiTSOConfig field for every variant of "
+                         "this invocation (repeatable; recorded in the manifest)")
     add_run_arguments(ap)
     a = ap.parse_args()
+    config_set = _parse_config_set(a.config_set)
 
     if a.report:
         report(Path(a.report))
@@ -271,6 +297,9 @@ def main() -> None:
         base = dataclasses.replace(base, start_time=sc.start_time(scenario))
     if sc.ramps(scenario):
         base = dataclasses.replace(base, profile_ramps=tuple(sc.ramps(scenario)))
+    if config_set:
+        base = dataclasses.replace(base, **config_set)   # fails on unknown fields
+        base.validate_integrator_mode()
     with start_thesis_run(
             __file__, target=TARGET, feeds=FEEDS, config=base,
             paramset=v.PARAMSET,
@@ -286,6 +315,7 @@ def main() -> None:
                           "incl. SVR and droop"),
                 "noise_seed": noise_seed,
                 "network": "DSO_3 x2 (load and DER)",
+                "config_set": config_set,
                 "host": socket.gethostname()},
             note=a.note, tag=a.tag, resume=a.run_dir) as run:
         out = run.root
@@ -294,7 +324,7 @@ def main() -> None:
         failed: List[str] = []
         with ProcessPoolExecutor(max_workers=max(1, a.jobs)) as pool:
             futs = {pool.submit(_run_variant, n, str(out), minutes, scenario,
-                                noise_seed): n for n in sel}
+                                noise_seed, config_set): n for n in sel}
             for fut in as_completed(futs):
                 n = futs[fut]
                 st = fut.result()

@@ -2150,6 +2150,47 @@ class MultiTSOConfig:
     Local bank relays and the classical scheme send no commit and trigger no
     hold under either scope."""
 
+    sts_coupler_dip_hold_mpu: float = 0.0  # added 2026-11-12
+    """Rate trigger of the STS coupler hold after a sudden voltage dip, in mpu
+    per STS step (author 2026-11-12).  Before each STS step, the runner forms
+    the mean MEASURED voltage of the TS-side (HV) buses of the STS's
+    interface couplers and compares it with the value of the previous STS
+    step.  If it fell by more than this threshold, all coupler OLTCs of that
+    STS are held for :attr:`sts_coupler_dip_hold_steps` STS steps, starting
+    with the present one, through ``hold_oltcs`` (the zero-step bound of the
+    tap lock); the STS DER stay free.  The TS side is used because an own
+    coupler step moves it by only about 2 mpu (STS side: about 10 mpu).
+    One-sided: voltage rises trigger nothing.  Motivation: Ch 10 R2 (E2),
+    OFO+: at the 600 Mvar load step every area-2 coupler tapped down two or
+    three times and back up within 35 min (17 reversals, 75 operations
+    against 31 net).  Screening of R2/R3 OFO+ (thesis repo,
+    00_daily_log/2026-11-12_ch10_r2_discrete_lanes.md): normal steps incl. TS
+    dispatches <= 8.9 mpu, line trip 11-15 mpu, load step 57-68 mpu.
+    0 = off, as in every run before 2026-11-12."""
+
+    sts_coupler_dip_hold_steps: int = 0  # added 2026-11-12
+    """STS steps the couplers are held after a dip detected by
+    :attr:`sts_coupler_dip_hold_mpu` (9 = one TS period, 18 = two, 27 =
+    three).  The runner re-applies ``hold_oltcs(1)`` at each held step, so a
+    running own-move lock is never shortened.  A new dip during a hold
+    restarts it.  Released early by the two safeguards below."""
+
+    sts_coupler_dip_hold_release_v_margin_pu: float = 0.0  # added 2026-11-12
+    """Safeguard 1 of the dip hold: the hold ends (from the present step on)
+    as soon as a MEASURED voltage of the STS controller's voltage buses lies
+    below ``v_min_pu + margin`` or above ``v_max_pu - margin`` of that STS
+    controller.  0 = release when the band itself is left; the couplers are
+    then free to help.  (Case 2 band 0.92-1.08 pu; R2 OFO+ with hold reaches
+    a measured 0.9253 pu, so a margin >= 5 mpu would release there.)"""
+
+    sts_coupler_dip_hold_release_headroom: float = 0.05  # added 2026-11-12
+    """Safeguard 2 of the dip hold: the hold ends as soon as the STS's
+    remaining UPWARD DER reactive headroom, sum of max(q_max - q, 0), falls
+    below this share of its DER reactive range, sum of (q_max - q_min).
+    After a dip the STS needs reactive injection; once its DER are nearly
+    saturated the couplers are the only actuator left.  (R2 OFO+ h27: the
+    smallest share during the hold is 0.13.)"""
+
     def validate_integrator_mode(self) -> None:
         """Fail-fast consistency check for the switched-shunt dispatch mode.
 
@@ -2160,6 +2201,32 @@ class MultiTSOConfig:
             raise ValueError(
                 "sts_coupler_hold_scope must be 'host' or 'area', got "
                 f"{self.sts_coupler_hold_scope!r}"
+            )
+        if float(self.sts_coupler_dip_hold_mpu) < 0.0:
+            raise ValueError(
+                "sts_coupler_dip_hold_mpu must be >= 0, got "
+                f"{self.sts_coupler_dip_hold_mpu!r}"
+            )
+        if (not isinstance(self.sts_coupler_dip_hold_steps, int)
+                or self.sts_coupler_dip_hold_steps < 0):
+            raise ValueError(
+                "sts_coupler_dip_hold_steps must be an int >= 0, got "
+                f"{self.sts_coupler_dip_hold_steps!r}"
+            )
+        if (float(self.sts_coupler_dip_hold_mpu) > 0.0
+                and self.sts_coupler_dip_hold_steps == 0):
+            raise ValueError(
+                "sts_coupler_dip_hold_mpu > 0 needs sts_coupler_dip_hold_steps > 0"
+            )
+        if float(self.sts_coupler_dip_hold_release_v_margin_pu) < 0.0:
+            raise ValueError(
+                "sts_coupler_dip_hold_release_v_margin_pu must be >= 0, got "
+                f"{self.sts_coupler_dip_hold_release_v_margin_pu!r}"
+            )
+        if not 0.0 <= float(self.sts_coupler_dip_hold_release_headroom) <= 1.0:
+            raise ValueError(
+                "sts_coupler_dip_hold_release_headroom must lie in [0, 1], got "
+                f"{self.sts_coupler_dip_hold_release_headroom!r}"
             )
         if (not isinstance(self.sts_coupler_hold_after_bank, int)
                 or self.sts_coupler_hold_after_bank < 0):

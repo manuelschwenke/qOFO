@@ -181,3 +181,47 @@ weight procedure are still to be checked.
 
 Open (earlier): adopting the hold into OFO+ would need every OFO+ run re-run (R2, R3, MC, and possibly Ch 9). This is the
 author's decision.
+
+## Integration, Z: copies and views (2026-11-12, ~14:30–16:30)
+
+- **Branch `res/mc-dip27-2026-11-12`** (worktree `C:\Users\Manuel Schwenke\qOFO_runs\qOFO_mc_dip27`, pushed to
+  `origin`; author: "the most recent code should also be in Z:\Python_Projekte\qOFO, commited and pushed"). It is
+  this branch plus:
+  - e08e94c: scenarios P2R_B03B15_L_Q4S/_Q4M. A parallel R3 session wrote them uncommitted into the
+    `qOFO_rerun_dip` worktree, and run 0007 used Q4S; they are committed here unchanged.
+  - 02b17f6: merge of `res/rerun-base-2026-11-10` (a00fe71: CEN rule, warm power-flow re-solve). That is the code of
+    the MC closing pass, which ran M and the top-up episodes. No conflicts.
+  - 5f6f9ac: `merge_mc.py --variants` (+ `tests/test_merge_mc_variants.py`) and the MC handover
+    `2026-11-12b_mc_rerun_dip27_handover.md`.
+  - Not merged: `res/oel-2026-11-11`. The OEL changes the plant for all variants and was used in the MC only for S1
+    on two episodes.
+  - Checks: 61 tests pass (dip hold, merge filter, case-2 variants, CEN rule, warm re-solve, coupler hold). The
+    `run_mc --smoke --new --variants S2,O3 --jobs 4` run exits 0 (`results/.../mc/0001_2026-11-12_144521_run_mc_smoke`,
+    local).
+  - Hold in the MC configs: `resolved(v, 180)` has 20 mpu / 27 steps for all six variants. It acts only where
+    `dso_mode == "ofo"` (S2, O3).
+- `qOFO_rerun_dip` was NOT changed further: a parallel Q4M screening run (`0008_…_screen_Q4M_dip27`, S2/O3) was
+  running from it at 14:42.
+- **Copies on Z:** (`results/ch_11_case2_multisystem/ref/`):
+  - `_r2_dip27/0005_2026-11-12_123242_run_ref_v5rb_E2_dip27`;
+  - `_r3l_dip27/0006_2026-11-12_123307_run_ref_v5rb_P2R_B03B15_L_dip27`;
+  - `_r2_diphold_tests/` (0001 smoke, 0002 h9, 0003 h18, 0004 h27).
+- **Views:**
+  - `_views/2026-11-12_v5rb_E2_dip27`: L2/S1/O2 from 0001_2026-11-10_155856, M from 0004_2026-11-10_181436, S2/O3 from
+    0005; config/manifest of 0005; report by `run_ref --report`.
+  - `_views/2026-11-12_v5rb_P2R_B03B15_L_dip27`: S2/O3 from 0006, the rest from the old R3 view. Its report equals the
+    old one apart from the header.
+  - Notes were added to the READMEs of the two old views.
+- **Thesis:** the R2 data were regenerated into `graphics/Ch10/data/2026-11-12_case3_ref_dip27/` (+ scarcity map, box
+  plots). Ch 5 now describes the hold, and the Ch 10 R2 text, tables and figures were rewritten; see the thesis log
+  `00_daily_log/2026-11-12_ch10_r2_discrete_lanes.md`, follow-up 6.
+- **R2 OFO+ with the hold, details used in the text:**
+  - Triggers at 91:40 at DSO_1/2/3: −41.9/−51.7/−38.9 mpu measured, no release. DSO_4 is not held: true dip 20.8 mpu,
+    measured below 20 mpu.
+  - Area-2 couplers move up only after the hold, from 105:40. The exception is trafo_5 (STS 2): −1 at 100:40 and
+    102:40, 3 reversals.
+  - Area-2 STS load: minimum 862.7 MW at 92:40, back above 925.6 MW at 102:00 (without the hold at 96:00).
+  - STS-3 interface gap only from about 120 min.
+
+Open: the MC re-run (author, 36 cores, handover above); Ch 11 and the weight procedure are still to be checked for
+STS-OFO dips above 20 mpu.

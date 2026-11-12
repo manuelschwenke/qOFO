@@ -126,5 +126,58 @@ Same triggers as h9 and h18.
 - **Not yet in the code:** an early release when an STS voltage nears its band, or when the IBG headroom in the needed
   direction is exhausted. This is recommended before the MC.
 
-Open: adopting the hold into OFO+ would need every OFO+ run re-run (R2, R3, MC, and possibly Ch 9). This is the
+## Adoption (author decision: h27 with safeguard)
+
+**Safeguards.** A running dip hold is applied step by step (`hold_oltcs(1)`), so that it can end early:
+- `v_band`: a measured voltage of the STS controller's voltage buses leaves [v_min + m, v_max − m], with
+  m = `sts_coupler_dip_hold_release_v_margin_pu` = 0 by default.
+- `der_headroom`: the upward DER reactive headroom is below `sts_coupler_dip_hold_release_headroom` (5 %) of the DER
+  range.
+
+Releases are recorded in `dso_coupler_dip_release`.
+
+Why m = 0: the Case 2 STS band is 0.92–1.08 pu (not 0.90–1.10). With the hold, R2 OFO+ reaches a measured 0.9253 pu,
+so any margin of 5 mpu or more would release at once.
+
+**Base config.** `variants.py` sets DIP_HOLD_MPU = 20 and DIP_HOLD_STEPS = 27 in `base_config`. The hold acts only
+where an STS-OFO exists (S2, O3). The 2×2 pair guard and the variant tests pass (48 passed).
+
+**Commits:** 1076a4d (hold + safeguards + --config-set) and 97ed5c6 (base config). The R3 scenario commits were
+cherry-picked as 067d6f0 and f851457.
+
+**Runs of record with the adopted hold** (local, clean f851457):
+
+| Run | Variant | Coupler ops / reversals, old → new | Triggers | Releases | Trajectory vs old |
+|---|---|---|---|---|---|
+| R2 `0005_2026-11-12_123242_run_ref_v5rb_E2_dip27` | O3 | 75/17 → 39/5 | DSO_1/2/3 at 91:40 | none | bit-identical to the h27 test run |
+| | S2 | 120/30 → 82/24 | DSO_1/2/3 at 91:40 | none | changed |
+| | O2 (check) | 137/32 → 137/32 | none | none | identical (max \|ΔV\| 7e-10 pu) |
+| R3 `0006_2026-11-12_123307_run_ref_v5rb_P2R_B03B15_L_dip27` | S2, O3 | unchanged | none | none | bit-identical to the run of record, so the Ch 10 R3 results stand |
+
+**S2 in R2**, old → new:
+
+| Metric | Old | New |
+|---|---|---|
+| e_v RMS over areas [mpu] | 13.28 | 13.18 |
+| area-2 e_v / worst [mpu] | 17.01 / 115.8 | 16.80 / 112.3 |
+| area-2 t_out | 55.6 % | 52.6 % |
+| STS f_V DSO_1/2/3 [mpu] | 12.19 / 14.20 / 13.12 | 12.28 / 14.59 / 13.48 |
+| coupler ops DSO_1/2/3 | 29 / 32 / 43 | 17 / 18 / 31 |
+| epost area 2 at (2) | 32.98 | 29.35 |
+| W at (2) [Mvar min] | 182.4 | 143.9 |
+
+**MC screen** (no simulation). Logged dips > 20 mpu per STS step in run `mc/0001_2026-11-10_155634_run_mc_v5rb`:
+- O3: 13 of 108 episodes, 21 STS hits (15 at 20–30 mpu, 6 at 30–50 mpu).
+- S2: 16 of 108 episodes, 23 STS hits.
+- All hits are at events: load connections 122/123, or trips of gen 1, 2 or 5. None is at a normal step. The
+  largest non-event step is a rise.
+- STS minimum at the hits: ≥ 0.999 pu.
+- Logged dips overstate the measured trigger value (R2: logged −57…−68 mpu, measured −39…−52 mpu). Some 20–30 mpu hits
+  may therefore not fire.
+- Episodes without a trigger stay bit-identical, as the R3 and O2 checks show.
+
+Open: the MC re-run for S2 and O3 (all episodes, or only those with a trigger plus an identity check); Ch 11 and the
+weight procedure are still to be checked.
+
+Open (earlier): adopting the hold into OFO+ would need every OFO+ run re-run (R2, R3, MC, and possibly Ch 9). This is the
 author's decision.

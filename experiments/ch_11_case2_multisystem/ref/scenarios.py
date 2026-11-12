@@ -203,6 +203,23 @@ SCENARIOS: Dict[str, Dict[str, object]] = {
                  t0_s=60 * 60.0, ramp_s=60 * 60.0, hold_s=60 * 60.0,
                  down=True),
         ]),
+    # ADDED 2026-11-12 (author: "Run 200 Mvar"): R3 (P2R_B03B15_L) plus 200 Mvar connected at
+    # IEEE 4 (pp bus 3, area 2, no MSC, no TS tap) at 271:00 (phase 60 s), run to 360 min, so
+    # that the STS couplers show some activity.  Identical to the entries in qOFO_rerun_r3b and
+    # qOFO_rerun_cen_r3b (thesis 00_daily_log/2026-11-12_ch10_r3_event_screening.md); here for
+    # the S2/O3 rerun with the coupler dip hold.
+    "P2R_B03B15_L_Q4S": dict(
+        title="R3 + 200 Mvar connected at IEEE 4 (area 2, no MSC, no TS tap) at 271:00, 360 min",
+        start="2016-11-06T08:00:00",
+        events=lambda: [_load(3, 200.0, _at(270, 60))],
+        ramps=lambda: SCENARIOS["P2R_B03B15_L"]["ramps"]()),
+    # ADDED 2026-11-12 (author: "Screen 300 Mvar"): as P2R_B03B15_L_Q4S with 300 Mvar, so that the
+    # coupler dip hold (20 mpu per STS step) fires at STS 1-3; 200 Mvar gave only 16-22 mpu.
+    "P2R_B03B15_L_Q4M": dict(
+        title="R3 + 300 Mvar connected at IEEE 4 (area 2, no MSC, no TS tap) at 271:00, 360 min",
+        start="2016-11-06T08:00:00",
+        events=lambda: [_load(3, 300.0, _at(270, 60))],
+        ramps=lambda: SCENARIOS["P2R_B03B15_L"]["ramps"]()),
     # Renewable-dominated period under unit commitment (author decision
     # 2026-10-31): the earliest 6-h window of the profile year, outside the
     # excluded days, starting at a full hour between 06:00 and 12:00, in which
